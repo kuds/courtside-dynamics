@@ -34,7 +34,7 @@ courtside-dynamics/
 │   ├── training/train.py                 # SAC / PPO training entry point
 │   └── colab_setup.py                    # Colab EGL bootstrap
 ├── tests/test_envs.py                    # env_checker + reward sanity
-└── *.ipynb                               # experiment notebooks (slim wrappers)
+└── notebooks/*.ipynb                     # experiment notebooks (slim wrappers)
 ```
 
 ## Installation
