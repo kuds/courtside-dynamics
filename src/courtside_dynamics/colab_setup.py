@@ -10,7 +10,7 @@ It is a no-op outside of Colab.
 """
 from __future__ import annotations
 
-import importlib
+import importlib.util
 import os
 import subprocess
 

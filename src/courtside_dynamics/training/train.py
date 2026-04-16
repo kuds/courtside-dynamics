@@ -153,7 +153,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     if cfg.record_video:
         callbacks.append(
             VideoRecordCallback(
-                env_fn=checked_env_fn,
+                env_fn=cfg.env_fn,
                 save_path=os.path.join(cfg.log_dir, "videos"),
                 video_length=cfg.video_length,
                 save_freq=cfg.eval_freq,
@@ -174,7 +174,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         )
         model.save(os.path.join(cfg.log_dir, "final_model"))
 
-        mean_reward, std_reward = evaluate_policy(model, train_env)
+        mean_reward, std_reward = evaluate_policy(
+            model, eval_env, n_eval_episodes=cfg.n_eval_episodes
+        )
         print(f"Mean reward: {mean_reward:.2f} +/- {std_reward:.2f}")
     finally:
         train_env.close()
