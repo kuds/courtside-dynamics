@@ -102,4 +102,4 @@ ceiling regardless of the algorithm.
 | Ball Balance    | SAC        | 751            | 1:52:23       | 2,000,000            |
 | Ball Bounce     | SAC        | 9.65           | 1:57:47       | 2,000,000            |
 | WallBall-v0     | SAC        | *in progress*  |               |                      |
-| TennisWall-v0   |            | *planned*      |               |                      |
+| TennisWall-v0   | SAC        | *in progress*  |               |                      |
