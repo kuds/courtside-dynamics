@@ -1,0 +1,46 @@
+<mujoco model="wall_ball">
+    <compiler angle="degree" coordinate="local" inertiafromgeom="true" />
+    <option integrator="RK4" timestep="0.002" />
+    <size nconmax="500" njmax="1000" nstack="300000" />
+    <default>
+        <joint armature="0.1" damping="1" limited="true" />
+        <geom condim="3" density="1000" friction="1 0.5 0.5" margin="0.001" rgba="0.8 0.8 0.8 1" />
+        <motor ctrlrange="-1 1" ctrllimited="true" />
+    </default>
+    <asset>
+        <texture builtin="flat" height="1278" name="texplane" rgb1="0.9 0.9 0.9" rgb2="0.1 0.1 0.1" type="2d" width="1279" />
+        <material name="matplane" reflectance="0.5" shininess="0.1" specular="0.1" texture="texplane" />
+    </asset>
+    <worldbody>
+        <light diffuse=".8 .8 .8" pos="0 0 3" specular="0.1 0.1 0.1" />
+        <geom name="floor" pos="0 0 0" size="5 5 0.1" type="plane" material="matplane" />
+        <body name="wall" pos="3 0 1.5">
+            <site name="wall_senor" pos="-.1 0 0.5" size="0.1 5 1" type="box" rgba="1 0 0 .15" />
+            <geom name="wall" size="0.1 5 1.5" type="box" rgba="0.7 0.7 0.9 1" />
+        </body>
+        <body name="paddle_base" pos="-2 0 1">
+            <joint name="paddle_slide_y" type="slide" axis="0 1 0" range="-2 2" />
+            <joint name="paddle_slide_z" type="slide" axis="0 0 1" range="0.5 2" />
+            <geom name="paddle_base_geom" pos="0 0 0" size="0.1 0.1 0.1" type="box" rgba="0.2 0.2 0.8 1" />
+            <body name="paddle_handle" pos="0 0 0.15">
+                <joint name="paddle_rotate_x" type="hinge" axis="1 0 0" range="-90 90" />
+                <geom name="paddle_handle_geom" pos="0 0 0" size="0.05 0.05 0.15" type="box" rgba="0.2 0.2 0.8 1" />
+                <body name="paddle_head" pos="0 0 0.15">
+                    <geom name="paddle_head_geom" pos="0 0 0.05" size="0.2 0.05 0.2" type="box" rgba="0.8 0.2 0.2 1" />
+                </body>
+            </body>
+        </body>
+        <body name="ball" pos="-4 0 1.5">
+            <joint name="ball_x" type="free" limited="false" />
+            <geom name="ball_geom" pos="0 0 0" size="0.1" type="sphere" rgba="1 0 0 1" />
+        </body>
+    </worldbody>
+    <actuator>
+        <motor name="paddle_slide_y" joint="paddle_slide_y" gear="100" />
+        <motor name="paddle_slide_z" joint="paddle_slide_z" gear="100" />
+        <motor name="paddle_rotate_x" joint="paddle_rotate_x" gear="100" />
+    </actuator>
+    <sensor>
+        <touch name="touch_sensor" site="wall_senor" />
+    </sensor>
+</mujoco>

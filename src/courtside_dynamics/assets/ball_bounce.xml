@@ -1,0 +1,42 @@
+<mujoco model="ball_bounce">
+  <option timestep=".002" />
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1=".1 .2 .3"
+      rgb2=".2 .3 .4" width="300" height="300" mark="none" />
+    <material name="grid" texture="grid" texrepeat="1 1"
+      texuniform="true" reflectance=".2" />
+  </asset>
+  <worldbody>
+    <light name="light" pos="0 0 1" />
+    <geom name="floor" type="plane" pos="0 0 -0.5" size="2 2 .1" material="grid" />
+    <body name="paddle_body" pos="0 0 0">
+      <site name="bounce_sensor" pos="0 0 0.025" size="0.21 0.21 0.075" type="box" rgba="1 0 0 .15" />
+      <joint name="rotate_x" pos="0 0 0" axis="1 0 0" range="-.3 .3" damping="10" />
+      <joint name="rotate_y" pos="0 0 0" axis="0 1 0" range="-.3 .3" damping="10" />
+      <joint name="rotate_z" pos="0 0 0" axis="0 0 1" range="-.3 .3" damping="10" />
+      <joint axis="0 0 1" limited="true" name="slider_z" range="0 0.5" type="slide" />
+      <joint axis="0 1 0" limited="true" name="slider_y" range="-.2 .2" type="slide" />
+      <joint axis="1 0 0" limited="true" name="slider_x" range="-.2 .2" type="slide" />
+      <geom name="paddle_geom" type="box" size=".2 .2 .02" rgba="0.2 0.2 1 1" solref="0.02 0.07" />
+    </body>
+    <body name="ball_body" pos="0 0 0.3">
+      <freejoint name="ball_freejoint" />
+      <site name="ball_site" pos="0 0 0" size="0.04" rgba="0 1 0 1" />
+      <geom name="ball_geom" type="sphere" size=".04" rgba="0 1 0 1" solref="0.02 0.07" />
+    </body>
+  </worldbody>
+  <actuator>
+    <general name="act_x" joint="rotate_x" ctrlrange="-1 1" gainprm="500 0 0" />
+    <general name="act_y" joint="rotate_y" ctrlrange="-1 1" gainprm="500 0 0" />
+    <general name="act_z" joint="rotate_z" ctrlrange="-1 1" gainprm="500 0 0" />
+    <motor ctrllimited="true" ctrlrange="-1 1" gear="50" joint="slider_z" name="slider_z_motor" />
+    <motor ctrllimited="true" ctrlrange="-1 1" gear="50" joint="slider_y" name="slider_y_motor" />
+    <motor ctrllimited="true" ctrlrange="-1 1" gear="50" joint="slider_x" name="slider_x_motor" />
+  </actuator>
+  <sensor>
+    <fromto name="ball_to_paddle" body1="ball_body" body2="paddle_body" />
+    <accelerometer site="ball_site" name="ball_accelerometer" />
+    <velocimeter site="ball_site" name="ball_velocity" />
+    <touch name="touch_sensor" site="bounce_sensor" />
+  </sensor>
+</mujoco>
