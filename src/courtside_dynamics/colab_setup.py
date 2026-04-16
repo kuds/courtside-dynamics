@@ -14,7 +14,6 @@ import importlib.util
 import os
 import subprocess
 
-
 NVIDIA_ICD_CONFIG_PATH = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
 _NVIDIA_ICD_CONTENTS = """{
     "file_format_version" : "1.0.0",

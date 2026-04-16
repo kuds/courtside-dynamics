@@ -32,7 +32,6 @@ from gymnasium.spaces import Box
 
 from courtside_dynamics.assets import asset_path
 
-
 # Cartesian bounds for "ball is still in play". Outside these, the episode
 # terminates. The numbers are chosen generously so a bad shot doesn't
 # instantly end training, but a ball that's fundamentally out of reach

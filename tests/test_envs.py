@@ -29,7 +29,6 @@ from courtside_dynamics.envs import (
     WallBallEnv,
 )
 
-
 ENV_CLASSES = [BallBalanceEnv, BallBounceEnv, WallBallEnv, TennisWallEnv]
 
 # Construction kwargs mirroring what each notebook uses at training time.
