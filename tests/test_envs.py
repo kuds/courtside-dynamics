@@ -97,20 +97,7 @@ def test_random_rollout_runs_without_nan(env_cls, rng):
     [
         (BallBalanceEnv, {}),
         (BallBounceEnv, {"min_force": 100.0}),
-        pytest.param(
-            WallBallEnv,
-            {"min_force": 100.0},
-            marks=pytest.mark.xfail(
-                reason=(
-                    "Wall Ball reward signal is unreachable: the ball is "
-                    "spawned at rest at x=-4 while the paddle can only reach "
-                    "x=-2 (no x-slide joint) and the wall is at x=3, so no "
-                    "touch event can fire with random (or any) actions. "
-                    "Tracked for fix."
-                ),
-                strict=True,
-            ),
-        ),
+        (WallBallEnv, {"min_force": 100.0}),
     ],
 )
 def test_random_rollout_produces_some_reward(env_cls, kwargs):
@@ -118,8 +105,10 @@ def test_random_rollout_produces_some_reward(env_cls, kwargs):
 
     For Ball Balance the reward is +1/step so this is trivial. For Ball
     Bounce gravity pulls the ball onto the paddle and an early contact
-    usually lands. For Wall Ball this currently fails -- exactly the
-    regression the upcoming fix needs to close.
+    usually lands. For Wall Ball the ball is served toward the wall on
+    reset, so the first wall contact comes "for free" and the test
+    verifies that reward genuinely fires on rising edges rather than
+    spamming every step.
     """
     env = env_cls(**kwargs)
     try:
