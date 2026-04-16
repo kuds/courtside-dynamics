@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import csv
 import os
-from typing import Callable, Iterable, Optional, Sequence
+from collections.abc import Callable, Iterable, Sequence
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecVideoRecorder
-
 
 InfoRowFn = Callable[[dict, float, float, bool], Sequence[object]]
 """Signature: ``(info, reward, total_reward, done) -> row values``."""
@@ -65,8 +64,8 @@ class VideoRecordCallback(BaseCallback):
         video_length: int,
         save_freq: int = 5_000,
         name_prefix: str = "rl_model",
-        csv_header: Optional[Iterable[str]] = None,
-        info_row_fn: Optional[InfoRowFn] = None,
+        csv_header: Iterable[str] | None = None,
+        info_row_fn: InfoRowFn | None = None,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose)

@@ -12,14 +12,12 @@ shared pipeline.
 
 | Env id                                  | Source                                    | Description                                                                 |
 |-----------------------------------------|-------------------------------------------|-----------------------------------------------------------------------------|
-| `Humanoid-v5`                           | stock `gymnasium`                         | Baseline locomotion task.                                                   |
 | `CourtsideDynamics/BallBalance-v0`      | `courtside_dynamics.envs.ball_balance`    | Keep a ball on a 6-DOF tray.                                                |
 | `CourtsideDynamics/BallBounce-v0`       | `courtside_dynamics.envs.ball_bounce`     | Juggle a ball on a 6-DOF paddle.                                            |
-| `CourtsideDynamics/WallBall-v0`         | `courtside_dynamics.envs.wall_ball`       | Hit a ball into a wall with a 3-DOF paddle. *(Reward fix in progress.)*     |
-| `CourtsideDynamics/TennisWall-v0`       | *planned*                                 | Rally a ball against a wall with a racket.                                  |
+| `CourtsideDynamics/WallBall-v0`         | `courtside_dynamics.envs.wall_ball`       | Hit a ball into a wall with a 4-DOF paddle.                                 |
+| `CourtsideDynamics/TennisWall-v0`       | `courtside_dynamics.envs.tennis_wall`     | Rally a ball against a wall with a 5-DOF racket and shaped reward.          |
 | `CourtsideDynamics/HumanoidTennis-v0`   | *planned*                                 | Full humanoid tennis -- the project north star.                             |
 
-![](/Images/sac_humanoid.gif)
 ![](/Images/sac_ball_balance.gif)
 ![](/Images/sac_ball_bounce.gif)
 ![](/Images/sac_wall_ball.gif)
@@ -89,17 +87,16 @@ currently `xfail(strict=True)` -- see the docstring in
 
 ## Results
 
-Hardware: Google Colab T4
+Hardware: Google Colab T4.
+
+Ball Balance caps at +1 per step, so the reported reward is dominated by
+the episode length (750 here) — a non-crashing policy will score near the
+ceiling regardless of the algorithm.
 
 | Simulation Type | Model Type | Average Reward | Training Time | Total Training Steps |
 |-----------------|------------|----------------|---------------|----------------------|
-| Humanoid-v5     | PPO        |                |               |                      |
-| Humanoid-v5     | SAC        | 6579.66        | 4:41:52       | 3,800,000            |
 | Ball Balance    | PPO        | 751            | 1:58:54       | 2,000,000            |
 | Ball Balance    | SAC        | 751            | 1:52:23       | 2,000,000            |
-| Ball Bounce     | PPO        |                |               |                      |
 | Ball Bounce     | SAC        | 9.65           | 1:57:47       | 2,000,000            |
 | WallBall-v0     | SAC        | *in progress*  |               |                      |
-| WallBall-v0     | PPO        |                |               |                      |
-| TennisWall-v0   | SAC        | *planned*      |               |                      |
-| TennisWall-v0   | PPO        | *planned*      |               |                      |
+| TennisWall-v0   | SAC        | *in progress*  |               |                      |

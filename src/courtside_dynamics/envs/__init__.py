@@ -1,4 +1,8 @@
-"""Custom MuJoCo environments for the Courtside Dynamics curriculum."""
+"""Custom MuJoCo environments for the Courtside Dynamics curriculum.
+
+Exports are listed in curriculum order (simplest → most complex), matching
+the registration order in :mod:`courtside_dynamics`.
+"""
 from courtside_dynamics.envs.ball_balance import BallBalanceEnv
 from courtside_dynamics.envs.ball_bounce import BallBounceEnv
 from courtside_dynamics.envs.tennis_wall import TennisWallEnv
@@ -7,6 +11,6 @@ from courtside_dynamics.envs.wall_ball import WallBallEnv
 __all__ = [
     "BallBalanceEnv",
     "BallBounceEnv",
-    "TennisWallEnv",
     "WallBallEnv",
+    "TennisWallEnv",
 ]

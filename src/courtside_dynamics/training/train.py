@@ -20,8 +20,8 @@ The helper builds vectorized train / eval envs, wires ``EvalCallback`` and
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Optional, Sequence
 
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.base_class import BaseAlgorithm
@@ -97,8 +97,8 @@ class TrainConfig:
     record_video: bool = True
     policy: str = "MlpPolicy"
     model_kwargs: dict = field(default_factory=dict)
-    csv_header: Optional[Sequence[str]] = None
-    info_row_fn: Optional[InfoRowFn] = None
+    csv_header: Sequence[str] | None = None
+    info_row_fn: InfoRowFn | None = None
     extra_callbacks: Iterable[BaseCallback] = field(default_factory=tuple)
 
 
@@ -153,7 +153,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     if cfg.record_video:
         callbacks.append(
             VideoRecordCallback(
-                env_fn=checked_env_fn,
+                env_fn=cfg.env_fn,
                 save_path=os.path.join(cfg.log_dir, "videos"),
                 video_length=cfg.video_length,
                 save_freq=cfg.eval_freq,
@@ -174,7 +174,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         )
         model.save(os.path.join(cfg.log_dir, "final_model"))
 
-        mean_reward, std_reward = evaluate_policy(model, train_env)
+        mean_reward, std_reward = evaluate_policy(
+            model, eval_env, n_eval_episodes=cfg.n_eval_episodes
+        )
         print(f"Mean reward: {mean_reward:.2f} +/- {std_reward:.2f}")
     finally:
         train_env.close()
