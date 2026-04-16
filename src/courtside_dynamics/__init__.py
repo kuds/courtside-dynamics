@@ -31,4 +31,10 @@ register(
     max_episode_steps=1000,
 )
 
+register(
+    id="CourtsideDynamics/TennisWall-v0",
+    entry_point="courtside_dynamics.envs.tennis_wall:TennisWallEnv",
+    max_episode_steps=1000,
+)
+
 __all__ = ["__version__"]

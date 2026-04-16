@@ -25,11 +25,12 @@ import courtside_dynamics  # noqa: F401  (triggers registration)
 from courtside_dynamics.envs import (
     BallBalanceEnv,
     BallBounceEnv,
+    TennisWallEnv,
     WallBallEnv,
 )
 
 
-ENV_CLASSES = [BallBalanceEnv, BallBounceEnv, WallBallEnv]
+ENV_CLASSES = [BallBalanceEnv, BallBounceEnv, WallBallEnv, TennisWallEnv]
 
 # Construction kwargs mirroring what each notebook uses at training time.
 # In particular ``min_force=100.0`` makes the touch-sensor rising-edge check
@@ -41,6 +42,7 @@ ENV_CLASSES_WITH_KWARGS = [
     (BallBalanceEnv, {}),
     (BallBounceEnv, {"min_force": 100.0}),
     (WallBallEnv, {"min_force": 100.0}),
+    (TennisWallEnv, {"min_force": 100.0}),
 ]
 
 
@@ -98,6 +100,7 @@ def test_random_rollout_runs_without_nan(env_cls, rng):
         (BallBalanceEnv, {}),
         (BallBounceEnv, {"min_force": 100.0}),
         (WallBallEnv, {"min_force": 100.0}),
+        (TennisWallEnv, {"min_force": 100.0}),
     ],
 )
 def test_random_rollout_produces_some_reward(env_cls, kwargs):
@@ -133,6 +136,7 @@ def test_gymnasium_make_ids():
         "CourtsideDynamics/BallBalance-v0",
         "CourtsideDynamics/BallBounce-v0",
         "CourtsideDynamics/WallBall-v0",
+        "CourtsideDynamics/TennisWall-v0",
     ):
         env = gymnasium.make(env_id)
         try:
@@ -146,6 +150,68 @@ def test_asset_path_returns_existing_files():
 
     from courtside_dynamics.assets import asset_path
 
-    for name in ("ball_balance.xml", "ball_bounce.xml", "wall_ball.xml"):
+    for name in ("ball_balance.xml", "ball_bounce.xml", "wall_ball.xml", "tennis_wall.xml"):
         p = Path(asset_path(name))
         assert p.is_file(), f"Missing asset: {name}"
+
+
+class TestTennisWallStateMachine:
+    """Verify the phase transitions and reward shaping in TennisWallEnv."""
+
+    def test_initial_phase_is_approach_paddle(self):
+        env = TennisWallEnv()
+        try:
+            obs, _ = env.reset(seed=42)
+            # Last two elements are phase one-hot [approach_paddle, approach_wall]
+            assert obs[-2] == 1.0 and obs[-1] == 0.0
+            assert env.phase == 0  # _PHASE_APPROACH_PADDLE
+        finally:
+            env.close()
+
+    def test_obs_shape_matches_spec(self):
+        env = TennisWallEnv()
+        try:
+            obs, _ = env.reset(seed=0)
+            assert obs.shape == (18,)
+            action = env.action_space.sample()
+            obs, _, _, _, _ = env.step(action)
+            assert obs.shape == (18,)
+        finally:
+            env.close()
+
+    def test_rally_count_starts_at_zero(self):
+        env = TennisWallEnv()
+        try:
+            env.reset(seed=0)
+            assert env.rally_count == 0
+        finally:
+            env.close()
+
+    def test_shaping_reward_is_nonzero(self):
+        """The potential-based shaping should produce nonzero reward even
+        with random actions (the ball is moving toward the paddle on reset)."""
+        env = TennisWallEnv()
+        try:
+            env.reset(seed=0)
+            rewards = []
+            for _ in range(50):
+                obs, reward, terminated, truncated, info = env.step(
+                    env.action_space.sample()
+                )
+                rewards.append(reward)
+                if terminated or truncated:
+                    break
+            assert any(r != 0.0 for r in rewards), "Shaping reward should be nonzero"
+        finally:
+            env.close()
+
+    def test_info_keys_present(self):
+        env = TennisWallEnv()
+        try:
+            env.reset(seed=0)
+            _, _, _, _, info = env.step(env.action_space.sample())
+            for key in ("phase", "rally_count", "paddle_hit_count",
+                        "wall_hit_count", "paddle_touch", "wall_touch"):
+                assert key in info, f"Missing info key: {key}"
+        finally:
+            env.close()
