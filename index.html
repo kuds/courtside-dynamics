@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Courtside Dynamics — Coming Soon</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #0b3d2e 0%, #1a6b4f 50%, #2d8f6b 100%);
+            color: #fff;
+            text-align: center;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 640px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.4rem 1rem;
+            background: rgba(255, 255, 255, 0.15);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            border-radius: 999px;
+            font-size: 0.85rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 1.75rem;
+        }
+
+        h1 {
+            font-size: clamp(2.5rem, 6vw, 4rem);
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            margin-bottom: 1rem;
+        }
+
+        .tagline {
+            font-size: clamp(1rem, 2.2vw, 1.25rem);
+            opacity: 0.9;
+            margin-bottom: 2.5rem;
+            line-height: 1.6;
+        }
+
+        .coming-soon {
+            font-size: clamp(1.1rem, 2.5vw, 1.4rem);
+            font-weight: 500;
+            padding: 1rem 2rem;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 12px;
+            display: inline-block;
+        }
+
+        footer {
+            position: fixed;
+            bottom: 1.5rem;
+            left: 0;
+            right: 0;
+            text-align: center;
+            font-size: 0.85rem;
+            opacity: 0.7;
+        }
+
+        footer a {
+            color: #fff;
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="badge">Courtside Dynamics</div>
+        <h1>Teaching agents to rally.</h1>
+        <p class="tagline">
+            A progression of MuJoCo environments and deep-RL training scripts,
+            climbing from simple ball control up to humanoid tennis.
+        </p>
+        <div class="coming-soon">Coming soon.</div>
+    </div>
+    <footer>
+        <a href="https://github.com/kuds/courtside-dynamics">View on GitHub</a>
+    </footer>
+</body>
+</html>
