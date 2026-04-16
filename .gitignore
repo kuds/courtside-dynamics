@@ -1,1 +1,26 @@
 .DS_Store
+
+# Python build / install artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Training outputs
+logs/
+runs/
+tb_logs/
+wandb/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
