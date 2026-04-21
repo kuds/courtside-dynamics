@@ -102,6 +102,17 @@ class BallBounceEnv(MujocoEnv, utils.EzPickle):
         self.set_state(qpos, qvel)
         return self._get_obs()
 
+    observation_names: tuple[str, ...] = (
+        "ball_x", "ball_y", "ball_z",
+        "ball_vx", "ball_vy", "ball_vz",
+        "rotate_x_qpos", "rotate_x_qvel",
+        "rotate_y_qpos", "rotate_y_qvel",
+        "rotate_z_qpos", "rotate_z_qvel",
+        "slider_x_qpos", "slider_x_qvel",
+        "slider_y_qpos", "slider_y_qvel",
+        "slider_z_qpos", "slider_z_qvel",
+    )
+
     def _get_obs(self) -> np.ndarray:
         return np.concatenate(
             (

@@ -144,6 +144,24 @@ def test_gymnasium_make_ids():
             env.close()
 
 
+@pytest.mark.parametrize("env_cls", ENV_CLASSES)
+def test_observation_names_match_obs_shape(env_cls):
+    """Each env declares labels in lockstep with its observation vector."""
+    env = env_cls()
+    try:
+        names = env.observation_names
+        assert len(names) == env.observation_space.shape[0], (
+            f"{env_cls.__name__}.observation_names has {len(names)} labels "
+            f"but observation_space.shape is {env.observation_space.shape}"
+        )
+        assert len(set(names)) == len(names), (
+            f"{env_cls.__name__}.observation_names has duplicate labels: "
+            f"{[n for n in names if names.count(n) > 1]}"
+        )
+    finally:
+        env.close()
+
+
 def test_asset_path_returns_existing_files():
     from pathlib import Path
 
@@ -212,5 +230,51 @@ class TestTennisWallStateMachine:
             for key in ("phase", "rally_count", "paddle_hit_count",
                         "wall_hit_count", "paddle_touch", "wall_touch"):
                 assert key in info, f"Missing info key: {key}"
+        finally:
+            env.close()
+
+    def test_phase_transitions_on_paddle_contact(self):
+        """Teleport the ball into the paddle face and verify phase advances.
+
+        The paddle face sits at ``paddle_base + (0.3, 0, 0)`` (see
+        ``tennis_wall.xml``). Placing the ball there with a small inward
+        velocity guarantees the paddle touch sensor fires, which should
+        bump ``paddle_hit_count`` and flip the phase from APPROACH_PADDLE
+        (0) to APPROACH_WALL (1). Testing this deterministically is the
+        only way to catch a broken rising-edge detector: random rollouts
+        leave convergence to luck.
+        """
+        env = TennisWallEnv(min_force=0.0)
+        try:
+            env.reset(seed=0)
+            # Place the ball in front of the paddle face (which sits at
+            # paddle_base + +0.3 on x) and send it toward the racket.
+            ball_start = env.data.body("paddle_base").xpos.copy()
+            ball_start[0] += 0.5
+
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            qpos[ball_qposadr : ball_qposadr + 3] = ball_start
+            qvel[ball_dofadr : ball_dofadr + 3] = [-5.0, 0.0, 0.0]
+            env.set_state(qpos, qvel)
+
+            assert env.phase == 0
+            transitioned = False
+            for _ in range(20):
+                _, _, terminated, truncated, info = env.step(
+                    np.zeros(env.action_space.shape, dtype=np.float32)
+                )
+                if info["paddle_hit_count"] >= 1:
+                    transitioned = True
+                    break
+                if terminated or truncated:
+                    break
+            assert transitioned, (
+                "Paddle contact never registered in 20 steps; rising-edge "
+                "detector or touch sensor is broken"
+            )
+            assert env.phase == 1  # APPROACH_WALL
         finally:
             env.close()
