@@ -100,3 +100,7 @@ ceiling regardless of the algorithm.
 | Ball Bounce     | SAC        | 9.65           | 1:57:47       | 2,000,000            |
 | WallBall-v0     | SAC        | *in progress*  |               |                      |
 | TennisWall-v0   | SAC        | *in progress*  |               |                      |
+
+## Blog Posts
+- [Serving Up Some Robotics: Setting Up a Tennis Environment in MuJoCo
+](https://www.findingtheta.com/blog/serving-up-some-robotics-setting-up-a-tennis-environment-in-mujoco)
