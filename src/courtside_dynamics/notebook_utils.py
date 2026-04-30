@@ -13,7 +13,9 @@ from __future__ import annotations
 import csv
 import importlib.util
 import os
+import time
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -37,33 +39,61 @@ def mount_drive(mount_point: str = "/content/drive") -> str:
     return os.path.join(mount_point, "MyDrive")
 
 
-def resolve_log_dir(
-    name: str,
+def resolve_run_dir(
+    env: str,
+    algo: str,
     *,
     use_drive: bool = False,
     drive_subdir: str = "courtside-dynamics",
     local_root: str = "./logs",
+    timestamp: bool = True,
 ) -> str:
-    """Pick a log directory, optionally rooted under mounted Drive.
+    """Pick a fresh run directory, optionally rooted under mounted Drive.
 
-    With ``use_drive=True`` and Drive mounted at ``/content/drive``, logs
-    land at ``/content/drive/MyDrive/<drive_subdir>/<name>``. Otherwise
-    (or when Drive isn't mounted) the function falls back to
-    ``<local_root>/<name>``. Either way, the directory is created.
+    Layout, modeled on mesozoic-labs::
+
+        <root>/<env>/<algo lowercased>/<YYYYMMDD_HHMMSS>/
+
+    With ``use_drive=True`` and Drive mounted at ``/content/drive``, the
+    root is ``/content/drive/MyDrive/<drive_subdir>``. Otherwise it
+    falls back to ``local_root``. Set ``timestamp=False`` to drop the
+    timestamp leaf (re-uses the same dir across runs, which is handy
+    when iterating but will mix artifacts).
     """
     if use_drive:
         my_drive = "/content/drive/MyDrive"
         if os.path.isdir(my_drive):
-            path = os.path.join(my_drive, drive_subdir, name)
-            os.makedirs(path, exist_ok=True)
-            return path
-        print(
-            "[notebook_utils] use_drive=True but /content/drive/MyDrive is "
-            "not mounted; falling back to local logs."
-        )
-    path = os.path.join(local_root, name)
+            root = os.path.join(my_drive, drive_subdir)
+        else:
+            print(
+                "[notebook_utils] use_drive=True but /content/drive/MyDrive "
+                "is not mounted; falling back to local logs."
+            )
+            root = local_root
+    else:
+        root = local_root
+
+    parts = [root, env, algo.lower()]
+    if timestamp:
+        parts.append(datetime.now().strftime("%Y%m%d_%H%M%S"))
+    path = os.path.join(*parts)
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def disconnect_runtime(delay_seconds: int = 5) -> None:
+    """Free the Colab GPU by tearing down the runtime. No-op locally.
+
+    The optional delay gives any in-flight cell output a moment to
+    render before the runtime disconnects.
+    """
+    if not _in_colab():
+        return
+    print(f"Disconnecting Colab runtime in {delay_seconds}s...")
+    time.sleep(delay_seconds)
+    from google.colab import runtime  # type: ignore
+
+    runtime.unassign()
 
 
 def _read_monitor_logs(monitor_dir: str) -> tuple[np.ndarray, np.ndarray]:
