@@ -33,7 +33,7 @@ def mount_drive(mount_point: str = "/content/drive") -> str:
     """
     if not _in_colab():
         return ""
-    from google.colab import drive  # type: ignore
+    from google.colab import drive
 
     drive.mount(mount_point)
     return os.path.join(mount_point, "MyDrive")
@@ -91,7 +91,7 @@ def disconnect_runtime(delay_seconds: int = 5) -> None:
         return
     print(f"Disconnecting Colab runtime in {delay_seconds}s...")
     time.sleep(delay_seconds)
-    from google.colab import runtime  # type: ignore
+    from google.colab import runtime
 
     runtime.unassign()
 
@@ -208,7 +208,7 @@ def record_best_model_video(
     The env returned by ``env_fn`` must be constructed with
     ``render_mode='rgb_array'`` so frames can be captured.
     """
-    import imageio.v2 as imageio  # type: ignore
+    import imageio.v2 as imageio
 
     model = _load_best_model(str(log_dir), algo)
     env = env_fn()
@@ -248,6 +248,6 @@ def record_best_model_video(
 
 def display_video(path: str, *, width: int = 480):
     """Embed an MP4 in a Jupyter / Colab cell."""
-    from IPython.display import Video  # type: ignore
+    from IPython.display import Video
 
     return Video(path, embed=True, width=width)

@@ -58,7 +58,7 @@ def _versions() -> dict[str, str]:
     return versions
 
 
-def _probe_env(cfg: "TrainConfig") -> dict[str, Any]:
+def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
     """Construct the env once to capture class + space metadata."""
     info: dict[str, Any] = {"class": None, "observation_shape": None, "action_shape": None}
     try:
@@ -81,7 +81,7 @@ def _probe_env(cfg: "TrainConfig") -> dict[str, Any]:
     return info
 
 
-def write_run_config(cfg: "TrainConfig", log_dir: str) -> str:
+def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
     """Snapshot the resolved cfg + provenance to ``log_dir/run_config.json``."""
     payload: dict[str, Any] = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -152,7 +152,7 @@ def _read_monitor(log_dir: str) -> tuple[list[float], list[int]]:
 
 
 def write_run_summary(
-    cfg: "TrainConfig",
+    cfg: TrainConfig,
     log_dir: str,
     *,
     final_mean_reward: float,
