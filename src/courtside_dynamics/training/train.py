@@ -20,6 +20,7 @@ The helper builds vectorized train / eval envs, wires ``EvalCallback`` and
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 
@@ -38,6 +39,10 @@ from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
 from courtside_dynamics.callbacks.video_record import (
     InfoRowFn,
     VideoRecordCallback,
+)
+from courtside_dynamics.training.artifacts import (
+    write_run_config,
+    write_run_summary,
 )
 
 _ALGOS = {
@@ -134,10 +139,14 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     """Run an end-to-end training loop for one ``TrainConfig``.
 
     Returns the trained model. Side effects: writes monitor logs,
-    TensorBoard events, evaluation npz, video MP4s, and ``best_model`` /
-    ``final_model`` checkpoints under ``cfg.log_dir``.
+    TensorBoard events, evaluation npz, video MP4s, ``best_model`` /
+    ``final_model`` checkpoints, plus ``run_config.json`` (provenance
+    snapshot at start) and ``run_summary.txt`` (eval / wall-clock report
+    at end) under ``cfg.log_dir``.
     """
     os.makedirs(cfg.log_dir, exist_ok=True)
+    write_run_config(cfg, cfg.log_dir)
+    start_time = time.monotonic()
 
     def checked_env_fn():
         env = cfg.env_fn()
@@ -201,6 +210,13 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             model, eval_env, n_eval_episodes=cfg.n_eval_episodes
         )
         print(f"Mean reward: {mean_reward:.2f} +/- {std_reward:.2f}")
+        write_run_summary(
+            cfg,
+            cfg.log_dir,
+            final_mean_reward=float(mean_reward),
+            final_std_reward=float(std_reward),
+            duration_seconds=time.monotonic() - start_time,
+        )
     finally:
         train_env.close()
         eval_env.close()

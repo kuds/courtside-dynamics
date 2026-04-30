@@ -1,0 +1,186 @@
+"""Curated env+algo recipes for the consolidated training notebook.
+
+Each :class:`Recipe` knows everything about an environment that the
+notebook would otherwise have to spell out: the env class, its
+constructor kwargs, the per-env extras that go into ``TrainConfig``
+(custom CSV rows, phase labels, ...), and a sane default budget for
+training. The notebook only has to pick a name (``"TennisWall"``) and
+an algorithm (``"SAC"``) and call :func:`build_train_config`.
+
+Adding a new env is one entry in :data:`RECIPES`; the notebook needs no
+edits.
+"""
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+from courtside_dynamics.envs import (
+    BallBalanceEnv,
+    BallBounceEnv,
+    TennisWallEnv,
+    WallBallEnv,
+)
+from courtside_dynamics.training import TrainConfig
+
+
+@dataclass(frozen=True)
+class Recipe:
+    """Static description of an env+training setup."""
+
+    env_cls: type
+    env_kwargs: dict[str, Any] = field(default_factory=dict)
+    default_total_timesteps: int = 1_000_000
+    name_prefix: str = "rl_model"
+    extra_cfg: dict[str, Any] = field(default_factory=dict)
+    description: str = ""
+
+
+def _ball_bounce_info_row(
+    info: dict, reward: float, total_reward: float, done: bool
+) -> Sequence[object]:
+    return [
+        info["ball_velocity"],
+        info["ball_accelerometer"],
+        info["ball_to_paddle"],
+        info["touch_sensor"],
+        reward,
+        total_reward,
+        done,
+    ]
+
+
+_BALL_BOUNCE_CSV_HEADER = [
+    "ball_velocity_x", "ball_velocity_y", "ball_velocity_z",
+    "ball_accelerometer_x", "ball_accelerometer_y", "ball_accelerometer_z",
+    "from_to_x1", "from_to_y1", "from_to_z1",
+    "from_to_x2", "from_to_y2", "from_to_z2",
+    "touch_sensor", "reward", "total_reward", "done",
+]
+
+
+RECIPES: dict[str, Recipe] = {
+    "BallBalance": Recipe(
+        env_cls=BallBalanceEnv,
+        env_kwargs={"render_mode": "rgb_array"},
+        default_total_timesteps=1_000_000,
+        name_prefix="ball_balance",
+        description="Keep a ball on a 6-DOF tray.",
+    ),
+    "BallBounce": Recipe(
+        env_cls=BallBounceEnv,
+        env_kwargs={"render_mode": "rgb_array", "min_force": 100.0},
+        default_total_timesteps=1_500_000,
+        name_prefix="ball_bounce",
+        extra_cfg={
+            "csv_header": _BALL_BOUNCE_CSV_HEADER,
+            "info_row_fn": _ball_bounce_info_row,
+        },
+        description="Juggle a ball on a 6-DOF paddle.",
+    ),
+    "WallBall": Recipe(
+        env_cls=WallBallEnv,
+        env_kwargs={"render_mode": "rgb_array", "min_force": 100.0},
+        default_total_timesteps=1_500_000,
+        name_prefix="wall_ball",
+        description="Hit a ball into a wall with a 4-DOF paddle.",
+    ),
+    "TennisWall": Recipe(
+        env_cls=TennisWallEnv,
+        env_kwargs={"render_mode": "rgb_array", "min_force": 100.0},
+        default_total_timesteps=2_000_000,
+        name_prefix="tennis_wall",
+        extra_cfg={
+            "phase_key": "phase",
+            "phase_labels": {0: "approach_paddle", 1: "approach_wall"},
+        },
+        description=(
+            "Rally a ball against a wall with a 5-DOF racket and shaped "
+            "reward."
+        ),
+    ),
+}
+
+
+# Quick-test overrides applied on top of the recipe defaults so a notebook
+# can verify the whole pipeline (callbacks, video, plotting) end-to-end in
+# a couple of minutes instead of hours.
+_QUICK_TEST_OVERRIDES: dict[str, Any] = {
+    "total_timesteps": 25_000,
+    "eval_freq": 5_000,
+    "n_eval_episodes": 3,
+    "video_length": 750,
+}
+
+
+def make_env_fn(env_name: str):
+    """Return a zero-arg env factory for ``env_name``.
+
+    Useful for tools (replay video, custom evaluation) that need a fresh
+    env outside of :func:`train`.
+    """
+    recipe = RECIPES[env_name]
+    kwargs = dict(recipe.env_kwargs)
+
+    def _factory():
+        return recipe.env_cls(**kwargs)
+
+    return _factory
+
+
+def build_train_config(
+    env_name: str,
+    *,
+    algo: str = "SAC",
+    log_dir: str,
+    total_timesteps: int | None = None,
+    quick_test: bool = False,
+    **overrides: Any,
+) -> TrainConfig:
+    """Materialize a :class:`TrainConfig` from a registered recipe.
+
+    Parameters
+    ----------
+    env_name:
+        Key into :data:`RECIPES` (e.g. ``"TennisWall"``).
+    algo:
+        ``"SAC"`` or ``"PPO"``.
+    log_dir:
+        Directory for monitor logs, TensorBoard, checkpoints, videos.
+    total_timesteps:
+        Override the recipe's default training budget. Ignored when
+        ``quick_test=True``.
+    quick_test:
+        Apply :data:`_QUICK_TEST_OVERRIDES` so the whole pipeline runs
+        end-to-end in a couple of minutes -- handy for smoke-testing on
+        a new Colab runtime.
+    **overrides:
+        Any other ``TrainConfig`` field (``eval_freq``, ``n_envs``,
+        ``model_kwargs``, ...).
+    """
+    if env_name not in RECIPES:
+        raise KeyError(
+            f"Unknown env '{env_name}'. Choose one of {sorted(RECIPES)}."
+        )
+    recipe = RECIPES[env_name]
+
+    cfg_kwargs: dict[str, Any] = {
+        "env_fn": make_env_fn(env_name),
+        "algo": algo,
+        "log_dir": log_dir,
+        "name_prefix": f"{recipe.name_prefix}_{algo.lower()}",
+        "total_timesteps": (
+            total_timesteps
+            if total_timesteps is not None
+            else recipe.default_total_timesteps
+        ),
+    }
+    cfg_kwargs.update(recipe.extra_cfg)
+
+    if quick_test:
+        cfg_kwargs.update(_QUICK_TEST_OVERRIDES)
+
+    cfg_kwargs.update(overrides)
+
+    return TrainConfig(**cfg_kwargs)
