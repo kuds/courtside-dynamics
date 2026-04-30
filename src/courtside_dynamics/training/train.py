@@ -34,6 +34,7 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.evaluation import evaluate_policy
 
+from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
 from courtside_dynamics.callbacks.video_record import (
     InfoRowFn,
     VideoRecordCallback,
@@ -81,6 +82,14 @@ class TrainConfig:
     csv_header / info_row_fn:
         Passed through to ``VideoRecordCallback`` so envs can log their
         custom info rows.
+    info_dict_eval:
+        When ``True`` (default), attaches an ``InfoDictEvalCallback`` that
+        logs per-episode aggregates of every scalar ``info`` key from
+        eval rollouts to TensorBoard. Set ``False`` to skip this pass
+        (e.g. for envs that emit no interesting ``info`` scalars).
+    phase_key / phase_labels:
+        Forwarded to ``InfoDictEvalCallback`` so envs with a state
+        machine (e.g. TennisWall) get per-phase time-fraction logs.
     extra_callbacks:
         Additional callbacks to run alongside eval / video recording.
     """
@@ -99,6 +108,9 @@ class TrainConfig:
     model_kwargs: dict = field(default_factory=dict)
     csv_header: Sequence[str] | None = None
     info_row_fn: InfoRowFn | None = None
+    info_dict_eval: bool = True
+    phase_key: str | None = None
+    phase_labels: dict[int, str] | None = None
     extra_callbacks: Iterable[BaseCallback] = field(default_factory=tuple)
 
 
@@ -160,6 +172,17 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 name_prefix=cfg.name_prefix,
                 csv_header=cfg.csv_header,
                 info_row_fn=cfg.info_row_fn,
+            )
+        )
+    if cfg.info_dict_eval:
+        info_eval_env = make_vec_env(checked_env_fn, n_envs=1)
+        callbacks.append(
+            InfoDictEvalCallback(
+                eval_env=info_eval_env,
+                n_eval_episodes=max(1, cfg.n_eval_episodes // 4),
+                eval_freq=cfg.eval_freq,
+                phase_key=cfg.phase_key,
+                phase_labels=cfg.phase_labels,
             )
         )
     callbacks.extend(cfg.extra_callbacks)

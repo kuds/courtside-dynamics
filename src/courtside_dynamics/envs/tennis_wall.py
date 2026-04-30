@@ -234,6 +234,17 @@ class TennisWallEnv(MujocoEnv, utils.EzPickle):
     # Helpers
     # ------------------------------------------------------------------
 
+    observation_names: tuple[str, ...] = (
+        "ball_x", "ball_y", "ball_z",
+        "ball_vx", "ball_vy", "ball_vz",
+        "paddle_slide_x_qpos", "paddle_slide_x_qvel",
+        "paddle_slide_y_qpos", "paddle_slide_y_qvel",
+        "paddle_slide_z_qpos", "paddle_slide_z_qvel",
+        "paddle_yaw_qpos", "paddle_yaw_qvel",
+        "paddle_pitch_qpos", "paddle_pitch_qvel",
+        "phase_approach_paddle", "phase_approach_wall",
+    )
+
     def _get_obs(self) -> np.ndarray:
         phase_onehot = np.array(
             [

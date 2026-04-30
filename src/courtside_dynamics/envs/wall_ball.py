@@ -159,6 +159,15 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         self.set_state(qpos, qvel)
         return self._get_obs()
 
+    observation_names: tuple[str, ...] = (
+        "ball_x", "ball_y", "ball_z",
+        "ball_vx", "ball_vy", "ball_vz",
+        "paddle_slide_x_qpos", "paddle_slide_x_qvel",
+        "paddle_slide_y_qpos", "paddle_slide_y_qvel",
+        "paddle_slide_z_qpos", "paddle_slide_z_qvel",
+        "paddle_rotate_x_qpos", "paddle_rotate_x_qvel",
+    )
+
     def _get_obs(self) -> np.ndarray:
         return np.concatenate(
             (

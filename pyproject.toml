@@ -39,6 +39,10 @@ train = [
     # declare it as a dep; pin it here so `pip install .[train]` is
     # self-sufficient.
     "imageio",
+    # VecVideoRecorder requires moviepy to encode MP4s. Without it,
+    # VideoRecordCallback fails with DependencyNotInstalled the first
+    # time it fires.
+    "moviepy",
 ]
 notebooks = [
     "mediapy",

@@ -5,12 +5,18 @@ copy of this callback, with small divergences in how they formatted the
 per-step CSV log. This version takes a pluggable ``info_row_fn`` so each
 environment can decide which pieces of its ``info`` dict to log without
 forking the callback itself.
+
+When neither ``info_row_fn`` nor ``csv_header`` is supplied, the callback
+auto-detects the scalar keys of the env's first ``info`` dict and logs
+them alongside the reward columns, both to the CSV and to TensorBoard
+under ``videorecord/<key>``.
 """
 from __future__ import annotations
 
 import csv
+import numbers
 import os
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
@@ -32,6 +38,34 @@ def _default_csv_header() -> Sequence[str]:
     return ["reward", "total_reward", "done"]
 
 
+#: Keys that SB3 / gymnasium wrappers inject into ``info`` and that we
+#: don't want showing up as training diagnostics. Anything with a ``.``
+#: in its name is also filtered out (e.g. ``TimeLimit.truncated``).
+_WRAPPER_INFO_KEYS = frozenset({"terminal_observation", "episode"})
+
+
+def _scalar_info_keys(info: Mapping) -> list[str]:
+    """Return the sorted env-authored scalar keys of ``info``.
+
+    Scalars are Python numbers/booleans or numpy scalar arrays (0-D). The
+    set excludes arrays/sequences so the auto-logger doesn't emit
+    unbounded-width rows, and wrapper-injected keys (e.g.
+    ``TimeLimit.truncated``) so the diagnostics only surface metrics the
+    env itself emits. Keys are returned in sorted order so CSV column
+    ordering is deterministic across runs.
+    """
+    keys: list[str] = []
+    for key, value in info.items():
+        name = str(key)
+        if name in _WRAPPER_INFO_KEYS or "." in name:
+            continue
+        if isinstance(value, (bool, numbers.Number)):
+            keys.append(name)
+        elif isinstance(value, np.ndarray) and value.ndim == 0:
+            keys.append(name)
+    return sorted(keys)
+
+
 class VideoRecordCallback(BaseCallback):
     """Record a video and CSV rollout of the current policy on a schedule.
 
@@ -51,10 +85,15 @@ class VideoRecordCallback(BaseCallback):
     name_prefix:
         Filename prefix for both the video and CSV output.
     csv_header:
-        Optional CSV header row; if ``None``, uses ``_default_csv_header``.
+        Optional CSV header row. If ``None`` *and* ``info_row_fn`` is also
+        ``None``, the header is derived at recording time from the scalar
+        keys of the env's first ``info`` dict.
     info_row_fn:
-        Optional callable returning the per-step CSV row; if ``None``,
-        uses ``_default_info_row_fn``.
+        Optional callable returning the per-step CSV row. If ``None``, the
+        callback auto-logs scalar info keys.
+    tb_log_prefix:
+        TensorBoard tag prefix for auto-logged scalar info keys. Ignored
+        when the user supplies their own ``info_row_fn``.
     """
 
     def __init__(
@@ -66,6 +105,7 @@ class VideoRecordCallback(BaseCallback):
         name_prefix: str = "rl_model",
         csv_header: Iterable[str] | None = None,
         info_row_fn: InfoRowFn | None = None,
+        tb_log_prefix: str = "videorecord",
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose)
@@ -74,8 +114,40 @@ class VideoRecordCallback(BaseCallback):
         self.video_length = video_length
         self.save_freq = save_freq
         self.name_prefix = name_prefix
-        self.csv_header = list(csv_header) if csv_header else list(_default_csv_header())
-        self.info_row_fn = info_row_fn or _default_info_row_fn
+        self.tb_log_prefix = tb_log_prefix
+
+        self._user_info_row_fn = info_row_fn
+        self._user_csv_header = list(csv_header) if csv_header else None
+        # Resolved lazily on first record so auto-detection can see a real
+        # ``info`` dict. ``info_row_fn``/``csv_header`` are re-derived per
+        # rollout only when the user didn't pin them.
+        self.csv_header: list[str] = self._user_csv_header or list(
+            _default_csv_header()
+        )
+        self.info_row_fn: InfoRowFn = (
+            info_row_fn if info_row_fn is not None else _default_info_row_fn
+        )
+
+    def _auto_configure(self, info: Mapping) -> list[str]:
+        """Populate ``csv_header``/``info_row_fn`` from a first info dict.
+
+        Returns the list of scalar info keys being auto-logged (possibly
+        empty). Only runs when the user didn't pin an explicit formatter.
+        """
+        if self._user_info_row_fn is not None:
+            return []
+
+        info_keys = _scalar_info_keys(info)
+        if self._user_csv_header is None:
+            self.csv_header = list(info_keys) + list(_default_csv_header())
+
+        def _row(
+            info: dict, reward: float, total_reward: float, done: bool
+        ) -> Sequence[object]:
+            return [info.get(k) for k in info_keys] + [reward, total_reward, done]
+
+        self.info_row_fn = _row
+        return info_keys
 
     def _on_step(self) -> bool:
         if self.n_calls % self.save_freq != 0:
@@ -95,29 +167,70 @@ class VideoRecordCallback(BaseCallback):
 
         try:
             obs = rec_env.reset()
+            # SB3 VecEnv.reset() is typed as ndarray | dict | tuple, but
+            # ``VecVideoRecorder`` over a Box obs space always yields ndarray.
+            assert not isinstance(obs, tuple)
             session_length = 0
             total_reward = 0.0
             csv_path = os.path.join(self.save_path, f"{name_prefix}.csv")
+            auto_keys: list[str] = []
+            auto_sums: dict[str, float] = {}
+            header_written = False
 
             with open(csv_path, "w", newline="") as csvfile:
                 writer = csv.writer(csvfile)
-                writer.writerow(self.csv_header)
 
                 for _ in range(self.video_length):
                     session_length += 1
                     action, _ = self.model.predict(obs)
                     obs, rewards, dones, infos = rec_env.step(action)
+                    assert not isinstance(obs, tuple)
                     total_reward += float(rewards[0])
+                    info = infos[0]
+
+                    if not header_written:
+                        auto_keys = self._auto_configure(info)
+                        auto_sums = {k: 0.0 for k in auto_keys}
+                        writer.writerow(self.csv_header)
+                        header_written = True
+
                     row = self.info_row_fn(
-                        infos[0],
+                        info,
                         float(rewards[0]),
                         float(total_reward),
                         bool(dones[0]),
                     )
                     writer.writerow(_flatten_row(row))
+
+                    for k in auto_keys:
+                        value = info.get(k)
+                        if value is None:
+                            continue
+                        try:
+                            auto_sums[k] += float(value)
+                        except (TypeError, ValueError):
+                            # Non-numeric scalar slipped through; skip TB average.
+                            auto_sums.pop(k, None)
+
                     rec_env.render()
                     if dones[0]:
                         break
+
+            # TensorBoard: emit the final-step snapshot plus a rollout mean
+            # per scalar info key. Also log the total reward so eyeballing
+            # the curve in TB matches the CSV.
+            self.logger.record(
+                f"{self.tb_log_prefix}/total_reward", float(total_reward)
+            )
+            self.logger.record(
+                f"{self.tb_log_prefix}/episode_length", int(session_length)
+            )
+            if session_length > 0:
+                for k, total in auto_sums.items():
+                    self.logger.record(
+                        f"{self.tb_log_prefix}/{k}_mean",
+                        total / session_length,
+                    )
 
             if self.verbose:
                 print(
