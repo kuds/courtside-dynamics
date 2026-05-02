@@ -13,6 +13,7 @@ import os
 import platform
 import statistics
 import subprocess
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -193,6 +194,32 @@ def _read_monitor(log_dir: str) -> tuple[list[float], list[int]]:
     return rewards, lengths
 
 
+_PROJECT_NAME = "courtside-dynamics"
+
+
+def _env_display_name(cfg: TrainConfig) -> str:
+    """Friendly env name (e.g. ``TennisWallEnv`` -> ``TennisWall``)."""
+    info = _probe_env(cfg)
+    cls = info.get("class") or ""
+    return cls[:-3] if cls.endswith("Env") else (cls or "Unknown")
+
+
+def _mean_std(values: Sequence[float]) -> tuple[float, float]:
+    if not values:
+        return 0.0, 0.0
+    mean = statistics.mean(values)
+    std = statistics.stdev(values) if len(values) > 1 else 0.0
+    return mean, std
+
+
+def _kv(label: str, value: str, label_width: int = 16) -> str:
+    return f"{(label + ':').ljust(label_width)}{value}"
+
+
+def _section(title: str) -> list[str]:
+    return ["", title, "-" * 40]
+
+
 def write_run_summary(
     cfg: TrainConfig,
     log_dir: str,
@@ -203,21 +230,50 @@ def write_run_summary(
     device: str | None = None,
 ) -> str:
     """Write a human-readable end-of-run report to ``log_dir/stage_summary.txt``."""
-    lines: list[str] = []
-    lines.append(f"Run: {os.path.basename(os.path.normpath(log_dir))}")
-    lines.append(f"Algo: {cfg.algo}")
-    lines.append(f"Total timesteps: {cfg.total_timesteps:,}")
-    lines.append(f"Wall-clock: {_format_duration(duration_seconds)}")
-    if device:
-        lines.append(f"Device: {device}")
-    lines.append("")
-    lines.append("Final evaluation:")
-    lines.append(
-        f"  mean_reward = {final_mean_reward:.3f} +/- {final_std_reward:.3f}"
-        f"  ({cfg.n_eval_episodes} episodes)"
+    env_name = _env_display_name(cfg)
+    git_sha = _git_sha()
+    short_sha = git_sha[:7] if git_sha else "unknown"
+    duration_str = _format_duration(duration_seconds)
+    throughput_fps = (
+        int(cfg.total_timesteps / duration_seconds) if duration_seconds > 0 else 0
     )
 
+    lines: list[str] = []
+    title = f"{_PROJECT_NAME}: {cfg.algo} on {env_name}"
+    lines.append(title)
+    lines.append("=" * 50)
+    lines.append("")
+
+    lines.append(_kv("Project", _PROJECT_NAME))
+    lines.append(_kv("Environment", env_name))
+    lines.append(_kv("Algorithm", cfg.algo))
+    seed = cfg.model_kwargs.get("seed") if cfg.model_kwargs else None
+    if seed is not None:
+        lines.append(_kv("Seed", str(seed)))
+    lines.append(
+        _kv("Date", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    )
+    lines.append(_kv("Status", "completed"))
+    lines.append(_kv("Git SHA", short_sha))
+    lines.append(_kv("Timesteps", f"{cfg.total_timesteps:,}"))
+    lines.append(_kv("Duration", duration_str))
+    lines.append(_kv("Throughput", f"{throughput_fps} FPS"))
+    lines.append(
+        _kv("Final eval", f"{final_mean_reward:.3f} +/- {final_std_reward:.3f}")
+    )
+
+    train_rewards, train_lengths = _read_monitor(log_dir)
+    if train_lengths:
+        last_n = min(100, len(train_lengths))
+        ep_mean, ep_std = _mean_std(train_lengths[-last_n:])
+        lines.append(
+            _kv("Avg ep length", f"{ep_mean:.1f} +/- {ep_std:.1f} steps")
+        )
+
     eval_npz = os.path.join(log_dir, "evaluations.npz")
+    best_step: int | None = None
+    best_mean: float | None = None
+    best_std: float | None = None
     if os.path.exists(eval_npz):
         data = np.load(eval_npz)
         timesteps = data["timesteps"]
@@ -226,31 +282,70 @@ def write_run_summary(
             mean_per_eval = results.mean(axis=1)
             std_per_eval = results.std(axis=1)
             best_idx = int(mean_per_eval.argmax())
-            lines.append("")
-            lines.append("Best eval (from evaluations.npz):")
+            best_step = int(timesteps[best_idx])
+            best_mean = float(mean_per_eval[best_idx])
+            best_std = float(std_per_eval[best_idx])
             lines.append(
-                f"  mean_reward = {mean_per_eval[best_idx]:.3f} +/- "
-                f"{std_per_eval[best_idx]:.3f} at step "
-                f"{int(timesteps[best_idx]):,}"
+                _kv(
+                    "Best eval",
+                    f"{best_mean:.3f} +/- {best_std:.3f} (at {best_step:,} steps)",
+                )
             )
 
-    train_rewards, train_lengths = _read_monitor(log_dir)
     if train_rewards:
         last_n = min(100, len(train_rewards))
-        lines.append("")
-        lines.append("Training (per-episode):")
-        lines.append(f"  episodes: {len(train_rewards):,}")
+        r_mean, r_std = _mean_std(train_rewards[-last_n:])
         lines.append(
-            f"  reward mean (last {last_n}): "
-            f"{statistics.mean(train_rewards[-last_n:]):.3f}"
-        )
-        lines.append(
-            f"  episode length mean (last {last_n}): "
-            f"{statistics.mean(train_lengths[-last_n:]):.1f}"
+            _kv(
+                "Recent train",
+                f"{r_mean:.3f} +/- {r_std:.3f} (last {last_n} episodes)",
+            )
         )
 
-    lines.append("")
-    lines.append("Artifacts:")
+    gpu = _gpu_info()
+    versions = _versions()
+    lines.extend(_section("Device"))
+    lines.append(f"  {_kv('Device', device or 'cpu')}")
+    if gpu.get("available"):
+        devices = gpu.get("devices") or []
+        if devices:
+            primary = devices[0]
+            lines.append(f"  {_kv('GPU', str(primary.get('name', 'unknown')))}")
+            total_mem = primary.get("total_memory_bytes")
+            if total_mem:
+                lines.append(
+                    f"  {_kv('VRAM', f'{int(total_mem) // (1024 * 1024)} MB')}"
+                )
+            cap = primary.get("capability")
+            if cap:
+                lines.append(f"  {_kv('Compute cap', str(cap))}")
+        cuda_version = gpu.get("cuda_version")
+        if cuda_version:
+            lines.append(f"  {_kv('CUDA', str(cuda_version))}")
+        cudnn_version = gpu.get("cudnn_version")
+        if cudnn_version:
+            lines.append(f"  {_kv('cuDNN', str(cudnn_version))}")
+    if "torch" in versions:
+        lines.append(f"  {_kv('PyTorch', versions['torch'])}")
+
+    lines.extend(_section("Hyperparameters"))
+    hp_items: list[tuple[str, Any]] = [
+        ("total_timesteps", cfg.total_timesteps),
+        ("n_envs", cfg.n_envs),
+    ]
+    for key, value in (cfg.model_kwargs or {}).items():
+        hp_items.append((key, value))
+    key_width = max((len(k) for k, _ in hp_items), default=0) + 4
+    for key, value in hp_items:
+        lines.append(f"  {key.ljust(key_width)}{value}")
+
+    if best_step is not None and best_mean is not None and best_std is not None:
+        lines.extend(
+            _section(f"Best Checkpoint Evaluation (step {best_step:,})")
+        )
+        lines.append(f"  {_kv('Reward', f'{best_mean:.3f} +/- {best_std:.3f}')}")
+
+    artifact_lines: list[str] = []
     for label, path in [
         ("best_model", "best_model.zip"),
         ("final_model", "final_model.zip"),
@@ -265,7 +360,10 @@ def write_run_summary(
     ]:
         full = os.path.join(log_dir, path)
         if os.path.exists(full):
-            lines.append(f"  {label}: {path}")
+            artifact_lines.append(f"  {_kv(label, path)}")
+    if artifact_lines:
+        lines.extend(_section("Artifacts"))
+        lines.extend(artifact_lines)
 
     out = os.path.join(log_dir, "stage_summary.txt")
     with open(out, "w") as f:
