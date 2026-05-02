@@ -302,6 +302,29 @@ def _load_best_model(log_dir: str, algo: str):
     return cls.load(candidate)
 
 
+def _load_obs_normalizer(log_dir: str, env_fn: Callable):
+    """Return a callable ``obs -> normalized_obs`` from ``vec_normalize.pkl``.
+
+    Returns identity if the file is missing. Builds a throwaway
+    ``DummyVecEnv`` only because ``VecNormalize.load`` requires a venv;
+    we never step it.
+    """
+    path = os.path.join(log_dir, "vec_normalize.pkl")
+    if not os.path.exists(path):
+        return lambda obs: obs
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+    dummy = DummyVecEnv([env_fn])
+    try:
+        vec_norm = VecNormalize.load(path, dummy)
+    except Exception:
+        dummy.close()
+        return lambda obs: obs
+    vec_norm.training = False
+    vec_norm.norm_reward = False
+    return vec_norm.normalize_obs
+
+
 def record_best_model_video(
     log_dir: str | Path,
     env_fn: Callable,
@@ -315,11 +338,15 @@ def record_best_model_video(
     """Roll out ``best_model.zip`` against a fresh env and save MP4.
 
     The env returned by ``env_fn`` must be constructed with
-    ``render_mode='rgb_array'`` so frames can be captured.
+    ``render_mode='rgb_array'`` so frames can be captured. If
+    ``vec_normalize.pkl`` is present in ``log_dir`` the saved
+    obs-normalizer is applied to each observation before
+    ``model.predict``, matching the training-time wrapper.
     """
     import imageio.v2 as imageio
 
     model = _load_best_model(str(log_dir), algo)
+    normalize_obs = _load_obs_normalizer(str(log_dir), env_fn)
     env = env_fn()
     if getattr(env, "render_mode", None) != "rgb_array":
         raise ValueError(
@@ -334,7 +361,7 @@ def record_best_model_video(
     total_reward = 0.0
     obs, _ = env.reset()
     for _ in range(video_length):
-        action, _ = model.predict(obs, deterministic=deterministic)
+        action, _ = model.predict(normalize_obs(obs), deterministic=deterministic)
         obs, reward, terminated, truncated, _ = env.step(action)
         total_reward += float(reward)
         frame = env.render()
