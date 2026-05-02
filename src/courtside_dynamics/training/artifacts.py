@@ -58,6 +58,41 @@ def _versions() -> dict[str, str]:
     return versions
 
 
+def _gpu_info() -> dict[str, Any]:
+    """Capture CUDA / GPU details available before training starts."""
+    info: dict[str, Any] = {"available": False}
+    try:
+        import torch
+    except ImportError:
+        return info
+    info["cuda_version"] = torch.version.cuda
+    info["available"] = bool(torch.cuda.is_available())
+    if not info["available"]:
+        return info
+    try:
+        info["cudnn_version"] = torch.backends.cudnn.version()
+    except Exception:
+        pass
+    count = torch.cuda.device_count()
+    info["device_count"] = count
+    devices: list[dict[str, Any]] = []
+    for i in range(count):
+        try:
+            props = torch.cuda.get_device_properties(i)
+            devices.append(
+                {
+                    "index": i,
+                    "name": props.name,
+                    "total_memory_bytes": int(props.total_memory),
+                    "capability": f"{props.major}.{props.minor}",
+                }
+            )
+        except Exception:
+            devices.append({"index": i, "name": torch.cuda.get_device_name(i)})
+    info["devices"] = devices
+    return info
+
+
 def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
     """Construct the env once to capture class + space metadata."""
     info: dict[str, Any] = {"class": None, "observation_shape": None, "action_shape": None}
@@ -87,6 +122,7 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
         "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "git_sha": _git_sha(),
         "versions": _versions(),
+        "gpu": _gpu_info(),
         "env": _probe_env(cfg),
         "train_config": {
             "algo": cfg.algo,
@@ -158,6 +194,7 @@ def write_run_summary(
     final_mean_reward: float,
     final_std_reward: float,
     duration_seconds: float,
+    device: str | None = None,
 ) -> str:
     """Write a human-readable end-of-run report to ``log_dir/run_summary.txt``."""
     lines: list[str] = []
@@ -165,6 +202,8 @@ def write_run_summary(
     lines.append(f"Algo: {cfg.algo}")
     lines.append(f"Total timesteps: {cfg.total_timesteps:,}")
     lines.append(f"Wall-clock: {_format_duration(duration_seconds)}")
+    if device:
+        lines.append(f"Device: {device}")
     lines.append("")
     lines.append("Final evaluation:")
     lines.append(
