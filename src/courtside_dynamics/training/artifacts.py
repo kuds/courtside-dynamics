@@ -136,6 +136,10 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "n_eval_episodes": cfg.n_eval_episodes,
             "video_length": cfg.video_length,
             "record_video": cfg.record_video,
+            "normalize_obs": cfg.normalize_obs,
+            "normalize_reward": cfg.normalize_reward,
+            "clip_obs": cfg.clip_obs,
+            "clip_reward": cfg.clip_reward,
             "policy": cfg.policy,
             "model_kwargs": cfg.model_kwargs,
             "csv_header": list(cfg.csv_header) if cfg.csv_header else None,
@@ -256,6 +260,7 @@ def write_run_summary(
         ("eval_info_csv", "eval_info.csv"),
         ("eval_info_plot", "eval_info.png"),
         ("checkpoints_dir", "checkpoints"),
+        ("vec_normalize", "vec_normalize.pkl"),
         ("best_model_video", "best_model.mp4"),
     ]:
         full = os.path.join(log_dir, path)

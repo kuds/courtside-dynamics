@@ -157,6 +157,31 @@ class VideoRecordCallback(BaseCallback):
         name_prefix = f"{self.name_prefix}_{self.num_timesteps}"
 
         rec_env = make_vec_env(self.env_fn, n_envs=1)
+
+        # If the policy was trained with VecNormalize, wrap the recording
+        # env in a frozen-stats VecNormalize so the policy sees obs on
+        # the same scale it trained on. Otherwise the rollout will
+        # diverge wildly from the eval curve.
+        get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
+        train_vec_norm = get_vec_norm() if get_vec_norm is not None else None
+        if train_vec_norm is not None:
+            from stable_baselines3.common.vec_env import (
+                VecNormalize,
+                sync_envs_normalization,
+            )
+
+            rec_env = VecNormalize(
+                rec_env,
+                training=False,
+                norm_obs=train_vec_norm.norm_obs,
+                norm_reward=False,
+                clip_obs=train_vec_norm.clip_obs,
+            )
+            try:
+                sync_envs_normalization(self.training_env, rec_env)
+            except (AttributeError, AssertionError):
+                pass
+
         rec_env = VecVideoRecorder(
             rec_env,
             self.save_path,

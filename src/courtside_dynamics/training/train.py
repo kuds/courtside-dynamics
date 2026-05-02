@@ -35,6 +35,7 @@ from stable_baselines3.common.callbacks import (
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.common.vec_env import VecNormalize
 
 from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
 from courtside_dynamics.callbacks.video_record import (
@@ -91,6 +92,18 @@ class TrainConfig:
         Max steps per recorded rollout from ``VideoRecordCallback``.
     record_video:
         Whether to attach the video recording callback.
+    normalize_obs:
+        When ``True`` (default), wrap envs in ``VecNormalize`` with a
+        running observation mean/std so the policy sees inputs on a
+        consistent scale. Stats are saved to ``LOG_DIR/vec_normalize.pkl``
+        and alongside each ``CheckpointCallback`` snapshot.
+    normalize_reward:
+        Tri-state. ``True`` / ``False`` force VecNormalize's return
+        normalization on/off. ``None`` (default) picks the per-algo
+        default: on for PPO (stabilizes value-function learning), off
+        for SAC (interacts poorly with auto-tuned entropy temperature).
+    clip_obs / clip_reward:
+        Forwarded to ``VecNormalize``. Defaults match SB3 (10.0 each).
     policy:
         SB3 policy name, usually ``"MlpPolicy"``.
     model_kwargs:
@@ -122,6 +135,10 @@ class TrainConfig:
     n_eval_episodes: int = 30
     video_length: int = 10_000
     record_video: bool = True
+    normalize_obs: bool = True
+    normalize_reward: bool | None = None
+    clip_obs: float = 10.0
+    clip_reward: float = 10.0
     policy: str = "MlpPolicy"
     model_kwargs: dict = field(default_factory=dict)
     csv_header: Sequence[str] | None = None
@@ -173,6 +190,34 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     )
     eval_env = make_vec_env(checked_env_fn, n_envs=1)
 
+    # PPO benefits from return normalization; SAC's auto-tuned alpha
+    # interacts poorly with it. ``normalize_reward=None`` picks the
+    # per-algo default; True/False forces the choice.
+    norm_reward = (
+        cfg.normalize_reward
+        if cfg.normalize_reward is not None
+        else cfg.algo.upper() == "PPO"
+    )
+    use_vec_normalize = cfg.normalize_obs or norm_reward
+    if use_vec_normalize:
+        train_env = VecNormalize(
+            train_env,
+            norm_obs=cfg.normalize_obs,
+            norm_reward=norm_reward,
+            clip_obs=cfg.clip_obs,
+            clip_reward=cfg.clip_reward,
+        )
+        # Eval envs always read the env's true reward (norm_reward=False)
+        # and freeze the running stats (training=False); SB3's EvalCallback
+        # syncs obs_rms/ret_rms from train_env before each eval.
+        eval_env = VecNormalize(
+            eval_env,
+            norm_obs=cfg.normalize_obs,
+            norm_reward=False,
+            clip_obs=cfg.clip_obs,
+            training=False,
+        )
+
     # SB3 callbacks fire on n_calls (per vec-env step), so an env-step
     # value of N means n_calls of max(N // n_envs, 1). This keeps the
     # cadence independent of n_envs.
@@ -196,6 +241,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 save_freq=_calls(cfg.checkpoint_freq),
                 save_path=os.path.join(cfg.log_dir, "checkpoints"),
                 name_prefix=cfg.name_prefix,
+                save_vecnormalize=use_vec_normalize,
             )
         )
     if cfg.record_video and cfg.video_freq > 0:
@@ -212,6 +258,14 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         )
     if cfg.info_dict_eval:
         info_eval_env = make_vec_env(checked_env_fn, n_envs=1)
+        if use_vec_normalize:
+            info_eval_env = VecNormalize(
+                info_eval_env,
+                norm_obs=cfg.normalize_obs,
+                norm_reward=False,
+                clip_obs=cfg.clip_obs,
+                training=False,
+            )
         callbacks.append(
             InfoDictEvalCallback(
                 eval_env=info_eval_env,
@@ -233,6 +287,8 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             progress_bar=False,
         )
         model.save(os.path.join(cfg.log_dir, "final_model"))
+        if use_vec_normalize:
+            train_env.save(os.path.join(cfg.log_dir, "vec_normalize.pkl"))
 
         mean_reward, std_reward = evaluate_policy(
             model, eval_env, n_eval_episodes=cfg.n_eval_episodes

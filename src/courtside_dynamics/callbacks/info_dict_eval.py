@@ -91,6 +91,20 @@ class InfoDictEvalCallback(BaseCallback):
         if self.eval_freq <= 0 or self.n_calls % self.eval_freq != 0:
             return True
 
+        # If the model wraps its training env in VecNormalize, copy the
+        # current obs_rms/ret_rms into our eval env so the policy sees
+        # observations normalized to the same scale it just trained on.
+        get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
+        if get_vec_norm is not None and get_vec_norm() is not None:
+            try:
+                from stable_baselines3.common.vec_env import (
+                    sync_envs_normalization,
+                )
+
+                sync_envs_normalization(self.training_env, self.eval_env)
+            except (AttributeError, AssertionError):
+                pass
+
         # Per-key accumulators across all eval episodes.
         sums: dict[str, float] = defaultdict(float)
         counts: dict[str, int] = defaultdict(int)
