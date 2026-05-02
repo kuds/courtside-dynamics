@@ -216,6 +216,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             final_mean_reward=float(mean_reward),
             final_std_reward=float(std_reward),
             duration_seconds=time.monotonic() - start_time,
+            device=str(getattr(model, "device", "")) or None,
         )
     finally:
         train_env.close()
