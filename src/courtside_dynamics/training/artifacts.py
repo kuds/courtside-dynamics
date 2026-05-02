@@ -194,6 +194,34 @@ def _read_monitor(log_dir: str) -> tuple[list[float], list[int]]:
     return rewards, lengths
 
 
+def _read_eval_info_at_step(log_dir: str, target_step: int) -> dict[str, float]:
+    """Pull metrics logged by ``InfoDictEvalCallback`` at ``target_step``.
+
+    The callback writes a long-format ``timestep,metric,value`` CSV at
+    every evaluation. Since it shares ``eval_freq`` with ``EvalCallback``,
+    the row at the best-checkpoint step describes the same model snapshot
+    that was saved as ``best_model.zip``.
+    """
+    path = os.path.join(log_dir, "eval_info.csv")
+    if not os.path.exists(path):
+        return {}
+    metrics: dict[str, float] = {}
+    with open(path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                ts = int(row["timestep"])
+            except (KeyError, ValueError):
+                continue
+            if ts != target_step:
+                continue
+            try:
+                metrics[row["metric"]] = float(row["value"])
+            except (KeyError, ValueError):
+                continue
+    return metrics
+
+
 _PROJECT_NAME = "courtside-dynamics"
 
 
@@ -344,6 +372,38 @@ def write_run_summary(
             _section(f"Best Checkpoint Evaluation (step {best_step:,})")
         )
         lines.append(f"  {_kv('Reward', f'{best_mean:.3f} +/- {best_std:.3f}')}")
+        eval_info = _read_eval_info_at_step(log_dir, best_step)
+        if eval_info:
+            ep_len = eval_info.get("episode_length")
+            if ep_len is not None:
+                lines.append(f"  {_kv('Episode length', f'{ep_len:.1f}')}")
+            # Counter-style keys: render `<key>: final X  max Y`.
+            counter_finals = sorted(
+                k[: -len("_final")] for k in eval_info if k.endswith("_final")
+            )
+            if counter_finals:
+                key_width = max(len(k) for k in counter_finals) + 2
+                for base in counter_finals:
+                    final = eval_info.get(f"{base}_final")
+                    peak = eval_info.get(f"{base}_max")
+                    parts = [f"final {final:.2f}" if final is not None else ""]
+                    if peak is not None:
+                        parts.append(f"max {peak:.2f}")
+                    lines.append(
+                        f"  {(base + ':').ljust(key_width)}{'  '.join(p for p in parts if p)}"
+                    )
+            phase_keys = sorted(
+                k for k in eval_info if k.startswith("phase_frac_")
+            )
+            if phase_keys:
+                lines.append("  Phase fractions:")
+                pf_width = (
+                    max(len(k[len("phase_frac_"):]) for k in phase_keys) + 4
+                )
+                for k in phase_keys:
+                    label = k[len("phase_frac_"):]
+                    pct = eval_info[k] * 100
+                    lines.append(f"    {label.ljust(pf_width)}{pct:.1f}%")
 
     artifact_lines: list[str] = []
     for label, path in [
