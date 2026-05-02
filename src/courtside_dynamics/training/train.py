@@ -29,6 +29,7 @@ from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.callbacks import (
     BaseCallback,
     CallbackList,
+    CheckpointCallback,
     EvalCallback,
 )
 from stable_baselines3.common.env_checker import check_env
@@ -72,8 +73,18 @@ class TrainConfig:
     n_envs:
         Number of parallel training workers.
     eval_freq:
-        Run ``EvalCallback`` every ``eval_freq`` training steps (summed
-        across workers).
+        Run ``EvalCallback`` every ``eval_freq`` *environment* steps
+        (summed across workers). The helper converts this to SB3's
+        per-vec-step ``n_calls`` semantics by dividing by ``n_envs``,
+        so the cadence is independent of how many workers are used.
+    checkpoint_freq:
+        Save a full ``CheckpointCallback`` snapshot every
+        ``checkpoint_freq`` environment steps. Same n_envs-independent
+        semantics as ``eval_freq``. Set ``<= 0`` to skip checkpointing.
+    video_freq:
+        Record a rollout video every ``video_freq`` environment steps.
+        Same n_envs-independent semantics. Set ``<= 0`` to skip videos
+        (or use ``record_video=False``).
     n_eval_episodes:
         Episodes per ``EvalCallback`` evaluation.
     video_length:
@@ -106,6 +117,8 @@ class TrainConfig:
     name_prefix: str = "rl_model"
     n_envs: int = 4
     eval_freq: int = 25_000
+    checkpoint_freq: int = 250_000
+    video_freq: int = 250_000
     n_eval_episodes: int = 30
     video_length: int = 10_000
     record_video: bool = True
@@ -160,6 +173,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     )
     eval_env = make_vec_env(checked_env_fn, n_envs=1)
 
+    # SB3 callbacks fire on n_calls (per vec-env step), so an env-step
+    # value of N means n_calls of max(N // n_envs, 1). This keeps the
+    # cadence independent of n_envs.
+    def _calls(env_steps: int) -> int:
+        return max(env_steps // max(cfg.n_envs, 1), 1)
+
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=cfg.log_dir,
@@ -167,17 +186,25 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         render=False,
         deterministic=True,
         n_eval_episodes=cfg.n_eval_episodes,
-        eval_freq=cfg.eval_freq,
+        eval_freq=_calls(cfg.eval_freq),
     )
 
     callbacks: list[BaseCallback] = [eval_callback]
-    if cfg.record_video:
+    if cfg.checkpoint_freq > 0:
+        callbacks.append(
+            CheckpointCallback(
+                save_freq=_calls(cfg.checkpoint_freq),
+                save_path=os.path.join(cfg.log_dir, "checkpoints"),
+                name_prefix=cfg.name_prefix,
+            )
+        )
+    if cfg.record_video and cfg.video_freq > 0:
         callbacks.append(
             VideoRecordCallback(
                 env_fn=cfg.env_fn,
                 save_path=os.path.join(cfg.log_dir, "videos"),
                 video_length=cfg.video_length,
-                save_freq=cfg.eval_freq,
+                save_freq=_calls(cfg.video_freq),
                 name_prefix=cfg.name_prefix,
                 csv_header=cfg.csv_header,
                 info_row_fn=cfg.info_row_fn,
@@ -189,9 +216,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             InfoDictEvalCallback(
                 eval_env=info_eval_env,
                 n_eval_episodes=max(1, cfg.n_eval_episodes // 4),
-                eval_freq=cfg.eval_freq,
+                eval_freq=_calls(cfg.eval_freq),
                 phase_key=cfg.phase_key,
                 phase_labels=cfg.phase_labels,
+                csv_path=os.path.join(cfg.log_dir, "eval_info.csv"),
             )
         )
     callbacks.extend(cfg.extra_callbacks)

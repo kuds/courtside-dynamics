@@ -109,6 +109,8 @@ RECIPES: dict[str, Recipe] = {
 _QUICK_TEST_OVERRIDES: dict[str, Any] = {
     "total_timesteps": 25_000,
     "eval_freq": 5_000,
+    "checkpoint_freq": 10_000,
+    "video_freq": 10_000,
     "n_eval_episodes": 3,
     "video_length": 750,
 }

@@ -131,6 +131,8 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "name_prefix": cfg.name_prefix,
             "n_envs": cfg.n_envs,
             "eval_freq": cfg.eval_freq,
+            "checkpoint_freq": cfg.checkpoint_freq,
+            "video_freq": cfg.video_freq,
             "n_eval_episodes": cfg.n_eval_episodes,
             "video_length": cfg.video_length,
             "record_video": cfg.record_video,
@@ -251,9 +253,13 @@ def write_run_summary(
         ("evaluations", "evaluations.npz"),
         ("config", "config.json"),
         ("learning_curve", "learning_curve.png"),
+        ("eval_info_csv", "eval_info.csv"),
+        ("eval_info_plot", "eval_info.png"),
+        ("checkpoints_dir", "checkpoints"),
         ("best_model_video", "best_model.mp4"),
     ]:
-        if os.path.exists(os.path.join(log_dir, path)):
+        full = os.path.join(log_dir, path)
+        if os.path.exists(full):
             lines.append(f"  {label}: {path}")
 
     out = os.path.join(log_dir, "stage_summary.txt")

@@ -129,53 +129,160 @@ def plot_learning_curve(
     smoothing: int = 25,
     show: bool = True,
 ):
-    """Two-panel reward plot from the artifacts written by ``train``.
+    """Four-panel learning curve from the artifacts written by ``train``.
 
-    Left: per-episode training returns from ``log_dir/monitor/*.monitor.csv``
-    with a rolling mean overlay. Right: deterministic eval rewards (mean
-    +/- std) read from ``log_dir/evaluations.npz`` (written by SB3's
+    Top row: per-episode training returns and episode lengths from
+    ``log_dir/monitor/*.monitor.csv`` with a rolling-mean overlay.
+    Bottom row: deterministic eval returns and episode lengths (mean
+    +/- std) from ``log_dir/evaluations.npz`` (written by SB3's
     ``EvalCallback``).
     """
     import matplotlib.pyplot as plt
 
     log_dir = str(log_dir)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    train_rewards, train_lengths = _read_monitor_logs(
+        os.path.join(log_dir, "monitor")
+    )
 
-    train_rewards, _ = _read_monitor_logs(os.path.join(log_dir, "monitor"))
-    if train_rewards.size:
-        axes[0].plot(train_rewards, alpha=0.3, label="episode reward")
-        if smoothing > 1 and train_rewards.size >= smoothing:
-            kernel = np.ones(smoothing) / smoothing
-            smooth = np.convolve(train_rewards, kernel, mode="valid")
-            axes[0].plot(
-                np.arange(smooth.size) + smoothing - 1,
-                smooth,
-                label=f"rolling mean ({smoothing})",
-            )
-        axes[0].legend()
-    else:
-        axes[0].text(0.5, 0.5, "no monitor logs", ha="center", va="center")
-    axes[0].set_title("Training rewards (per episode)")
-    axes[0].set_xlabel("Episode")
-    axes[0].set_ylabel("Return")
+    def _plot_train(ax, series, title, ylabel):
+        if series.size:
+            ax.plot(series, alpha=0.3, label="per-episode")
+            if smoothing > 1 and series.size >= smoothing:
+                kernel = np.ones(smoothing) / smoothing
+                smooth = np.convolve(series, kernel, mode="valid")
+                ax.plot(
+                    np.arange(smooth.size) + smoothing - 1,
+                    smooth,
+                    label=f"rolling mean ({smoothing})",
+                )
+            ax.legend()
+        else:
+            ax.text(0.5, 0.5, "no monitor logs", ha="center", va="center")
+        ax.set_title(title)
+        ax.set_xlabel("Episode")
+        ax.set_ylabel(ylabel)
+
+    _plot_train(axes[0, 0], train_rewards, "Training rewards (per episode)", "Return")
+    _plot_train(
+        axes[0, 1],
+        train_lengths.astype(float),
+        "Training episode lengths",
+        "Steps",
+    )
 
     eval_npz = os.path.join(log_dir, "evaluations.npz")
-    if os.path.exists(eval_npz):
-        data = np.load(eval_npz)
-        timesteps = data["timesteps"]
-        results = data["results"]
-        mean = results.mean(axis=1)
-        std = results.std(axis=1)
-        axes[1].plot(timesteps, mean, label="eval mean")
-        axes[1].fill_between(
-            timesteps, mean - std, mean + std, alpha=0.25, label="+/-1 std"
-        )
-        axes[1].legend()
-    else:
-        axes[1].text(0.5, 0.5, "no evaluations.npz", ha="center", va="center")
-    axes[1].set_title("Evaluation rewards")
-    axes[1].set_xlabel("Timestep")
-    axes[1].set_ylabel("Return")
+    eval_data = np.load(eval_npz) if os.path.exists(eval_npz) else None
+
+    def _plot_eval(ax, key, title, ylabel):
+        if eval_data is None:
+            ax.text(0.5, 0.5, "no evaluations.npz", ha="center", va="center")
+        elif key not in eval_data:
+            ax.text(0.5, 0.5, f"no '{key}' in evaluations.npz", ha="center", va="center")
+        else:
+            timesteps = eval_data["timesteps"]
+            results = eval_data[key]
+            mean = results.mean(axis=1)
+            std = results.std(axis=1)
+            ax.plot(timesteps, mean, label="eval mean")
+            ax.fill_between(
+                timesteps, mean - std, mean + std, alpha=0.25, label="+/-1 std"
+            )
+            ax.legend()
+        ax.set_title(title)
+        ax.set_xlabel("Timestep")
+        ax.set_ylabel(ylabel)
+
+    _plot_eval(axes[1, 0], "results", "Evaluation rewards", "Return")
+    _plot_eval(axes[1, 1], "ep_lengths", "Evaluation episode lengths", "Steps")
+
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=120)
+    if show:
+        plt.show()
+    return fig
+
+
+def _split_eval_metric(name: str) -> tuple[str, str]:
+    """Split an eval-info metric name into ``(stem, variant)``.
+
+    ``rally_count_mean`` -> ``("rally_count", "mean")``,
+    ``phase_frac_<label>`` -> ``("phase_frac", "<label>")``,
+    standalone names like ``episode_length`` -> ``("episode_length", "")``.
+    """
+    if name.startswith("phase_frac_"):
+        return "phase_frac", name[len("phase_frac_") :]
+    for suffix in ("_mean", "_final", "_max"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)], suffix[1:]
+    return name, ""
+
+
+def plot_eval_info(
+    log_dir: str | Path,
+    *,
+    save_path: str | None = None,
+    show: bool = True,
+    max_cols: int = 3,
+):
+    """Per-metric time-series grid from ``log_dir/eval_info.csv``.
+
+    The CSV is written by ``InfoDictEvalCallback`` in long format
+    ``(timestep, metric, value)``. This function pivots it into a grid
+    with one panel per metric stem (e.g. ``rally_count``); ``_mean``,
+    ``_final``, and ``_max`` variants are overlaid as separate lines
+    on the same axes. ``phase_frac_<label>`` metrics share one panel.
+
+    Returns ``None`` if the CSV is missing or empty.
+    """
+    import csv as _csv
+
+    import matplotlib.pyplot as plt
+
+    csv_path = os.path.join(str(log_dir), "eval_info.csv")
+    if not os.path.exists(csv_path):
+        print(f"[notebook_utils] no eval_info.csv at {csv_path}")
+        return None
+
+    series: dict[str, dict[str, tuple[list[float], list[float]]]] = {}
+    with open(csv_path) as f:
+        reader = _csv.DictReader(f)
+        for row in reader:
+            try:
+                ts = float(row["timestep"])
+                val = float(row["value"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            stem, variant = _split_eval_metric(row["metric"])
+            xs, ys = series.setdefault(stem, {}).setdefault(variant, ([], []))
+            xs.append(ts)
+            ys.append(val)
+
+    if not series:
+        print(f"[notebook_utils] eval_info.csv is empty: {csv_path}")
+        return None
+
+    stems = sorted(series)
+    n = len(stems)
+    cols = min(max_cols, n)
+    rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(
+        rows, cols, figsize=(5 * cols, 3.5 * rows), squeeze=False
+    )
+
+    for i, stem in enumerate(stems):
+        ax = axes[i // cols][i % cols]
+        for variant in sorted(series[stem]):
+            xs, ys = series[stem][variant]
+            ax.plot(xs, ys, marker=".", markersize=3, label=variant or "value")
+        ax.set_title(stem)
+        ax.set_xlabel("Timestep")
+        if any(v for v in series[stem]):
+            ax.legend(fontsize=8)
+
+    for j in range(n, rows * cols):
+        axes[j // cols][j % cols].axis("off")
 
     fig.tight_layout()
     if save_path:

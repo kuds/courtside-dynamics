@@ -22,6 +22,8 @@ produces a fresh sample.
 """
 from __future__ import annotations
 
+import csv
+import os
 from collections import defaultdict
 from collections.abc import Mapping
 
@@ -56,6 +58,11 @@ class InfoDictEvalCallback(BaseCallback):
     deterministic:
         Passed to ``model.predict``. Evaluation is almost always
         deterministic, which is the default.
+    csv_path:
+        Optional path. When set, every evaluation appends one row per
+        metric in long format (``timestep,metric,value``) so the data
+        survives outside TensorBoard. The header is written on the
+        first call.
     """
 
     def __init__(
@@ -67,6 +74,7 @@ class InfoDictEvalCallback(BaseCallback):
         phase_key: str | None = None,
         phase_labels: Mapping[int, str] | None = None,
         deterministic: bool = True,
+        csv_path: str | None = None,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose)
@@ -77,6 +85,7 @@ class InfoDictEvalCallback(BaseCallback):
         self.phase_key = phase_key
         self.phase_labels = dict(phase_labels or {})
         self.deterministic = deterministic
+        self.csv_path = csv_path
 
     def _on_step(self) -> bool:
         if self.eval_freq <= 0 or self.n_calls % self.eval_freq != 0:
@@ -129,37 +138,37 @@ class InfoDictEvalCallback(BaseCallback):
                     finals[key] = float(info[key])
                 total_episodes += 1
 
-        logger = self.logger
-        logger.record(f"{self.log_prefix}/episode_length", total_steps / max(1, total_episodes))
-
-        for key, total in sums.items():
-            if counts[key] > 0:
-                logger.record(f"{self.log_prefix}/{key}_mean", total / counts[key])
-            logger.record(f"{self.log_prefix}/{key}_max", maxes[key])
-
         # Fall back to the last seen step if a rollout hit video_length
         # without termination and ``finals`` is empty.
         if not finals and last_info is not None:
             for key in _scalar_info_keys(last_info):
                 finals[key] = float(last_info[key])
 
+        metrics: dict[str, float] = {
+            "episode_length": total_steps / max(1, total_episodes),
+        }
+        for key, total in sums.items():
+            if counts[key] > 0:
+                metrics[f"{key}_mean"] = total / counts[key]
+            metrics[f"{key}_max"] = maxes[key]
         for key, value in finals.items():
-            logger.record(f"{self.log_prefix}/{key}_final", value)
-
+            metrics[f"{key}_final"] = value
         if self.phase_key is not None and phase_counts and total_steps > 0:
             for phase_int, count in phase_counts.items():
                 label = self.phase_labels.get(phase_int, str(phase_int))
-                logger.record(
-                    f"{self.log_prefix}/phase_frac_{label}",
-                    count / total_steps,
-                )
-            # Also log any declared labels that never appeared so plots
-            # don't have surprise gaps.
+                metrics[f"phase_frac_{label}"] = count / total_steps
+            # Also surface any declared labels that never appeared so
+            # plots don't have surprise gaps.
             for phase_int, label in self.phase_labels.items():
                 if phase_int not in phase_counts:
-                    logger.record(
-                        f"{self.log_prefix}/phase_frac_{label}", 0.0
-                    )
+                    metrics.setdefault(f"phase_frac_{label}", 0.0)
+
+        logger = self.logger
+        for name, value in metrics.items():
+            logger.record(f"{self.log_prefix}/{name}", value)
+
+        if self.csv_path is not None:
+            self._append_csv(metrics, self.num_timesteps)
 
         if self.verbose:
             print(
@@ -169,3 +178,19 @@ class InfoDictEvalCallback(BaseCallback):
             )
 
         return True
+
+    def _append_csv(self, metrics: Mapping[str, float], timestep: int) -> None:
+        """Append one (timestep, metric, value) row per metric in long format."""
+        path = self.csv_path
+        if path is None:
+            return
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        new_file = not os.path.exists(path)
+        with open(path, "a", newline="") as f:
+            writer = csv.writer(f)
+            if new_file:
+                writer.writerow(["timestep", "metric", "value"])
+            for name in sorted(metrics):
+                writer.writerow([timestep, name, float(metrics[name])])
