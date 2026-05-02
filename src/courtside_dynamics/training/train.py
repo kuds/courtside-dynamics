@@ -106,7 +106,7 @@ class TrainConfig:
     name_prefix: str = "rl_model"
     n_envs: int = 4
     eval_freq: int = 25_000
-    n_eval_episodes: int = 20
+    n_eval_episodes: int = 30
     video_length: int = 10_000
     record_video: bool = True
     policy: str = "MlpPolicy"
@@ -140,9 +140,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
 
     Returns the trained model. Side effects: writes monitor logs,
     TensorBoard events, evaluation npz, video MP4s, ``best_model`` /
-    ``final_model`` checkpoints, plus ``run_config.json`` (provenance
-    snapshot at start) and ``run_summary.txt`` (eval / wall-clock report
-    at end) under ``cfg.log_dir``.
+    ``final_model`` checkpoints, plus ``config.json`` (provenance
+    snapshot at start) and ``stage_summary.txt`` (eval / wall-clock
+    report at end) under ``cfg.log_dir``.
     """
     os.makedirs(cfg.log_dir, exist_ok=True)
     write_run_config(cfg, cfg.log_dir)

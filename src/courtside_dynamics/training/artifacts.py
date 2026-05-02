@@ -1,4 +1,4 @@
-"""Per-run artifacts: ``run_config.json`` and ``run_summary.txt``.
+"""Per-run artifacts: ``config.json`` and ``stage_summary.txt``.
 
 Both files are written by :func:`courtside_dynamics.training.train` so
 every ``LOG_DIR`` is self-describing -- you can answer "how was this
@@ -117,7 +117,7 @@ def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
 
 
 def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
-    """Snapshot the resolved cfg + provenance to ``log_dir/run_config.json``."""
+    """Snapshot the resolved cfg + provenance to ``log_dir/config.json``."""
     payload: dict[str, Any] = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "git_sha": _git_sha(),
@@ -146,7 +146,7 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             ),
         },
     }
-    out = os.path.join(log_dir, "run_config.json")
+    out = os.path.join(log_dir, "config.json")
     with open(out, "w") as f:
         # default=repr so any callable / non-JSON value in model_kwargs
         # round-trips as a readable string instead of crashing the dump.
@@ -196,7 +196,7 @@ def write_run_summary(
     duration_seconds: float,
     device: str | None = None,
 ) -> str:
-    """Write a human-readable end-of-run report to ``log_dir/run_summary.txt``."""
+    """Write a human-readable end-of-run report to ``log_dir/stage_summary.txt``."""
     lines: list[str] = []
     lines.append(f"Run: {os.path.basename(os.path.normpath(log_dir))}")
     lines.append(f"Algo: {cfg.algo}")
@@ -249,14 +249,14 @@ def write_run_summary(
         ("best_model", "best_model.zip"),
         ("final_model", "final_model.zip"),
         ("evaluations", "evaluations.npz"),
-        ("run_config", "run_config.json"),
+        ("config", "config.json"),
         ("learning_curve", "learning_curve.png"),
         ("best_model_video", "best_model.mp4"),
     ]:
         if os.path.exists(os.path.join(log_dir, path)):
             lines.append(f"  {label}: {path}")
 
-    out = os.path.join(log_dir, "run_summary.txt")
+    out = os.path.join(log_dir, "stage_summary.txt")
     with open(out, "w") as f:
         f.write("\n".join(lines) + "\n")
     return out
