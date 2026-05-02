@@ -29,7 +29,7 @@ def mount_drive(mount_point: str = "/content/drive") -> str:
     """Mount Google Drive in Colab; no-op (returns ``""``) elsewhere.
 
     Returns the ``MyDrive`` root on success so callers can build paths
-    like ``os.path.join(mount_drive(), "courtside-dynamics", "logs")``.
+    like ``os.path.join(mount_drive(), "Finding Theta", "courtside-dynamics")``.
     """
     if not _in_colab():
         return ""
@@ -50,20 +50,22 @@ def resolve_run_dir(
 ) -> str:
     """Pick a fresh run directory, optionally rooted under mounted Drive.
 
-    Layout, modeled on mesozoic-labs::
+    Layout::
 
         <root>/<env>/<algo lowercased>/<YYYYMMDD_HHMMSS>/
 
     With ``use_drive=True`` and Drive mounted at ``/content/drive``, the
-    root is ``/content/drive/MyDrive/<drive_subdir>``. Otherwise it
-    falls back to ``local_root``. Set ``timestamp=False`` to drop the
-    timestamp leaf (re-uses the same dir across runs, which is handy
-    when iterating but will mix artifacts).
+    root is ``/content/drive/MyDrive/Finding Theta/<drive_subdir>/training_runs``.
+    Otherwise it falls back to ``local_root``. Set ``timestamp=False``
+    to drop the timestamp leaf (re-uses the same dir across runs, which
+    is handy when iterating but will mix artifacts).
     """
     if use_drive:
         my_drive = "/content/drive/MyDrive"
         if os.path.isdir(my_drive):
-            root = os.path.join(my_drive, drive_subdir)
+            root = os.path.join(
+                my_drive, "Finding Theta", drive_subdir, "training_runs"
+            )
         else:
             print(
                 "[notebook_utils] use_drive=True but /content/drive/MyDrive "
