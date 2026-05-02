@@ -162,6 +162,96 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
     return out
 
 
+def _scalar_or_initial(value: Any) -> Any:
+    """Return scalars unchanged; resolve schedule callables at progress=1.0."""
+    if isinstance(value, (int, float, str, bool)) or value is None:
+        return value
+    if callable(value):
+        try:
+            return float(value(1.0))
+        except Exception:
+            return repr(value)
+    return value
+
+
+def _model_info(model: Any) -> dict[str, Any]:
+    """Snapshot the SB3-resolved model + policy hyperparameters.
+
+    Captures both what the user passed and what SB3 filled in from its
+    defaults (e.g. ``net_arch=[256, 256]`` for ``MlpPolicy``), so the
+    ``config.json`` is enough to reconstruct the exact training setup.
+    """
+    info: dict[str, Any] = {}
+    info["algo_class"] = type(model).__name__
+    info["device"] = str(getattr(model, "device", ""))
+
+    policy = getattr(model, "policy", None)
+    if policy is not None:
+        info["policy_class"] = type(policy).__name__
+        net_arch = getattr(policy, "net_arch", None)
+        if net_arch is not None:
+            info["net_arch"] = net_arch
+        activation_fn = getattr(policy, "activation_fn", None)
+        if activation_fn is not None:
+            info["activation_fn"] = getattr(
+                activation_fn, "__name__", repr(activation_fn)
+            )
+        try:
+            num_params = sum(p.numel() for p in policy.parameters())
+            info["policy_num_params"] = int(num_params)
+        except Exception:
+            pass
+
+    # Hyperparameters common across SAC/PPO. Missing attrs are silently
+    # skipped so this stays algo-agnostic.
+    hyperparam_keys = (
+        # Shared
+        "learning_rate", "gamma", "batch_size", "max_grad_norm", "seed",
+        # Off-policy (SAC, TD3, DQN)
+        "tau", "buffer_size", "learning_starts", "train_freq",
+        "gradient_steps", "ent_coef", "target_entropy",
+        "target_update_interval",
+        # On-policy (PPO, A2C)
+        "n_steps", "n_epochs", "gae_lambda", "clip_range",
+        "clip_range_vf", "vf_coef", "normalize_advantage",
+    )
+    hyperparams: dict[str, Any] = {}
+    for attr in hyperparam_keys:
+        if not hasattr(model, attr):
+            continue
+        value = getattr(model, attr)
+        if attr in ("learning_rate", "clip_range", "clip_range_vf"):
+            value = _scalar_or_initial(value)
+        elif attr == "train_freq":
+            value = repr(value)
+        hyperparams[attr] = value
+    info["hyperparameters"] = hyperparams
+    return info
+
+
+def update_run_config_with_model(model: Any, log_dir: str) -> str | None:
+    """Augment ``log_dir/config.json`` with resolved model details.
+
+    Called after the SB3 algorithm is constructed so SB3-default values
+    (``net_arch=[256, 256]``, ``learning_rate=3e-4``, ``buffer_size=1e6``,
+    etc.) end up on disk even when the user passes an empty
+    ``model_kwargs``. No-op if ``config.json`` doesn't exist yet.
+    """
+    path = os.path.join(log_dir, "config.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    payload["resolved_model"] = _model_info(model)
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2, default=repr)
+        f.write("\n")
+    return path
+
+
 def _format_duration(seconds: float) -> str:
     seconds = int(seconds)
     h, rem = divmod(seconds, 3600)

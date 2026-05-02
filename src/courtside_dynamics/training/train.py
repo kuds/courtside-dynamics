@@ -43,6 +43,7 @@ from courtside_dynamics.callbacks.video_record import (
     VideoRecordCallback,
 )
 from courtside_dynamics.training.artifacts import (
+    update_run_config_with_model,
     write_run_config,
     write_run_summary,
 )
@@ -279,6 +280,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     callbacks.extend(cfg.extra_callbacks)
 
     model = _build_algo(cfg.algo, train_env, cfg.log_dir, **cfg.model_kwargs)
+    update_run_config_with_model(model, cfg.log_dir)
 
     try:
         model.learn(
