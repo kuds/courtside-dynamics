@@ -506,6 +506,7 @@ def write_run_summary(
         ("eval_info_plot", "eval_info.png"),
         ("checkpoints_dir", "checkpoints"),
         ("vec_normalize", "vec_normalize.pkl"),
+        ("best_vec_normalize", "best_vec_normalize.pkl"),
         ("best_model_video", "best_model.mp4"),
     ]:
         full = os.path.join(log_dir, path)

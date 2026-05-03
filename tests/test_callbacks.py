@@ -270,6 +270,77 @@ def test_info_dict_eval_callback_aggregates(tmp_path):
     assert frac_sum == pytest.approx(1.0, abs=1e-6)
 
 
+class TestSaveVecNormalizeOnNewBest:
+    """The new-best snapshot is what makes ``best_model.zip`` replayable.
+
+    Without it, ``vec_normalize.pkl`` is only written at end of training,
+    so its running stats reflect the final train_env state — not the
+    moment best_model was saved. ``record_best_model_video`` would then
+    feed best_model obs normalized by mismatched stats.
+    """
+
+    @staticmethod
+    def _build_vec_normalize():
+        from stable_baselines3.common.env_util import make_vec_env
+        from stable_baselines3.common.vec_env import VecNormalize
+
+        from courtside_dynamics.envs import BallBalanceEnv
+
+        venv = make_vec_env(lambda: BallBalanceEnv(), n_envs=1)
+        return VecNormalize(venv, norm_obs=True, norm_reward=False)
+
+    def test_writes_paired_file_when_vec_normalize_present(self, tmp_path):
+        from stable_baselines3.common.vec_env import (
+            DummyVecEnv,
+            VecNormalize,
+        )
+
+        from courtside_dynamics.envs import BallBalanceEnv
+        from courtside_dynamics.training.train import (
+            _SaveVecNormalizeOnNewBest,
+        )
+
+        vec_norm = self._build_vec_normalize()
+        # Step a few times so obs_rms has a non-default running mean —
+        # otherwise a "passed" test could mean we saved the SB3 default.
+        vec_norm.reset()
+        for _ in range(5):
+            vec_norm.step(np.zeros((1, 6), dtype=np.float32))
+
+        model = _FakeModel(action_dim=6)
+        model.get_vec_normalize_env = lambda: vec_norm  # type: ignore[attr-defined]
+
+        save_path = tmp_path / "best_vec_normalize.pkl"
+        cb = _SaveVecNormalizeOnNewBest(str(save_path))
+        cb.model = model  # type: ignore[assignment]
+        assert cb._on_step() is True
+        assert save_path.exists()
+
+        # Loading should reconstruct an equivalent VecNormalize. obs_rms
+        # mean must match the one we just trained, not the default zeros.
+        dummy = DummyVecEnv([lambda: BallBalanceEnv()])
+        loaded = VecNormalize.load(str(save_path), dummy)
+        np.testing.assert_allclose(loaded.obs_rms.mean, vec_norm.obs_rms.mean)
+        np.testing.assert_allclose(loaded.obs_rms.var, vec_norm.obs_rms.var)
+        dummy.close()
+        vec_norm.close()
+
+    def test_noop_when_model_has_no_vec_normalize(self, tmp_path):
+        """A model trained without VecNormalize must not raise or write."""
+        from courtside_dynamics.training.train import (
+            _SaveVecNormalizeOnNewBest,
+        )
+
+        model = _FakeModel(action_dim=6)
+        model.get_vec_normalize_env = lambda: None  # type: ignore[attr-defined]
+
+        save_path = tmp_path / "best_vec_normalize.pkl"
+        cb = _SaveVecNormalizeOnNewBest(str(save_path))
+        cb.model = model  # type: ignore[assignment]
+        assert cb._on_step() is True
+        assert not save_path.exists()
+
+
 def test_info_dict_eval_callback_no_phase_key(tmp_path):
     """WallBall has no phase key — callback should still produce metrics."""
     from stable_baselines3.common.env_util import make_vec_env
