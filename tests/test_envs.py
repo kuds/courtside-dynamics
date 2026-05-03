@@ -32,7 +32,7 @@ from courtside_dynamics.envs import (
 ENV_CLASSES = [BallBalanceEnv, BallBounceEnv, WallBallEnv, TennisWallEnv]
 
 # Construction kwargs mirroring what each notebook uses at training time.
-# In particular ``min_force=100.0`` makes the touch-sensor rising-edge check
+# In particular ``min_force=20.0`` makes the touch-sensor rising-edge check
 # actually discriminate between "in contact" and "not in contact" --
 # with ``min_force=0.0`` (the XML default) the check fires every step, which
 # masks reward bugs. See the ``test_random_rollout_produces_some_reward``
@@ -40,7 +40,7 @@ ENV_CLASSES = [BallBalanceEnv, BallBounceEnv, WallBallEnv, TennisWallEnv]
 ENV_CLASSES_WITH_KWARGS = [
     (BallBalanceEnv, {}),
     (BallBounceEnv, {"min_force": 100.0}),
-    (WallBallEnv, {"min_force": 100.0}),
+    (WallBallEnv, {"min_force": 20.0}),
     (TennisWallEnv, {"min_force": 100.0}),
 ]
 
@@ -98,7 +98,6 @@ def test_random_rollout_runs_without_nan(env_cls, rng):
     [
         (BallBalanceEnv, {}),
         (BallBounceEnv, {"min_force": 100.0}),
-        (WallBallEnv, {"min_force": 100.0}),
         (TennisWallEnv, {"min_force": 100.0}),
     ],
 )
@@ -107,10 +106,11 @@ def test_random_rollout_produces_some_reward(env_cls, kwargs):
 
     For Ball Balance the reward is +1/step so this is trivial. For Ball
     Bounce gravity pulls the ball onto the paddle and an early contact
-    usually lands. For Wall Ball the ball is served toward the wall on
-    reset, so the first wall contact comes "for free" and the test
-    verifies that reward genuinely fires on rising edges rather than
-    spamming every step.
+    usually lands. Tennis Wall has potential-based shaping that fires
+    every step. Wall Ball is intentionally excluded: under the post-fix
+    reward gate (no reward until the paddle has touched the ball)
+    random actions can't earn anything within 2000 steps. See
+    ``TestWallBallRewardGate`` for the targeted oracle-vs-noop check.
     """
     env = env_cls(**kwargs)
     try:
@@ -276,5 +276,157 @@ class TestTennisWallStateMachine:
                 "detector or touch sensor is broken"
             )
             assert env.phase == 1  # APPROACH_WALL
+        finally:
+            env.close()
+
+
+class TestWallBallRewardGate:
+    """Verify the post-fix WallBall reward design.
+
+    The original env gave +1 on every wall contact, including the serve
+    bounce. SAC training stalled at reward=1.000 ± 0.000 because the
+    serve alone produced 1 reward and a dead-ball floor rally produced
+    no further events — i.e. random and trained policies were
+    indistinguishable. These tests pin down the new contract:
+
+    * a no-op policy gets the serve bounce but earns nothing,
+    * the oracle (paddle tracker) earns strictly more than no-op,
+    * a stalled ball terminates instead of burning the full episode,
+    * paddle-face contacts grant the shaping bonus.
+    """
+
+    @staticmethod
+    def _zero_action(env):
+        return np.zeros(env.action_space.shape, dtype=np.float32)
+
+    def test_serve_bounce_alone_yields_no_reward(self):
+        """Hold the paddle still and let the serve hit the wall.
+
+        ``wall_contact_count`` must go up (the ball does hit the wall)
+        but reward must stay at 0 because ``paddle_hit_count`` is still 0.
+        """
+        env = WallBallEnv(min_force=20.0, episode_len=400)
+        try:
+            env.reset(seed=0)
+            total_reward = 0.0
+            info = {"wall_contact_count": 0, "paddle_hit_count": 0}
+            for _ in range(300):
+                _, reward, terminated, truncated, info = env.step(
+                    self._zero_action(env)
+                )
+                total_reward += reward
+                if info["wall_contact_count"] >= 1:
+                    break
+                if terminated or truncated:
+                    break
+            assert info["wall_contact_count"] >= 1, (
+                "Serve never reached the wall — physics regression"
+            )
+            assert info["paddle_hit_count"] == 0
+            assert total_reward == 0.0, (
+                f"Serve bounce should not reward, got {total_reward}"
+            )
+        finally:
+            env.close()
+
+    def test_oracle_outscores_noop(self):
+        """A hand-coded paddle tracker must score strictly above no-op.
+
+        This is the canary for the whole fix: if a controller with full
+        state access can't get nonzero reward, the env is unsolvable and
+        no RL agent will fix it.
+        """
+        from courtside_dynamics.scripted_policies import (
+            wall_ball_oracle_action,
+        )
+
+        def run(action_fn, seed):
+            env = WallBallEnv(min_force=20.0, episode_len=750)
+            try:
+                obs, _ = env.reset(seed=seed)
+                total = 0.0
+                for _ in range(750):
+                    obs, reward, terminated, truncated, _ = env.step(
+                        action_fn(obs)
+                    )
+                    total += reward
+                    if terminated or truncated:
+                        break
+                return total
+            finally:
+                env.close()
+
+        noop_total = run(lambda o: np.zeros(4, dtype=np.float32), seed=0)
+        oracle_total = run(wall_ball_oracle_action, seed=0)
+        assert noop_total == 0.0, (
+            f"No-op policy earned {noop_total}, expected 0"
+        )
+        assert oracle_total > noop_total, (
+            f"Oracle ({oracle_total}) did not beat no-op ({noop_total}) — "
+            "env is not solvable by paddle tracking"
+        )
+
+    def test_stalled_ball_terminates_episode(self):
+        """A dead ball should end the episode well before episode_len."""
+        env = WallBallEnv(
+            min_force=20.0, episode_len=2000, stall_steps=50
+        )
+        try:
+            env.reset(seed=0)
+            terminated = False
+            info = {"stalled": False}
+            steps = 0
+            for step in range(1, 600):
+                _, _, terminated, truncated, info = env.step(
+                    self._zero_action(env)
+                )
+                steps = step
+                if terminated or truncated:
+                    break
+            assert terminated, "Stalled ball never terminated the episode"
+            assert info["stalled"], "Termination wasn't flagged as a stall"
+            assert steps < 600, (
+                "Episode ran past stall_steps=50 budget"
+            )
+        finally:
+            env.close()
+
+    def test_paddle_contact_grants_bonus(self):
+        """Teleport the ball into the paddle and confirm the bonus fires.
+
+        The paddle face site sits at world ``(-2, 0, 1.35)`` when all
+        paddle joints are at qpos=0 (paddle_base + handle 0.15 + head
+        body 0.15 + site 0.05). Spawning the ball there with an inward
+        velocity is a deterministic way to verify the rising-edge
+        detector and bonus wiring without depending on luck.
+        """
+        env = WallBallEnv(min_force=0.0, paddle_hit_bonus=0.5)
+        try:
+            env.reset(seed=0)
+
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            qpos[ball_qposadr : ball_qposadr + 3] = [-1.5, 0.0, 1.35]
+            qvel[ball_dofadr : ball_dofadr + 3] = [-3.0, 0.0, 0.0]
+            env.set_state(qpos, qvel)
+
+            total_reward = 0.0
+            hit = False
+            for _ in range(40):
+                _, reward, terminated, truncated, info = env.step(
+                    self._zero_action(env)
+                )
+                total_reward += reward
+                if info["paddle_hit_count"] >= 1:
+                    hit = True
+                    break
+                if terminated or truncated:
+                    break
+            assert hit, "Ball-into-paddle never registered a contact"
+            assert total_reward >= 0.5, (
+                f"Paddle bonus didn't fire (total reward {total_reward})"
+            )
         finally:
             env.close()

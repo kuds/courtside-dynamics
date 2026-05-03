@@ -21,19 +21,20 @@
         <body name="paddle_base" pos="-2 0 1">
             <joint name="paddle_slide_x" type="slide" axis="1 0 0" range="-1 4" />
             <joint name="paddle_slide_y" type="slide" axis="0 1 0" range="-2 2" />
-            <joint name="paddle_slide_z" type="slide" axis="0 0 1" range="-0.5 1.5" />
-            <geom name="paddle_base_geom" pos="0 0 0" size="0.1 0.1 0.1" type="box" rgba="0.2 0.2 0.8 1" />
+            <joint name="paddle_slide_z" type="slide" axis="0 0 1" range="-0.9 1.5" />
+            <geom name="paddle_base_geom" pos="0 0 0" size="0.1 0.1 0.1" type="box" rgba="0.2 0.2 0.8 1" mass="0.3" />
             <body name="paddle_handle" pos="0 0 0.15">
                 <joint name="paddle_rotate_x" type="hinge" axis="1 0 0" range="-90 90" />
-                <geom name="paddle_handle_geom" pos="0 0 0" size="0.05 0.05 0.15" type="box" rgba="0.2 0.2 0.8 1" />
+                <geom name="paddle_handle_geom" pos="0 0 0" size="0.05 0.05 0.15" type="box" rgba="0.2 0.2 0.8 1" mass="0.2" />
                 <body name="paddle_head" pos="0 0 0.15">
-                    <geom name="paddle_head_geom" pos="0 0 0.05" size="0.2 0.05 0.2" type="box" rgba="0.8 0.2 0.2 1" />
+                    <site name="paddle_sensor" pos="0 0 0.05" size="0.2 0.05 0.2" type="box" rgba="0 1 0 0.15" />
+                    <geom name="paddle_head_geom" pos="0 0 0.05" size="0.2 0.05 0.2" type="box" rgba="0.8 0.2 0.2 1" mass="0.5" />
                 </body>
             </body>
         </body>
         <body name="ball" pos="0 0 1.5">
-            <joint name="ball_x" type="free" limited="false" />
-            <geom name="ball_geom" pos="0 0 0" size="0.1" type="sphere" rgba="1 0 0 1" friction="0.3 0.1 0.1" solref="0.01 0.8" />
+            <joint name="ball_x" type="free" limited="false" damping="0" armature="0" />
+            <geom name="ball_geom" pos="0 0 0" size="0.1" type="sphere" rgba="1 0 0 1" mass="0.1" friction="0.3 0.1 0.1" solref="-200000 -0.5" />
         </body>
     </worldbody>
     <actuator>
@@ -43,6 +44,7 @@
         <motor name="paddle_rotate_x_motor" joint="paddle_rotate_x" gear="100" />
     </actuator>
     <sensor>
-        <touch name="touch_sensor" site="wall_sensor" />
+        <touch name="wall_touch" site="wall_sensor" />
+        <touch name="paddle_touch" site="paddle_sensor" />
     </sensor>
 </mujoco>

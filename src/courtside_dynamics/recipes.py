@@ -81,7 +81,7 @@ RECIPES: dict[str, Recipe] = {
     ),
     "WallBall": Recipe(
         env_cls=WallBallEnv,
-        env_kwargs={"render_mode": "rgb_array", "min_force": 100.0},
+        env_kwargs={"render_mode": "rgb_array", "min_force": 20.0},
         default_total_timesteps=1_500_000,
         name_prefix="wall_ball",
         description="Hit a ball into a wall with a 4-DOF paddle.",
