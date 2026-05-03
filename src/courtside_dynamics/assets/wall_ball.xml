@@ -24,11 +24,11 @@
             <joint name="paddle_slide_z" type="slide" axis="0 0 1" range="-0.9 1.5" />
             <geom name="paddle_base_geom" pos="0 0 0" size="0.1 0.1 0.1" type="box" rgba="0.2 0.2 0.8 1" mass="0.3" />
             <body name="paddle_handle" pos="0 0 0.15">
-                <joint name="paddle_rotate_x" type="hinge" axis="1 0 0" range="-90 90" />
+                <joint name="paddle_pitch" type="hinge" axis="0 1 0" range="-90 90" />
                 <geom name="paddle_handle_geom" pos="0 0 0" size="0.05 0.05 0.15" type="box" rgba="0.2 0.2 0.8 1" mass="0.2" />
                 <body name="paddle_head" pos="0 0 0.15">
-                    <site name="paddle_sensor" pos="0 0 0.05" size="0.2 0.05 0.2" type="box" rgba="0 1 0 0.15" />
-                    <geom name="paddle_head_geom" pos="0 0 0.05" size="0.2 0.05 0.2" type="box" rgba="0.8 0.2 0.2 1" mass="0.5" />
+                    <site name="paddle_sensor" pos="0 0 0.05" size="0.05 0.2 0.2" type="box" rgba="0 1 0 0.15" />
+                    <geom name="paddle_head_geom" pos="0 0 0.05" size="0.05 0.2 0.2" type="box" rgba="0.8 0.2 0.2 1" mass="0.5" />
                 </body>
             </body>
         </body>
@@ -41,7 +41,7 @@
         <motor name="paddle_slide_x_motor" joint="paddle_slide_x" gear="100" />
         <motor name="paddle_slide_y_motor" joint="paddle_slide_y" gear="100" />
         <motor name="paddle_slide_z_motor" joint="paddle_slide_z" gear="100" />
-        <motor name="paddle_rotate_x_motor" joint="paddle_rotate_x" gear="100" />
+        <motor name="paddle_pitch_motor" joint="paddle_pitch" gear="100" />
     </actuator>
     <sensor>
         <touch name="wall_touch" site="wall_sensor" />
