@@ -14,7 +14,7 @@ shared pipeline.
 |-----------------------------------------|-------------------------------------------|-----------------------------------------------------------------------------|
 | `CourtsideDynamics/BallBalance-v0`      | `courtside_dynamics.envs.ball_balance`    | Keep a ball on a 6-DOF tray.                                                |
 | `CourtsideDynamics/BallBounce-v0`       | `courtside_dynamics.envs.ball_bounce`     | Juggle a ball on a 6-DOF paddle.                                            |
-| `CourtsideDynamics/WallBall-v0`         | `courtside_dynamics.envs.wall_ball`       | Hit a ball into a wall with a 4-DOF paddle.                                 |
+| `CourtsideDynamics/WallBall-v1`         | `courtside_dynamics.envs.wall_ball`       | Rally a ball against a wall with a 4-DOF paddle and shaped reward.          |
 | `CourtsideDynamics/TennisWall-v0`       | `courtside_dynamics.envs.tennis_wall`     | Rally a ball against a wall with a 5-DOF racket and shaped reward.          |
 | `CourtsideDynamics/HumanoidTennis-v0`   | *planned*                                 | Full humanoid tennis -- the project north star.                             |
 
@@ -98,7 +98,7 @@ ceiling regardless of the algorithm.
 | Ball Balance    | PPO        | 751            | 1:58:54       | 2,000,000            |
 | Ball Balance    | SAC        | 751            | 1:52:23       | 2,000,000            |
 | Ball Bounce     | SAC        | 9.65           | 1:57:47       | 2,000,000            |
-| WallBall-v0     | SAC        | *in progress*  |               |                      |
+| WallBall-v1     | SAC        | *in progress*  |               |                      |
 | TennisWall-v0   | SAC        | *in progress*  |               |                      |
 
 ## Blog Posts

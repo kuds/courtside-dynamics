@@ -134,7 +134,7 @@ def test_gymnasium_make_ids():
     for env_id in (
         "CourtsideDynamics/BallBalance-v0",
         "CourtsideDynamics/BallBounce-v0",
-        "CourtsideDynamics/WallBall-v0",
+        "CourtsideDynamics/WallBall-v1",
         "CourtsideDynamics/TennisWall-v0",
     ):
         env = gymnasium.make(env_id)
@@ -358,8 +358,11 @@ class TestWallBallRewardGate:
 
         noop_total = run(lambda o: np.zeros(4, dtype=np.float32), seed=0)
         oracle_total = run(wall_ball_oracle_action, seed=0)
-        assert noop_total == 0.0, (
-            f"No-op policy earned {noop_total}, expected 0"
+        # With the OOB penalty + tracking-shaping clawback, a no-op
+        # policy that lets the ball escape can land slightly negative;
+        # the strict "no positive reward" claim is what matters here.
+        assert noop_total <= 0.0, (
+            f"No-op policy earned {noop_total}, expected <= 0"
         )
         assert oracle_total > noop_total, (
             f"Oracle ({oracle_total}) did not beat no-op ({noop_total}) — "
@@ -428,5 +431,290 @@ class TestWallBallRewardGate:
             assert total_reward >= 0.5, (
                 f"Paddle bonus didn't fire (total reward {total_reward})"
             )
+        finally:
+            env.close()
+
+    def test_obs_shape_includes_paddle_to_ball_offset(self):
+        """The 18-dim obs ends with the paddle_head→ball relative xyz."""
+        env = WallBallEnv()
+        try:
+            obs, _ = env.reset(seed=0)
+            assert obs.shape == (18,)
+            ball = np.array(env.data.joint("ball_x").qpos[:3])
+            paddle = np.array(env.data.body("paddle_head").xpos)
+            np.testing.assert_allclose(obs[-3:], ball - paddle, atol=1e-6)
+        finally:
+            env.close()
+
+    def test_out_of_bounds_applies_penalty(self):
+        """Driving the ball out of the play volume subtracts the
+        configured penalty from the terminating step's reward."""
+        env = WallBallEnv(
+            min_force=20.0,
+            out_of_bounds_penalty=2.5,
+            track_shaping_scale=0.0,
+            paddle_hit_bonus=0.0,
+        )
+        try:
+            env.reset(seed=0)
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            qpos[ball_qposadr : ball_qposadr + 3] = [0.0, 4.4, 1.5]
+            qvel[ball_dofadr : ball_dofadr + 3] = [0.0, 50.0, 0.0]
+            env.set_state(qpos, qvel)
+
+            terminating_reward = None
+            for _ in range(50):
+                _, reward, terminated, truncated, _ = env.step(
+                    np.zeros(env.action_space.shape, dtype=np.float32)
+                )
+                if terminated or truncated:
+                    terminating_reward = reward
+                    break
+            assert terminating_reward is not None, "Episode never terminated"
+            assert terminating_reward <= -2.4, (
+                f"Expected ~-2.5 OOB penalty, got {terminating_reward}"
+            )
+        finally:
+            env.close()
+
+    def test_track_shaping_zero_net_on_missed_return(self):
+        """A no-op policy must net zero tracking shaping on a missed
+        return — the PBRS terminal correction must claw back the
+        accumulated shaping when the episode ends mid-window."""
+        env = WallBallEnv(
+            min_force=20.0,
+            track_shaping_scale=1.0,
+            paddle_hit_bonus=0.0,
+            out_of_bounds_penalty=0.0,
+        )
+        try:
+            env.reset(seed=0)
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            # Place the ball post-wall, heading back but offset in y so
+            # it misses the paddle and exits OOB.
+            qpos[ball_qposadr : ball_qposadr + 3] = [2.5, 2.0, 1.0]
+            qvel[ball_dofadr : ball_dofadr + 3] = [-15.0, 0.0, 0.0]
+            env.set_state(qpos, qvel)
+            env._returning = True
+            env._prev_paddle_to_ball = None
+            env._return_shaping_total = 0.0
+
+            cumulative = 0.0
+            episode_done = False
+            for _ in range(300):
+                _, reward, terminated, truncated, _ = env.step(
+                    np.zeros(env.action_space.shape, dtype=np.float32)
+                )
+                cumulative += reward
+                if terminated or truncated:
+                    episode_done = True
+                    break
+            assert episode_done, "Episode did not end in 300 steps"
+            assert abs(cumulative) < 1e-9, (
+                f"Expected zero net shaping on missed return, got {cumulative}"
+            )
+        finally:
+            env.close()
+
+    def test_track_shaping_positive_on_successful_return(self):
+        """Net shaping is positive when the paddle returns the ball:
+        no clawback fires on a successful return, so the agent keeps
+        the positive shaping accumulated while the ball approached."""
+        env = WallBallEnv(
+            min_force=0.0,
+            track_shaping_scale=1.0,
+            paddle_hit_bonus=0.0,
+            out_of_bounds_penalty=0.0,
+        )
+        try:
+            env.reset(seed=0)
+            env._returning = True
+            env._prev_paddle_to_ball = None
+            env._return_shaping_total = 0.0
+
+            # The paddle's broad face is normal to ±x (per the
+            # reorientation on main); approach it from +x with a small
+            # velocity so the stiff contact peak is captured.
+            paddle_pos = env.data.body("paddle_head").xpos.copy()
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            qpos[ball_qposadr : ball_qposadr + 3] = paddle_pos + np.array(
+                [0.5, 0.0, 0.05]
+            )
+            qvel[ball_dofadr : ball_dofadr + 3] = [-3.0, 0.0, 0.0]
+            env.set_state(qpos, qvel)
+
+            cumulative = 0.0
+            hit_registered = False
+            for _ in range(50):
+                _, reward, terminated, truncated, info = env.step(
+                    np.zeros(env.action_space.shape, dtype=np.float32)
+                )
+                cumulative += reward
+                if info["paddle_hit_count"] >= 1:
+                    hit_registered = True
+                    break
+                if terminated or truncated:
+                    break
+            assert hit_registered, "Paddle contact never registered"
+            assert cumulative > 0.0, (
+                f"Expected positive net shaping on successful return, got {cumulative}"
+            )
+        finally:
+            env.close()
+
+    def test_consecutive_wall_hit_does_not_pay(self):
+        """A wall contact with no paddle hit since the last wall does
+        not earn the +1 — tightening main's "any paddle hit this episode"
+        gate to "since the last wall hit" so a ball that bounces off
+        the wall twice with no return between fails the rally."""
+        env = WallBallEnv(
+            min_force=20.0,
+            track_shaping_scale=0.0,
+            paddle_hit_bonus=0.0,
+            out_of_bounds_penalty=0.0,
+        )
+        try:
+            env.reset(seed=0)
+            # Force the gate closed (as if a previous wall already
+            # fired with no paddle return) and drive a fresh wall hit.
+            env._paddle_hit_since_last_wall = False
+            env._returning = False
+            env._prev_wall_touch = 0.0
+
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            # Park the ball just shy of the wall sensor (face at x≈2.85)
+            # and shove it at the wall.
+            # Slow velocity so the stiff-contact peak coincides with a
+            # control-step boundary and the touch sensor reads nonzero.
+            qpos[ball_qposadr : ball_qposadr + 3] = [2.7, 0.0, 1.5]
+            qvel[ball_dofadr : ball_dofadr + 3] = [3.0, 0.0, 0.0]
+            env.set_state(qpos, qvel)
+
+            cumulative = 0.0
+            initial_count = env.wall_contact_count
+            for _ in range(40):
+                _, reward, terminated, truncated, info = env.step(
+                    np.zeros(env.action_space.shape, dtype=np.float32)
+                )
+                cumulative += reward
+                if info["wall_contact_count"] > initial_count:
+                    break
+                if terminated or truncated:
+                    break
+            assert info["wall_contact_count"] > initial_count, (
+                "Wall contact never registered"
+            )
+            # bounce_count tracks *rewarded* wall contacts; with the
+            # gate closed this contact must not increment it.
+            assert env.bounce_count == 0
+            assert cumulative < 0.5, (
+                f"Expected gated wall hit to pay nothing, got {cumulative}"
+            )
+        finally:
+            env.close()
+
+    def test_consecutive_wall_hit_claws_back_stale_shaping(self):
+        """A consecutive wall contact must claw back any tracking
+        shaping accumulated in the previous return window, preserving
+        the no-op zero-net invariant across multi-bounce episodes."""
+        env = WallBallEnv(
+            min_force=20.0,
+            track_shaping_scale=0.0,
+            paddle_hit_bonus=0.0,
+            out_of_bounds_penalty=0.0,
+        )
+        try:
+            env.reset(seed=0)
+            # Pretend the previous return window paid out +0.5 of
+            # shaping but ended without a paddle return.
+            env._paddle_hit_since_last_wall = False
+            env._returning = True
+            env._return_shaping_total = 0.5
+            env._prev_paddle_to_ball = None
+            env._prev_wall_touch = 0.0
+
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            # Slow velocity so the stiff-contact peak coincides with a
+            # control-step boundary and the touch sensor reads nonzero.
+            qpos[ball_qposadr : ball_qposadr + 3] = [2.7, 0.0, 1.5]
+            qvel[ball_dofadr : ball_dofadr + 3] = [3.0, 0.0, 0.0]
+            env.set_state(qpos, qvel)
+
+            cumulative = 0.0
+            initial_count = env.wall_contact_count
+            for _ in range(40):
+                _, reward, terminated, truncated, info = env.step(
+                    np.zeros(env.action_space.shape, dtype=np.float32)
+                )
+                cumulative += reward
+                if info["wall_contact_count"] > initial_count:
+                    break
+                if terminated or truncated:
+                    break
+            assert info["wall_contact_count"] > initial_count
+            # Clawback: -0.5. No +1 (gate closed). Other rewards zeroed.
+            assert cumulative < -0.4, (
+                f"Expected ~-0.5 clawback on consecutive wall, got {cumulative}"
+            )
+        finally:
+            env.close()
+
+    def test_wall_reward_resumes_after_paddle_hit(self):
+        """After a paddle hit, the next wall contact pays +1 again."""
+        env = WallBallEnv(
+            min_force=20.0,
+            track_shaping_scale=0.0,
+            paddle_hit_bonus=0.0,
+            out_of_bounds_penalty=0.0,
+        )
+        try:
+            env.reset(seed=0)
+            env._paddle_hit_since_last_wall = True
+            env._returning = False
+            env._return_shaping_total = 0.0
+            env._prev_wall_touch = 0.0
+
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            # Slow velocity so the stiff-contact peak coincides with a
+            # control-step boundary and the touch sensor reads nonzero.
+            qpos[ball_qposadr : ball_qposadr + 3] = [2.7, 0.0, 1.5]
+            qvel[ball_dofadr : ball_dofadr + 3] = [3.0, 0.0, 0.0]
+            env.set_state(qpos, qvel)
+
+            cumulative = 0.0
+            initial_count = env.wall_contact_count
+            for _ in range(40):
+                _, reward, terminated, truncated, info = env.step(
+                    np.zeros(env.action_space.shape, dtype=np.float32)
+                )
+                cumulative += reward
+                if info["wall_contact_count"] > initial_count:
+                    break
+                if terminated or truncated:
+                    break
+            assert info["wall_contact_count"] > initial_count
+            assert cumulative >= 0.9, (
+                f"Expected +1 wall reward after paddle hit, got {cumulative}"
+            )
+            # Gate should now be closed again until the next paddle hit.
+            assert env._paddle_hit_since_last_wall is False
         finally:
             env.close()

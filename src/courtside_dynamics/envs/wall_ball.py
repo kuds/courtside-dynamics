@@ -7,11 +7,29 @@ wall. The reward is intentionally narrow:
 - The **first** wall contact (the serve) earns nothing. With a free
   serve bonus the policy gradient is flat — every random rollout would
   hit reward 1.0 and SAC's critic would have zero variance to fit.
-- Subsequent wall contacts earn +1, but only after the paddle has
-  touched the ball at least once. This forces the agent to learn the
-  paddle-redirect-to-wall loop instead of free-riding on the serve.
+- Subsequent wall contacts earn +1, but **only** if a paddle hit
+  happened since the previous wall contact. A "wall → wall" sequence
+  with no paddle return between is a failed rally and pays nothing,
+  forcing the agent to actually return the ball each cycle rather than
+  free-riding on a serve that ricochets back to the wall on its own.
 - Each fresh paddle contact earns ``paddle_hit_bonus`` so the agent has
   a dense gradient long before it can close the full loop.
+- ``track_shaping_scale`` adds potential-based shaping that rewards
+  reductions in the paddle→ball distance while a return is in progress
+  (i.e. between a wall contact and the next paddle hit). Strict PBRS is
+  ``F = γ·Φ(s') − Φ(s)``; this implementation uses ``Φ(s) − Φ(s')``
+  (γ treated as 1) for simplicity. With SAC's typical γ=0.99 the policy
+  bias is small but not exactly zero — keep ``track_shaping_scale``
+  modest relative to the +1 wall and paddle-hit rewards. The shaping
+  also has a terminal correction: any accumulated tracking shaping is
+  clawed back if the return window ends without a paddle hit (either
+  because the ball drifted out of the play volume or because a second
+  wall bounce happened with no return between). That preserves the
+  invariant that a no-op policy nets zero tracking shaping.
+- ``out_of_bounds_penalty`` subtracts a flat amount on the terminating
+  step when the ball leaves the play volume, so the agent is
+  incentivised to keep the rally alive rather than letting the ball
+  escape.
 
 Episodes also terminate early when the ball goes "dead": if no new
 paddle/wall rising-edge fires for ``stall_steps`` consecutive steps, the
@@ -71,6 +89,8 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         serve_lob: float = 4.0,
         serve_speed_jitter: float = 1.0,
         paddle_hit_bonus: float = 0.25,
+        track_shaping_scale: float = 0.5,
+        out_of_bounds_penalty: float = 1.0,
         stall_steps: int = 200,
         **kwargs: Any,
     ) -> None:
@@ -82,6 +102,8 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
             serve_lob=serve_lob,
             serve_speed_jitter=serve_speed_jitter,
             paddle_hit_bonus=paddle_hit_bonus,
+            track_shaping_scale=track_shaping_scale,
+            out_of_bounds_penalty=out_of_bounds_penalty,
             stall_steps=stall_steps,
             **kwargs,
         )
@@ -91,6 +113,8 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         self.serve_lob = float(serve_lob)
         self.serve_speed_jitter = float(serve_speed_jitter)
         self.paddle_hit_bonus = float(paddle_hit_bonus)
+        self.track_shaping_scale = float(track_shaping_scale)
+        self.out_of_bounds_penalty = float(out_of_bounds_penalty)
         self.stall_steps = int(stall_steps)
 
         # Runtime bookkeeping (reset in ``reset_model``).
@@ -100,13 +124,29 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         self._prev_wall_touch = 0.0
         self._prev_paddle_touch = 0.0
         self._steps_since_event = 0
+        # Strict per-cycle gate: True iff a paddle hit has happened
+        # since the most recent wall contact (or, before the first wall
+        # contact, never — so the serve earns nothing). Wall +1 fires
+        # only when this is True at the moment of the wall edge.
+        self._paddle_hit_since_last_wall = False
+        # Tracking-shaping window: True between a wall hit and the next
+        # paddle hit (the ball is heading back toward the paddle).
+        self._returning = False
+        self._prev_paddle_to_ball: float | None = None
+        # Cumulative tracking shaping awarded since the current return
+        # window opened. Clawed back if the window ends without a paddle
+        # hit (either via a second wall bounce or via episode end), so
+        # passive ball drift toward the paddle nets zero shaping.
+        self._return_shaping_total: float = 0.0
 
         # Obs: ball pos(3) + ball vel(3) + paddle qpos/qvel(8) +
-        # paddle_engaged flag(1) = 15. The flag tells the value function
-        # whether the *next* wall contact is rewardable, which an MLP
-        # policy can't infer from raw state alone.
+        # paddle_engaged flag(1) + paddle_head→ball relative xyz(3) = 18.
+        # The flag tells the value function whether the *next* wall
+        # contact is rewardable, which an MLP policy can't infer from
+        # raw state alone. The relative xyz spares the policy from
+        # learning the joint→world mapping by hand.
         observation_space = Box(
-            low=-np.inf, high=np.inf, shape=(15,), dtype=np.float64
+            low=-np.inf, high=np.inf, shape=(18,), dtype=np.float64
         )
         MujocoEnv.__init__(
             self,
@@ -146,24 +186,59 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         if paddle_edge:
             self.paddle_hit_count += 1
             reward += self.paddle_hit_bonus
+            self._paddle_hit_since_last_wall = True
+            self._returning = False
+            self._prev_paddle_to_ball = None
+            self._return_shaping_total = 0.0
             event_this_step = True
 
         if wall_edge:
             self.wall_contact_count += 1
-            # Gate: only reward wall contacts that came after a paddle
-            # touch. The first wall contact (the serve) yields nothing.
-            if self.paddle_hit_count >= 1:
+            # If the previous return window didn't end in a paddle hit,
+            # the tracking shaping accumulated during it was unearned —
+            # claw it back now before opening the next window. This
+            # preserves the no-op zero-net-shaping invariant across
+            # multi-bounce episodes.
+            if self._returning and abs(self._return_shaping_total) > 1e-9:
+                reward -= self._return_shaping_total
+            # Strict gate: only pay the +1 if a paddle hit happened
+            # since the last wall contact (or it's the serve and the
+            # gate has never been opened).
+            if self._paddle_hit_since_last_wall:
                 self.bounce_count += 1
                 reward += 1.0
+            self._paddle_hit_since_last_wall = False
+            # Open a fresh shaping window.
+            self._returning = True
+            self._prev_paddle_to_ball = None
+            self._return_shaping_total = 0.0
             event_this_step = True
+
+        # Potential-based tracking shaping: reward reductions in the
+        # paddle→ball distance while a return is in progress. Each delta
+        # is scale * (prev_dist - dist), which telescopes over the
+        # window to scale * (d_init - d_final). Clawback (above on
+        # consecutive wall, below on episode end) ensures a window that
+        # doesn't terminate in a paddle hit nets zero.
+        ball_pos = np.array(self.data.joint("ball_x").qpos[:3])
+        paddle_head_pos = np.array(self.data.body("paddle_head").xpos)
+        if self._returning and self.track_shaping_scale > 0.0:
+            dist = float(np.linalg.norm(ball_pos - paddle_head_pos))
+            if self._prev_paddle_to_ball is not None:
+                delta = self.track_shaping_scale * (
+                    self._prev_paddle_to_ball - dist
+                )
+                reward += delta
+                self._return_shaping_total += delta
+            self._prev_paddle_to_ball = dist
 
         if event_this_step:
             self._steps_since_event = 0
         else:
             self._steps_since_event += 1
 
-        obs = self._get_obs()
-        ball_x, ball_y, ball_z = obs[0], obs[1], obs[2]
+        obs = self._get_obs(ball_pos, paddle_head_pos)
+        ball_x, ball_y, ball_z = ball_pos[0], ball_pos[1], ball_pos[2]
         ball_out_of_bounds = (
             ball_x < _BALL_MIN_X
             or ball_x > _BALL_MAX_X
@@ -171,6 +246,9 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
             or ball_y > _BALL_MAX_Y
             or ball_z < _BALL_MIN_Z
         )
+        if ball_out_of_bounds:
+            reward -= self.out_of_bounds_penalty
+
         # Stall: cut the episode if the ball has gone dead. Only counts
         # *after* the serve has registered, otherwise a slow serve would
         # spuriously trip it.
@@ -182,6 +260,17 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
             not np.isfinite(obs).all() or ball_out_of_bounds or stalled
         )
         truncated = self.step_number > self.episode_len
+
+        # PBRS terminal correction: if the episode ends mid-return, the
+        # accumulated shaping was unearned (no paddle hit closed the
+        # window), so claw it back now.
+        if (
+            (terminated or truncated)
+            and self._returning
+            and abs(self._return_shaping_total) > 1e-9
+        ):
+            reward -= self._return_shaping_total
+            self._return_shaping_total = 0.0
 
         info = {
             # Backward-compat keys consumed by callbacks/CSV writers.
@@ -204,6 +293,10 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         self._prev_wall_touch = 0.0
         self._prev_paddle_touch = 0.0
         self._steps_since_event = 0
+        self._paddle_hit_since_last_wall = False
+        self._returning = False
+        self._prev_paddle_to_ball = None
+        self._return_shaping_total = 0.0
 
         qpos = self.init_qpos + self.np_random.uniform(
             size=self.model.nq, low=-0.01, high=0.01
@@ -236,13 +329,23 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         "paddle_slide_z_qpos", "paddle_slide_z_qvel",
         "paddle_pitch_qpos", "paddle_pitch_qvel",
         "paddle_engaged",
+        "paddle_to_ball_dx", "paddle_to_ball_dy", "paddle_to_ball_dz",
     )
 
-    def _get_obs(self) -> np.ndarray:
+    def _get_obs(
+        self,
+        ball_pos: np.ndarray | None = None,
+        paddle_head_pos: np.ndarray | None = None,
+    ) -> np.ndarray:
+        if ball_pos is None:
+            ball_pos = np.array(self.data.joint("ball_x").qpos[:3])
+        if paddle_head_pos is None:
+            paddle_head_pos = np.array(self.data.body("paddle_head").xpos)
+        rel = ball_pos - paddle_head_pos
         paddle_engaged = np.array([float(self.paddle_hit_count >= 1)])
         return np.concatenate(
             (
-                np.array(self.data.joint("ball_x").qpos[:3]),
+                ball_pos,
                 np.array(self.data.joint("ball_x").qvel[:3]),
                 np.array(self.data.joint("paddle_slide_x").qpos),
                 np.array(self.data.joint("paddle_slide_x").qvel),
@@ -253,6 +356,7 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
                 np.array(self.data.joint("paddle_pitch").qpos),
                 np.array(self.data.joint("paddle_pitch").qvel),
                 paddle_engaged,
+                rel,
             ),
             axis=0,
         )
