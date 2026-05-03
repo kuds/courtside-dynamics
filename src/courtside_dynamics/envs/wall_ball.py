@@ -140,11 +140,12 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         self._return_shaping_total: float = 0.0
 
         # Obs: ball pos(3) + ball vel(3) + paddle qpos/qvel(8) +
-        # paddle_engaged flag(1) + paddle_head→ball relative xyz(3) = 18.
-        # The flag tells the value function whether the *next* wall
-        # contact is rewardable, which an MLP policy can't infer from
-        # raw state alone. The relative xyz spares the policy from
-        # learning the joint→world mapping by hand.
+        # paddle_hit_since_last_wall flag(1) + paddle_head→ball
+        # relative xyz(3) = 18. The flag exposes the wall-reward gate
+        # state: True iff the next wall contact will pay +1, which an
+        # MLP policy can't infer from raw state alone. The relative
+        # xyz spares the policy from learning the joint→world mapping
+        # by hand.
         observation_space = Box(
             low=-np.inf, high=np.inf, shape=(18,), dtype=np.float64
         )
@@ -328,7 +329,7 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         "paddle_slide_y_qpos", "paddle_slide_y_qvel",
         "paddle_slide_z_qpos", "paddle_slide_z_qvel",
         "paddle_pitch_qpos", "paddle_pitch_qvel",
-        "paddle_engaged",
+        "paddle_hit_since_last_wall",
         "paddle_to_ball_dx", "paddle_to_ball_dy", "paddle_to_ball_dz",
     )
 
@@ -342,7 +343,7 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         if paddle_head_pos is None:
             paddle_head_pos = np.array(self.data.body("paddle_head").xpos)
         rel = ball_pos - paddle_head_pos
-        paddle_engaged = np.array([float(self.paddle_hit_count >= 1)])
+        gate_open = np.array([float(self._paddle_hit_since_last_wall)])
         return np.concatenate(
             (
                 ball_pos,
@@ -355,7 +356,7 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
                 np.array(self.data.joint("paddle_slide_z").qvel),
                 np.array(self.data.joint("paddle_pitch").qpos),
                 np.array(self.data.joint("paddle_pitch").qvel),
-                paddle_engaged,
+                gate_open,
                 rel,
             ),
             axis=0,
