@@ -54,6 +54,32 @@ _ALGOS = {
 }
 
 
+class _SaveVecNormalizeOnNewBest(BaseCallback):
+    """Snapshot the model's ``VecNormalize`` stats when EvalCallback saves a new best.
+
+    Wired in via ``EvalCallback(..., callback_on_new_best=...)``. Without
+    this, ``vec_normalize.pkl`` is only written at the very end of
+    training, so its running stats reflect the *final* train_env state —
+    not the moment ``best_model.zip`` was saved. Replaying ``best_model``
+    against final-step stats is a silent obs-distribution mismatch.
+    """
+
+    def __init__(self, save_path: str) -> None:
+        super().__init__()
+        self.save_path = save_path
+
+    def _on_step(self) -> bool:
+        get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
+        if get_vec_norm is None:
+            return True
+        vec_norm = get_vec_norm()
+        if vec_norm is None:
+            return True
+        os.makedirs(os.path.dirname(self.save_path) or ".", exist_ok=True)
+        vec_norm.save(self.save_path)
+        return True
+
+
 @dataclass
 class TrainConfig:
     """All knobs for a single training run.
@@ -225,6 +251,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     def _calls(env_steps: int) -> int:
         return max(env_steps // max(cfg.n_envs, 1), 1)
 
+    on_new_best: BaseCallback | None = None
+    if use_vec_normalize:
+        on_new_best = _SaveVecNormalizeOnNewBest(
+            os.path.join(cfg.log_dir, "best_vec_normalize.pkl")
+        )
+
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=cfg.log_dir,
@@ -233,6 +265,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         deterministic=True,
         n_eval_episodes=cfg.n_eval_episodes,
         eval_freq=_calls(cfg.eval_freq),
+        callback_on_new_best=on_new_best,
     )
 
     callbacks: list[BaseCallback] = [eval_callback]

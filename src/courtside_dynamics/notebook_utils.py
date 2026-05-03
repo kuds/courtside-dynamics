@@ -303,13 +303,18 @@ def _load_best_model(log_dir: str, algo: str):
 
 
 def _load_obs_normalizer(log_dir: str, env_fn: Callable):
-    """Return a callable ``obs -> normalized_obs`` from ``vec_normalize.pkl``.
+    """Return a callable ``obs -> normalized_obs`` paired with ``best_model.zip``.
 
-    Returns identity if the file is missing. Builds a throwaway
-    ``DummyVecEnv`` only because ``VecNormalize.load`` requires a venv;
-    we never step it.
+    Prefers ``best_vec_normalize.pkl`` (snapshot taken at the moment the
+    best model was saved) and falls back to ``vec_normalize.pkl`` (saved
+    at end of training, may not match best_model's training-time stats)
+    for older runs. Returns identity if neither file exists. Builds a
+    throwaway ``DummyVecEnv`` only because ``VecNormalize.load`` requires
+    a venv; we never step it.
     """
-    path = os.path.join(log_dir, "vec_normalize.pkl")
+    path = os.path.join(log_dir, "best_vec_normalize.pkl")
+    if not os.path.exists(path):
+        path = os.path.join(log_dir, "vec_normalize.pkl")
     if not os.path.exists(path):
         return lambda obs: obs
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
