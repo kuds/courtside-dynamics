@@ -234,7 +234,7 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         "paddle_slide_x_qpos", "paddle_slide_x_qvel",
         "paddle_slide_y_qpos", "paddle_slide_y_qvel",
         "paddle_slide_z_qpos", "paddle_slide_z_qvel",
-        "paddle_rotate_x_qpos", "paddle_rotate_x_qvel",
+        "paddle_pitch_qpos", "paddle_pitch_qvel",
         "paddle_engaged",
     )
 
@@ -250,8 +250,8 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
                 np.array(self.data.joint("paddle_slide_y").qvel),
                 np.array(self.data.joint("paddle_slide_z").qpos),
                 np.array(self.data.joint("paddle_slide_z").qvel),
-                np.array(self.data.joint("paddle_rotate_x").qpos),
-                np.array(self.data.joint("paddle_rotate_x").qvel),
+                np.array(self.data.joint("paddle_pitch").qpos),
+                np.array(self.data.joint("paddle_pitch").qvel),
                 paddle_engaged,
             ),
             axis=0,
