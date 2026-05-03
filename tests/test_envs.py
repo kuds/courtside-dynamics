@@ -135,6 +135,7 @@ def test_gymnasium_make_ids():
         "CourtsideDynamics/BallBalance-v0",
         "CourtsideDynamics/BallBounce-v0",
         "CourtsideDynamics/WallBall-v0",
+        "CourtsideDynamics/WallBall-v1",
         "CourtsideDynamics/TennisWall-v0",
     ):
         env = gymnasium.make(env_id)
@@ -239,7 +240,118 @@ class TestWallBallShaping:
         finally:
             env.close()
 
-    def test_paddle_hit_bonus_fires_on_return(self):
+    def test_track_shaping_zero_net_on_missed_return(self):
+        """A no-op policy should earn zero net tracking shaping on a missed return.
+
+        The ball naturally drifts toward the stationary paddle after a wall
+        bounce, so without a PBRS terminal correction the agent could pocket
+        positive shaping purely from passive ball movement.  The clawback at
+        episode end must cancel the accumulated shaping so the net is zero.
+
+        The setup places the ball heading back from the wall but aimed to the
+        side of the paddle, so it exits the play volume (OOB termination)
+        without triggering a paddle contact.
+        """
+        env = WallBallEnv(
+            min_force=100.0,
+            track_shaping_scale=1.0,
+            paddle_hit_bonus=0.0,
+            out_of_bounds_penalty=0.0,
+        )
+        try:
+            env.reset(seed=0)
+            # Place the ball as if it just bounced off the wall (high x),
+            # heading back (-x) but offset in y so it misses the paddle.
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            qpos[ball_qposadr : ball_qposadr + 3] = [2.5, 2.0, 1.0]
+            qvel[ball_dofadr : ball_dofadr + 3] = [-15.0, 0.0, 0.0]
+            env.set_state(qpos, qvel)
+            env._returning = True
+            env._prev_paddle_to_ball = None
+            env._return_shaping_total = 0.0
+
+            shaping_total = 0.0
+            episode_done = False
+            for _ in range(200):
+                _, reward, terminated, truncated, _ = env.step(
+                    np.zeros(env.action_space.shape, dtype=np.float32)
+                )
+                shaping_total += reward
+                if terminated or truncated:
+                    episode_done = True
+                    break
+            assert episode_done, "Episode did not end in 200 steps"
+            # Net tracking shaping must be zero: clawback at episode end
+            # must exactly cancel the positive shaping accumulated while
+            # the ball drifted toward the paddle.
+            assert abs(shaping_total) < 1e-9, (
+                f"Expected zero net tracking shaping on missed return, "
+                f"got {shaping_total:.6f}"
+            )
+        finally:
+            env.close()
+
+    def test_track_shaping_positive_on_successful_return(self):
+        """Tracking shaping should be net positive when the paddle returns the ball.
+
+        After a successful paddle hit the clawback is NOT applied, so the
+        agent keeps the positive shaping accumulated while the ball was
+        approaching during the return window.
+        """
+        env = WallBallEnv(
+            min_force=0.0,
+            track_shaping_scale=1.0,
+            paddle_hit_bonus=0.0,
+            out_of_bounds_penalty=0.0,
+        )
+        try:
+            env.reset(seed=0)
+            # Force "returning" state and place the ball 0.5 m from the
+            # paddle face with a velocity that carries it into contact over
+            # several steps so shaping accumulates before the hit registers.
+            env._returning = True
+            env._prev_paddle_to_ball = None
+            env._return_shaping_total = 0.0
+
+            paddle_pos = env.data.body("paddle_head").xpos.copy()
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            qpos[ball_qposadr : ball_qposadr + 3] = paddle_pos + np.array(
+                [0.0, 0.5, 0.0]
+            )
+            qvel[ball_dofadr : ball_dofadr + 3] = [0.0, -5.0, 0.0]
+            env.set_state(qpos, qvel)
+
+            shaping_total = 0.0
+            hit_registered = False
+            for _ in range(50):
+                _, reward, terminated, truncated, info = env.step(
+                    np.zeros(env.action_space.shape, dtype=np.float32)
+                )
+                shaping_total += reward
+                if info["paddle_hit_count"] >= 1:
+                    hit_registered = True
+                    break
+                if terminated or truncated:
+                    break
+            assert hit_registered, (
+                "Paddle contact never registered; "
+                "rising-edge detector or touch sensor is broken"
+            )
+            # Net shaping up to the hit must be positive: the ball closed
+            # the gap each step, so (prev_dist - dist) > 0, and no clawback
+            # fires on a successful return.
+            assert shaping_total > 0.0, (
+                f"Expected positive net shaping on successful return, "
+                f"got {shaping_total:.6f}"
+            )
+        finally:
+            env.close()
         """Place the ball on the paddle face mid-return and confirm the
         paddle-hit bonus is paid out."""
         env = WallBallEnv(

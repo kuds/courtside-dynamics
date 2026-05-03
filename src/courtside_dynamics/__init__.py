@@ -31,6 +31,17 @@ register(
     max_episode_steps=1000,
 )
 
+# WallBall-v1 reflects the breaking observation-space change introduced in
+# the shaped-reward update: the observation vector widened from 14 to 17
+# dimensions by appending the paddle_head→ball relative xyz offset.
+# Checkpoints and replay buffers built against v0 (14-D obs) are not
+# compatible with v1.
+register(
+    id="CourtsideDynamics/WallBall-v1",
+    entry_point="courtside_dynamics.envs.wall_ball:WallBallEnv",
+    max_episode_steps=1000,
+)
+
 register(
     id="CourtsideDynamics/TennisWall-v0",
     entry_point="courtside_dynamics.envs.tennis_wall:TennisWallEnv",

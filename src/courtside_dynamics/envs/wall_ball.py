@@ -132,6 +132,12 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         # rewarded for crowding the wall.
         self._returning = False
         self._prev_paddle_to_ball: float | None = None
+        # Cumulative tracking shaping awarded since the last wall bounce.
+        # Used for PBRS terminal correction: if the episode ends before the
+        # agent returns the ball, the accumulated shaping is clawed back so
+        # a no-op policy cannot earn net-positive shaping from the ball
+        # naturally drifting toward the stationary paddle after a bounce.
+        self._return_shaping_total: float = 0.0
         self._steps_since_event = 0
 
         # Observation: ball xyz(3) + ball xyz vel(3) + paddle joints
@@ -179,6 +185,7 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
             # shaping window and reset the tracking baseline.
             self._returning = True
             self._prev_paddle_to_ball = None
+            self._return_shaping_total = 0.0
             self._steps_since_event = 0
 
         if paddle_edge:
@@ -187,20 +194,25 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
                 reward += self.paddle_hit_bonus
             self._returning = False
             self._prev_paddle_to_ball = None
+            self._return_shaping_total = 0.0
             self._steps_since_event = 0
 
         # Potential-based tracking shaping: reward reductions in the
-        # paddle→ball distance while a return is in progress. This
-        # telescopes to zero across an episode (Δpotential terms cancel),
-        # so it does not bias the optimal policy's return value.
+        # paddle→ball distance while a return is in progress.
+        # Each delta is Φ(s) - Φ(s') = scale * (prev_dist - dist), which
+        # telescopes to scale * (d_init - d_final) over the full window.
+        # PBRS terminal correction below ensures a missed return earns zero
+        # net shaping by clawing back the accumulated total on episode end.
         ball_pos = np.array(self.data.joint("ball_x").qpos[:3])
         paddle_head_pos = np.array(self.data.body("paddle_head").xpos)
         dist = float(np.linalg.norm(ball_pos - paddle_head_pos))
         if self._returning and self.track_shaping_scale > 0.0:
             if self._prev_paddle_to_ball is not None:
-                reward += self.track_shaping_scale * (
+                delta = self.track_shaping_scale * (
                     self._prev_paddle_to_ball - dist
                 )
+                reward += delta
+                self._return_shaping_total += delta
             self._prev_paddle_to_ball = dist
 
         if not (wall_edge or paddle_edge):
@@ -222,6 +234,14 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         terminated = bool(not np.isfinite(obs).all() or ball_out_of_bounds)
         truncated = self.step_number > self.episode_len
 
+        # PBRS terminal correction: if the episode ends while a return is
+        # still in progress (the agent never hit the ball back), claw back
+        # the accumulated tracking shaping so the no-op policy earns zero
+        # net shaping from the ball passively drifting toward the paddle.
+        if (terminated or truncated) and self._returning and self._return_shaping_total != 0.0:
+            reward -= self._return_shaping_total
+            self._return_shaping_total = 0.0
+
         info = {
             "sensor_data": wall_touch,
             "wall_touch": wall_touch,
@@ -241,6 +261,7 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         self._prev_paddle_touch = 0.0
         self._returning = False
         self._prev_paddle_to_ball = None
+        self._return_shaping_total = 0.0
         self._steps_since_event = 0
 
         qpos = self.init_qpos + self.np_random.uniform(

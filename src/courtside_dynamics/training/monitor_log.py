@@ -10,10 +10,20 @@ re-learns once per worker — it's a plotting artifact, not a training
 collapse.
 
 ``load_monitor_episodes`` reads every monitor file under a directory and
-returns a single ``DataFrame`` sorted by ``t`` (the wall-clock seconds
-since the run started, recorded by SB3 for every episode). Downstream
-plotting code can index by ``t`` (or by cumulative ``timestep``) and get
-a curve that reflects how the agents actually progressed in time.
+returns a single ``DataFrame`` sorted by wall-clock time. Each worker's
+``t`` column holds *seconds elapsed since that worker's monitor opened*
+(``t_start`` in the JSON header). Workers may be launched at different
+real-world times, so the correct ordering key is ``t_start + t``, stored
+in the ``t_abs`` column. Downstream plotting code can index by ``t_abs``
+to get a curve that reflects how the agents actually progressed in time.
+
+.. note:: ``cumulative_episode_steps`` counts only the steps in episodes
+   that have already *finished*. For a vectorised run with N workers,
+   SB3's internal ``num_timesteps`` also includes in-progress steps on
+   other workers, so ``cumulative_episode_steps`` will under-count the
+   real training-step axis by up to ``(N-1) * max_episode_length``. Use
+   ``cumulative_episode_steps`` for plotting purposes only; do not treat
+   it as equivalent to SB3's ``num_timesteps``.
 """
 from __future__ import annotations
 
@@ -34,10 +44,16 @@ class MonitorBundle:
     ----------
     episodes:
         Per-episode rows (one per finished episode, across all workers),
-        sorted by ``t`` (wall-clock seconds since the worker started).
-        Columns include ``r`` (return), ``l`` (length), ``t``, plus
-        derived ``worker_id``, ``cumulative_timestep``, and
+        sorted by ``t_abs`` (absolute wall-clock seconds, ``t_start + t``).
+        Columns include ``r`` (return), ``l`` (length), ``t``,
+        ``t_abs``, plus derived ``worker_id``,
+        ``cumulative_episode_steps``, and
         ``rolling_mean_r`` / ``rolling_mean_l`` columns.
+
+        ``cumulative_episode_steps`` is the cumulative sum of ``l`` over
+        finished episodes in wall-clock order. It is *not* equivalent to
+        SB3's ``num_timesteps`` (which also counts in-progress steps on
+        other workers); use it for plotting only.
     headers:
         Per-worker JSON headers as written by SB3's ``Monitor`` (one per
         file). Useful for recovering the env id and the per-worker start
@@ -67,7 +83,8 @@ def load_monitor_episodes(
     Returns
     -------
     MonitorBundle
-        Episodes sorted by ``t`` plus the per-worker JSON headers.
+        Episodes sorted by ``t_abs`` (absolute wall-clock time,
+        ``t_start + t``) plus the per-worker JSON headers.
     """
     paths = sorted(glob.glob(os.path.join(monitor_dir, "*.monitor.csv")))
     if not paths:
@@ -81,22 +98,35 @@ def load_monitor_episodes(
         with open(path) as fh:
             first = fh.readline().lstrip("#")
             try:
-                headers.append(json.loads(first))
+                header = json.loads(first)
             except json.JSONDecodeError:
-                headers.append({})
+                header = {}
+            headers.append(header)
+        t_start: float = float(header.get("t_start", 0.0))
         df = pd.read_csv(path, skiprows=1)
         df["worker_id"] = worker_id
+        # Compute absolute wall-clock time so that workers launched at
+        # different real-world times are sorted correctly.  SB3 writes
+        # ``t`` as seconds since *this worker's* monitor opened, so two
+        # workers with different ``t_start`` values cannot be compared on
+        # raw ``t`` alone.
+        df["t_abs"] = t_start + df["t"]
         frames.append(df)
 
     episodes = pd.concat(frames, ignore_index=True)
-    if "t" not in episodes.columns:
+    if "t_abs" not in episodes.columns:
         raise ValueError(
             f"Monitor CSVs under {monitor_dir!r} are missing the 't' column; "
             "cannot interleave by wall-clock time."
         )
-    episodes = episodes.sort_values("t", kind="mergesort").reset_index(drop=True)
+    episodes = episodes.sort_values("t_abs", kind="mergesort").reset_index(drop=True)
     if "l" in episodes.columns:
-        episodes["cumulative_timestep"] = episodes["l"].cumsum().astype("int64")
+        # cumulative_episode_steps counts only finished-episode steps —
+        # NOT SB3's num_timesteps which also includes in-progress steps
+        # on other workers.  Use this column for plotting only.
+        episodes["cumulative_episode_steps"] = (
+            episodes["l"].cumsum().astype("int64")
+        )
     if "r" in episodes.columns:
         episodes["rolling_mean_r"] = (
             episodes["r"]
