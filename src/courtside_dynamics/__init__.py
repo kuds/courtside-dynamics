@@ -26,7 +26,7 @@ register(
 )
 
 register(
-    id="CourtsideDynamics/WallBall-v0",
+    id="CourtsideDynamics/WallBall-v1",
     entry_point="courtside_dynamics.envs.wall_ball:WallBallEnv",
     max_episode_steps=1000,
 )
