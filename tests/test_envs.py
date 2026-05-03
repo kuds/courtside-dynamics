@@ -172,6 +172,121 @@ def test_asset_path_returns_existing_files():
         assert p.is_file(), f"Missing asset: {name}"
 
 
+class TestWallBallShaping:
+    """Verify the WallBall reward shaping and diagnostic info keys."""
+
+    def test_obs_shape_includes_paddle_to_ball_offset(self):
+        env = WallBallEnv()
+        try:
+            obs, _ = env.reset(seed=0)
+            assert obs.shape == (17,)
+            # Last three obs dims = paddle_head -> ball relative xyz.
+            ball = np.array(env.data.joint("ball_x").qpos[:3])
+            paddle = np.array(env.data.body("paddle_head").xpos)
+            np.testing.assert_allclose(obs[-3:], ball - paddle, atol=1e-6)
+        finally:
+            env.close()
+
+    def test_info_keys_present(self):
+        env = WallBallEnv(min_force=100.0)
+        try:
+            env.reset(seed=0)
+            _, _, _, _, info = env.step(env.action_space.sample())
+            for key in (
+                "sensor_data",
+                "wall_touch",
+                "paddle_touch",
+                "bounce_count",
+                "wall_contact_count",
+                "paddle_hit_count",
+                "stalled",
+            ):
+                assert key in info, f"Missing info key: {key}"
+        finally:
+            env.close()
+
+    def test_out_of_bounds_applies_penalty(self):
+        """Driving the ball out of the play volume should subtract the
+        configured penalty from the terminating step's reward."""
+        env = WallBallEnv(
+            min_force=100.0,
+            out_of_bounds_penalty=2.5,
+            track_shaping_scale=0.0,
+        )
+        try:
+            env.reset(seed=0)
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            # Park the ball just inside the +y boundary and shove it out.
+            qpos[ball_qposadr : ball_qposadr + 3] = [0.0, 4.4, 1.5]
+            qvel[ball_dofadr : ball_dofadr + 3] = [0.0, 50.0, 0.0]
+            env.set_state(qpos, qvel)
+
+            terminating_reward = None
+            for _ in range(50):
+                _, reward, terminated, truncated, _ = env.step(
+                    np.zeros(env.action_space.shape, dtype=np.float32)
+                )
+                if terminated or truncated:
+                    terminating_reward = reward
+                    break
+            assert terminating_reward is not None, "Episode never terminated"
+            assert terminating_reward <= -2.4, (
+                f"Expected ~-2.5 penalty on OOB termination, got {terminating_reward}"
+            )
+        finally:
+            env.close()
+
+    def test_paddle_hit_bonus_fires_on_return(self):
+        """Place the ball on the paddle face mid-return and confirm the
+        paddle-hit bonus is paid out."""
+        env = WallBallEnv(
+            min_force=0.0,
+            paddle_hit_bonus=2.0,
+            track_shaping_scale=0.0,
+            out_of_bounds_penalty=0.0,
+        )
+        try:
+            env.reset(seed=0)
+            # Force the env into "returning" state as if a wall bounce just
+            # happened, so the paddle bonus is eligible.
+            env._returning = True
+            env._prev_paddle_to_ball = None
+
+            paddle_pos = env.data.body("paddle_head").xpos.copy()
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            qpos[ball_qposadr : ball_qposadr + 3] = paddle_pos + np.array(
+                [0.0, 0.2, 0.05]
+            )
+            qvel[ball_dofadr : ball_dofadr + 3] = [0.0, -8.0, 0.0]
+            env.set_state(qpos, qvel)
+
+            cumulative = 0.0
+            for _ in range(40):
+                _, reward, terminated, truncated, info = env.step(
+                    np.zeros(env.action_space.shape, dtype=np.float32)
+                )
+                cumulative += reward
+                if info["paddle_hit_count"] >= 1:
+                    break
+                if terminated or truncated:
+                    break
+            assert info["paddle_hit_count"] >= 1, (
+                "Paddle contact never registered; rising-edge detector or "
+                "paddle touch sensor is broken"
+            )
+            assert cumulative >= 1.5, (
+                f"Expected paddle-hit bonus (~2.0) to accumulate, got {cumulative}"
+            )
+        finally:
+            env.close()
+
+
 class TestTennisWallStateMachine:
     """Verify the phase transitions and reward shaping in TennisWallEnv."""
 

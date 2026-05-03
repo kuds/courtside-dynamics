@@ -27,6 +27,7 @@
                 <joint name="paddle_rotate_x" type="hinge" axis="1 0 0" range="-90 90" />
                 <geom name="paddle_handle_geom" pos="0 0 0" size="0.05 0.05 0.15" type="box" rgba="0.2 0.2 0.8 1" />
                 <body name="paddle_head" pos="0 0 0.15">
+                    <site name="paddle_sensor" pos="0 0 0.05" size="0.2 0.05 0.2" type="box" rgba="0 1 0 0.15" />
                     <geom name="paddle_head_geom" pos="0 0 0.05" size="0.2 0.05 0.2" type="box" rgba="0.8 0.2 0.2 1" />
                 </body>
             </body>
@@ -44,5 +45,6 @@
     </actuator>
     <sensor>
         <touch name="touch_sensor" site="wall_sensor" />
+        <touch name="paddle_touch" site="paddle_sensor" />
     </sensor>
 </mujoco>
