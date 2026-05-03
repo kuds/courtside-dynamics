@@ -238,7 +238,7 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         # still in progress (the agent never hit the ball back), claw back
         # the accumulated tracking shaping so the no-op policy earns zero
         # net shaping from the ball passively drifting toward the paddle.
-        if (terminated or truncated) and self._returning and self._return_shaping_total != 0.0:
+        if (terminated or truncated) and self._returning and abs(self._return_shaping_total) > 1e-9:
             reward -= self._return_shaping_total
             self._return_shaping_total = 0.0
 

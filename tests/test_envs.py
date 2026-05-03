@@ -352,6 +352,8 @@ class TestWallBallShaping:
             )
         finally:
             env.close()
+
+    def test_paddle_hit_bonus_fires_on_return(self):
         """Place the ball on the paddle face mid-return and confirm the
         paddle-hit bonus is paid out."""
         env = WallBallEnv(
