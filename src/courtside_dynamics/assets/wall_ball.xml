@@ -8,43 +8,57 @@
         <motor ctrlrange="-1 1" ctrllimited="true" />
     </default>
     <asset>
-        <texture builtin="flat" height="1278" name="texplane" rgb1="0.9 0.9 0.9" rgb2="0.1 0.1 0.1" type="2d" width="1279" />
-        <material name="matplane" reflectance="0.5" shininess="0.1" specular="0.1" texture="texplane" />
+        <texture name="grid" type="2d" builtin="checker" rgb1=".1 .2 .3" rgb2=".2 .3 .4" width="300" height="300" mark="none" />
+        <material name="grid" texture="grid" texrepeat="3 3" texuniform="true" reflectance=".2" />
     </asset>
     <worldbody>
-        <light diffuse=".8 .8 .8" pos="0 0 3" specular="0.1 0.1 0.1" />
-        <geom name="floor" pos="0 0 0" size="5 5 0.1" type="plane" material="matplane" />
-        <body name="wall" pos="3 0 1.5">
-            <site name="wall_sensor" pos="-.1 0 0" size="0.05 5 1.5" type="box" rgba="1 0 0 .15" />
-            <geom name="wall" size="0.1 5 1.5" type="box" rgba="0.7 0.7 0.9 1" />
+        <light diffuse=".8 .8 .8" pos="0 0 5" specular="0.1 0.1 0.1" />
+        <camera name="side" pos="0 -8 3" xyaxes="1 0 0 0 1 2" />
+        <geom name="floor" pos="0 0 0" size="8 6 0.1" type="plane" material="grid" />
+
+        <body name="wall" pos="4 0 1.5">
+            <site name="wall_sensor" pos="-0.06 0 0" size="0.05 5 1.5" type="box" rgba="1 0 0 0.15" />
+            <geom name="wall_geom" size="0.1 5 1.5" type="box" rgba="0.7 0.7 0.9 1" />
         </body>
-        <body name="paddle_base" pos="-2 0 1">
-            <joint name="paddle_slide_x" type="slide" axis="1 0 0" range="-1 4" />
-            <joint name="paddle_slide_y" type="slide" axis="0 1 0" range="-2 2" />
-            <joint name="paddle_slide_z" type="slide" axis="0 0 1" range="-0.9 1.5" />
-            <geom name="paddle_base_geom" pos="0 0 0" size="0.1 0.1 0.1" type="box" rgba="0.2 0.2 0.8 1" mass="0.3" />
-            <body name="paddle_handle" pos="0 0 0.15">
-                <joint name="paddle_pitch" type="hinge" axis="0 1 0" range="-90 90" />
-                <geom name="paddle_handle_geom" pos="0 0 0" size="0.05 0.05 0.15" type="box" rgba="0.2 0.2 0.8 1" mass="0.2" />
-                <body name="paddle_head" pos="0 0 0.15">
-                    <site name="paddle_sensor" pos="0 0 0.05" size="0.05 0.2 0.2" type="box" rgba="0 1 0 0.15" />
-                    <geom name="paddle_head_geom" pos="0 0 0.05" size="0.05 0.2 0.2" type="box" rgba="0.8 0.2 0.2 1" mass="0.5" />
-                </body>
+
+        <!-- Racket: 3 slide DOFs plus yaw and pitch hinges. The body
+             origin sits at the base of the handle, so yaw/pitch rotate
+             the racket around the grip like a real swing. The
+             ``paddle_head`` sub-body wraps the face geom so callers
+             that read ``data.body("paddle_head").xpos`` get the face
+             centre in world coordinates. -->
+        <body name="paddle_base" pos="-2 0 1.2">
+            <joint name="paddle_slide_x" type="slide" axis="1 0 0" range="-3 2" damping="5" />
+            <joint name="paddle_slide_y" type="slide" axis="0 1 0" range="-3 3" damping="5" />
+            <joint name="paddle_slide_z" type="slide" axis="0 0 1" range="-0.8 2" damping="5" />
+            <joint name="paddle_yaw" type="hinge" axis="0 0 1" range="-90 90" damping="2" />
+            <joint name="paddle_pitch" type="hinge" axis="0 1 0" range="-80 80" damping="2" />
+            <geom name="paddle_grip" type="box" pos="0 0 0" size="0.03 0.03 0.03" rgba="0.2 0.2 0.2 1" mass="0.05" />
+            <geom name="paddle_shaft" type="box" pos="0.15 0 0" size="0.12 0.015 0.015" rgba="0.4 0.4 0.4 1" mass="0.05" />
+            <body name="paddle_head" pos="0.3 0 0">
+                <site name="paddle_sensor" pos="0 0 0" size="0.02 0.2 0.25" type="box" rgba="0 1 0 0.15" />
+                <geom name="paddle_face" type="box" pos="0 0 0" size="0.02 0.2 0.25" rgba="0.9 0.9 0.2 1" solref="0.01 0.5" mass="0.25" />
             </body>
         </body>
-        <body name="ball" pos="0 0 1.5">
+
+        <!-- Tennis ball. Mass is ~57g like a regulation ball. The
+             joint must override the default damping=1 / armature=0.1
+             — those are sized for jointed paddle DOFs, not a ball
+             flying through the air, where they'd act as drag. -->
+        <body name="ball" pos="1.0 0 1.3">
             <joint name="ball_x" type="free" limited="false" damping="0" armature="0" />
-            <geom name="ball_geom" pos="0 0 0" size="0.1" type="sphere" rgba="1 0 0 1" mass="0.1" friction="0.3 0.1 0.1" solref="-200000 -0.5" />
+            <geom name="ball_geom" type="sphere" size="0.07" rgba="1 0.5 0 1" mass="0.057" friction="0.3 0.1 0.1" solref="0.01 0.7" />
         </body>
     </worldbody>
     <actuator>
         <motor name="paddle_slide_x_motor" joint="paddle_slide_x" gear="100" />
         <motor name="paddle_slide_y_motor" joint="paddle_slide_y" gear="100" />
         <motor name="paddle_slide_z_motor" joint="paddle_slide_z" gear="100" />
-        <motor name="paddle_pitch_motor" joint="paddle_pitch" gear="100" />
+        <motor name="paddle_yaw_motor" joint="paddle_yaw" gear="30" />
+        <motor name="paddle_pitch_motor" joint="paddle_pitch" gear="30" />
     </actuator>
     <sensor>
-        <touch name="wall_touch" site="wall_sensor" />
         <touch name="paddle_touch" site="paddle_sensor" />
+        <touch name="wall_touch" site="wall_sensor" />
     </sensor>
 </mujoco>

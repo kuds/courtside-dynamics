@@ -355,7 +355,7 @@ def test_info_dict_eval_callback_no_phase_key(tmp_path):
         eval_freq=1,
         log_prefix="eval_info",
     )
-    cb.model = _FakeModel(action_dim=4)
+    cb.model = _FakeModel(action_dim=5)
     cb.n_calls = cb.eval_freq
     cb.num_timesteps = cb.eval_freq
     cb._on_step()

@@ -84,7 +84,10 @@ RECIPES: dict[str, Recipe] = {
         env_kwargs={"render_mode": "rgb_array", "min_force": 20.0},
         default_total_timesteps=1_500_000,
         name_prefix="wall_ball",
-        description="Hit a ball into a wall with a 4-DOF paddle.",
+        description=(
+            "Rally a ball against a wall with a 5-DOF racket and a "
+            "strict gated wall-hit reward."
+        ),
     ),
     "TennisWall": Recipe(
         env_cls=TennisWallEnv,

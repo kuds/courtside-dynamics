@@ -40,7 +40,7 @@ ENV_CLASSES = [BallBalanceEnv, BallBounceEnv, WallBallEnv, TennisWallEnv]
 ENV_CLASSES_WITH_KWARGS = [
     (BallBalanceEnv, {}),
     (BallBounceEnv, {"min_force": 100.0}),
-    (WallBallEnv, {"min_force": 20.0}),
+    (WallBallEnv, {"min_force": 1.0}),
     (TennisWallEnv, {"min_force": 100.0}),
 ]
 
@@ -299,32 +299,40 @@ class TestWallBallRewardGate:
     def _zero_action(env):
         return np.zeros(env.action_space.shape, dtype=np.float32)
 
-    def test_serve_bounce_alone_yields_no_reward(self):
-        """Hold the paddle still and let the serve hit the wall.
+    def test_noop_earns_no_wall_reward(self):
+        """Hold the paddle still and verify no wall +1 ever pays out.
 
-        ``wall_contact_count`` must go up (the ball does hit the wall)
-        but reward must stay at 0 because ``paddle_hit_count`` is still 0.
+        The serve flies *toward* the paddle, so a still paddle either
+        (a) gets brushed by the ball as it passes, possibly registering
+        a paddle-hit edge, or (b) lets the ball drift past and OOB.
+        Either way, the gated wall reward must remain at zero —
+        ``bounce_count`` (which only counts *rewarded* wall hits) must
+        stay at 0 across the whole episode.
         """
-        env = WallBallEnv(min_force=20.0, episode_len=400)
+        env = WallBallEnv(
+            min_force=1.0,
+            episode_len=400,
+            track_shaping_scale=0.0,
+            paddle_hit_bonus=0.0,
+            out_of_bounds_penalty=0.0,
+        )
         try:
             env.reset(seed=0)
             total_reward = 0.0
-            info = {"wall_contact_count": 0, "paddle_hit_count": 0}
-            for _ in range(300):
-                _, reward, terminated, truncated, info = env.step(
+            for _ in range(400):
+                _, reward, terminated, truncated, _ = env.step(
                     self._zero_action(env)
                 )
                 total_reward += reward
-                if info["wall_contact_count"] >= 1:
-                    break
                 if terminated or truncated:
                     break
-            assert info["wall_contact_count"] >= 1, (
-                "Serve never reached the wall — physics regression"
+            assert env.bounce_count == 0, (
+                f"No-op policy somehow earned a gated wall hit: "
+                f"bounce_count={env.bounce_count}"
             )
-            assert info["paddle_hit_count"] == 0
             assert total_reward == 0.0, (
-                f"Serve bounce should not reward, got {total_reward}"
+                f"No-op total reward should be 0 (all bonuses zeroed), "
+                f"got {total_reward}"
             )
         finally:
             env.close()
@@ -341,7 +349,7 @@ class TestWallBallRewardGate:
         )
 
         def run(action_fn, seed):
-            env = WallBallEnv(min_force=20.0, episode_len=750)
+            env = WallBallEnv(min_force=1.0, episode_len=750)
             try:
                 obs, _ = env.reset(seed=seed)
                 total = 0.0
@@ -356,7 +364,7 @@ class TestWallBallRewardGate:
             finally:
                 env.close()
 
-        noop_total = run(lambda o: np.zeros(4, dtype=np.float32), seed=0)
+        noop_total = run(lambda o: np.zeros(5, dtype=np.float32), seed=0)
         oracle_total = run(wall_ball_oracle_action, seed=0)
         # With the OOB penalty + tracking-shaping clawback, a no-op
         # policy that lets the ball escape can land slightly negative;
@@ -370,12 +378,30 @@ class TestWallBallRewardGate:
         )
 
     def test_stalled_ball_terminates_episode(self):
-        """A dead ball should end the episode well before episode_len."""
+        """A dead ball should end the episode well before episode_len.
+
+        The serve flies *at* the paddle, so a no-op policy normally
+        either grazes the paddle or lets the ball pass and OOB. To
+        exercise the stall path deterministically, we pin the ball to
+        the floor at rest and flip ``_first_event_seen`` on (as if a
+        paddle hit had already happened) — the env should then count
+        ``stall_steps`` of no events and terminate via stall.
+        """
         env = WallBallEnv(
-            min_force=20.0, episode_len=2000, stall_steps=50
+            min_force=1.0, episode_len=2000, stall_steps=50
         )
         try:
             env.reset(seed=0)
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            qpos[ball_qposadr : ball_qposadr + 3] = [0.0, 0.0, 0.07]
+            qvel[ball_dofadr : ball_dofadr + 6] = 0.0
+            env.set_state(qpos, qvel)
+            env._first_event_seen = True
+            env._steps_since_event = 0
+
             terminated = False
             info = {"stalled": False}
             steps = 0
@@ -397,9 +423,10 @@ class TestWallBallRewardGate:
     def test_paddle_contact_grants_bonus(self):
         """Teleport the ball into the paddle and confirm the bonus fires.
 
-        The paddle face site sits at world ``(-2, 0, 1.35)`` when all
-        paddle joints are at qpos=0 (paddle_base + handle 0.15 + head
-        body 0.15 + site 0.05). Spawning the ball there with an inward
+        The paddle face sits at world ``(-1.7, 0, 1.2)`` when all
+        paddle joints are at qpos=0 (paddle_base at (-2, 0, 1.2) +
+        paddle_head body offset (0.3, 0, 0)). Spawning the ball just
+        in front of the face on the wall side and giving it an inward
         velocity is a deterministic way to verify the rising-edge
         detector and bonus wiring without depending on luck.
         """
@@ -411,7 +438,7 @@ class TestWallBallRewardGate:
             qvel = env.data.qvel.copy()
             ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
             ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
-            qpos[ball_qposadr : ball_qposadr + 3] = [-1.5, 0.0, 1.35]
+            qpos[ball_qposadr : ball_qposadr + 3] = [-1.0, 0.0, 1.3]
             qvel[ball_dofadr : ball_dofadr + 3] = [-3.0, 0.0, 0.0]
             env.set_state(qpos, qvel)
 
@@ -435,11 +462,11 @@ class TestWallBallRewardGate:
             env.close()
 
     def test_obs_shape_includes_paddle_to_ball_offset(self):
-        """The 18-dim obs ends with the paddle_head→ball relative xyz."""
+        """The 20-dim obs ends with the paddle_head→ball relative xyz."""
         env = WallBallEnv()
         try:
             obs, _ = env.reset(seed=0)
-            assert obs.shape == (18,)
+            assert obs.shape == (20,)
             ball = np.array(env.data.joint("ball_x").qpos[:3])
             paddle = np.array(env.data.body("paddle_head").xpos)
             np.testing.assert_allclose(obs[-3:], ball - paddle, atol=1e-6)
@@ -450,7 +477,7 @@ class TestWallBallRewardGate:
         """Driving the ball out of the play volume subtracts the
         configured penalty from the terminating step's reward."""
         env = WallBallEnv(
-            min_force=20.0,
+            min_force=1.0,
             out_of_bounds_penalty=2.5,
             track_shaping_scale=0.0,
             paddle_hit_bonus=0.0,
@@ -461,7 +488,7 @@ class TestWallBallRewardGate:
             qvel = env.data.qvel.copy()
             ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
             ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
-            qpos[ball_qposadr : ball_qposadr + 3] = [0.0, 4.4, 1.5]
+            qpos[ball_qposadr : ball_qposadr + 3] = [0.0, 5.4, 1.5]
             qvel[ball_dofadr : ball_dofadr + 3] = [0.0, 50.0, 0.0]
             env.set_state(qpos, qvel)
 
@@ -485,7 +512,7 @@ class TestWallBallRewardGate:
         return — the PBRS terminal correction must claw back the
         accumulated shaping when the episode ends mid-window."""
         env = WallBallEnv(
-            min_force=20.0,
+            min_force=1.0,
             track_shaping_scale=1.0,
             paddle_hit_bonus=0.0,
             out_of_bounds_penalty=0.0,
@@ -577,7 +604,7 @@ class TestWallBallRewardGate:
         gate to "since the last wall hit" so a ball that bounces off
         the wall twice with no return between fails the rally."""
         env = WallBallEnv(
-            min_force=20.0,
+            min_force=1.0,
             track_shaping_scale=0.0,
             paddle_hit_bonus=0.0,
             out_of_bounds_penalty=0.0,
@@ -630,7 +657,7 @@ class TestWallBallRewardGate:
         shaping accumulated in the previous return window, preserving
         the no-op zero-net invariant across multi-bounce episodes."""
         env = WallBallEnv(
-            min_force=20.0,
+            min_force=1.0,
             track_shaping_scale=0.0,
             paddle_hit_bonus=0.0,
             out_of_bounds_penalty=0.0,
@@ -677,7 +704,7 @@ class TestWallBallRewardGate:
     def test_wall_reward_resumes_after_paddle_hit(self):
         """After a paddle hit, the next wall contact pays +1 again."""
         env = WallBallEnv(
-            min_force=20.0,
+            min_force=1.0,
             track_shaping_scale=0.0,
             paddle_hit_bonus=0.0,
             out_of_bounds_penalty=0.0,
