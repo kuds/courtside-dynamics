@@ -1,10 +1,11 @@
 """Per-episode ``info`` dict aggregation for evaluation rollouts.
 
 SB3's ``EvalCallback`` logs mean reward across eval episodes, but it
-ignores everything in the ``info`` dict. For TennisWall that's most of
-the useful signal: without per-episode rally counts, paddle/wall hit
-counts, and time spent in each phase, the TensorBoard curves don't tell
-you whether the agent is learning to rally or just drifting.
+ignores everything in the ``info`` dict. For WallBall that's most of
+the useful signal: without per-episode bounce counts, paddle/wall hit
+counts, and (for envs that have one) time spent in each phase, the
+TensorBoard curves don't tell you whether the agent is learning to
+rally or just drifting.
 
 ``InfoDictEvalCallback`` rolls ``n_eval_episodes`` on a separate eval
 ``VecEnv``, collects every scalar ``info`` key it sees, and emits three

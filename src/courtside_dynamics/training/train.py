@@ -145,7 +145,7 @@ class TrainConfig:
         (e.g. for envs that emit no interesting ``info`` scalars).
     phase_key / phase_labels:
         Forwarded to ``InfoDictEvalCallback`` so envs with a state
-        machine (e.g. TennisWall) get per-phase time-fraction logs.
+        machine get per-phase time-fraction logs.
     extra_callbacks:
         Additional callbacks to run alongside eval / video recording.
     """

@@ -1,8 +1,8 @@
 """Tests for ``VideoRecordCallback`` and ``InfoDictEvalCallback``.
 
 The video recorder is the main entry point for per-step CSV logging, and
-its auto-detection of scalar ``info`` keys is what gives TennisWall runs
-their phase/rally diagnostics "for free". These tests verify:
+its auto-detection of scalar ``info`` keys is what gives WallBall runs
+their bounce/hit-count diagnostics "for free". These tests verify:
 
 1. Scalar-only filtering (arrays and non-numeric keys are skipped).
 2. Explicit ``info_row_fn`` still wins over auto-detection.
@@ -123,12 +123,12 @@ def _run_callback_once(callback, tmp_path: Path) -> None:
 
 
 def test_auto_log_populates_csv_and_tensorboard(tmp_path, _stub_video_recorder):
-    """End-to-end: TennisWall's info keys land in CSV + TB on auto-detect."""
+    """End-to-end: WallBall's info keys land in CSV + TB on auto-detect."""
     from courtside_dynamics.callbacks.video_record import VideoRecordCallback
-    from courtside_dynamics.envs import TennisWallEnv
+    from courtside_dynamics.envs import WallBallEnv
 
     cb = VideoRecordCallback(
-        env_fn=lambda: TennisWallEnv(),
+        env_fn=lambda: WallBallEnv(),
         save_path=str(tmp_path),
         video_length=20,
         save_freq=1,
@@ -146,10 +146,9 @@ def test_auto_log_populates_csv_and_tensorboard(tmp_path, _stub_video_recorder):
     assert len(rows) >= 2  # header + at least one data row
     header = rows[0]
     for required in (
-        "phase",
-        "rally_count",
+        "bounce_count",
+        "wall_contact_count",
         "paddle_hit_count",
-        "wall_hit_count",
         "paddle_touch",
         "wall_touch",
         "reward",
@@ -167,22 +166,22 @@ def test_auto_log_populates_csv_and_tensorboard(tmp_path, _stub_video_recorder):
     tb = cb.model.logger.records
     assert "videorecord/total_reward" in tb
     assert "videorecord/episode_length" in tb
-    assert "videorecord/rally_count_mean" in tb
+    assert "videorecord/bounce_count_mean" in tb
     assert "videorecord/paddle_touch_mean" in tb
 
 
 def test_explicit_info_row_fn_overrides_auto_detection(tmp_path, _stub_video_recorder):
     from courtside_dynamics.callbacks.video_record import VideoRecordCallback
-    from courtside_dynamics.envs import TennisWallEnv
+    from courtside_dynamics.envs import WallBallEnv
 
     cb = VideoRecordCallback(
-        env_fn=lambda: TennisWallEnv(),
+        env_fn=lambda: WallBallEnv(),
         save_path=str(tmp_path),
         video_length=5,
         save_freq=1,
         name_prefix="explicit",
-        csv_header=["rally_count", "reward"],
-        info_row_fn=lambda info, r, tr, d: [info["rally_count"], r],
+        csv_header=["bounce_count", "reward"],
+        info_row_fn=lambda info, r, tr, d: [info["bounce_count"], r],
     )
     cb.model = _FakeModel(action_dim=5)
     _run_callback_once(cb, tmp_path)
@@ -191,7 +190,7 @@ def test_explicit_info_row_fn_overrides_auto_detection(tmp_path, _stub_video_rec
     with open(csv_files[0]) as f:
         rows = list(csv.reader(f))
     # User header wins; auto-detection doesn't inject extra columns.
-    assert rows[0] == ["rally_count", "reward"]
+    assert rows[0] == ["bounce_count", "reward"]
     for data_row in rows[1:]:
         assert len(data_row) == 2
 
@@ -220,54 +219,6 @@ def test_auto_log_handles_empty_info(tmp_path, _stub_video_recorder):
         rows = list(csv.reader(f))
     # Header falls back to the default reward triple.
     assert rows[0] == ["reward", "total_reward", "done"]
-
-
-def test_info_dict_eval_callback_aggregates(tmp_path):
-    """End-to-end: eval callback records per-episode rally/hit metrics.
-
-    We don't train a real model — ``_FakeModel`` returns a fixed action,
-    so we just need to verify the aggregation pipeline produces the
-    expected TB tags with sane values.
-    """
-    from stable_baselines3.common.env_util import make_vec_env
-
-    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
-    from courtside_dynamics.envs import TennisWallEnv
-
-    eval_env = make_vec_env(lambda: TennisWallEnv(episode_len=30), n_envs=1)
-    cb = InfoDictEvalCallback(
-        eval_env=eval_env,
-        n_eval_episodes=2,
-        eval_freq=1,
-        log_prefix="eval_info",
-        phase_key="phase",
-        phase_labels={0: "approach_paddle", 1: "approach_wall"},
-    )
-    cb.model = _FakeModel(action_dim=5)
-    cb.n_calls = cb.eval_freq
-    cb.num_timesteps = cb.eval_freq
-    cb._on_step()
-    eval_env.close()
-
-    tb = cb.model.logger.records
-    # Per-episode aggregates: final + max for counter-style keys.
-    assert "eval_info/rally_count_final" in tb
-    assert "eval_info/rally_count_max" in tb
-    assert "eval_info/paddle_hit_count_final" in tb
-    assert "eval_info/wall_hit_count_final" in tb
-    # Mean metrics for continuous values.
-    assert "eval_info/paddle_touch_mean" in tb
-    assert "eval_info/wall_touch_mean" in tb
-    assert "eval_info/episode_length" in tb
-    # Phase fractions (categorical, not a mean).
-    assert "eval_info/phase_frac_approach_paddle" in tb
-    assert "eval_info/phase_frac_approach_wall" in tb
-    # The two fractions should sum to ~1 per the averaging.
-    frac_sum = (
-        tb["eval_info/phase_frac_approach_paddle"]
-        + tb["eval_info/phase_frac_approach_wall"]
-    )
-    assert frac_sum == pytest.approx(1.0, abs=1e-6)
 
 
 class TestSaveVecNormalizeOnNewBest:
@@ -341,8 +292,13 @@ class TestSaveVecNormalizeOnNewBest:
         assert not save_path.exists()
 
 
-def test_info_dict_eval_callback_no_phase_key(tmp_path):
-    """WallBall has no phase key — callback should still produce metrics."""
+def test_info_dict_eval_callback_aggregates(tmp_path):
+    """End-to-end: eval callback records per-episode hit/bounce metrics.
+
+    We don't train a real model — ``_FakeModel`` returns a fixed action,
+    so we just need to verify the aggregation pipeline produces the
+    expected TB tags with sane values for an env without a phase key.
+    """
     from stable_baselines3.common.env_util import make_vec_env
 
     from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
@@ -351,18 +307,26 @@ def test_info_dict_eval_callback_no_phase_key(tmp_path):
     eval_env = make_vec_env(lambda: WallBallEnv(episode_len=30), n_envs=1)
     cb = InfoDictEvalCallback(
         eval_env=eval_env,
-        n_eval_episodes=1,
+        n_eval_episodes=2,
         eval_freq=1,
         log_prefix="eval_info",
     )
-    cb.model = _FakeModel(action_dim=4)
+    cb.model = _FakeModel(action_dim=5)
     cb.n_calls = cb.eval_freq
     cb.num_timesteps = cb.eval_freq
     cb._on_step()
     eval_env.close()
 
     tb = cb.model.logger.records
+    # Per-episode aggregates: final + max for counter-style keys.
     assert "eval_info/bounce_count_final" in tb
+    assert "eval_info/bounce_count_max" in tb
+    assert "eval_info/paddle_hit_count_final" in tb
+    assert "eval_info/wall_contact_count_final" in tb
+    # Mean metrics for continuous values.
+    assert "eval_info/paddle_touch_mean" in tb
+    assert "eval_info/wall_touch_mean" in tb
     assert "eval_info/sensor_data_mean" in tb
-    # No phase key -> no phase fractions.
+    assert "eval_info/episode_length" in tb
+    # No phase key configured -> no phase fractions.
     assert not any(k.startswith("eval_info/phase_frac") for k in tb)

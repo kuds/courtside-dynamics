@@ -4,7 +4,7 @@ Each :class:`Recipe` knows everything about an environment that the
 notebook would otherwise have to spell out: the env class, its
 constructor kwargs, the per-env extras that go into ``TrainConfig``
 (custom CSV rows, phase labels, ...), and a sane default budget for
-training. The notebook only has to pick a name (``"TennisWall"``) and
+training. The notebook only has to pick a name (``"WallBall"``) and
 an algorithm (``"SAC"``) and call :func:`build_train_config`.
 
 Adding a new env is one entry in :data:`RECIPES`; the notebook needs no
@@ -19,7 +19,6 @@ from typing import Any
 from courtside_dynamics.envs import (
     BallBalanceEnv,
     BallBounceEnv,
-    TennisWallEnv,
     WallBallEnv,
 )
 from courtside_dynamics.training import TrainConfig
@@ -84,20 +83,9 @@ RECIPES: dict[str, Recipe] = {
         env_kwargs={"render_mode": "rgb_array", "min_force": 20.0},
         default_total_timesteps=1_500_000,
         name_prefix="wall_ball",
-        description="Hit a ball into a wall with a 4-DOF paddle.",
-    ),
-    "TennisWall": Recipe(
-        env_cls=TennisWallEnv,
-        env_kwargs={"render_mode": "rgb_array", "min_force": 100.0},
-        default_total_timesteps=2_000_000,
-        name_prefix="tennis_wall",
-        extra_cfg={
-            "phase_key": "phase",
-            "phase_labels": {0: "approach_paddle", 1: "approach_wall"},
-        },
         description=(
-            "Rally a ball against a wall with a 5-DOF racket and shaped "
-            "reward."
+            "Rally a ball against a wall with a 5-DOF racket and a "
+            "strict gated wall-hit reward."
         ),
     ),
 }
@@ -145,7 +133,7 @@ def build_train_config(
     Parameters
     ----------
     env_name:
-        Key into :data:`RECIPES` (e.g. ``"TennisWall"``).
+        Key into :data:`RECIPES` (e.g. ``"WallBall"``).
     algo:
         ``"SAC"`` or ``"PPO"``.
     log_dir:
