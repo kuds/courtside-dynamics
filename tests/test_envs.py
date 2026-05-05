@@ -25,23 +25,22 @@ import courtside_dynamics  # noqa: F401  (triggers registration)
 from courtside_dynamics.envs import (
     BallBalanceEnv,
     BallBounceEnv,
-    TennisWallEnv,
     WallBallEnv,
 )
 
-ENV_CLASSES = [BallBalanceEnv, BallBounceEnv, WallBallEnv, TennisWallEnv]
+ENV_CLASSES = [BallBalanceEnv, BallBounceEnv, WallBallEnv]
 
 # Construction kwargs mirroring what each notebook uses at training time.
-# In particular ``min_force=20.0`` makes the touch-sensor rising-edge check
+# In particular ``min_force`` makes the touch-sensor rising-edge check
 # actually discriminate between "in contact" and "not in contact" --
-# with ``min_force=0.0`` (the XML default) the check fires every step, which
-# masks reward bugs. See the ``test_random_rollout_produces_some_reward``
-# docstring for the relevance to Wall Ball.
+# with ``min_force=0.0`` (the XML default) the check fires every step,
+# which masks reward bugs. See the
+# ``test_random_rollout_produces_some_reward`` docstring for the
+# relevance to Wall Ball.
 ENV_CLASSES_WITH_KWARGS = [
     (BallBalanceEnv, {}),
     (BallBounceEnv, {"min_force": 100.0}),
     (WallBallEnv, {"min_force": 1.0}),
-    (TennisWallEnv, {"min_force": 100.0}),
 ]
 
 
@@ -98,7 +97,6 @@ def test_random_rollout_runs_without_nan(env_cls, rng):
     [
         (BallBalanceEnv, {}),
         (BallBounceEnv, {"min_force": 100.0}),
-        (TennisWallEnv, {"min_force": 100.0}),
     ],
 )
 def test_random_rollout_produces_some_reward(env_cls, kwargs):
@@ -106,10 +104,9 @@ def test_random_rollout_produces_some_reward(env_cls, kwargs):
 
     For Ball Balance the reward is +1/step so this is trivial. For Ball
     Bounce gravity pulls the ball onto the paddle and an early contact
-    usually lands. Tennis Wall has potential-based shaping that fires
-    every step. Wall Ball is intentionally excluded: under the post-fix
-    reward gate (no reward until the paddle has touched the ball)
-    random actions can't earn anything within 2000 steps. See
+    usually lands. Wall Ball is intentionally excluded: under the
+    post-fix reward gate (no reward until the paddle has touched the
+    ball) random actions can't earn anything within 2000 steps. See
     ``TestWallBallRewardGate`` for the targeted oracle-vs-noop check.
     """
     env = env_cls(**kwargs)
@@ -135,7 +132,6 @@ def test_gymnasium_make_ids():
         "CourtsideDynamics/BallBalance-v0",
         "CourtsideDynamics/BallBounce-v0",
         "CourtsideDynamics/WallBall-v1",
-        "CourtsideDynamics/TennisWall-v0",
     ):
         env = gymnasium.make(env_id)
         try:
@@ -167,117 +163,9 @@ def test_asset_path_returns_existing_files():
 
     from courtside_dynamics.assets import asset_path
 
-    for name in ("ball_balance.xml", "ball_bounce.xml", "wall_ball.xml", "tennis_wall.xml"):
+    for name in ("ball_balance.xml", "ball_bounce.xml", "wall_ball.xml"):
         p = Path(asset_path(name))
         assert p.is_file(), f"Missing asset: {name}"
-
-
-class TestTennisWallStateMachine:
-    """Verify the phase transitions and reward shaping in TennisWallEnv."""
-
-    def test_initial_phase_is_approach_paddle(self):
-        env = TennisWallEnv()
-        try:
-            obs, _ = env.reset(seed=42)
-            # Last two elements are phase one-hot [approach_paddle, approach_wall]
-            assert obs[-2] == 1.0 and obs[-1] == 0.0
-            assert env.phase == 0  # _PHASE_APPROACH_PADDLE
-        finally:
-            env.close()
-
-    def test_obs_shape_matches_spec(self):
-        env = TennisWallEnv()
-        try:
-            obs, _ = env.reset(seed=0)
-            assert obs.shape == (18,)
-            action = env.action_space.sample()
-            obs, _, _, _, _ = env.step(action)
-            assert obs.shape == (18,)
-        finally:
-            env.close()
-
-    def test_rally_count_starts_at_zero(self):
-        env = TennisWallEnv()
-        try:
-            env.reset(seed=0)
-            assert env.rally_count == 0
-        finally:
-            env.close()
-
-    def test_shaping_reward_is_nonzero(self):
-        """The potential-based shaping should produce nonzero reward even
-        with random actions (the ball is moving toward the paddle on reset)."""
-        env = TennisWallEnv()
-        try:
-            env.reset(seed=0)
-            rewards = []
-            for _ in range(50):
-                obs, reward, terminated, truncated, info = env.step(
-                    env.action_space.sample()
-                )
-                rewards.append(reward)
-                if terminated or truncated:
-                    break
-            assert any(r != 0.0 for r in rewards), "Shaping reward should be nonzero"
-        finally:
-            env.close()
-
-    def test_info_keys_present(self):
-        env = TennisWallEnv()
-        try:
-            env.reset(seed=0)
-            _, _, _, _, info = env.step(env.action_space.sample())
-            for key in ("phase", "rally_count", "paddle_hit_count",
-                        "wall_hit_count", "paddle_touch", "wall_touch"):
-                assert key in info, f"Missing info key: {key}"
-        finally:
-            env.close()
-
-    def test_phase_transitions_on_paddle_contact(self):
-        """Teleport the ball into the paddle face and verify phase advances.
-
-        The paddle face sits at ``paddle_base + (0.3, 0, 0)`` (see
-        ``tennis_wall.xml``). Placing the ball there with a small inward
-        velocity guarantees the paddle touch sensor fires, which should
-        bump ``paddle_hit_count`` and flip the phase from APPROACH_PADDLE
-        (0) to APPROACH_WALL (1). Testing this deterministically is the
-        only way to catch a broken rising-edge detector: random rollouts
-        leave convergence to luck.
-        """
-        env = TennisWallEnv(min_force=0.0)
-        try:
-            env.reset(seed=0)
-            # Place the ball in front of the paddle face (which sits at
-            # paddle_base + +0.3 on x) and send it toward the racket.
-            ball_start = env.data.body("paddle_base").xpos.copy()
-            ball_start[0] += 0.5
-
-            qpos = env.data.qpos.copy()
-            qvel = env.data.qvel.copy()
-            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
-            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
-            qpos[ball_qposadr : ball_qposadr + 3] = ball_start
-            qvel[ball_dofadr : ball_dofadr + 3] = [-5.0, 0.0, 0.0]
-            env.set_state(qpos, qvel)
-
-            assert env.phase == 0
-            transitioned = False
-            for _ in range(20):
-                _, _, terminated, truncated, info = env.step(
-                    np.zeros(env.action_space.shape, dtype=np.float32)
-                )
-                if info["paddle_hit_count"] >= 1:
-                    transitioned = True
-                    break
-                if terminated or truncated:
-                    break
-            assert transitioned, (
-                "Paddle contact never registered in 20 steps; rising-edge "
-                "detector or touch sensor is broken"
-            )
-            assert env.phase == 1  # APPROACH_WALL
-        finally:
-            env.close()
 
 
 class TestWallBallRewardGate:

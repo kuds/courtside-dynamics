@@ -316,7 +316,7 @@ _PROJECT_NAME = "courtside-dynamics"
 
 
 def _env_display_name(cfg: TrainConfig) -> str:
-    """Friendly env name (e.g. ``TennisWallEnv`` -> ``TennisWall``)."""
+    """Friendly env name (e.g. ``WallBallEnv`` -> ``WallBall``)."""
     info = _probe_env(cfg)
     cls = info.get("class") or ""
     return cls[:-3] if cls.endswith("Env") else (cls or "Unknown")

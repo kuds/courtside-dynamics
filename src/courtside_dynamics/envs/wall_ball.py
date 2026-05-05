@@ -53,9 +53,8 @@ from gymnasium.spaces import Box
 from courtside_dynamics.assets import asset_path
 
 # Cartesian bounds for "ball is still in play". Outside these, the
-# episode terminates. The numbers match the larger TennisWall play
-# volume: paddle starts near x=-2, wall sits at x=4, so we leave a
-# generous margin behind the paddle.
+# episode terminates. Paddle starts near x=-2, wall sits at x=4, so
+# we leave a generous margin behind the paddle.
 _BALL_MIN_X = -6.0
 _BALL_MAX_X = 5.0
 _BALL_MIN_Y = -5.5
