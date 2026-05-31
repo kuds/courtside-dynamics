@@ -94,6 +94,9 @@ class VideoRecordCallback(BaseCallback):
     tb_log_prefix:
         TensorBoard tag prefix for auto-logged scalar info keys. Ignored
         when the user supplies their own ``info_row_fn``.
+    seed:
+        Optional seed for the throwaway recording env, so the replayed
+        rollout is reproducible across runs. ``None`` leaves it unseeded.
     """
 
     def __init__(
@@ -106,6 +109,7 @@ class VideoRecordCallback(BaseCallback):
         csv_header: Iterable[str] | None = None,
         info_row_fn: InfoRowFn | None = None,
         tb_log_prefix: str = "videorecord",
+        seed: int | None = None,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose)
@@ -115,6 +119,7 @@ class VideoRecordCallback(BaseCallback):
         self.save_freq = save_freq
         self.name_prefix = name_prefix
         self.tb_log_prefix = tb_log_prefix
+        self.seed = seed
 
         self._user_info_row_fn = info_row_fn
         self._user_csv_header = list(csv_header) if csv_header else None
@@ -156,7 +161,7 @@ class VideoRecordCallback(BaseCallback):
         os.makedirs(self.save_path, exist_ok=True)
         name_prefix = f"{self.name_prefix}_{self.num_timesteps}"
 
-        rec_env = make_vec_env(self.env_fn, n_envs=1)
+        rec_env = make_vec_env(self.env_fn, n_envs=1, seed=self.seed)
 
         # If the policy was trained with VecNormalize, wrap the recording
         # env in a frozen-stats VecNormalize so the policy sees obs on

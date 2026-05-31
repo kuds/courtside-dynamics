@@ -131,6 +131,7 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "log_dir": cfg.log_dir,
             "name_prefix": cfg.name_prefix,
             "n_envs": cfg.n_envs,
+            "seed": cfg.seed,
             "eval_freq": cfg.eval_freq,
             "checkpoint_freq": cfg.checkpoint_freq,
             "video_freq": cfg.video_freq,
@@ -365,7 +366,9 @@ def write_run_summary(
     lines.append(_kv("Project", _PROJECT_NAME))
     lines.append(_kv("Environment", env_name))
     lines.append(_kv("Algorithm", cfg.algo))
-    seed = cfg.model_kwargs.get("seed") if cfg.model_kwargs else None
+    seed = cfg.seed
+    if seed is None and cfg.model_kwargs:
+        seed = cfg.model_kwargs.get("seed")
     if seed is not None:
         lines.append(_kv("Seed", str(seed)))
     lines.append(

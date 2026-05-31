@@ -100,6 +100,13 @@ class TrainConfig:
         Filename prefix used by the video recording callback.
     n_envs:
         Number of parallel training workers.
+    seed:
+        Master RNG seed. When set it is forwarded to the SB3 algorithm
+        (seeding policy init, action sampling, and the training env) and
+        used to derive distinct, deterministic seeds for the eval,
+        info-eval, and video-recording envs, making a run reproducible
+        end-to-end. Leave ``None`` (default) for nondeterministic runs.
+        An explicit ``model_kwargs['seed']`` takes precedence.
     eval_freq:
         Run ``EvalCallback`` every ``eval_freq`` *environment* steps
         (summed across workers). The helper converts this to SB3's
@@ -156,6 +163,7 @@ class TrainConfig:
     log_dir: str = "./logs/run"
     name_prefix: str = "rl_model"
     n_envs: int = 4
+    seed: int | None = None
     eval_freq: int = 25_000
     checkpoint_freq: int = 250_000
     video_freq: int = 250_000
@@ -176,15 +184,49 @@ class TrainConfig:
     extra_callbacks: Iterable[BaseCallback] = field(default_factory=tuple)
 
 
-def _build_algo(name: str, env, log_dir: str, **model_kwargs) -> BaseAlgorithm:
+# Algorithms that learn off-policy from a replay buffer. For these the
+# number of gradient updates per rollout is decoupled from the number of
+# env steps collected, so a vectorised env silently starves the policy of
+# updates unless we compensate (see ``_build_algo``).
+_OFF_POLICY_ALGOS = frozenset({"SAC"})
+
+
+def _offset_seed(seed: int | None, offset: int) -> int | None:
+    """Derive a distinct child seed, or ``None`` when seeding is disabled.
+
+    Each helper env (eval, info-eval, video) gets its own offset so they
+    don't all replay the identical stream the training env saw, while the
+    whole run still reproduces exactly from a single master ``seed``.
+    """
+    return None if seed is None else seed + offset
+
+
+def _build_algo(
+    name: str,
+    env,
+    log_dir: str,
+    *,
+    policy: str = "MlpPolicy",
+    **model_kwargs,
+) -> BaseAlgorithm:
     try:
         cls = _ALGOS[name]
     except KeyError as exc:
         raise ValueError(
             f"Unknown algo '{name}'. Expected one of {sorted(_ALGOS)}."
         ) from exc
+
+    # SAC defaults to ``gradient_steps=1`` with ``train_freq=1``: each
+    # rollout adds ``n_envs`` transitions to the replay buffer but runs only
+    # ONE gradient update -- an update:data ratio of 1:n_envs that starves
+    # the policy as ``n_envs`` grows. ``gradient_steps=-1`` runs as many
+    # updates as steps collected, restoring a 1:1 ratio independent of
+    # ``n_envs``. Applied only when the caller didn't pin it explicitly.
+    if name.upper() in _OFF_POLICY_ALGOS:
+        model_kwargs.setdefault("gradient_steps", -1)
+
     return cls(
-        "MlpPolicy",
+        policy,
         env,
         verbose=0,
         tensorboard_log=os.path.join(log_dir, "tensorboard"),
@@ -213,9 +255,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     train_env = make_vec_env(
         checked_env_fn,
         n_envs=cfg.n_envs,
+        seed=cfg.seed,
         monitor_dir=os.path.join(cfg.log_dir, "monitor"),
     )
-    eval_env = make_vec_env(checked_env_fn, n_envs=1)
+    eval_env = make_vec_env(
+        checked_env_fn, n_envs=1, seed=_offset_seed(cfg.seed, 1)
+    )
 
     # PPO benefits from return normalization; SAC's auto-tuned alpha
     # interacts poorly with it. ``normalize_reward=None`` picks the
@@ -288,10 +333,13 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 name_prefix=cfg.name_prefix,
                 csv_header=cfg.csv_header,
                 info_row_fn=cfg.info_row_fn,
+                seed=_offset_seed(cfg.seed, 3),
             )
         )
     if cfg.info_dict_eval:
-        info_eval_env = make_vec_env(checked_env_fn, n_envs=1)
+        info_eval_env = make_vec_env(
+            checked_env_fn, n_envs=1, seed=_offset_seed(cfg.seed, 2)
+        )
         if use_vec_normalize:
             info_eval_env = VecNormalize(
                 info_eval_env,
@@ -312,7 +360,18 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         )
     callbacks.extend(cfg.extra_callbacks)
 
-    model = _build_algo(cfg.algo, train_env, cfg.log_dir, **cfg.model_kwargs)
+    # cfg.seed is the first-class knob; an explicit model_kwargs['seed']
+    # still wins so power users can override per-algo if they want.
+    model_kwargs = dict(cfg.model_kwargs)
+    if cfg.seed is not None:
+        model_kwargs.setdefault("seed", cfg.seed)
+    model = _build_algo(
+        cfg.algo,
+        train_env,
+        cfg.log_dir,
+        policy=cfg.policy,
+        **model_kwargs,
+    )
     update_run_config_with_model(model, cfg.log_dir)
 
     try:
