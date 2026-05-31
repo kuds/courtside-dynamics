@@ -633,3 +633,65 @@ class TestWallBallRewardGate:
             assert env._paddle_hit_since_last_wall is False
         finally:
             env.close()
+
+    def test_reward_components_sum_to_total(self):
+        """The per-component reward breakdown in info must sum to reward.
+
+        Whatever the dynamics do, ``rew_wall + rew_paddle + rew_shaping +
+        rew_oob`` has to equal the scalar reward on every step -- that's
+        the invariant that makes the composition plots trustworthy.
+        """
+        env = WallBallEnv(min_force=1.0)
+        try:
+            env.reset(seed=0)
+            rng = np.random.default_rng(0)
+            for _ in range(250):
+                action = rng.uniform(
+                    -1.0, 1.0, size=env.action_space.shape
+                ).astype(np.float32)
+                _, reward, terminated, truncated, info = env.step(action)
+                components = (
+                    info["rew_wall"]
+                    + info["rew_paddle"]
+                    + info["rew_shaping"]
+                    + info["rew_oob"]
+                )
+                assert abs(components - reward) < 1e-9, (
+                    f"components {components} != reward {reward}"
+                )
+                if terminated or truncated:
+                    break
+        finally:
+            env.close()
+
+    def test_termination_flag_set_on_out_of_bounds(self):
+        """An OOB exit flags ``term_oob`` (and not the others) at the end."""
+        env = WallBallEnv(
+            min_force=1.0,
+            out_of_bounds_penalty=1.0,
+            track_shaping_scale=0.0,
+            paddle_hit_bonus=0.0,
+        )
+        try:
+            env.reset(seed=0)
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            qpos[ball_qposadr : ball_qposadr + 3] = [0.0, 5.4, 1.5]
+            qvel[ball_dofadr : ball_dofadr + 3] = [0.0, 50.0, 0.0]
+            env.set_state(qpos, qvel)
+
+            for _ in range(50):
+                _, _, terminated, truncated, info = env.step(
+                    np.zeros(env.action_space.shape, dtype=np.float32)
+                )
+                if terminated or truncated:
+                    assert info["term_oob"] is True
+                    assert info["term_stall"] is False
+                    assert info["term_timeout"] is False
+                    break
+            else:
+                raise AssertionError("episode never terminated")
+        finally:
+            env.close()

@@ -24,7 +24,6 @@ import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 
-from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.callbacks import (
     BaseCallback,
@@ -35,6 +34,7 @@ from stable_baselines3.common.callbacks import (
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.common.logger import configure as configure_logger
 from stable_baselines3.common.vec_env import VecNormalize
 
 from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
@@ -42,16 +42,17 @@ from courtside_dynamics.callbacks.video_record import (
     InfoRowFn,
     VideoRecordCallback,
 )
+from courtside_dynamics.training.algos import (
+    ALGOS as _ALGOS,
+)
+from courtside_dynamics.training.algos import (
+    OFF_POLICY_ALGOS as _OFF_POLICY_ALGOS,
+)
 from courtside_dynamics.training.artifacts import (
     update_run_config_with_model,
     write_run_config,
     write_run_summary,
 )
-
-_ALGOS = {
-    "SAC": SAC,
-    "PPO": PPO,
-}
 
 
 class _SaveVecNormalizeOnNewBest(BaseCallback):
@@ -150,6 +151,17 @@ class TrainConfig:
         logs per-episode aggregates of every scalar ``info`` key from
         eval rollouts to TensorBoard. Set ``False`` to skip this pass
         (e.g. for envs that emit no interesting ``info`` scalars).
+    success_key / success_threshold:
+        Forwarded to ``InfoDictEvalCallback``. When ``success_key`` is
+        set, the fraction of eval episodes whose terminal
+        ``info[success_key] >= success_threshold`` is logged as
+        ``eval_info/success_rate`` -- the real task metric for sparse
+        objectives (e.g. ``"bounce_count"`` for WallBall).
+    verbose:
+        SB3 ``verbose`` level for the algorithm; when non-zero, the
+        per-rollout training table is also streamed to stdout (useful on
+        long Colab runs). Independent of the CSV/TensorBoard logging that
+        is always on.
     phase_key / phase_labels:
         Forwarded to ``InfoDictEvalCallback`` so envs with a state
         machine get per-phase time-fraction logs.
@@ -175,20 +187,16 @@ class TrainConfig:
     clip_obs: float = 10.0
     clip_reward: float = 10.0
     policy: str = "MlpPolicy"
+    verbose: int = 0
     model_kwargs: dict = field(default_factory=dict)
     csv_header: Sequence[str] | None = None
     info_row_fn: InfoRowFn | None = None
     info_dict_eval: bool = True
+    success_key: str | None = None
+    success_threshold: float = 1.0
     phase_key: str | None = None
     phase_labels: dict[int, str] | None = None
     extra_callbacks: Iterable[BaseCallback] = field(default_factory=tuple)
-
-
-# Algorithms that learn off-policy from a replay buffer. For these the
-# number of gradient updates per rollout is decoupled from the number of
-# env steps collected, so a vectorised env silently starves the policy of
-# updates unless we compensate (see ``_build_algo``).
-_OFF_POLICY_ALGOS = frozenset({"SAC"})
 
 
 def _offset_seed(seed: int | None, offset: int) -> int | None:
@@ -207,6 +215,7 @@ def _build_algo(
     log_dir: str,
     *,
     policy: str = "MlpPolicy",
+    verbose: int = 0,
     **model_kwargs,
 ) -> BaseAlgorithm:
     try:
@@ -228,7 +237,7 @@ def _build_algo(
     return cls(
         policy,
         env,
-        verbose=0,
+        verbose=verbose,
         tensorboard_log=os.path.join(log_dir, "tensorboard"),
         **model_kwargs,
     )
@@ -355,6 +364,8 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 eval_freq=_calls(cfg.eval_freq),
                 phase_key=cfg.phase_key,
                 phase_labels=cfg.phase_labels,
+                success_key=cfg.success_key,
+                success_threshold=cfg.success_threshold,
                 csv_path=os.path.join(cfg.log_dir, "eval_info.csv"),
             )
         )
@@ -370,7 +381,19 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         train_env,
         cfg.log_dir,
         policy=cfg.policy,
+        verbose=cfg.verbose,
         **model_kwargs,
+    )
+
+    # Route SB3's own diagnostics (SAC ent_coef/actor/critic losses, PPO
+    # explained_variance/approx_kl, ...) to a CSV alongside TensorBoard so
+    # the run directory is self-diagnosing after the Colab runtime is gone.
+    # ``progress.csv`` is read back by stage_summary + plot_training_health.
+    log_formats = ["csv", "tensorboard"]
+    if cfg.verbose:
+        log_formats.append("stdout")
+    model.set_logger(
+        configure_logger(os.path.join(cfg.log_dir, "tensorboard"), log_formats)
     )
     update_run_config_with_model(model, cfg.log_dir)
 

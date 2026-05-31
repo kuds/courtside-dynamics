@@ -132,6 +132,7 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "name_prefix": cfg.name_prefix,
             "n_envs": cfg.n_envs,
             "seed": cfg.seed,
+            "verbose": cfg.verbose,
             "eval_freq": cfg.eval_freq,
             "checkpoint_freq": cfg.checkpoint_freq,
             "video_freq": cfg.video_freq,
@@ -146,6 +147,8 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "model_kwargs": cfg.model_kwargs,
             "csv_header": list(cfg.csv_header) if cfg.csv_header else None,
             "info_dict_eval": cfg.info_dict_eval,
+            "success_key": cfg.success_key,
+            "success_threshold": cfg.success_threshold,
             "phase_key": cfg.phase_key,
             "phase_labels": (
                 {str(k): v for k, v in cfg.phase_labels.items()}
@@ -261,28 +264,70 @@ def _format_duration(seconds: float) -> str:
 
 
 def _read_monitor(log_dir: str) -> tuple[list[float], list[int]]:
-    rewards: list[float] = []
-    lengths: list[int] = []
-    monitor_dir = os.path.join(log_dir, "monitor")
-    if not os.path.isdir(monitor_dir):
-        return rewards, lengths
-    for entry in sorted(os.listdir(monitor_dir)):
-        if not entry.endswith("monitor.csv"):
-            continue
-        with open(os.path.join(monitor_dir, entry)) as f:
-            reader = csv.reader(f)
-            next(reader, None)  # SB3 metadata comment
-            header = next(reader, None)
-            if not header or "r" not in header or "l" not in header:
-                continue
-            r_idx = header.index("r")
-            l_idx = header.index("l")
-            for row in reader:
-                if not row:
-                    continue
-                rewards.append(float(row[r_idx]))
-                lengths.append(int(row[l_idx]))
+    """Return ``(rewards, lengths)`` in wall-clock order across workers.
+
+    Delegates to ``load_monitor_episodes`` so the "Recent train" stat
+    below reflects the genuinely most-recent episodes (interleaved by
+    wall-clock time), not whatever the last per-worker file happened to
+    hold. Returns empty lists when no monitor logs exist.
+    """
+    from courtside_dynamics.training.monitor_log import load_monitor_episodes
+
+    try:
+        bundle = load_monitor_episodes(os.path.join(log_dir, "monitor"))
+    except FileNotFoundError:
+        return [], []
+    df = bundle.episodes
+    rewards = [float(x) for x in df["r"]] if "r" in df else []
+    lengths = [int(x) for x in df["l"]] if "l" in df else []
     return rewards, lengths
+
+
+#: SB3 ``train/*`` diagnostics worth surfacing in the static run report.
+#: Missing keys are skipped, so the same list covers SAC and PPO.
+_TRAINING_HEALTH_KEYS = (
+    # SAC / off-policy
+    "train/ent_coef",
+    "train/ent_coef_loss",
+    "train/actor_loss",
+    "train/critic_loss",
+    # PPO / on-policy
+    "train/explained_variance",
+    "train/approx_kl",
+    "train/clip_fraction",
+    "train/value_loss",
+    "train/policy_gradient_loss",
+    "train/entropy_loss",
+    # shared
+    "train/learning_rate",
+    "train/loss",
+)
+
+
+def _read_training_health(log_dir: str) -> dict[str, float]:
+    """Final value of each known ``train/*`` metric from ``progress.csv``.
+
+    SB3's CSV logger writes ``LOG_DIR/tensorboard/progress.csv`` with one
+    column per metric; cells are blank when a metric wasn't logged on that
+    row. We keep the last non-blank float per key, i.e. its end-of-run
+    value. Returns ``{}`` if the file is absent (e.g. CSV logging off).
+    """
+    path = os.path.join(log_dir, "tensorboard", "progress.csv")
+    if not os.path.exists(path):
+        return {}
+    finals: dict[str, float] = {}
+    with open(path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            for key in _TRAINING_HEALTH_KEYS:
+                value = row.get(key, "")
+                if value in ("", None):
+                    continue
+                try:
+                    finals[key] = float(value)
+                except (TypeError, ValueError):
+                    continue
+    return finals
 
 
 def _read_eval_info_at_step(log_dir: str, target_step: int) -> dict[str, float]:
@@ -498,6 +543,13 @@ def write_run_summary(
                     pct = eval_info[k] * 100
                     lines.append(f"    {label.ljust(pf_width)}{pct:.1f}%")
 
+    health = _read_training_health(log_dir)
+    if health:
+        lines.extend(_section("Training Health (final)"))
+        hw = max(len(k) for k in health) + 2
+        for key in sorted(health):
+            lines.append(f"  {(key + ':').ljust(hw)}{health[key]:.4g}")
+
     artifact_lines: list[str] = []
     for label, path in [
         ("best_model", "best_model.zip"),
@@ -507,6 +559,8 @@ def write_run_summary(
         ("learning_curve", "learning_curve.png"),
         ("eval_info_csv", "eval_info.csv"),
         ("eval_info_plot", "eval_info.png"),
+        ("training_health_plot", "training_health.png"),
+        ("progress_csv", "tensorboard/progress.csv"),
         ("checkpoints_dir", "checkpoints"),
         ("vec_normalize", "vec_normalize.pkl"),
         ("best_vec_normalize", "best_vec_normalize.pkl"),

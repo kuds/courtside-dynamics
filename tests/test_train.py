@@ -74,3 +74,28 @@ def test_offset_seed_is_distinct_per_offset():
     assert _offset_seed(base, 0) == 100
     assert _offset_seed(base, 1) == 101
     assert _offset_seed(base, 2) == 102
+
+
+def test_algo_registry_has_sac_and_ppo():
+    from courtside_dynamics.training.algos import ALGOS, OFF_POLICY_ALGOS
+
+    assert set(ALGOS) == {"SAC", "PPO"}
+    # SAC is off-policy (gets gradient_steps=-1); PPO is not.
+    assert "SAC" in OFF_POLICY_ALGOS
+    assert "PPO" not in OFF_POLICY_ALGOS
+
+
+def test_scalar_info_keys_reexported_from_video_record():
+    """The helper moved to ``callbacks._info`` but must stay importable
+    from ``video_record`` (existing code and tests import it there)."""
+    from courtside_dynamics.callbacks._info import _scalar_info_keys as canonical
+    from courtside_dynamics.callbacks.video_record import (
+        _scalar_info_keys as reexported,
+    )
+
+    assert canonical is reexported
+
+
+def test_verbose_forwarded_to_model(env, tmp_path):
+    model = _build_algo("SAC", env, str(tmp_path), verbose=2)
+    assert model.verbose == 2

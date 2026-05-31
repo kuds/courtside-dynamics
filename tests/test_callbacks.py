@@ -330,3 +330,35 @@ def test_info_dict_eval_callback_aggregates(tmp_path):
     assert "eval_info/episode_length" in tb
     # No phase key configured -> no phase fractions.
     assert not any(k.startswith("eval_info/phase_frac") for k in tb)
+
+
+def test_info_dict_eval_success_rate_and_ep_mean(tmp_path):
+    """With a ``success_key`` set, the callback logs a success rate plus
+    per-episode terminal means (``<key>_ep_mean``)."""
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.envs import WallBallEnv
+
+    eval_env = make_vec_env(lambda: WallBallEnv(episode_len=30), n_envs=1)
+    cb = InfoDictEvalCallback(
+        eval_env=eval_env,
+        n_eval_episodes=2,
+        eval_freq=1,
+        log_prefix="eval_info",
+        success_key="bounce_count",
+        success_threshold=1.0,
+    )
+    cb.model = _FakeModel(action_dim=5)
+    cb.n_calls = cb.eval_freq
+    cb.num_timesteps = cb.eval_freq
+    cb._on_step()
+    eval_env.close()
+
+    tb = cb.model.logger.records
+    assert "eval_info/success_rate" in tb
+    assert 0.0 <= tb["eval_info/success_rate"] <= 1.0
+    # Per-episode terminal mean of a counter key.
+    assert "eval_info/bounce_count_ep_mean" in tb
+    # The no-op fake policy never completes a rally, so success rate is 0.
+    assert tb["eval_info/success_rate"] == 0.0
