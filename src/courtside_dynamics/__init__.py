@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from gymnasium.envs.registration import register
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance-v0")`` etc.

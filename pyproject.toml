@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "courtside-dynamics"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Courtside Dynamics: a progression of MuJoCo environments toward humanoid tennis, trained with deep RL."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -61,6 +61,12 @@ Repository = "https://github.com/kuds/rl-mujoco-tennis"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Single source of truth for the version: ``courtside_dynamics.__version__``.
+# setuptools reads it statically (AST parse of the literal assignment), so the
+# package isn't imported at build time and its runtime deps aren't needed then.
+[tool.setuptools.dynamic]
+version = { attr = "courtside_dynamics.__version__" }
 
 [tool.setuptools.package-data]
 "courtside_dynamics.assets" = ["*.xml"]
