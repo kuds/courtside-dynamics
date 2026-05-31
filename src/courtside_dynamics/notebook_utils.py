@@ -96,24 +96,20 @@ def disconnect_runtime(delay_seconds: int = 5) -> None:
 
 
 def _read_monitor_logs(monitor_dir: str) -> tuple[np.ndarray, np.ndarray]:
-    """Return ``(rewards, lengths)`` in wall-clock order across workers.
+    """Return ``(rewards, lengths)`` arrays in wall-clock order across workers.
 
-    Delegates to :func:`courtside_dynamics.training.load_monitor_episodes`,
-    which interleaves the per-worker ``*.monitor.csv`` files by absolute
+    Uses the shared ``read_monitor_rewards_lengths`` helper, which
+    interleaves the per-worker ``*.monitor.csv`` files by absolute
     wall-clock time. Reading them naively in file order instead produces a
     fake "learn / collapse / re-learn" sawtooth, one cycle per worker.
     Returns empty arrays when no monitor logs exist yet.
     """
-    from courtside_dynamics.training import load_monitor_episodes
+    from courtside_dynamics.training.monitor_log import (
+        read_monitor_rewards_lengths,
+    )
 
-    try:
-        bundle = load_monitor_episodes(monitor_dir)
-    except FileNotFoundError:
-        return np.array([]), np.array([])
-    df = bundle.episodes
-    rewards = df["r"].to_numpy(dtype=float) if "r" in df else np.array([])
-    lengths = df["l"].to_numpy(dtype=int) if "l" in df else np.array([])
-    return rewards, lengths
+    rewards, lengths = read_monitor_rewards_lengths(monitor_dir)
+    return np.array(rewards, dtype=float), np.array(lengths, dtype=int)
 
 
 def plot_learning_curve(

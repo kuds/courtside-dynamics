@@ -664,6 +664,32 @@ class TestWallBallRewardGate:
         finally:
             env.close()
 
+    def test_termination_flags_are_mutually_exclusive(self):
+        """At most one term_* flag may be True on any step, so the eval
+        per-episode fractions partition cleanly (sum <= 1)."""
+        env = WallBallEnv(min_force=1.0, episode_len=200)
+        try:
+            env.reset(seed=0)
+            rng = np.random.default_rng(1)
+            for _ in range(250):
+                action = rng.uniform(
+                    -1.0, 1.0, size=env.action_space.shape
+                ).astype(np.float32)
+                _, _, terminated, truncated, info = env.step(action)
+                flags = (
+                    int(info["term_oob"])
+                    + int(info["term_stall"])
+                    + int(info["term_timeout"])
+                    + int(info["term_nonfinite"])
+                )
+                assert flags <= 1, f"overlapping termination flags: {info}"
+                if terminated or truncated:
+                    # Exactly one cause on the terminating step.
+                    assert flags == 1, f"no termination cause flagged: {info}"
+                    break
+        finally:
+            env.close()
+
     def test_termination_flag_set_on_out_of_bounds(self):
         """An OOB exit flags ``term_oob`` (and not the others) at the end."""
         env = WallBallEnv(

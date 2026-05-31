@@ -269,6 +269,15 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         terminated = bool(obs_nonfinite or ball_out_of_bounds or stalled)
         truncated = self.step_number > self.episode_len
 
+        # Mutually-exclusive termination cause, in priority order, so the
+        # per-episode fractions in eval aggregation partition cleanly (sum
+        # to <= 1). A terminated step never also counts as a timeout (gym
+        # semantics: termination wins over truncation when both fire).
+        term_nonfinite = obs_nonfinite
+        term_oob = ball_out_of_bounds and not term_nonfinite
+        term_stall = stalled and not (term_nonfinite or ball_out_of_bounds)
+        term_timeout = truncated and not terminated
+
         # PBRS terminal correction: if the episode ends mid-return, the
         # accumulated shaping was unearned (no paddle hit closed the
         # window), so claw it back now.
@@ -296,13 +305,14 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
             "rew_paddle": rew_paddle,
             "rew_shaping": rew_shaping,
             "rew_oob": rew_oob,
-            # Termination-cause flags. At most one is True, and exactly
-            # one on the final step of an episode; per-episode aggregation
-            # turns these into OOB / stall / timeout / nonfinite fractions.
-            "term_oob": bool(ball_out_of_bounds),
-            "term_stall": bool(stalled),
-            "term_timeout": bool(truncated),
-            "term_nonfinite": bool(obs_nonfinite),
+            # Termination-cause flags. Mutually exclusive: at most one is
+            # True (exactly one on the terminating step), so per-episode
+            # aggregation turns these into a clean OOB / stall / timeout /
+            # nonfinite breakdown that sums to <= 1.
+            "term_oob": bool(term_oob),
+            "term_stall": bool(term_stall),
+            "term_timeout": bool(term_timeout),
+            "term_nonfinite": bool(term_nonfinite),
         }
         return obs, reward, terminated, truncated, info
 

@@ -362,3 +362,29 @@ def test_info_dict_eval_success_rate_and_ep_mean(tmp_path):
     assert "eval_info/bounce_count_ep_mean" in tb
     # The no-op fake policy never completes a rally, so success rate is 0.
     assert tb["eval_info/success_rate"] == 0.0
+
+
+def test_info_dict_eval_success_rate_omitted_when_key_absent(tmp_path):
+    """A success_key that the env never emits must omit success_rate
+    entirely (a visible gap) rather than report a confident 0.0."""
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.envs import WallBallEnv
+
+    eval_env = make_vec_env(lambda: WallBallEnv(episode_len=30), n_envs=1)
+    cb = InfoDictEvalCallback(
+        eval_env=eval_env,
+        n_eval_episodes=1,
+        eval_freq=1,
+        log_prefix="eval_info",
+        success_key="not_a_real_key",  # WallBall never emits this
+        success_threshold=1.0,
+    )
+    cb.model = _FakeModel(action_dim=5)
+    cb.n_calls = cb.eval_freq
+    cb.num_timesteps = cb.eval_freq
+    cb._on_step()
+    eval_env.close()
+
+    assert "eval_info/success_rate" not in cb.model.logger.records

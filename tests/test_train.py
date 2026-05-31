@@ -99,3 +99,41 @@ def test_scalar_info_keys_reexported_from_video_record():
 def test_verbose_forwarded_to_model(env, tmp_path):
     model = _build_algo("SAC", env, str(tmp_path), verbose=2)
     assert model.verbose == 2
+
+
+def test_verbose_in_model_kwargs_does_not_collide(env, tmp_path):
+    """train() routes verbose through model_kwargs; a user-supplied
+    model_kwargs['verbose'] must not raise a duplicate-keyword TypeError."""
+    model_kwargs = {"verbose": 1}
+    model = _build_algo("SAC", env, str(tmp_path), policy="MlpPolicy", **model_kwargs)
+    assert model.verbose == 1
+
+
+def test_csv_logger_survives_learn(tmp_path):
+    """The logger configured in train() must persist across model.learn so
+    progress.csv is actually written -- SB3 only resets the logger when it
+    wasn't explicitly set, so set_logger must make it stick."""
+    import os
+
+    from courtside_dynamics.envs import BallBalanceEnv
+    from courtside_dynamics.training import TrainConfig, train
+
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(),
+        algo="SAC",
+        total_timesteps=256,
+        log_dir=str(tmp_path),
+        n_envs=1,
+        eval_freq=10_000,  # don't fire EvalCallback in this short run
+        checkpoint_freq=0,
+        video_freq=0,
+        record_video=False,
+        info_dict_eval=False,
+        normalize_obs=False,
+        n_eval_episodes=1,  # keep the end-of-train final eval cheap
+        model_kwargs={"learning_starts": 16, "buffer_size": 500},
+    )
+    train(cfg)
+    assert os.path.exists(
+        os.path.join(str(tmp_path), "tensorboard", "progress.csv")
+    ), "CSV logger was reset by learn(); progress.csv not written"

@@ -145,7 +145,10 @@ class InfoDictEvalCallback(BaseCallback):
             info = infos[0]
             last_info = info
 
-            for key in _scalar_info_keys(info):
+            # Scalar keys are stable within a step; compute once and reuse
+            # for both the running stats and the terminal snapshot below.
+            step_keys = _scalar_info_keys(info)
+            for key in step_keys:
                 value = float(info[key])
                 sums[key] += value
                 counts[key] += 1
@@ -165,9 +168,7 @@ class InfoDictEvalCallback(BaseCallback):
                 # VecEnvs reset automatically and the next ``obs`` is
                 # already post-reset, so ``info`` holds the last step of
                 # the just-finished episode.
-                ep_terminal = {
-                    key: float(info[key]) for key in _scalar_info_keys(info)
-                }
+                ep_terminal = {key: float(info[key]) for key in step_keys}
                 finals.update(ep_terminal)
                 episode_finals.append(ep_terminal)
                 total_episodes += 1
@@ -202,13 +203,21 @@ class InfoDictEvalCallback(BaseCallback):
                 if vals:
                     metrics[f"{key}_ep_mean"] = sum(vals) / len(vals)
             if self.success_key is not None:
-                successes = [
-                    1.0
-                    if s.get(self.success_key, 0.0) >= self.success_threshold
-                    else 0.0
+                # Only score episodes whose terminal info actually carried
+                # the key. If it never appears (misconfigured success_key),
+                # omit success_rate entirely -- a visible gap -- rather than
+                # reporting a confident 0.0 indistinguishable from real 0%.
+                present = [
+                    s[self.success_key]
                     for s in episode_finals
+                    if self.success_key in s
                 ]
-                metrics["success_rate"] = sum(successes) / len(successes)
+                if present:
+                    successes = [
+                        1.0 if v >= self.success_threshold else 0.0
+                        for v in present
+                    ]
+                    metrics["success_rate"] = sum(successes) / len(successes)
 
         if self.phase_key is not None and phase_counts and total_steps > 0:
             for phase_int, count in phase_counts.items():

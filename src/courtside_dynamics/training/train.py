@@ -215,7 +215,6 @@ def _build_algo(
     log_dir: str,
     *,
     policy: str = "MlpPolicy",
-    verbose: int = 0,
     **model_kwargs,
 ) -> BaseAlgorithm:
     try:
@@ -234,10 +233,12 @@ def _build_algo(
     if name.upper() in _OFF_POLICY_ALGOS:
         model_kwargs.setdefault("gradient_steps", -1)
 
+    # ``verbose`` flows through ``model_kwargs`` (not an explicit param) so a
+    # caller-supplied ``model_kwargs["verbose"]`` can't collide with a second
+    # ``verbose=`` keyword and raise TypeError at construction.
     return cls(
         policy,
         env,
-        verbose=verbose,
         tensorboard_log=os.path.join(log_dir, "tensorboard"),
         **model_kwargs,
     )

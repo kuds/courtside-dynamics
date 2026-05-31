@@ -266,51 +266,28 @@ def _format_duration(seconds: float) -> str:
 def _read_monitor(log_dir: str) -> tuple[list[float], list[int]]:
     """Return ``(rewards, lengths)`` in wall-clock order across workers.
 
-    Delegates to ``load_monitor_episodes`` so the "Recent train" stat
-    below reflects the genuinely most-recent episodes (interleaved by
-    wall-clock time), not whatever the last per-worker file happened to
-    hold. Returns empty lists when no monitor logs exist.
+    Uses the shared ``read_monitor_rewards_lengths`` helper so the "Recent
+    train" stat reflects the genuinely most-recent episodes (interleaved by
+    wall-clock time), not whatever the last per-worker file happened to hold.
     """
-    from courtside_dynamics.training.monitor_log import load_monitor_episodes
+    from courtside_dynamics.training.monitor_log import (
+        read_monitor_rewards_lengths,
+    )
 
-    try:
-        bundle = load_monitor_episodes(os.path.join(log_dir, "monitor"))
-    except FileNotFoundError:
-        return [], []
-    df = bundle.episodes
-    rewards = [float(x) for x in df["r"]] if "r" in df else []
-    lengths = [int(x) for x in df["l"]] if "l" in df else []
-    return rewards, lengths
-
-
-#: SB3 ``train/*`` diagnostics worth surfacing in the static run report.
-#: Missing keys are skipped, so the same list covers SAC and PPO.
-_TRAINING_HEALTH_KEYS = (
-    # SAC / off-policy
-    "train/ent_coef",
-    "train/ent_coef_loss",
-    "train/actor_loss",
-    "train/critic_loss",
-    # PPO / on-policy
-    "train/explained_variance",
-    "train/approx_kl",
-    "train/clip_fraction",
-    "train/value_loss",
-    "train/policy_gradient_loss",
-    "train/entropy_loss",
-    # shared
-    "train/learning_rate",
-    "train/loss",
-)
+    return read_monitor_rewards_lengths(os.path.join(log_dir, "monitor"))
 
 
 def _read_training_health(log_dir: str) -> dict[str, float]:
-    """Final value of each known ``train/*`` metric from ``progress.csv``.
+    """Final value of every ``train/*`` metric from ``progress.csv``.
 
     SB3's CSV logger writes ``LOG_DIR/tensorboard/progress.csv`` with one
     column per metric; cells are blank when a metric wasn't logged on that
-    row. We keep the last non-blank float per key, i.e. its end-of-run
-    value. Returns ``{}`` if the file is absent (e.g. CSV logging off).
+    row. We discover the ``train/*`` columns from the header (so the same
+    code covers SAC and PPO, and picks up any metric SB3 adds) and keep the
+    last non-blank float per key, i.e. its end-of-run value. This matches
+    ``plot_training_health``'s generic ``train/*`` discovery so the static
+    report and the plot never disagree on which metrics matter. Returns
+    ``{}`` if the file is absent (e.g. CSV logging off).
     """
     path = os.path.join(log_dir, "tensorboard", "progress.csv")
     if not os.path.exists(path):
@@ -318,8 +295,11 @@ def _read_training_health(log_dir: str) -> dict[str, float]:
     finals: dict[str, float] = {}
     with open(path) as f:
         reader = csv.DictReader(f)
+        health_keys = [
+            c for c in (reader.fieldnames or []) if c.startswith("train/")
+        ]
         for row in reader:
-            for key in _TRAINING_HEALTH_KEYS:
+            for key in health_keys:
                 value = row.get(key, "")
                 if value in ("", None):
                     continue
