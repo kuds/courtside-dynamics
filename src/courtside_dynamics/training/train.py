@@ -372,17 +372,19 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         )
     callbacks.extend(cfg.extra_callbacks)
 
-    # cfg.seed is the first-class knob; an explicit model_kwargs['seed']
-    # still wins so power users can override per-algo if they want.
+    # cfg.seed / cfg.verbose are the first-class knobs; an explicit value in
+    # model_kwargs still wins (setdefault), and routing both through
+    # model_kwargs avoids a duplicate-keyword TypeError at construction.
     model_kwargs = dict(cfg.model_kwargs)
     if cfg.seed is not None:
         model_kwargs.setdefault("seed", cfg.seed)
+    model_kwargs.setdefault("verbose", cfg.verbose)
+    effective_verbose = model_kwargs["verbose"]
     model = _build_algo(
         cfg.algo,
         train_env,
         cfg.log_dir,
         policy=cfg.policy,
-        verbose=cfg.verbose,
         **model_kwargs,
     )
 
@@ -390,8 +392,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     # explained_variance/approx_kl, ...) to a CSV alongside TensorBoard so
     # the run directory is self-diagnosing after the Colab runtime is gone.
     # ``progress.csv`` is read back by stage_summary + plot_training_health.
+    # set_logger marks the logger custom, so SB3's learn() leaves it intact
+    # instead of resetting to its default (TensorBoard-only) configuration.
     log_formats = ["csv", "tensorboard"]
-    if cfg.verbose:
+    if effective_verbose:
         log_formats.append("stdout")
     model.set_logger(
         configure_logger(os.path.join(cfg.log_dir, "tensorboard"), log_formats)

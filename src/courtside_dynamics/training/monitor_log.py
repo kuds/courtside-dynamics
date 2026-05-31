@@ -103,7 +103,13 @@ def load_monitor_episodes(
                 header = {}
             headers.append(header)
         t_start: float = float(header.get("t_start", 0.0))
-        df = pd.read_csv(path, skiprows=1)
+        try:
+            df = pd.read_csv(path, skiprows=1)
+        except pd.errors.EmptyDataError:
+            # Header-only file: a worker that hasn't finished its first
+            # episode yet (run still warming up, or inspected mid-flight).
+            # Skip it rather than aborting the whole load.
+            continue
         df["worker_id"] = worker_id
         # Compute absolute wall-clock time so that workers launched at
         # different real-world times are sorted correctly. SB3 writes
@@ -112,6 +118,13 @@ def load_monitor_episodes(
         # on raw ``t`` alone.
         df["t_abs"] = t_start + df["t"]
         frames.append(df)
+
+    if not frames:
+        # Files existed but none held episode data yet. Treat this like the
+        # no-files case so callers' ``except FileNotFoundError`` handles it.
+        raise FileNotFoundError(
+            f"No finished-episode rows in any monitor file under {monitor_dir!r}"
+        )
 
     episodes = pd.concat(frames, ignore_index=True)
     episodes = episodes.sort_values("t_abs", kind="mergesort").reset_index(drop=True)
