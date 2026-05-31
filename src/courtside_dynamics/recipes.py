@@ -83,6 +83,12 @@ RECIPES: dict[str, Recipe] = {
         env_kwargs={"render_mode": "rgb_array", "min_force": 20.0},
         default_total_timesteps=1_500_000,
         name_prefix="wall_ball",
+        extra_cfg={
+            # An eval episode "succeeds" once it completes a full rally
+            # cycle (a gated wall hit). Surfaces eval_info/success_rate.
+            "success_key": "bounce_count",
+            "success_threshold": 1.0,
+        },
         description=(
             "Rally a ball against a wall with a 5-DOF racket and a "
             "strict gated wall-hit reward."

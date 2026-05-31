@@ -31,7 +31,7 @@ from collections.abc import Mapping
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecEnv
 
-from courtside_dynamics.callbacks.video_record import _scalar_info_keys
+from courtside_dynamics.callbacks._info import _scalar_info_keys
 
 
 class InfoDictEvalCallback(BaseCallback):
@@ -59,6 +59,14 @@ class InfoDictEvalCallback(BaseCallback):
     deterministic:
         Passed to ``model.predict``. Evaluation is almost always
         deterministic, which is the default.
+    success_key / success_threshold:
+        When ``success_key`` is set, an episode counts as a success if
+        its terminal ``info[success_key]`` is ``>= success_threshold``,
+        and the fraction of successful episodes is logged as
+        ``<prefix>/success_rate``. For WallBall, ``success_key=
+        "bounce_count"`` with threshold 1 yields "fraction of eval
+        episodes that completed at least one full rally" -- the real task
+        metric that mean reward (shaping-dominated) obscures.
     csv_path:
         Optional path. When set, every evaluation appends one row per
         metric in long format (``timestep,metric,value``) so the data
@@ -75,6 +83,8 @@ class InfoDictEvalCallback(BaseCallback):
         phase_key: str | None = None,
         phase_labels: Mapping[int, str] | None = None,
         deterministic: bool = True,
+        success_key: str | None = None,
+        success_threshold: float = 1.0,
         csv_path: str | None = None,
         verbose: int = 0,
     ) -> None:
@@ -86,6 +96,8 @@ class InfoDictEvalCallback(BaseCallback):
         self.phase_key = phase_key
         self.phase_labels = dict(phase_labels or {})
         self.deterministic = deterministic
+        self.success_key = success_key
+        self.success_threshold = success_threshold
         self.csv_path = csv_path
 
     def _on_step(self) -> bool:
@@ -112,6 +124,10 @@ class InfoDictEvalCallback(BaseCallback):
         finals: dict[str, float] = {}
         maxes: dict[str, float] = {}
         phase_counts: dict[int, int] = defaultdict(int)
+        # One terminal snapshot per finished episode, so we can aggregate
+        # at episode granularity (e.g. mean terminal rally count, success
+        # rate) rather than the step-weighted means above.
+        episode_finals: list[dict[str, float]] = []
         total_steps = 0
         total_episodes = 0
 
@@ -129,7 +145,10 @@ class InfoDictEvalCallback(BaseCallback):
             info = infos[0]
             last_info = info
 
-            for key in _scalar_info_keys(info):
+            # Scalar keys are stable within a step; compute once and reuse
+            # for both the running stats and the terminal snapshot below.
+            step_keys = _scalar_info_keys(info)
+            for key in step_keys:
                 value = float(info[key])
                 sums[key] += value
                 counts[key] += 1
@@ -149,8 +168,9 @@ class InfoDictEvalCallback(BaseCallback):
                 # VecEnvs reset automatically and the next ``obs`` is
                 # already post-reset, so ``info`` holds the last step of
                 # the just-finished episode.
-                for key in _scalar_info_keys(info):
-                    finals[key] = float(info[key])
+                ep_terminal = {key: float(info[key]) for key in step_keys}
+                finals.update(ep_terminal)
+                episode_finals.append(ep_terminal)
                 total_episodes += 1
 
         # Fall back to the last seen step if a rollout hit video_length
@@ -168,6 +188,37 @@ class InfoDictEvalCallback(BaseCallback):
             metrics[f"{key}_max"] = maxes[key]
         for key, value in finals.items():
             metrics[f"{key}_final"] = value
+
+        # Per-episode terminal means: average each key's terminal value
+        # across episodes. For monotone counters this is the mean
+        # end-of-episode total (e.g. avg rallies completed per episode);
+        # for the env's ``term_*`` flags it is the fraction of episodes
+        # that ended that way (OOB / stall / timeout breakdown).
+        if episode_finals:
+            ep_keys: set[str] = set()
+            for snap in episode_finals:
+                ep_keys.update(snap)
+            for key in ep_keys:
+                vals = [s[key] for s in episode_finals if key in s]
+                if vals:
+                    metrics[f"{key}_ep_mean"] = sum(vals) / len(vals)
+            if self.success_key is not None:
+                # Only score episodes whose terminal info actually carried
+                # the key. If it never appears (misconfigured success_key),
+                # omit success_rate entirely -- a visible gap -- rather than
+                # reporting a confident 0.0 indistinguishable from real 0%.
+                present = [
+                    s[self.success_key]
+                    for s in episode_finals
+                    if self.success_key in s
+                ]
+                if present:
+                    successes = [
+                        1.0 if v >= self.success_threshold else 0.0
+                        for v in present
+                    ]
+                    metrics["success_rate"] = sum(successes) / len(successes)
+
         if self.phase_key is not None and phase_counts and total_steps > 0:
             for phase_int, count in phase_counts.items():
                 label = self.phase_labels.get(phase_int, str(phase_int))

@@ -156,7 +156,6 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         # Cache the ball's DOF offset so serve velocities don't depend on
         # a hard-coded index into qvel.
         self._ball_dofadr = int(self.model.joint("ball_x").dofadr[0])
-        self._ball_qposadr = int(self.model.joint("ball_x").qposadr[0])
 
     def step(self, a):
         self.do_simulation(a, self.frame_skip)
@@ -177,11 +176,20 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         self._prev_paddle_touch = paddle_touch
 
         reward = 0.0
+        # Per-component reward breakdown, surfaced in ``info`` so training
+        # diagnostics can tell whether the agent is completing rallies
+        # (rew_wall) or just farming the dense shaping term (rew_shaping).
+        # The four components sum exactly to ``reward``.
+        rew_wall = 0.0
+        rew_paddle = 0.0
+        rew_shaping = 0.0
+        rew_oob = 0.0
         event_this_step = False
 
         if paddle_edge:
             self.paddle_hit_count += 1
             reward += self.paddle_hit_bonus
+            rew_paddle += self.paddle_hit_bonus
             self._paddle_hit_since_last_wall = True
             self._returning = False
             self._prev_paddle_to_ball = None
@@ -197,11 +205,13 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
             # multi-bounce episodes.
             if self._returning and abs(self._return_shaping_total) > 1e-9:
                 reward -= self._return_shaping_total
+                rew_shaping -= self._return_shaping_total
             # Strict gate: only pay the +1 if a paddle hit happened
             # since the last wall contact.
             if self._paddle_hit_since_last_wall:
                 self.bounce_count += 1
                 reward += 1.0
+                rew_wall += 1.0
             self._paddle_hit_since_last_wall = False
             # Open a fresh shaping window.
             self._returning = True
@@ -224,6 +234,7 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
                     self._prev_paddle_to_ball - dist
                 )
                 reward += delta
+                rew_shaping += delta
                 self._return_shaping_total += delta
             self._prev_paddle_to_ball = dist
 
@@ -244,6 +255,7 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         )
         if ball_out_of_bounds:
             reward -= self.out_of_bounds_penalty
+            rew_oob -= self.out_of_bounds_penalty
 
         # Stall: cut the episode if the ball has gone dead. Only counts
         # *after* the first event has fired, otherwise a slow serve
@@ -253,10 +265,18 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
             self._first_event_seen
             and self._steps_since_event >= self.stall_steps
         )
-        terminated = bool(
-            not np.isfinite(obs).all() or ball_out_of_bounds or stalled
-        )
+        obs_nonfinite = not bool(np.isfinite(obs).all())
+        terminated = bool(obs_nonfinite or ball_out_of_bounds or stalled)
         truncated = self.step_number > self.episode_len
+
+        # Mutually-exclusive termination cause, in priority order, so the
+        # per-episode fractions in eval aggregation partition cleanly (sum
+        # to <= 1). A terminated step never also counts as a timeout (gym
+        # semantics: termination wins over truncation when both fire).
+        term_nonfinite = obs_nonfinite
+        term_oob = ball_out_of_bounds and not term_nonfinite
+        term_stall = stalled and not (term_nonfinite or ball_out_of_bounds)
+        term_timeout = truncated and not terminated
 
         # PBRS terminal correction: if the episode ends mid-return, the
         # accumulated shaping was unearned (no paddle hit closed the
@@ -267,18 +287,32 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
             and abs(self._return_shaping_total) > 1e-9
         ):
             reward -= self._return_shaping_total
+            rew_shaping -= self._return_shaping_total
             self._return_shaping_total = 0.0
 
         info = {
             # Backward-compat keys consumed by callbacks/CSV writers.
             "sensor_data": wall_touch,
             "bounce_count": self.bounce_count,
-            # New diagnostic keys.
+            # Diagnostic counters / sensors.
             "wall_contact_count": self.wall_contact_count,
             "paddle_hit_count": self.paddle_hit_count,
             "paddle_touch": paddle_touch,
             "wall_touch": wall_touch,
             "stalled": bool(stalled),
+            # Per-component reward breakdown (sums to ``reward``).
+            "rew_wall": rew_wall,
+            "rew_paddle": rew_paddle,
+            "rew_shaping": rew_shaping,
+            "rew_oob": rew_oob,
+            # Termination-cause flags. Mutually exclusive: at most one is
+            # True (exactly one on the terminating step), so per-episode
+            # aggregation turns these into a clean OOB / stall / timeout /
+            # nonfinite breakdown that sums to <= 1.
+            "term_oob": bool(term_oob),
+            "term_stall": bool(term_stall),
+            "term_timeout": bool(term_timeout),
+            "term_nonfinite": bool(term_nonfinite),
         }
         return obs, reward, terminated, truncated, info
 

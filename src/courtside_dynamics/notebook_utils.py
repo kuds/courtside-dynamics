@@ -10,8 +10,6 @@ in a local Jupyter session.
 """
 from __future__ import annotations
 
-import csv
-import importlib.util
 import os
 import time
 from collections.abc import Callable
@@ -20,9 +18,8 @@ from pathlib import Path
 
 import numpy as np
 
-
-def _in_colab() -> bool:
-    return importlib.util.find_spec("google.colab") is not None
+# Single source of truth for the Colab check (also used by colab_setup).
+from courtside_dynamics.colab_setup import _in_colab
 
 
 def mount_drive(mount_point: str = "/content/drive") -> str:
@@ -99,27 +96,20 @@ def disconnect_runtime(delay_seconds: int = 5) -> None:
 
 
 def _read_monitor_logs(monitor_dir: str) -> tuple[np.ndarray, np.ndarray]:
-    rewards: list[float] = []
-    lengths: list[int] = []
-    if not os.path.isdir(monitor_dir):
-        return np.array([]), np.array([])
-    for entry in sorted(os.listdir(monitor_dir)):
-        if not entry.endswith("monitor.csv"):
-            continue
-        with open(os.path.join(monitor_dir, entry)) as f:
-            reader = csv.reader(f)
-            next(reader, None)  # SB3 metadata comment
-            header = next(reader, None)
-            if not header or "r" not in header:
-                continue
-            r_idx = header.index("r")
-            l_idx = header.index("l")
-            for row in reader:
-                if not row:
-                    continue
-                rewards.append(float(row[r_idx]))
-                lengths.append(int(row[l_idx]))
-    return np.array(rewards), np.array(lengths)
+    """Return ``(rewards, lengths)`` arrays in wall-clock order across workers.
+
+    Uses the shared ``read_monitor_rewards_lengths`` helper, which
+    interleaves the per-worker ``*.monitor.csv`` files by absolute
+    wall-clock time. Reading them naively in file order instead produces a
+    fake "learn / collapse / re-learn" sawtooth, one cycle per worker.
+    Returns empty arrays when no monitor logs exist yet.
+    """
+    from courtside_dynamics.training.monitor_log import (
+        read_monitor_rewards_lengths,
+    )
+
+    rewards, lengths = read_monitor_rewards_lengths(monitor_dir)
+    return np.array(rewards, dtype=float), np.array(lengths, dtype=int)
 
 
 def plot_learning_curve(
@@ -208,12 +198,15 @@ def _split_eval_metric(name: str) -> tuple[str, str]:
     """Split an eval-info metric name into ``(stem, variant)``.
 
     ``rally_count_mean`` -> ``("rally_count", "mean")``,
+    ``rally_count_ep_mean`` -> ``("rally_count", "ep_mean")``,
     ``phase_frac_<label>`` -> ``("phase_frac", "<label>")``,
     standalone names like ``episode_length`` -> ``("episode_length", "")``.
     """
     if name.startswith("phase_frac_"):
         return "phase_frac", name[len("phase_frac_") :]
-    for suffix in ("_mean", "_final", "_max"):
+    # ``_ep_mean`` must be checked before ``_mean`` (its own suffix) so the
+    # per-episode variant overlays on the same panel as ``_mean``/``_max``.
+    for suffix in ("_ep_mean", "_mean", "_final", "_max"):
         if name.endswith(suffix):
             return name[: -len(suffix)], suffix[1:]
     return name, ""
@@ -292,10 +285,79 @@ def plot_eval_info(
     return fig
 
 
-def _load_best_model(log_dir: str, algo: str):
-    from stable_baselines3 import PPO, SAC
+def plot_training_health(
+    log_dir: str | Path,
+    *,
+    save_path: str | None = None,
+    show: bool = True,
+    max_cols: int = 3,
+):
+    """Per-metric grid of SB3's ``train/*`` diagnostics over training.
 
-    cls = {"SAC": SAC, "PPO": PPO}[algo.upper()]
+    Reads ``LOG_DIR/tensorboard/progress.csv`` (written by the CSV logger
+    wired up in ``train``). One panel per ``train/*`` column -- for SAC
+    that's ``ent_coef`` (the entropy temperature), ``actor_loss``,
+    ``critic_loss``, ``ent_coef_loss``; for PPO ``explained_variance``,
+    ``approx_kl``, ``clip_fraction``, etc. A collapsing ``ent_coef`` or a
+    diverging ``critic_loss`` explains a stalled SAC run that the reward
+    curve alone won't.
+
+    Returns ``None`` if ``progress.csv`` is missing or has no ``train/``
+    columns yet.
+    """
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    csv_path = os.path.join(str(log_dir), "tensorboard", "progress.csv")
+    if not os.path.exists(csv_path):
+        print(f"[notebook_utils] no progress.csv at {csv_path}")
+        return None
+    df = pd.read_csv(csv_path)
+    metric_cols = sorted(c for c in df.columns if c.startswith("train/"))
+    if not metric_cols:
+        print("[notebook_utils] progress.csv has no train/* metrics yet")
+        return None
+
+    xcol = (
+        "time/total_timesteps"
+        if "time/total_timesteps" in df.columns
+        else None
+    )
+    n = len(metric_cols)
+    cols = min(max_cols, n)
+    rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(
+        rows, cols, figsize=(5 * cols, 3.5 * rows), squeeze=False
+    )
+
+    for i, col in enumerate(metric_cols):
+        ax = axes[i // cols][i % cols]
+        series = df[col]
+        mask = series.notna()
+        if xcol is not None:
+            ax.plot(df[xcol][mask], series[mask], marker=".", markersize=3)
+            ax.set_xlabel("Timestep")
+        else:
+            xs = [j for j, keep in enumerate(mask) if keep]
+            ax.plot(xs, series[mask], marker=".", markersize=3)
+            ax.set_xlabel("Log step")
+        ax.set_title(col[len("train/") :])
+
+    for j in range(n, rows * cols):
+        axes[j // cols][j % cols].axis("off")
+
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=120)
+    if show:
+        plt.show()
+    return fig
+
+
+def _load_best_model(log_dir: str, algo: str):
+    from courtside_dynamics.training.algos import ALGOS
+
+    cls = ALGOS[algo.upper()]
     candidate = os.path.join(log_dir, "best_model.zip")
     if not os.path.exists(candidate):
         candidate = os.path.join(log_dir, "best_model")

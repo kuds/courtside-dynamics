@@ -24,7 +24,6 @@ import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 
-from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.callbacks import (
     BaseCallback,
@@ -35,6 +34,7 @@ from stable_baselines3.common.callbacks import (
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.common.logger import configure as configure_logger
 from stable_baselines3.common.vec_env import VecNormalize
 
 from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
@@ -42,16 +42,17 @@ from courtside_dynamics.callbacks.video_record import (
     InfoRowFn,
     VideoRecordCallback,
 )
+from courtside_dynamics.training.algos import (
+    ALGOS as _ALGOS,
+)
+from courtside_dynamics.training.algos import (
+    OFF_POLICY_ALGOS as _OFF_POLICY_ALGOS,
+)
 from courtside_dynamics.training.artifacts import (
     update_run_config_with_model,
     write_run_config,
     write_run_summary,
 )
-
-_ALGOS = {
-    "SAC": SAC,
-    "PPO": PPO,
-}
 
 
 class _SaveVecNormalizeOnNewBest(BaseCallback):
@@ -100,6 +101,13 @@ class TrainConfig:
         Filename prefix used by the video recording callback.
     n_envs:
         Number of parallel training workers.
+    seed:
+        Master RNG seed. When set it is forwarded to the SB3 algorithm
+        (seeding policy init, action sampling, and the training env) and
+        used to derive distinct, deterministic seeds for the eval,
+        info-eval, and video-recording envs, making a run reproducible
+        end-to-end. Leave ``None`` (default) for nondeterministic runs.
+        An explicit ``model_kwargs['seed']`` takes precedence.
     eval_freq:
         Run ``EvalCallback`` every ``eval_freq`` *environment* steps
         (summed across workers). The helper converts this to SB3's
@@ -143,6 +151,17 @@ class TrainConfig:
         logs per-episode aggregates of every scalar ``info`` key from
         eval rollouts to TensorBoard. Set ``False`` to skip this pass
         (e.g. for envs that emit no interesting ``info`` scalars).
+    success_key / success_threshold:
+        Forwarded to ``InfoDictEvalCallback``. When ``success_key`` is
+        set, the fraction of eval episodes whose terminal
+        ``info[success_key] >= success_threshold`` is logged as
+        ``eval_info/success_rate`` -- the real task metric for sparse
+        objectives (e.g. ``"bounce_count"`` for WallBall).
+    verbose:
+        SB3 ``verbose`` level for the algorithm; when non-zero, the
+        per-rollout training table is also streamed to stdout (useful on
+        long Colab runs). Independent of the CSV/TensorBoard logging that
+        is always on.
     phase_key / phase_labels:
         Forwarded to ``InfoDictEvalCallback`` so envs with a state
         machine get per-phase time-fraction logs.
@@ -156,6 +175,7 @@ class TrainConfig:
     log_dir: str = "./logs/run"
     name_prefix: str = "rl_model"
     n_envs: int = 4
+    seed: int | None = None
     eval_freq: int = 25_000
     checkpoint_freq: int = 250_000
     video_freq: int = 250_000
@@ -167,26 +187,58 @@ class TrainConfig:
     clip_obs: float = 10.0
     clip_reward: float = 10.0
     policy: str = "MlpPolicy"
+    verbose: int = 0
     model_kwargs: dict = field(default_factory=dict)
     csv_header: Sequence[str] | None = None
     info_row_fn: InfoRowFn | None = None
     info_dict_eval: bool = True
+    success_key: str | None = None
+    success_threshold: float = 1.0
     phase_key: str | None = None
     phase_labels: dict[int, str] | None = None
     extra_callbacks: Iterable[BaseCallback] = field(default_factory=tuple)
 
 
-def _build_algo(name: str, env, log_dir: str, **model_kwargs) -> BaseAlgorithm:
+def _offset_seed(seed: int | None, offset: int) -> int | None:
+    """Derive a distinct child seed, or ``None`` when seeding is disabled.
+
+    Each helper env (eval, info-eval, video) gets its own offset so they
+    don't all replay the identical stream the training env saw, while the
+    whole run still reproduces exactly from a single master ``seed``.
+    """
+    return None if seed is None else seed + offset
+
+
+def _build_algo(
+    name: str,
+    env,
+    log_dir: str,
+    *,
+    policy: str = "MlpPolicy",
+    **model_kwargs,
+) -> BaseAlgorithm:
     try:
         cls = _ALGOS[name]
     except KeyError as exc:
         raise ValueError(
             f"Unknown algo '{name}'. Expected one of {sorted(_ALGOS)}."
         ) from exc
+
+    # SAC defaults to ``gradient_steps=1`` with ``train_freq=1``: each
+    # rollout adds ``n_envs`` transitions to the replay buffer but runs only
+    # ONE gradient update -- an update:data ratio of 1:n_envs that starves
+    # the policy as ``n_envs`` grows. ``gradient_steps=-1`` runs as many
+    # updates as steps collected, restoring a 1:1 ratio independent of
+    # ``n_envs``. Applied only when the caller didn't pin it explicitly.
+    if name.upper() in _OFF_POLICY_ALGOS:
+        model_kwargs.setdefault("gradient_steps", -1)
+
+    # ``verbose`` flows through ``model_kwargs`` (not an explicit param) so a
+    # caller-supplied ``model_kwargs["verbose"]`` can't collide with a second
+    # ``verbose=`` keyword and raise TypeError at construction.
     return cls(
-        "MlpPolicy",
+        policy,
         env,
-        verbose=0,
         tensorboard_log=os.path.join(log_dir, "tensorboard"),
         **model_kwargs,
     )
@@ -213,9 +265,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     train_env = make_vec_env(
         checked_env_fn,
         n_envs=cfg.n_envs,
+        seed=cfg.seed,
         monitor_dir=os.path.join(cfg.log_dir, "monitor"),
     )
-    eval_env = make_vec_env(checked_env_fn, n_envs=1)
+    eval_env = make_vec_env(
+        checked_env_fn, n_envs=1, seed=_offset_seed(cfg.seed, 1)
+    )
 
     # PPO benefits from return normalization; SAC's auto-tuned alpha
     # interacts poorly with it. ``normalize_reward=None`` picks the
@@ -288,10 +343,13 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 name_prefix=cfg.name_prefix,
                 csv_header=cfg.csv_header,
                 info_row_fn=cfg.info_row_fn,
+                seed=_offset_seed(cfg.seed, 3),
             )
         )
     if cfg.info_dict_eval:
-        info_eval_env = make_vec_env(checked_env_fn, n_envs=1)
+        info_eval_env = make_vec_env(
+            checked_env_fn, n_envs=1, seed=_offset_seed(cfg.seed, 2)
+        )
         if use_vec_normalize:
             info_eval_env = VecNormalize(
                 info_eval_env,
@@ -307,12 +365,41 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 eval_freq=_calls(cfg.eval_freq),
                 phase_key=cfg.phase_key,
                 phase_labels=cfg.phase_labels,
+                success_key=cfg.success_key,
+                success_threshold=cfg.success_threshold,
                 csv_path=os.path.join(cfg.log_dir, "eval_info.csv"),
             )
         )
     callbacks.extend(cfg.extra_callbacks)
 
-    model = _build_algo(cfg.algo, train_env, cfg.log_dir, **cfg.model_kwargs)
+    # cfg.seed / cfg.verbose are the first-class knobs; an explicit value in
+    # model_kwargs still wins (setdefault), and routing both through
+    # model_kwargs avoids a duplicate-keyword TypeError at construction.
+    model_kwargs = dict(cfg.model_kwargs)
+    if cfg.seed is not None:
+        model_kwargs.setdefault("seed", cfg.seed)
+    model_kwargs.setdefault("verbose", cfg.verbose)
+    effective_verbose = model_kwargs["verbose"]
+    model = _build_algo(
+        cfg.algo,
+        train_env,
+        cfg.log_dir,
+        policy=cfg.policy,
+        **model_kwargs,
+    )
+
+    # Route SB3's own diagnostics (SAC ent_coef/actor/critic losses, PPO
+    # explained_variance/approx_kl, ...) to a CSV alongside TensorBoard so
+    # the run directory is self-diagnosing after the Colab runtime is gone.
+    # ``progress.csv`` is read back by stage_summary + plot_training_health.
+    # set_logger marks the logger custom, so SB3's learn() leaves it intact
+    # instead of resetting to its default (TensorBoard-only) configuration.
+    log_formats = ["csv", "tensorboard"]
+    if effective_verbose:
+        log_formats.append("stdout")
+    model.set_logger(
+        configure_logger(os.path.join(cfg.log_dir, "tensorboard"), log_formats)
+    )
     update_run_config_with_model(model, cfg.log_dir)
 
     try:

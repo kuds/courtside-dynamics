@@ -115,3 +115,55 @@ def test_missing_dir_raises(tmp_path: Path):
 def test_empty_dir_raises(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         load_monitor_episodes(str(tmp_path))
+
+
+def test_header_only_files_raise_filenotfound(tmp_path: Path):
+    """A monitor file that exists but holds no episode rows (run inspected
+    before the first episode finished) must be skipped, not crash with a
+    pandas EmptyDataError. With no usable data it reads as 'no logs'."""
+    # Only the SB3 ``#{json}`` metadata line, no column header or rows.
+    (tmp_path / "0.monitor.csv").write_text(
+        "#" + json.dumps({"t_start": 0.0, "env_id": "Test-v0"}) + "\n"
+    )
+    with pytest.raises(FileNotFoundError):
+        load_monitor_episodes(str(tmp_path))
+
+
+def test_header_only_file_skipped_when_another_has_data(tmp_path: Path):
+    """A header-only worker file is skipped; a sibling with real episodes
+    still loads."""
+    (tmp_path / "0.monitor.csv").write_text(
+        "#" + json.dumps({"t_start": 0.0}) + "\n"
+    )
+    _write_monitor_csv(
+        tmp_path / "1.monitor.csv",
+        rows=[(1.0, 10, 0.1), (2.0, 20, 0.2)],
+        t_start=0.0,
+    )
+    bundle = load_monitor_episodes(str(tmp_path))
+    assert list(bundle.episodes["r"]) == [1.0, 2.0]
+
+
+def test_read_monitor_rewards_lengths(tmp_path: Path):
+    """The shared helper returns time-ordered (rewards, lengths) lists, and
+    empty lists (not an exception) when no usable logs exist."""
+    from courtside_dynamics.training.monitor_log import (
+        read_monitor_rewards_lengths,
+    )
+
+    assert read_monitor_rewards_lengths(str(tmp_path)) == ([], [])
+
+    _write_monitor_csv(
+        tmp_path / "0.monitor.csv",
+        rows=[(1.0, 10, 0.2)],
+        t_start=0.0,
+    )
+    _write_monitor_csv(
+        tmp_path / "1.monitor.csv",
+        rows=[(3.0, 30, 0.1)],
+        t_start=0.0,
+    )
+    rewards, lengths = read_monitor_rewards_lengths(str(tmp_path))
+    # Time-ordered by t_abs: worker 1's t=0.1 before worker 0's t=0.2.
+    assert rewards == [3.0, 1.0]
+    assert lengths == [30, 10]

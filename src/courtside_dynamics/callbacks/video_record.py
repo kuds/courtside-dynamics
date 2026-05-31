@@ -14,7 +14,6 @@ under ``videorecord/<key>``.
 from __future__ import annotations
 
 import csv
-import numbers
 import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
 
@@ -22,6 +21,12 @@ import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecVideoRecorder
+
+# ``_scalar_info_keys`` lives in the neutral ``_info`` module so this
+# callback and ``InfoDictEvalCallback`` can share it without one importing
+# a private name from the other. Re-exported here for back-compat: existing
+# code (and tests) import it from this module.
+from courtside_dynamics.callbacks._info import _scalar_info_keys
 
 InfoRowFn = Callable[[dict, float, float, bool], Sequence[object]]
 """Signature: ``(info, reward, total_reward, done) -> row values``."""
@@ -36,34 +41,6 @@ def _default_info_row_fn(
 
 def _default_csv_header() -> Sequence[str]:
     return ["reward", "total_reward", "done"]
-
-
-#: Keys that SB3 / gymnasium wrappers inject into ``info`` and that we
-#: don't want showing up as training diagnostics. Anything with a ``.``
-#: in its name is also filtered out (e.g. ``TimeLimit.truncated``).
-_WRAPPER_INFO_KEYS = frozenset({"terminal_observation", "episode"})
-
-
-def _scalar_info_keys(info: Mapping) -> list[str]:
-    """Return the sorted env-authored scalar keys of ``info``.
-
-    Scalars are Python numbers/booleans or numpy scalar arrays (0-D). The
-    set excludes arrays/sequences so the auto-logger doesn't emit
-    unbounded-width rows, and wrapper-injected keys (e.g.
-    ``TimeLimit.truncated``) so the diagnostics only surface metrics the
-    env itself emits. Keys are returned in sorted order so CSV column
-    ordering is deterministic across runs.
-    """
-    keys: list[str] = []
-    for key, value in info.items():
-        name = str(key)
-        if name in _WRAPPER_INFO_KEYS or "." in name:
-            continue
-        if isinstance(value, (bool, numbers.Number)):
-            keys.append(name)
-        elif isinstance(value, np.ndarray) and value.ndim == 0:
-            keys.append(name)
-    return sorted(keys)
 
 
 class VideoRecordCallback(BaseCallback):
@@ -94,6 +71,9 @@ class VideoRecordCallback(BaseCallback):
     tb_log_prefix:
         TensorBoard tag prefix for auto-logged scalar info keys. Ignored
         when the user supplies their own ``info_row_fn``.
+    seed:
+        Optional seed for the throwaway recording env, so the replayed
+        rollout is reproducible across runs. ``None`` leaves it unseeded.
     """
 
     def __init__(
@@ -106,6 +86,7 @@ class VideoRecordCallback(BaseCallback):
         csv_header: Iterable[str] | None = None,
         info_row_fn: InfoRowFn | None = None,
         tb_log_prefix: str = "videorecord",
+        seed: int | None = None,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose)
@@ -115,6 +96,7 @@ class VideoRecordCallback(BaseCallback):
         self.save_freq = save_freq
         self.name_prefix = name_prefix
         self.tb_log_prefix = tb_log_prefix
+        self.seed = seed
 
         self._user_info_row_fn = info_row_fn
         self._user_csv_header = list(csv_header) if csv_header else None
@@ -156,7 +138,7 @@ class VideoRecordCallback(BaseCallback):
         os.makedirs(self.save_path, exist_ok=True)
         name_prefix = f"{self.name_prefix}_{self.num_timesteps}"
 
-        rec_env = make_vec_env(self.env_fn, n_envs=1)
+        rec_env = make_vec_env(self.env_fn, n_envs=1, seed=self.seed)
 
         # If the policy was trained with VecNormalize, wrap the recording
         # env in a frozen-stats VecNormalize so the policy sees obs on
