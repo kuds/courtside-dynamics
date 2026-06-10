@@ -13,10 +13,12 @@ __version__ = "0.1.1"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance-v0")`` etc.
+# ``max_episode_steps`` matches each env's internal ``episode_len``
+# default so the TimeLimit wrapper and the env's own truncation agree.
 register(
     id="CourtsideDynamics/BallBalance-v0",
     entry_point="courtside_dynamics.envs.ball_balance:BallBalanceEnv",
-    max_episode_steps=1000,
+    max_episode_steps=750,
 )
 
 register(
@@ -28,7 +30,7 @@ register(
 register(
     id="CourtsideDynamics/WallBall-v1",
     entry_point="courtside_dynamics.envs.wall_ball:WallBallEnv",
-    max_episode_steps=1000,
+    max_episode_steps=750,
 )
 
 __all__ = ["__version__"]

@@ -54,7 +54,7 @@ class BallBalanceEnv(MujocoEnv, utils.EzPickle):
 
         obs = self._get_obs()
         terminated = bool(not np.isfinite(obs).all() or (obs[2] < 0))
-        truncated = self.step_number > self.episode_len
+        truncated = self.step_number >= self.episode_len
         return obs, reward, terminated, truncated, {}
 
     def reset_model(self):

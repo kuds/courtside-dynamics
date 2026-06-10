@@ -56,8 +56,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/kuds/rl-mujoco-tennis"
-Repository = "https://github.com/kuds/rl-mujoco-tennis"
+Homepage = "https://github.com/kuds/courtside-dynamics"
+Repository = "https://github.com/kuds/courtside-dynamics"
 
 [tool.setuptools.packages.find]
 where = ["src"]

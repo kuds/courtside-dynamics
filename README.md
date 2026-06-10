@@ -79,10 +79,11 @@ env = gymnasium.make("CourtsideDynamics/BallBounce-v0")
 pytest
 ```
 
-The suite runs the Stable-Baselines3 `env_checker` on every env plus a
-random-rollout sanity check. The Wall Ball reward-signal test is
-currently `xfail(strict=True)` -- see the docstring in
-`tests/test_envs.py` for the context.
+The suite runs the Stable-Baselines3 `env_checker` on every env plus
+random-rollout sanity checks, and a targeted Wall Ball reward suite
+(`TestWallBallRewardGate`) that pins down the gated wall reward,
+per-cycle paddle bonus, shaping clawback, and termination flags with
+an oracle-vs-noop comparison.
 
 ## Results
 
@@ -90,7 +91,9 @@ Hardware: Google Colab T4.
 
 Ball Balance caps at +1 per step, so the reported reward is dominated by
 the episode length (750 here) — a non-crashing policy will score near the
-ceiling regardless of the algorithm.
+ceiling regardless of the algorithm. (The 751s below predate the fix for
+an off-by-one that ran every episode one step past `episode_len`; new
+runs cap at exactly 750.)
 
 | Simulation Type | Model Type | Average Reward | Training Time | Total Training Steps |
 |-----------------|------------|----------------|---------------|----------------------|

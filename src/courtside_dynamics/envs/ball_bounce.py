@@ -68,10 +68,15 @@ class BallBounceEnv(MujocoEnv, utils.EzPickle):
         )
         current_fromto_value = np.array(self.data.sensor("ball_to_paddle").data)
 
-        # Bounce detection: rising edge on the touch sensor above ``min_force``.
+        # Bounce detection: rising edge on the touch sensor across the
+        # ``min_force`` threshold (same hysteresis as WallBall). The strict
+        # ``>`` matters at the default ``min_force=0``: with the old
+        # ``current >= min_force and prev <= 0`` form, a step with *no
+        # contact at all* (current == prev == 0) satisfied both clauses and
+        # paid +1 every airborne step.
         if (
-            current_touch_value >= self.min_force
-            and self.previous_touch_value <= 0
+            current_touch_value > self.min_force
+            and self.previous_touch_value <= self.min_force
         ):
             self.bounce_count += 1
             reward = 1.0
@@ -79,7 +84,7 @@ class BallBounceEnv(MujocoEnv, utils.EzPickle):
 
         obs = self._get_obs()
         terminated = bool(not np.isfinite(obs).all() or (obs[2] < 0))
-        truncated = self.step_number > self.episode_len
+        truncated = self.step_number >= self.episode_len
         info = {
             "touch_sensor": current_touch_value,
             "ball_velocity": current_velocity_value,

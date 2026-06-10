@@ -4,15 +4,14 @@ These tests are intentionally short. They catch three classes of bug:
 
 1. The env doesn't construct at all (XML, observation space, MujocoEnv init).
 2. The env violates the Gymnasium API (caught by ``check_env``).
-3. The env can't produce any reward signal at all (caught by the random
-   rollout below).
+3. The reward function pays when it shouldn't or stays silent when it
+   should pay (the random rollout below plus the targeted
+   ``TestWallBallRewardGate`` suite).
 
-Point 3 is specifically there to flag the Wall Ball regression documented
-in the review: as originally written the ball has no initial velocity and
-will never generate a touch-sensor event, so the policy has no learning
-signal whatsoever. The random-rollout test starts out permissive (it only
-asserts the env runs), with a stricter reward-nonzero check marked xfail
-for Wall Ball until the fix lands.
+Wall Ball is excluded from the random-rollout reward check on purpose:
+under the gated reward (no wall +1 until the paddle has touched the
+ball) random actions can't earn anything in 2000 steps, so the env gets
+its own oracle-vs-noop check instead.
 """
 from __future__ import annotations
 
@@ -120,6 +119,69 @@ def test_random_rollout_produces_some_reward(env_cls, kwargs):
             if terminated or truncated:
                 env.reset(seed=0)
         assert total > 0.0, f"No reward observed in random rollout of {env_cls.__name__}"
+    finally:
+        env.close()
+
+
+def test_ball_bounce_no_reward_without_contact():
+    """No touch, no reward -- even at the default ``min_force=0``.
+
+    Regression test: the old rising-edge check (``current >= min_force
+    and prev <= 0``) was satisfied by two consecutive zero-touch steps,
+    so a default-constructed env (e.g. via ``gymnasium.make``) paid +1
+    on every airborne step. The ball spawns ~0.3 above the paddle, so
+    the first few steps are guaranteed contact-free.
+    """
+    env = BallBounceEnv()
+    try:
+        env.reset(seed=0)
+        for _ in range(5):
+            _, reward, _, _, info = env.step(
+                np.zeros(env.action_space.shape, dtype=np.float32)
+            )
+            assert info["touch_sensor"] == 0.0, (
+                "Test premise broken: ball already in contact"
+            )
+            assert reward == 0.0, (
+                f"Reward {reward} paid with zero touch force"
+            )
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("env_cls", ENV_CLASSES)
+def test_episode_truncates_at_exactly_episode_len(env_cls):
+    """``episode_len=N`` must mean N steps, not N+1.
+
+    Regression test for the ``step_number > episode_len`` off-by-one
+    that made every env run one extra step (and the README report 751
+    for a 750-step BallBalance episode).
+    """
+    env = env_cls(episode_len=20)
+    try:
+        env.reset(seed=0)
+        steps = 0
+        truncated = False
+        for _ in range(40):
+            _, _, terminated, truncated, _ = env.step(
+                np.zeros(env.action_space.shape, dtype=np.float32)
+            )
+            steps += 1
+            if terminated or truncated:
+                break
+        # BallBalance can't terminate early under zero action; the other
+        # envs might (e.g. WallBall OOB), in which case the truncation
+        # boundary isn't exercised -- only assert when truncation fired.
+        if truncated:
+            assert steps == 20, (
+                f"{env_cls.__name__} truncated after {steps} steps, "
+                "expected exactly episode_len=20"
+            )
+        elif env_cls is BallBalanceEnv:
+            raise AssertionError(
+                "BallBalance episode neither terminated nor truncated "
+                "within 2x episode_len"
+            )
     finally:
         env.close()
 
@@ -345,6 +407,66 @@ class TestWallBallRewardGate:
             assert hit, "Ball-into-paddle never registered a contact"
             assert total_reward >= 0.5, (
                 f"Paddle bonus didn't fire (total reward {total_reward})"
+            )
+        finally:
+            env.close()
+
+    def test_repeat_paddle_hits_pay_bonus_once_per_cycle(self):
+        """Only the first paddle contact per wall cycle pays the bonus.
+
+        Regression test for the juggling exploit: every fresh paddle
+        contact used to pay ``paddle_hit_bonus``, so bouncing the ball
+        on the paddle (no wall involved) farmed unbounded reward. We
+        shoot the ball into the paddle face twice with no wall contact
+        between; the second contact must register (hit count = 2) but
+        pay nothing.
+        """
+        env = WallBallEnv(
+            min_force=0.0,
+            paddle_hit_bonus=0.5,
+            track_shaping_scale=0.0,
+            out_of_bounds_penalty=0.0,
+        )
+        try:
+            env.reset(seed=0)
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+
+            def shoot_ball_at_paddle():
+                qpos = env.data.qpos.copy()
+                qvel = env.data.qvel.copy()
+                face = env.data.body("paddle_head").xpos.copy()
+                qpos[ball_qposadr : ball_qposadr + 3] = face + np.array(
+                    [0.5, 0.0, 0.05]
+                )
+                qvel[ball_dofadr : ball_dofadr + 6] = 0.0
+                qvel[ball_dofadr : ball_dofadr + 3] = [-3.0, 0.0, 0.0]
+                env.set_state(qpos, qvel)
+
+            total_reward = 0.0
+            hits_seen = 0
+            for _ in range(2):
+                shoot_ball_at_paddle()
+                for _ in range(60):
+                    _, reward, terminated, truncated, info = env.step(
+                        self._zero_action(env)
+                    )
+                    total_reward += reward
+                    if info["paddle_hit_count"] > hits_seen:
+                        hits_seen = info["paddle_hit_count"]
+                        break
+                    if terminated or truncated:
+                        break
+
+            assert hits_seen == 2, (
+                f"Expected two paddle contacts, saw {hits_seen}"
+            )
+            assert env.wall_contact_count == 0, (
+                "Test premise broken: ball reached the wall"
+            )
+            assert abs(total_reward - 0.5) < 1e-9, (
+                f"Second paddle hit in the same cycle paid a bonus: "
+                f"total reward {total_reward}, expected 0.5"
             )
         finally:
             env.close()
