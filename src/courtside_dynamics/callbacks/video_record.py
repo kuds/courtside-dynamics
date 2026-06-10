@@ -74,6 +74,11 @@ class VideoRecordCallback(BaseCallback):
     seed:
         Optional seed for the throwaway recording env, so the replayed
         rollout is reproducible across runs. ``None`` leaves it unseeded.
+    deterministic:
+        Passed to ``model.predict``. Defaults to ``True`` so the video
+        shows the same deterministic policy ``EvalCallback`` scores --
+        a stochastic rollout (the old behavior) understates a trained
+        SAC policy and made videos hard to reconcile with eval curves.
     """
 
     def __init__(
@@ -87,6 +92,7 @@ class VideoRecordCallback(BaseCallback):
         info_row_fn: InfoRowFn | None = None,
         tb_log_prefix: str = "videorecord",
         seed: int | None = None,
+        deterministic: bool = True,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose)
@@ -97,6 +103,7 @@ class VideoRecordCallback(BaseCallback):
         self.name_prefix = name_prefix
         self.tb_log_prefix = tb_log_prefix
         self.seed = seed
+        self.deterministic = deterministic
 
         self._user_info_row_fn = info_row_fn
         self._user_csv_header = list(csv_header) if csv_header else None
@@ -189,7 +196,9 @@ class VideoRecordCallback(BaseCallback):
 
                 for _ in range(self.video_length):
                     session_length += 1
-                    action, _ = self.model.predict(obs)
+                    action, _ = self.model.predict(
+                        obs, deterministic=self.deterministic
+                    )
                     obs, rewards, dones, infos = rec_env.step(action)
                     assert not isinstance(obs, tuple)
                     total_reward += float(rewards[0])

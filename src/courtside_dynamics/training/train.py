@@ -35,7 +35,10 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.logger import configure as configure_logger
-from stable_baselines3.common.vec_env import VecNormalize
+from stable_baselines3.common.vec_env import (
+    VecNormalize,
+    sync_envs_normalization,
+)
 
 from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
 from courtside_dynamics.callbacks.video_record import (
@@ -346,6 +349,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 seed=_offset_seed(cfg.seed, 3),
             )
         )
+    info_eval_env = None
     if cfg.info_dict_eval:
         info_eval_env = make_vec_env(
             checked_env_fn, n_envs=1, seed=_offset_seed(cfg.seed, 2)
@@ -402,15 +406,31 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     )
     update_run_config_with_model(model, cfg.log_dir)
 
+    interrupted = False
     try:
-        model.learn(
-            total_timesteps=cfg.total_timesteps,
-            callback=CallbackList(callbacks),
-            progress_bar=False,
-        )
+        try:
+            model.learn(
+                total_timesteps=cfg.total_timesteps,
+                callback=CallbackList(callbacks),
+                progress_bar=False,
+            )
+        except KeyboardInterrupt:
+            # A stopped Colab cell / ^C shouldn't vaporize hours of
+            # training. Salvage the run: fall through to save the model,
+            # normalization stats, final eval, and summary (marked
+            # "interrupted") so the run dir stays self-describing.
+            interrupted = True
+            print(
+                "Training interrupted -- saving final_model and summary "
+                "for the partial run."
+            )
         model.save(os.path.join(cfg.log_dir, "final_model"))
         if use_vec_normalize:
             train_env.save(os.path.join(cfg.log_dir, "vec_normalize.pkl"))
+            # EvalCallback last synced eval_env's running stats up to
+            # eval_freq steps ago; re-sync so the final eval normalizes
+            # observations with the end-of-training statistics.
+            sync_envs_normalization(train_env, eval_env)
 
         mean_reward, std_reward = evaluate_policy(
             model, eval_env, n_eval_episodes=cfg.n_eval_episodes
@@ -423,9 +443,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             final_std_reward=float(std_reward),
             duration_seconds=time.monotonic() - start_time,
             device=str(getattr(model, "device", "")) or None,
+            status="interrupted" if interrupted else "completed",
         )
     finally:
         train_env.close()
         eval_env.close()
+        if info_eval_env is not None:
+            info_eval_env.close()
 
     return model

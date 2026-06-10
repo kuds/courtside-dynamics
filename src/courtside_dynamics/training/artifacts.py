@@ -372,8 +372,14 @@ def write_run_summary(
     final_std_reward: float,
     duration_seconds: float,
     device: str | None = None,
+    status: str = "completed",
 ) -> str:
-    """Write a human-readable end-of-run report to ``log_dir/stage_summary.txt``."""
+    """Write a human-readable end-of-run report to ``log_dir/stage_summary.txt``.
+
+    ``status`` distinguishes a run that reached its full budget
+    (``"completed"``) from one cut short by KeyboardInterrupt
+    (``"interrupted"``); the eval numbers are real either way.
+    """
     env_name = _env_display_name(cfg)
     git_sha = _git_sha()
     short_sha = git_sha[:7] if git_sha else "unknown"
@@ -399,7 +405,7 @@ def write_run_summary(
     lines.append(
         _kv("Date", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     )
-    lines.append(_kv("Status", "completed"))
+    lines.append(_kv("Status", status))
     lines.append(_kv("Git SHA", short_sha))
     lines.append(_kv("Timesteps", f"{cfg.total_timesteps:,}"))
     lines.append(_kv("Duration", duration_str))

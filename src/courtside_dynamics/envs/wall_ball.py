@@ -15,8 +15,12 @@ The reward is intentionally narrow:
   *toward* the paddle, so the very first event is expected to be a
   paddle hit; the gate is initialised closed (False) on reset so any
   pre-paddle wall contact would pay nothing.
-- Each fresh paddle contact earns ``paddle_hit_bonus`` so the agent has
-  a dense gradient long before it can close the full loop.
+- The *first* paddle contact of each cycle earns ``paddle_hit_bonus``
+  so the agent has a dense gradient long before it can close the full
+  loop. Repeat paddle contacts before the next wall hit pay nothing:
+  without that gate, juggling the ball on the paddle (the previous
+  curriculum stage's skill!) farms the bonus indefinitely and is
+  competitive with actually rallying.
 - ``track_shaping_scale`` adds potential-based shaping that rewards
   reductions in the paddle→ball distance while a return is in progress.
   The shaping window is opened **on reset** as if a virtual wall hit
@@ -136,10 +140,11 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         # Obs: ball pos(3) + ball vel(3) + paddle qpos/qvel(10) +
         # paddle_hit_since_last_wall flag(1) + paddle_head→ball
         # relative xyz(3) = 20. The flag exposes the wall-reward gate
-        # state: True iff the next wall contact will pay +1, which an
-        # MLP policy can't infer from raw state alone. The relative
-        # xyz spares the policy from learning the joint→world mapping
-        # by hand.
+        # state: True iff the next wall contact will pay +1 (and,
+        # equivalently, that this cycle's paddle bonus is already
+        # consumed), which an MLP policy can't infer from raw state
+        # alone. The relative xyz spares the policy from learning the
+        # joint→world mapping by hand.
         observation_space = Box(
             low=-np.inf, high=np.inf, shape=(20,), dtype=np.float64
         )
@@ -188,8 +193,13 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
 
         if paddle_edge:
             self.paddle_hit_count += 1
-            reward += self.paddle_hit_bonus
-            rew_paddle += self.paddle_hit_bonus
+            # Bonus only on the first paddle hit per wall cycle. The gate
+            # flag doubles as "bonus consumed": repeat contacts before the
+            # next wall hit would otherwise let the agent farm the bonus
+            # by juggling the ball on the paddle without ever rallying.
+            if not self._paddle_hit_since_last_wall:
+                reward += self.paddle_hit_bonus
+                rew_paddle += self.paddle_hit_bonus
             self._paddle_hit_since_last_wall = True
             self._returning = False
             self._prev_paddle_to_ball = None
@@ -267,7 +277,7 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         )
         obs_nonfinite = not bool(np.isfinite(obs).all())
         terminated = bool(obs_nonfinite or ball_out_of_bounds or stalled)
-        truncated = self.step_number > self.episode_len
+        truncated = self.step_number >= self.episode_len
 
         # Mutually-exclusive termination cause, in priority order, so the
         # per-episode fractions in eval aggregation partition cleanly (sum
