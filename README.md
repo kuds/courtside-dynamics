@@ -1,5 +1,7 @@
 # Courtside Dynamics
 
+[![CI](https://github.com/kuds/courtside-dynamics/actions/workflows/ci.yml/badge.svg)](https://github.com/kuds/courtside-dynamics/actions/workflows/ci.yml)
+
 A progression of MuJoCo environments and deep-RL training scripts aimed at
 a single long-term goal: **teach humanoid agents to rally and play tennis**.
 
@@ -25,15 +27,24 @@ shared pipeline.
 
 ```
 courtside-dynamics/
-├── pyproject.toml                        # pinned deps + package metadata
+├── pyproject.toml                        # deps + package metadata
 ├── src/courtside_dynamics/
 │   ├── assets/*.xml                      # MJCF model files
 │   ├── envs/                             # Gymnasium environments
-│   ├── callbacks/video_record.py         # unified video + CSV recorder
-│   ├── training/train.py                 # SAC / PPO training entry point
+│   ├── callbacks/
+│   │   ├── video_record.py               # unified video + CSV recorder
+│   │   └── info_dict_eval.py             # per-episode info aggregates -> TB/CSV
+│   ├── training/
+│   │   ├── train.py                      # SAC / PPO training entry point
+│   │   ├── algos.py                      # algo-name -> SB3 class registry
+│   │   ├── artifacts.py                  # config.json + stage_summary.txt writers
+│   │   └── monitor_log.py                # wall-clock-ordered monitor CSV loader
+│   ├── recipes.py                        # env+algo presets used by the notebook
+│   ├── notebook_utils.py                 # Drive mount, plots, best-model replay
+│   ├── scripted_policies.py              # hand-coded oracles for env validation
 │   └── colab_setup.py                    # Colab EGL bootstrap
-├── tests/test_envs.py                    # env_checker + reward sanity
-└── notebooks/*.ipynb                     # experiment notebooks (slim wrappers)
+├── tests/                                # env, training, callback, monitor tests
+└── notebooks/sb3_training.ipynb          # one Colab driver for the whole curriculum
 ```
 
 ## Installation
@@ -49,6 +60,20 @@ The base install pulls only `mujoco`, `gymnasium`, and `numpy`. The
 `jupyter`.
 
 ## Quick start
+
+The supported path is a recipe: it fills in the per-env defaults
+(constructor kwargs, training budget, success metric, CSV columns) that
+the notebook relies on.
+
+```python
+from courtside_dynamics.recipes import build_train_config
+from courtside_dynamics.training import train
+
+cfg = build_train_config("WallBall", algo="SAC", log_dir="./logs/WallBall")
+model = train(cfg)
+```
+
+Or configure everything by hand:
 
 ```python
 from courtside_dynamics.envs import BallBounceEnv
@@ -87,7 +112,8 @@ an oracle-vs-noop comparison.
 
 ## Results
 
-Hardware: Google Colab T4.
+Hardware: Google Colab T4 (the results below). The notebook's `n_envs`
+guidance assumes the newer L4 runtime; both work.
 
 Ball Balance caps at +1 per step, so the reported reward is dominated by
 the episode length (750 here) — a non-crashing policy will score near the
