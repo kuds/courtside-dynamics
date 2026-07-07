@@ -30,20 +30,20 @@ courtside-dynamics/
 ├── pyproject.toml                        # deps + package metadata
 ├── src/courtside_dynamics/
 │   ├── assets/*.xml                      # MJCF model files
-│   ├── envs/                             # Gymnasium environments
+│   ├── envs/                             # Gymnasium environments (shared base in _base.py)
 │   ├── callbacks/
 │   │   ├── video_record.py               # unified video + CSV recorder
 │   │   └── info_dict_eval.py             # per-episode info aggregates -> TB/CSV
 │   ├── training/
 │   │   ├── train.py                      # SAC / PPO training entry point
 │   │   ├── algos.py                      # algo-name -> SB3 class registry
-│   │   ├── artifacts.py                  # config.json + stage_summary.txt writers
+│   │   ├── artifacts.py                  # config.json / stage_summary.txt writers + artifact registry
 │   │   └── monitor_log.py                # wall-clock-ordered monitor CSV loader
 │   ├── recipes.py                        # env+algo presets used by the notebook
-│   ├── notebook_utils.py                 # Drive mount, plots, best-model replay
+│   ├── notebook_utils.py                 # Drive mount, plots, replay, run report, artifact audit
 │   ├── scripted_policies.py              # hand-coded oracles for env validation
 │   └── colab_setup.py                    # Colab EGL bootstrap
-├── tests/                                # env, training, callback, monitor tests
+├── tests/                                # env, training, callback, recipe, notebook-helper tests
 └── notebooks/sb3_training.ipynb          # one Colab driver for the whole curriculum
 ```
 
@@ -56,8 +56,9 @@ pip install -e ".[train,notebooks]"
 
 The base install pulls only `mujoco`, `gymnasium`, and `numpy`. The
 `train` extra adds `stable-baselines3`, `torch`, `tensorboard`,
-`pandas`, and `matplotlib`. The `notebooks` extra adds `mediapy` and
-`jupyter`.
+`pandas`, `matplotlib`, plus `imageio` and `moviepy` for video
+recording. The `notebooks` extra adds `mediapy` and `jupyter`; the
+`dev` extra adds `pytest`, `ruff`, and `mypy` for working on the repo.
 
 ## Quick start
 
@@ -98,9 +99,37 @@ import courtside_dynamics  # noqa: F401  (triggers registration)
 env = gymnasium.make("CourtsideDynamics/BallBounce-v0")
 ```
 
+Pass `seed=...` to `build_train_config` / `TrainConfig` when comparing
+reward or env tweaks: it makes the whole run reproducible (SB3, the
+training workers, and every helper env get derived, non-overlapping
+seeds), so run-to-run noise doesn't masquerade as a real difference.
+
+## Run artifacts & troubleshooting
+
+Every `train(cfg)` run leaves a self-describing `log_dir` -- you can
+answer "how was this model produced, and why did it underperform?" from
+disk alone, after the Colab runtime is gone:
+
+| Artifact | What it answers |
+|----------|-----------------|
+| `config.json` | Exact env/algo/hyperparameters (incl. SB3-resolved defaults), package versions, GPU, git SHA. |
+| `stage_summary.txt` | End-of-run report: final/best eval, duration, throughput, device, final `train/*` health metrics. |
+| `evaluations.npz`, `eval_info.csv` | Deterministic eval curve + per-episode info aggregates (success rate, bounce/hit counts, termination-cause breakdown). |
+| `tensorboard/`, `tensorboard/progress.csv` | Live scalars and their CSV mirror (SAC `ent_coef`/losses, PPO `explained_variance`/`approx_kl`, ...). |
+| `monitor/`, `checkpoints/`, `videos/` | Per-episode training returns, periodic snapshots, rollout videos. |
+| `best_model.zip` + `best_vec_normalize.pkl` | Best policy plus the obs-normalization stats from the moment it was saved. |
+
+`courtside_dynamics.notebook_utils` turns those into diagnostics:
+`print_stage_summary` replays the report, `check_run_artifacts` audits
+the directory and explains anything missing (eval never fired, moviepy
+absent, ...), and `plot_learning_curve` / `plot_eval_info` /
+`plot_training_health` chart the CSVs. The notebook runs all of them
+after training.
+
 ## Tests
 
 ```bash
+pip install -e ".[train,dev]"
 pytest
 ```
 
@@ -108,7 +137,9 @@ The suite runs the Stable-Baselines3 `env_checker` on every env plus
 random-rollout sanity checks, and a targeted Wall Ball reward suite
 (`TestWallBallRewardGate`) that pins down the gated wall reward,
 per-cycle paddle bonus, shaping clawback, and termination flags with
-an oracle-vs-noop comparison.
+an oracle-vs-noop comparison. Callbacks, the training entry point, the
+recipe registry, monitor-log loading, and the notebook report/audit
+helpers are covered by their own test modules.
 
 ## Results
 
