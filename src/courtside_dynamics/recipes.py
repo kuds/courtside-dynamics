@@ -43,6 +43,7 @@ def _ball_bounce_info_row(
         info["ball_velocity"],
         info["ball_accelerometer"],
         info["ball_to_paddle"],
+        info["bounce_count"],
         info["touch_sensor"],
         reward,
         total_reward,
@@ -55,7 +56,7 @@ _BALL_BOUNCE_CSV_HEADER = [
     "ball_accelerometer_x", "ball_accelerometer_y", "ball_accelerometer_z",
     "from_to_x1", "from_to_y1", "from_to_z1",
     "from_to_x2", "from_to_y2", "from_to_z2",
-    "touch_sensor", "reward", "total_reward", "done",
+    "bounce_count", "touch_sensor", "reward", "total_reward", "done",
 ]
 
 
@@ -75,6 +76,10 @@ RECIPES: dict[str, Recipe] = {
         extra_cfg={
             "csv_header": _BALL_BOUNCE_CSV_HEADER,
             "info_row_fn": _ball_bounce_info_row,
+            # An eval episode "succeeds" once the paddle makes at least
+            # one fresh contact. Surfaces eval_info/success_rate.
+            "success_key": "bounce_count",
+            "success_threshold": 1.0,
         },
         description="Juggle a ball on a 6-DOF paddle.",
     ),
@@ -145,8 +150,8 @@ def build_train_config(
     log_dir:
         Directory for monitor logs, TensorBoard, checkpoints, videos.
     total_timesteps:
-        Override the recipe's default training budget. Ignored when
-        ``quick_test=True``.
+        Override the recipe's default training budget. Like every other
+        explicit override, it wins over the ``quick_test`` presets.
     quick_test:
         Apply :data:`_QUICK_TEST_OVERRIDES` so the whole pipeline runs
         end-to-end in a couple of minutes -- handy for smoke-testing on
@@ -166,17 +171,19 @@ def build_train_config(
         "algo": algo,
         "log_dir": log_dir,
         "name_prefix": f"{recipe.name_prefix}_{algo.lower()}",
-        "total_timesteps": (
-            total_timesteps
-            if total_timesteps is not None
-            else recipe.default_total_timesteps
-        ),
+        "total_timesteps": recipe.default_total_timesteps,
     }
     cfg_kwargs.update(recipe.extra_cfg)
 
     if quick_test:
         cfg_kwargs.update(_QUICK_TEST_OVERRIDES)
 
+    # Explicit caller choices are applied last so they always win --
+    # including over the quick-test presets. (``total_timesteps`` used to
+    # be silently discarded under ``quick_test=True``, unlike every other
+    # override, which made "quick test but a bit longer" impossible.)
+    if total_timesteps is not None:
+        cfg_kwargs["total_timesteps"] = total_timesteps
     cfg_kwargs.update(overrides)
 
     return TrainConfig(**cfg_kwargs)

@@ -13,7 +13,6 @@ their bounce/hit-count diagnostics "for free". These tests verify:
 from __future__ import annotations
 
 import csv
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -111,7 +110,7 @@ class _FakeModel:
         return np.zeros((1, self.action_dim), dtype=np.float32), None
 
 
-def _run_callback_once(callback, tmp_path: Path) -> None:
+def _run_callback_once(callback) -> None:
     """Drive a single recording pass without a real training loop.
 
     We bypass ``_on_step``'s schedule check by pre-setting ``n_calls`` so
@@ -135,7 +134,7 @@ def test_auto_log_populates_csv_and_tensorboard(tmp_path, _stub_video_recorder):
         name_prefix="test",
     )
     cb.model = _FakeModel(action_dim=5)
-    _run_callback_once(cb, tmp_path)
+    _run_callback_once(cb)
 
     # CSV: the scalar info keys + default reward columns should be in the
     # header, and every row should match that width.
@@ -184,7 +183,7 @@ def test_explicit_info_row_fn_overrides_auto_detection(tmp_path, _stub_video_rec
         info_row_fn=lambda info, r, tr, d: [info["bounce_count"], r],
     )
     cb.model = _FakeModel(action_dim=5)
-    _run_callback_once(cb, tmp_path)
+    _run_callback_once(cb)
 
     csv_files = list(tmp_path.glob("*.csv"))
     with open(csv_files[0]) as f:
@@ -212,13 +211,33 @@ def test_auto_log_handles_empty_info(tmp_path, _stub_video_recorder):
         name_prefix="empty",
     )
     cb.model = _FakeModel(action_dim=6)
-    _run_callback_once(cb, tmp_path)
+    _run_callback_once(cb)
 
     csv_files = list(tmp_path.glob("*.csv"))
     with open(csv_files[0]) as f:
         rows = list(csv.reader(f))
     # Header falls back to the default reward triple.
     assert rows[0] == ["reward", "total_reward", "done"]
+
+
+def test_video_callback_save_freq_zero_disables_recording(tmp_path):
+    """``save_freq=0`` must be a no-op (matching InfoDictEvalCallback's
+    ``eval_freq <= 0`` contract), not a ZeroDivisionError in the modulo
+    schedule check."""
+    from courtside_dynamics.callbacks.video_record import VideoRecordCallback
+    from courtside_dynamics.envs import BallBalanceEnv
+
+    cb = VideoRecordCallback(
+        env_fn=lambda: BallBalanceEnv(),
+        save_path=str(tmp_path),
+        video_length=5,
+        save_freq=0,
+    )
+    # No model attached: reaching past the guard would crash, so a clean
+    # True return proves the early exit fired.
+    cb.n_calls = 1
+    assert cb._on_step() is True
+    assert not list(tmp_path.iterdir()), "recording artifacts were written"
 
 
 class TestSaveVecNormalizeOnNewBest:

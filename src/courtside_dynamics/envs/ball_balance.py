@@ -13,39 +13,23 @@ from typing import Any
 
 import numpy as np
 from gymnasium import utils
-from gymnasium.envs.mujoco import MujocoEnv
-from gymnasium.spaces import Box
 
 from courtside_dynamics.assets import asset_path
+from courtside_dynamics.envs._base import CourtsideMujocoEnv
 
 
-class BallBalanceEnv(MujocoEnv, utils.EzPickle):
+class BallBalanceEnv(CourtsideMujocoEnv, utils.EzPickle):
     """Balance a ball on a tray with 6 DOFs."""
-
-    metadata = {
-        "render_modes": [
-            "human",
-            "rgb_array",
-            "depth_array",
-        ],
-        "render_fps": 100,
-    }
 
     def __init__(self, episode_len: int = 750, **kwargs: Any) -> None:
         utils.EzPickle.__init__(self, episode_len=episode_len, **kwargs)
-
-        observation_space = Box(
-            low=-np.inf, high=np.inf, shape=(18,), dtype=np.float64
-        )
-        MujocoEnv.__init__(
+        CourtsideMujocoEnv.__init__(
             self,
             asset_path("ball_balance.xml"),
-            5,
-            observation_space=observation_space,
+            episode_len=episode_len,
+            obs_dim=18,
             **kwargs,
         )
-        self.step_number = 0
-        self.episode_len = episode_len
 
     def step(self, a):
         reward = 1.0
@@ -59,14 +43,7 @@ class BallBalanceEnv(MujocoEnv, utils.EzPickle):
 
     def reset_model(self):
         self.step_number = 0
-
-        qpos = self.init_qpos + self.np_random.uniform(
-            size=self.model.nq, low=-0.01, high=0.01
-        )
-        qvel = self.init_qvel + self.np_random.uniform(
-            size=self.model.nv, low=-0.01, high=0.01
-        )
-        self.set_state(qpos, qvel)
+        self.set_state(*self._noisy_init_state())
         return self._get_obs()
 
     #: Human-readable labels matching each element of ``_get_obs``. The
@@ -83,22 +60,14 @@ class BallBalanceEnv(MujocoEnv, utils.EzPickle):
     )
 
     def _get_obs(self) -> np.ndarray:
+        ball = self.data.joint("ball")
         return np.concatenate(
             (
-                np.array(self.data.joint("ball").qpos[:3]),
-                np.array(self.data.joint("ball").qvel[:3]),
-                np.array(self.data.joint("rotate_x").qpos),
-                np.array(self.data.joint("rotate_x").qvel),
-                np.array(self.data.joint("rotate_y").qpos),
-                np.array(self.data.joint("rotate_y").qvel),
-                np.array(self.data.joint("rotate_z").qpos),
-                np.array(self.data.joint("rotate_z").qvel),
-                np.array(self.data.joint("slider_x").qpos),
-                np.array(self.data.joint("slider_x").qvel),
-                np.array(self.data.joint("slider_y").qpos),
-                np.array(self.data.joint("slider_y").qvel),
-                np.array(self.data.joint("slider_z").qpos),
-                np.array(self.data.joint("slider_z").qvel),
-            ),
-            axis=0,
+                np.asarray(ball.qpos[:3]),
+                np.asarray(ball.qvel[:3]),
+                self._joints_obs(
+                    "rotate_x", "rotate_y", "rotate_z",
+                    "slider_x", "slider_y", "slider_z",
+                ),
+            )
         )

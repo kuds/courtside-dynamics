@@ -43,14 +43,9 @@ ENV_CLASSES_WITH_KWARGS = [
 ]
 
 
-@pytest.fixture(scope="module")
-def rng() -> np.random.Generator:
-    return np.random.default_rng(0)
-
-
-@pytest.mark.parametrize("env_cls", ENV_CLASSES)
-def test_env_constructs_and_steps(env_cls):
-    env = env_cls()
+@pytest.mark.parametrize("env_cls,kwargs", ENV_CLASSES_WITH_KWARGS)
+def test_env_constructs_and_steps(env_cls, kwargs):
+    env = env_cls(**kwargs)
     try:
         obs, info = env.reset(seed=0)
         assert obs.shape == env.observation_space.shape
@@ -77,7 +72,7 @@ def test_env_passes_sb3_check_env(env_cls):
 
 
 @pytest.mark.parametrize("env_cls", ENV_CLASSES)
-def test_random_rollout_runs_without_nan(env_cls, rng):
+def test_random_rollout_runs_without_nan(env_cls):
     env = env_cls()
     try:
         env.reset(seed=0)
@@ -119,6 +114,34 @@ def test_random_rollout_produces_some_reward(env_cls, kwargs):
             if terminated or truncated:
                 env.reset(seed=0)
         assert total > 0.0, f"No reward observed in random rollout of {env_cls.__name__}"
+    finally:
+        env.close()
+
+
+def test_ball_bounce_info_exposes_bounce_count():
+    """``info["bounce_count"]`` tracks the env counter step-for-step.
+
+    The counter is BallBounce's true task metric; exposing it in ``info``
+    is what lets ``InfoDictEvalCallback`` aggregate it and the recipe's
+    ``success_key="bounce_count"`` compute an eval success rate. The ball
+    spawns above the paddle, so a held-still paddle receives at least one
+    contact within a few hundred steps.
+    """
+    env = BallBounceEnv()
+    try:
+        env.reset(seed=0)
+        saw_bounce = False
+        for _ in range(500):
+            _, _, terminated, truncated, info = env.step(
+                np.zeros(env.action_space.shape, dtype=np.float32)
+            )
+            assert info["bounce_count"] == env.bounce_count
+            if info["bounce_count"] >= 1:
+                saw_bounce = True
+                break
+            if terminated or truncated:
+                break
+        assert saw_bounce, "Ball never contacted the paddle under no-op"
     finally:
         env.close()
 

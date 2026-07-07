@@ -355,9 +355,9 @@ def plot_training_health(
 
 
 def _load_best_model(log_dir: str, algo: str):
-    from courtside_dynamics.training.algos import ALGOS
+    from courtside_dynamics.training.algos import resolve_algo
 
-    cls = ALGOS[algo.upper()]
+    cls = resolve_algo(algo)
     candidate = os.path.join(log_dir, "best_model.zip")
     if not os.path.exists(candidate):
         candidate = os.path.join(log_dir, "best_model")
@@ -385,8 +385,12 @@ def _load_obs_normalizer(log_dir: str, env_fn: Callable):
     try:
         vec_norm = VecNormalize.load(path, dummy)
     except Exception:
-        dummy.close()
         return lambda obs: obs
+    finally:
+        # ``normalize_obs`` only reads ``obs_rms``; the venv exists solely
+        # to satisfy VecNormalize.load's signature and would otherwise leak
+        # a full MuJoCo env for the rest of the notebook session.
+        dummy.close()
     vec_norm.training = False
     vec_norm.norm_reward = False
     return vec_norm.normalize_obs

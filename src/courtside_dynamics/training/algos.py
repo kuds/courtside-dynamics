@@ -18,3 +18,21 @@ ALGOS: dict[str, type[BaseAlgorithm]] = {"SAC": SAC, "PPO": PPO}
 #: env steps collected, so a vectorised env silently starves the policy of
 #: updates unless we compensate (see ``train._build_algo``).
 OFF_POLICY_ALGOS = frozenset({"SAC"})
+
+
+def resolve_algo(name: str) -> type[BaseAlgorithm]:
+    """Look up an algorithm class by name, case-insensitively.
+
+    The rest of the project compares ``algo`` strings with ``.upper()``
+    (reward-normalization default, off-policy check, model loading), so
+    the registry lookup must be equally forgiving -- otherwise
+    ``algo="sac"`` would pass every other branch and still crash on the
+    registry. Raises ``ValueError`` for unknown names so callers can
+    validate the config before doing any expensive setup.
+    """
+    try:
+        return ALGOS[name.upper()]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown algo '{name}'. Expected one of {sorted(ALGOS)}."
+        ) from exc

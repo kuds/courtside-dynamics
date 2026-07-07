@@ -46,10 +46,10 @@ from courtside_dynamics.callbacks.video_record import (
     VideoRecordCallback,
 )
 from courtside_dynamics.training.algos import (
-    ALGOS as _ALGOS,
+    OFF_POLICY_ALGOS as _OFF_POLICY_ALGOS,
 )
 from courtside_dynamics.training.algos import (
-    OFF_POLICY_ALGOS as _OFF_POLICY_ALGOS,
+    resolve_algo as _resolve_algo,
 )
 from courtside_dynamics.training.artifacts import (
     update_run_config_with_model,
@@ -91,8 +91,9 @@ class TrainConfig:
     Attributes
     ----------
     env_fn:
-        Zero-arg factory returning a fresh Gymnasium env. The helper wraps
-        it with ``check_env`` and replicates it across ``n_envs`` workers.
+        Zero-arg factory returning a fresh Gymnasium env. The helper runs
+        ``check_env`` on the first instance it builds and replicates the
+        factory across ``n_envs`` workers.
     algo:
         ``"SAC"`` or ``"PPO"``.
     total_timesteps:
@@ -208,8 +209,25 @@ def _offset_seed(seed: int | None, offset: int) -> int | None:
     Each helper env (eval, info-eval, video) gets its own offset so they
     don't all replay the identical stream the training env saw, while the
     whole run still reproduces exactly from a single master ``seed``.
+
+    Callers must keep helper offsets *past the training-worker block*:
+    ``make_vec_env(seed=s, n_envs=n)`` seeds worker ``i`` with ``s + i``,
+    so any offset below ``n_envs`` would hand a helper env the exact seed
+    (and reset stream) of one of the training workers -- the eval env
+    would then score the policy on state sequences it trained on.
     """
     return None if seed is None else seed + offset
+
+
+def _env_steps_to_calls(env_steps: int, n_envs: int) -> int:
+    """Convert an env-step cadence into SB3's per-vec-step ``n_calls``.
+
+    SB3 callbacks fire on ``n_calls`` (one per vec-env step, i.e. per
+    ``n_envs`` environment steps), so a cadence of N environment steps
+    means ``max(N // n_envs, 1)`` calls. This keeps eval/checkpoint/video
+    frequency independent of how many workers a run uses.
+    """
+    return max(env_steps // max(n_envs, 1), 1)
 
 
 def _build_algo(
@@ -220,12 +238,7 @@ def _build_algo(
     policy: str = "MlpPolicy",
     **model_kwargs,
 ) -> BaseAlgorithm:
-    try:
-        cls = _ALGOS[name]
-    except KeyError as exc:
-        raise ValueError(
-            f"Unknown algo '{name}'. Expected one of {sorted(_ALGOS)}."
-        ) from exc
+    cls = _resolve_algo(name)
 
     # SAC defaults to ``gradient_steps=1`` with ``train_freq=1``: each
     # rollout adds ``n_envs`` transitions to the replay buffer but runs only
@@ -256,14 +269,32 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     snapshot at start) and ``stage_summary.txt`` (eval / wall-clock
     report at end) under ``cfg.log_dir``.
     """
+    # Validate the algo name up front, before any envs are built or
+    # artifacts written -- a typo'd ``algo`` should fail in milliseconds,
+    # not after constructing (and checking) a fleet of MuJoCo envs.
+    _resolve_algo(cfg.algo)
+
     os.makedirs(cfg.log_dir, exist_ok=True)
     write_run_config(cfg, cfg.log_dir)
     start_time = time.monotonic()
 
+    # ``check_env`` replays several reset/step cycles; running it on every
+    # one of the n_envs + eval + info-eval instances just repeats the same
+    # verdict on identical envs. Check the first instance only.
+    env_checked = False
+
     def checked_env_fn():
+        nonlocal env_checked
         env = cfg.env_fn()
-        check_env(env)
+        if not env_checked:
+            check_env(env)
+            env_checked = True
         return env
+
+    # Helper envs (eval, info-eval, video) get seeds *past* the training
+    # worker block: make_vec_env seeds worker i with ``seed + i``, so
+    # offsets 1..n_envs-1 would replay a training worker's reset stream.
+    eval_seed_offset = cfg.n_envs
 
     train_env = make_vec_env(
         checked_env_fn,
@@ -272,7 +303,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         monitor_dir=os.path.join(cfg.log_dir, "monitor"),
     )
     eval_env = make_vec_env(
-        checked_env_fn, n_envs=1, seed=_offset_seed(cfg.seed, 1)
+        checked_env_fn, n_envs=1, seed=_offset_seed(cfg.seed, eval_seed_offset)
     )
 
     # PPO benefits from return normalization; SAC's auto-tuned alpha
@@ -303,11 +334,8 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             training=False,
         )
 
-    # SB3 callbacks fire on n_calls (per vec-env step), so an env-step
-    # value of N means n_calls of max(N // n_envs, 1). This keeps the
-    # cadence independent of n_envs.
     def _calls(env_steps: int) -> int:
-        return max(env_steps // max(cfg.n_envs, 1), 1)
+        return _env_steps_to_calls(env_steps, cfg.n_envs)
 
     on_new_best: BaseCallback | None = None
     if use_vec_normalize:
@@ -346,13 +374,15 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 name_prefix=cfg.name_prefix,
                 csv_header=cfg.csv_header,
                 info_row_fn=cfg.info_row_fn,
-                seed=_offset_seed(cfg.seed, 3),
+                seed=_offset_seed(cfg.seed, eval_seed_offset + 2),
             )
         )
     info_eval_env = None
     if cfg.info_dict_eval:
         info_eval_env = make_vec_env(
-            checked_env_fn, n_envs=1, seed=_offset_seed(cfg.seed, 2)
+            checked_env_fn,
+            n_envs=1,
+            seed=_offset_seed(cfg.seed, eval_seed_offset + 1),
         )
         if use_vec_normalize:
             info_eval_env = VecNormalize(
