@@ -45,8 +45,13 @@ train = [
     "moviepy",
 ]
 notebooks = [
+    # Deliberately NOT "jupyter": anywhere the notebook is *running*,
+    # Jupyter already exists, so the metapackage is redundant -- and on
+    # Colab it upgrades jupyter-server past google-colab's pinned
+    # version, making every install cell print a pip dependency-conflict
+    # error. Local users provisioning a fresh env install jupyter (or
+    # jupyterlab) themselves.
     "mediapy",
-    "jupyter",
 ]
 dev = [
     "pytest>=7",

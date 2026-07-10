@@ -57,8 +57,11 @@ pip install -e ".[train,notebooks]"
 The base install pulls only `mujoco`, `gymnasium`, and `numpy`. The
 `train` extra adds `stable-baselines3`, `torch`, `tensorboard`,
 `pandas`, `matplotlib`, plus `imageio` and `moviepy` for video
-recording. The `notebooks` extra adds `mediapy` and `jupyter`; the
-`dev` extra adds `pytest`, `ruff`, and `mypy` for working on the repo.
+recording. The `notebooks` extra adds `mediapy`; it intentionally does
+not install Jupyter itself (wherever the notebook runs, Jupyter already
+exists -- and on Colab installing it conflicts with `google-colab`'s
+pinned `jupyter-server`). The `dev` extra adds `pytest`, `ruff`, and
+`mypy` for working on the repo.
 
 ## Quick start
 
