@@ -51,10 +51,9 @@ from typing import Any
 
 import numpy as np
 from gymnasium import utils
-from gymnasium.envs.mujoco import MujocoEnv
-from gymnasium.spaces import Box
 
 from courtside_dynamics.assets import asset_path
+from courtside_dynamics.envs._base import CourtsideMujocoEnv
 
 # Cartesian bounds for "ball is still in play". Outside these, the
 # episode terminates. Paddle starts near x=-2, wall sits at x=4, so
@@ -66,17 +65,8 @@ _BALL_MAX_Y = 5.5
 _BALL_MIN_Z = -0.5
 
 
-class WallBallEnv(MujocoEnv, utils.EzPickle):
+class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
     """Rally a ball against a wall with a 5-DOF racket."""
-
-    metadata = {
-        "render_modes": [
-            "human",
-            "rgb_array",
-            "depth_array",
-        ],
-        "render_fps": 100,
-    }
 
     def __init__(
         self,
@@ -145,18 +135,13 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         # consumed), which an MLP policy can't infer from raw state
         # alone. The relative xyz spares the policy from learning the
         # joint→world mapping by hand.
-        observation_space = Box(
-            low=-np.inf, high=np.inf, shape=(20,), dtype=np.float64
-        )
-        MujocoEnv.__init__(
+        CourtsideMujocoEnv.__init__(
             self,
             asset_path("wall_ball.xml"),
-            5,
-            observation_space=observation_space,
+            episode_len=episode_len,
+            obs_dim=20,
             **kwargs,
         )
-        self.step_number = 0
-        self.episode_len = episode_len
 
         # Cache the ball's DOF offset so serve velocities don't depend on
         # a hard-coded index into qvel.
@@ -343,12 +328,7 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         self._prev_paddle_to_ball = None
         self._return_shaping_total = 0.0
 
-        qpos = self.init_qpos + self.np_random.uniform(
-            size=self.model.nq, low=-0.01, high=0.01
-        )
-        qvel = self.init_qvel + self.np_random.uniform(
-            size=self.model.nv, low=-0.01, high=0.01
-        )
+        qpos, qvel = self._noisy_init_state()
 
         # Serve: throw the ball *toward* the paddle (negative x) with a
         # small upward lob and mild lateral jitter so the agent can't
@@ -394,17 +374,11 @@ class WallBallEnv(MujocoEnv, utils.EzPickle):
         return np.concatenate(
             (
                 ball_pos,
-                np.array(self.data.joint("ball_x").qvel[:3]),
-                np.array(self.data.joint("paddle_slide_x").qpos),
-                np.array(self.data.joint("paddle_slide_x").qvel),
-                np.array(self.data.joint("paddle_slide_y").qpos),
-                np.array(self.data.joint("paddle_slide_y").qvel),
-                np.array(self.data.joint("paddle_slide_z").qpos),
-                np.array(self.data.joint("paddle_slide_z").qvel),
-                np.array(self.data.joint("paddle_yaw").qpos),
-                np.array(self.data.joint("paddle_yaw").qvel),
-                np.array(self.data.joint("paddle_pitch").qpos),
-                np.array(self.data.joint("paddle_pitch").qvel),
+                np.asarray(self.data.joint("ball_x").qvel[:3]),
+                self._joints_obs(
+                    "paddle_slide_x", "paddle_slide_y", "paddle_slide_z",
+                    "paddle_yaw", "paddle_pitch",
+                ),
                 gate_open,
                 rel,
             ),

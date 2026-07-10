@@ -139,7 +139,10 @@ class VideoRecordCallback(BaseCallback):
         return info_keys
 
     def _on_step(self) -> bool:
-        if self.n_calls % self.save_freq != 0:
+        # ``save_freq <= 0`` disables recording (same contract as
+        # InfoDictEvalCallback's eval_freq) instead of raising
+        # ZeroDivisionError on the modulo below.
+        if self.save_freq <= 0 or self.n_calls % self.save_freq != 0:
             return True
 
         os.makedirs(self.save_path, exist_ok=True)

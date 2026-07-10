@@ -11,23 +11,13 @@ from typing import Any
 
 import numpy as np
 from gymnasium import utils
-from gymnasium.envs.mujoco import MujocoEnv
-from gymnasium.spaces import Box
 
 from courtside_dynamics.assets import asset_path
+from courtside_dynamics.envs._base import CourtsideMujocoEnv
 
 
-class BallBounceEnv(MujocoEnv, utils.EzPickle):
+class BallBounceEnv(CourtsideMujocoEnv, utils.EzPickle):
     """Juggle a ball on a 6-DOF paddle."""
-
-    metadata = {
-        "render_modes": [
-            "human",
-            "rgb_array",
-            "depth_array",
-        ],
-        "render_fps": 100,
-    }
 
     def __init__(
         self,
@@ -39,22 +29,17 @@ class BallBounceEnv(MujocoEnv, utils.EzPickle):
             self, episode_len=episode_len, min_force=min_force, **kwargs
         )
 
-        self.min_force = min_force
+        self.min_force = float(min_force)
         self.bounce_count = 0
         self.previous_touch_value = 0.0
 
-        observation_space = Box(
-            low=-np.inf, high=np.inf, shape=(18,), dtype=np.float64
-        )
-        MujocoEnv.__init__(
+        CourtsideMujocoEnv.__init__(
             self,
             asset_path("ball_bounce.xml"),
-            5,
-            observation_space=observation_space,
+            episode_len=episode_len,
+            obs_dim=18,
             **kwargs,
         )
-        self.step_number = 0
-        self.episode_len = episode_len
 
     def step(self, a):
         reward = 0.0
@@ -86,6 +71,10 @@ class BallBounceEnv(MujocoEnv, utils.EzPickle):
         terminated = bool(not np.isfinite(obs).all() or (obs[2] < 0))
         truncated = self.step_number >= self.episode_len
         info = {
+            # ``bounce_count`` is the true task metric (contacts so far this
+            # episode); exposing it lets InfoDictEvalCallback aggregate it
+            # and ``success_key="bounce_count"`` compute a success rate.
+            "bounce_count": self.bounce_count,
             "touch_sensor": current_touch_value,
             "ball_velocity": current_velocity_value,
             "ball_accelerometer": current_accelerometer_value,
@@ -97,14 +86,7 @@ class BallBounceEnv(MujocoEnv, utils.EzPickle):
         self.step_number = 0
         self.bounce_count = 0
         self.previous_touch_value = 0.0
-
-        qpos = self.init_qpos + self.np_random.uniform(
-            size=self.model.nq, low=-0.01, high=0.01
-        )
-        qvel = self.init_qvel + self.np_random.uniform(
-            size=self.model.nv, low=-0.01, high=0.01
-        )
-        self.set_state(qpos, qvel)
+        self.set_state(*self._noisy_init_state())
         return self._get_obs()
 
     observation_names: tuple[str, ...] = (
@@ -119,22 +101,14 @@ class BallBounceEnv(MujocoEnv, utils.EzPickle):
     )
 
     def _get_obs(self) -> np.ndarray:
+        ball = self.data.joint("ball_freejoint")
         return np.concatenate(
             (
-                np.array(self.data.joint("ball_freejoint").qpos[:3]),
-                np.array(self.data.joint("ball_freejoint").qvel[:3]),
-                np.array(self.data.joint("rotate_x").qpos),
-                np.array(self.data.joint("rotate_x").qvel),
-                np.array(self.data.joint("rotate_y").qpos),
-                np.array(self.data.joint("rotate_y").qvel),
-                np.array(self.data.joint("rotate_z").qpos),
-                np.array(self.data.joint("rotate_z").qvel),
-                np.array(self.data.joint("slider_x").qpos),
-                np.array(self.data.joint("slider_x").qvel),
-                np.array(self.data.joint("slider_y").qpos),
-                np.array(self.data.joint("slider_y").qvel),
-                np.array(self.data.joint("slider_z").qpos),
-                np.array(self.data.joint("slider_z").qvel),
-            ),
-            axis=0,
+                np.asarray(ball.qpos[:3]),
+                np.asarray(ball.qvel[:3]),
+                self._joints_obs(
+                    "rotate_x", "rotate_y", "rotate_z",
+                    "slider_x", "slider_y", "slider_z",
+                ),
+            )
         )

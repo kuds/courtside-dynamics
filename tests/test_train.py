@@ -17,7 +17,11 @@ import pytest
 from stable_baselines3.common.env_util import make_vec_env
 
 from courtside_dynamics.envs import BallBalanceEnv
-from courtside_dynamics.training.train import _build_algo, _offset_seed
+from courtside_dynamics.training.train import (
+    _build_algo,
+    _env_steps_to_calls,
+    _offset_seed,
+)
 
 
 @pytest.fixture
@@ -65,6 +69,35 @@ def test_unknown_algo_raises(env, tmp_path):
         _build_algo("DDPG", env, str(tmp_path))
 
 
+def test_algo_name_is_case_insensitive(env, tmp_path):
+    """``algo="sac"`` must resolve like ``"SAC"`` -- every other algo
+    comparison in the project uses ``.upper()``, so the registry lookup
+    can't be the one place that is case-sensitive."""
+    model = _build_algo("sac", env, str(tmp_path))
+    # The off-policy gradient_steps default must apply to "sac" too.
+    assert model.gradient_steps == -1
+
+
+def test_train_rejects_unknown_algo_before_any_setup(tmp_path):
+    """A typo'd algo must fail fast, before envs are built or artifacts
+    written -- the log dir should not even exist afterwards."""
+    import os
+
+    from courtside_dynamics.training import TrainConfig, train
+
+    log_dir = os.path.join(str(tmp_path), "run")
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(),
+        algo="DDPG",
+        log_dir=log_dir,
+    )
+    with pytest.raises(ValueError):
+        train(cfg)
+    assert not os.path.exists(log_dir), (
+        "train() built artifacts before validating the algo name"
+    )
+
+
 def test_offset_seed_passes_through_none():
     assert _offset_seed(None, 1) is None
 
@@ -74,6 +107,17 @@ def test_offset_seed_is_distinct_per_offset():
     assert _offset_seed(base, 0) == 100
     assert _offset_seed(base, 1) == 101
     assert _offset_seed(base, 2) == 102
+
+
+def test_env_steps_to_calls_scales_with_n_envs():
+    """An env-step cadence of N means N // n_envs vec-steps, floored at 1,
+    so the wall-clock eval/checkpoint cadence is independent of n_envs."""
+    assert _env_steps_to_calls(25_000, 1) == 25_000
+    assert _env_steps_to_calls(25_000, 4) == 6_250
+    # Cadence smaller than one vec step still fires every call.
+    assert _env_steps_to_calls(2, 4) == 1
+    # Degenerate n_envs values must not divide by zero.
+    assert _env_steps_to_calls(100, 0) == 100
 
 
 def test_algo_registry_has_sac_and_ppo():

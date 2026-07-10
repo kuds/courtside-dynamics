@@ -340,6 +340,31 @@ def _read_eval_info_at_step(log_dir: str, target_step: int) -> dict[str, float]:
 
 _PROJECT_NAME = "courtside-dynamics"
 
+#: ``(label, path relative to log_dir)`` for every artifact a training
+#: run (plus the notebook's plotting/replay cells) can produce, in
+#: rough order of when they appear during a run. Single source of truth
+#: shared by ``write_run_summary``'s "Artifacts" section and the
+#: notebook-facing ``check_run_artifacts`` audit helper, so the report
+#: and the troubleshooting checklist never drift.
+EXPECTED_ARTIFACTS: tuple[tuple[str, str], ...] = (
+    ("config", "config.json"),
+    ("monitor_dir", "monitor"),
+    ("progress_csv", "tensorboard/progress.csv"),
+    ("evaluations", "evaluations.npz"),
+    ("eval_info_csv", "eval_info.csv"),
+    ("best_model", "best_model.zip"),
+    ("best_vec_normalize", "best_vec_normalize.pkl"),
+    ("checkpoints_dir", "checkpoints"),
+    ("videos_dir", "videos"),
+    ("final_model", "final_model.zip"),
+    ("vec_normalize", "vec_normalize.pkl"),
+    ("stage_summary", "stage_summary.txt"),
+    ("learning_curve", "learning_curve.png"),
+    ("eval_info_plot", "eval_info.png"),
+    ("training_health_plot", "training_health.png"),
+    ("best_model_video", "best_model.mp4"),
+)
+
 
 def _env_display_name(cfg: TrainConfig) -> str:
     """Friendly env name (e.g. ``WallBallEnv`` -> ``WallBall``)."""
@@ -537,21 +562,9 @@ def write_run_summary(
             lines.append(f"  {(key + ':').ljust(hw)}{health[key]:.4g}")
 
     artifact_lines: list[str] = []
-    for label, path in [
-        ("best_model", "best_model.zip"),
-        ("final_model", "final_model.zip"),
-        ("evaluations", "evaluations.npz"),
-        ("config", "config.json"),
-        ("learning_curve", "learning_curve.png"),
-        ("eval_info_csv", "eval_info.csv"),
-        ("eval_info_plot", "eval_info.png"),
-        ("training_health_plot", "training_health.png"),
-        ("progress_csv", "tensorboard/progress.csv"),
-        ("checkpoints_dir", "checkpoints"),
-        ("vec_normalize", "vec_normalize.pkl"),
-        ("best_vec_normalize", "best_vec_normalize.pkl"),
-        ("best_model_video", "best_model.mp4"),
-    ]:
+    for label, path in EXPECTED_ARTIFACTS:
+        if path == "stage_summary.txt":
+            continue  # this report itself; listing it would be circular
         full = os.path.join(log_dir, path)
         if os.path.exists(full):
             artifact_lines.append(f"  {_kv(label, path)}")

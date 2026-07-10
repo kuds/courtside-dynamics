@@ -194,6 +194,97 @@ def plot_learning_curve(
     return fig
 
 
+def print_stage_summary(log_dir: str | Path) -> None:
+    """Print the end-of-run report ``train()`` wrote to ``stage_summary.txt``.
+
+    The report holds the final/best eval numbers, wall-clock duration,
+    throughput, device info, and the training-health finals -- the first
+    place to look when a run underperforms. ``train()`` writes it even for
+    interrupted runs (marked ``status: interrupted``).
+    """
+    path = os.path.join(str(log_dir), "stage_summary.txt")
+    try:
+        with open(path) as f:
+            print(f.read())
+    except FileNotFoundError:
+        print(
+            f"[notebook_utils] no stage_summary.txt at {path} -- it is "
+            "written when train() finishes (or is interrupted); its absence "
+            "means the run crashed before the save/eval epilogue."
+        )
+
+
+#: Most common cause for each artifact being absent, shown by
+#: ``check_run_artifacts`` next to MISSING entries.
+_ARTIFACT_HINTS: dict[str, str] = {
+    "config.json": "written at the very start of train(); absent means train() never ran on this dir",
+    "monitor": "monitor CSVs appear once training starts; rows once the first episodes finish",
+    "tensorboard/progress.csv": "written by the CSV logger train() wires up; appears after SB3's first metric dump",
+    "evaluations.npz": "written by EvalCallback; check eval_freq <= total_timesteps",
+    "eval_info.csv": "written by InfoDictEvalCallback each eval; requires info_dict_eval=True",
+    "best_model.zip": "saved by EvalCallback on its first completed evaluation",
+    "best_vec_normalize.pkl": "needs VecNormalize enabled plus at least one new-best eval",
+    "checkpoints": "requires checkpoint_freq > 0 and a run long enough to reach the first checkpoint",
+    "videos": "requires record_video=True, video_freq > 0, and moviepy installed",
+    "final_model.zip": "written when learn() finishes or is interrupted; absent means the run crashed",
+    "vec_normalize.pkl": "only written when VecNormalize is enabled (normalize_obs / normalize_reward)",
+    "stage_summary.txt": "written by train()'s epilogue; absent means the run crashed before it",
+    "learning_curve.png": "saved by the plot_learning_curve cell -- did it run with save_path set?",
+    "eval_info.png": "saved by the plot_eval_info cell -- did it run with save_path set?",
+    "training_health.png": "saved by the plot_training_health cell -- did it run with save_path set?",
+    "best_model.mp4": "saved by record_best_model_video -- needs best_model.zip and rgb_array rendering",
+}
+
+
+def _human_size(num_bytes: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if num_bytes < 1024 or unit == "GB":
+            if unit == "B":
+                return f"{int(num_bytes)} {unit}"
+            return f"{num_bytes:.1f} {unit}"
+        num_bytes /= 1024
+    raise AssertionError("unreachable")
+
+
+def check_run_artifacts(log_dir: str | Path) -> list[str]:
+    """Audit ``log_dir`` against every artifact a run should have produced.
+
+    Prints one line per artifact -- present ones with their size (file
+    count for directories), missing ones with the most common cause --
+    and returns the missing relative paths. Run it at the end of a
+    notebook session, after the plotting and replay cells: it catches
+    silently-skipped outputs (no video because moviepy failed, no
+    best_model because eval never fired) while the Colab runtime still
+    exists to do something about it.
+    """
+    from courtside_dynamics.training.artifacts import EXPECTED_ARTIFACTS
+
+    log_dir = str(log_dir)
+    missing: list[str] = []
+    label_width = max(len(label) for label, _ in EXPECTED_ARTIFACTS) + 2
+    for label, rel in EXPECTED_ARTIFACTS:
+        full = os.path.join(log_dir, rel)
+        if os.path.isdir(full):
+            n_files = 0
+            total = 0
+            for root, _dirs, files in os.walk(full):
+                n_files += len(files)
+                total += sum(
+                    os.path.getsize(os.path.join(root, f)) for f in files
+                )
+            status = f"ok       {n_files} file(s), {_human_size(total)}"
+        elif os.path.isfile(full):
+            status = f"ok       {_human_size(os.path.getsize(full))}"
+        else:
+            missing.append(rel)
+            hint = _ARTIFACT_HINTS.get(rel)
+            status = "MISSING" + (f"  -- {hint}" if hint else "")
+        print(f"{(label + ':').ljust(label_width)}{status}")
+    if not missing:
+        print("\nAll expected artifacts present.")
+    return missing
+
+
 def _split_eval_metric(name: str) -> tuple[str, str]:
     """Split an eval-info metric name into ``(stem, variant)``.
 
@@ -355,9 +446,9 @@ def plot_training_health(
 
 
 def _load_best_model(log_dir: str, algo: str):
-    from courtside_dynamics.training.algos import ALGOS
+    from courtside_dynamics.training.algos import resolve_algo
 
-    cls = ALGOS[algo.upper()]
+    cls = resolve_algo(algo)
     candidate = os.path.join(log_dir, "best_model.zip")
     if not os.path.exists(candidate):
         candidate = os.path.join(log_dir, "best_model")
@@ -385,8 +476,12 @@ def _load_obs_normalizer(log_dir: str, env_fn: Callable):
     try:
         vec_norm = VecNormalize.load(path, dummy)
     except Exception:
-        dummy.close()
         return lambda obs: obs
+    finally:
+        # ``normalize_obs`` only reads ``obs_rms``; the venv exists solely
+        # to satisfy VecNormalize.load's signature and would otherwise leak
+        # a full MuJoCo env for the rest of the notebook session.
+        dummy.close()
     vec_norm.training = False
     vec_norm.norm_reward = False
     return vec_norm.normalize_obs
