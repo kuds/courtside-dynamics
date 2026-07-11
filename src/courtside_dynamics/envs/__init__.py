@@ -14,15 +14,35 @@ from courtside_dynamics.envs.robot_models import (
     get_robot_model_spec,
     initialize_humanoid_tennis_home,
 )
+from courtside_dynamics.envs.tennis_rules import (
+    CourtSide,
+    RallyEvent,
+    RallyEventKind,
+    RallyPhase,
+    RallyRules,
+    RallySnapshot,
+    RallyStateMachine,
+    RallyTransition,
+    TerminationReason,
+)
 from courtside_dynamics.envs.wall_ball import WallBallEnv
 
 __all__ = [
     "BallBalanceEnv",
     "BallBounceEnv",
+    "CourtSide",
     "ROBOT_MODELS",
+    "RallyEvent",
+    "RallyEventKind",
+    "RallyPhase",
+    "RallyRules",
+    "RallySnapshot",
+    "RallyStateMachine",
+    "RallyTransition",
     "RobotModelSpec",
     "SUPPORTED_ROBOT_MODELS",
     "UNITREE_G1_ACTION_LAYOUT",
+    "TerminationReason",
     "WallBallEnv",
     "get_robot_model_spec",
     "initialize_humanoid_tennis_home",
