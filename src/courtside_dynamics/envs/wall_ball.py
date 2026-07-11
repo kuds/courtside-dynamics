@@ -61,11 +61,12 @@ Episodes terminate early when the rally is over:
   serve cannot trip it before the agent has had a chance to make
   contact.
 
-Contact events are filtered to *ball* contacts: the raw touch sensors
-sum every contact on their site, so without the filter an unpowered
-paddle sagging until its face scrapes the floor reads as a paddle "hit"
-(paying the bonus, opening the wall +1 gate, and resetting the stall
-clock with the ball metres away).
+Paddle touch events are filtered to *ball* contacts: the raw touch
+sensor sums every contact on its site, so without the filter an
+unpowered paddle sagging until its face scrapes the floor reads as a
+paddle "hit" (paying the bonus, opening the wall +1 gate, and resetting
+the stall clock with the ball metres away). The wall sensor needs no
+filter — nothing but the ball can physically reach the wall.
 """
 from __future__ import annotations
 
@@ -198,32 +199,73 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._floor_geom_id = int(self.model.geom("floor").id)
         self._paddle_geom_id = int(self.model.geom("paddle_face").id)
         self._wall_geom_id = int(self.model.geom("wall_geom").id)
+        # The shaft and grip can also legally touch the ball. They never
+        # fire the face-mounted touch sensor (no reward), but they do
+        # interrupt the consecutive-floor-bounce sequence: a save off
+        # the racket frame is still a touch under the rally rule.
+        self._racket_frame_geom_ids = np.array(
+            [
+                int(self.model.geom("paddle_shaft").id),
+                int(self.model.geom("paddle_grip").id),
+            ]
+        )
         # Whether the ball was in floor contact on the previous substep,
         # persisted across frames so a contact spanning a frame boundary
         # isn't double-counted as a fresh bounce.
         self._ball_on_floor = False
+        # Ball-paddle-face contact on the previous substep. Under RK4
+        # the touch sensor lags the contact snapshot by one substep
+        # (see _step_mujoco_simulation), so the peak-sampling window
+        # must include it or brief contacts lose their force reading.
+        self._ball_on_paddle = False
         # Peak touch-sensor readings across the substeps of the most
         # recent frame (see _step_mujoco_simulation).
         self._substep_wall_touch = 0.0
         self._substep_paddle_touch = 0.0
 
-    def _ball_contacts(self) -> tuple[bool, bool, bool]:
-        """Return (floor, paddle, wall) flags for the ball's active contacts."""
-        ncon = int(self.data.ncon)
-        if ncon == 0:
-            return False, False, False
-        geom1 = self.data.contact.geom1[:ncon]
-        geom2 = self.data.contact.geom2[:ncon]
+    def _ball_contacts(
+        self,
+    ) -> tuple[float, float, bool, bool, bool]:
+        """Scan the ball's active contacts for one substep.
+
+        Returns ``(face_force, wall_force, on_floor, on_face,
+        on_racket)``: the largest normal force among ball-face and
+        ball-wall contact pairs (0.0 when none) plus contact flags for
+        the floor, the paddle face, and the full racket (face + shaft +
+        grip — the frame matters for the consecutive-bounce rally rule
+        but never pays reward). Forces come from ``mj_contactForce``,
+        which shares ``data.contact``'s snapshot: unlike the touch
+        sensors it neither lags the contact list under RK4 nor loses
+        edge hits whose contact point falls outside the sensor site's
+        thin box, and a ball-pair force is inherently ball-specific.
+        """
+        face_force = 0.0
+        wall_force = 0.0
+        on_floor = on_face = on_racket = False
+        force6 = np.zeros(6)
         ball = self._ball_geom_id
-        involves_ball = (geom1 == ball) | (geom2 == ball)
-        if not involves_ball.any():
-            return False, False, False
-        other = np.where(geom1 == ball, geom2, geom1)[involves_ball]
-        return (
-            bool((other == self._floor_geom_id).any()),
-            bool((other == self._paddle_geom_id).any()),
-            bool((other == self._wall_geom_id).any()),
-        )
+        for i in range(int(self.data.ncon)):
+            geom1 = int(self.data.contact.geom1[i])
+            geom2 = int(self.data.contact.geom2[i])
+            if geom1 == ball:
+                other = geom2
+            elif geom2 == ball:
+                other = geom1
+            else:
+                continue
+            if other == self._floor_geom_id:
+                on_floor = True
+            elif other == self._paddle_geom_id:
+                on_face = True
+                on_racket = True
+                mujoco.mj_contactForce(self.model, self.data, i, force6)
+                face_force = max(face_force, float(force6[0]))
+            elif other == self._wall_geom_id:
+                mujoco.mj_contactForce(self.model, self.data, i, force6)
+                wall_force = max(wall_force, float(force6[0]))
+            elif other in self._racket_frame_geom_ids:
+                on_racket = True
+        return face_force, wall_force, on_floor, on_face, on_racket
 
     def _step_mujoco_simulation(self, ctrl, n_frames):
         """Step the physics one substep at a time, tracking contact events.
@@ -240,18 +282,28 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         Two refinements happen here, at substep resolution, because both
         are invisible at frame resolution:
 
-        - Touch peaks are sampled only in substeps where the ball is
-          actually touching the corresponding geom. The raw sensors sum
-          every contact on their site, so an unpowered paddle sagging
-          until its face scraped the FLOOR used to register as a paddle
-          "hit" with the ball metres away.
+        - The paddle "touch" measurement is primarily the ball-face
+          contact normal force read via ``mj_contactForce`` (see
+          ``_ball_contacts``): the raw touch sensor sums every contact
+          on its site, so an unpowered paddle sagging until its face
+          scraped the FLOOR used to register as a paddle "hit" with the
+          ball metres away — and conversely the sensor misses genuine
+          edge hits (contact point outside its thin site box) and, under
+          RK4, lags ``data.contact`` by one substep. The sensor is kept
+          as a supplementary reading, sampled only while the ball
+          touches the face now or did on the previous substep (the
+          one-substep grace bridges the RK4 lag). The wall reading takes
+          the max of the pair force and the raw sensor unconditionally:
+          nothing but the ball can physically reach the wall, and each
+          signal catches brief contacts the other misses.
         - Floor bounces are detected as ball-floor contact onsets whose
           pre-impact downward speed exceeds ``floor_bounce_min_speed``
-          (the debounce for settling/rolling chatter). Any paddle/wall
-          contact resets the consecutive-bounce count, mirroring the
-          wall-ball rally rule; the reset runs after bounce detection so
-          a racket contact in the same substep as a floor touch absolves
-          the bounce rather than terminating on a scooped pickup.
+          (the debounce for settling/rolling chatter). Any racket or
+          wall contact resets the consecutive-bounce count, mirroring
+          the wall-ball rally rule; the reset runs after bounce
+          detection so a racket contact in the same substep as a floor
+          touch absolves the bounce rather than terminating on a
+          scooped pickup.
         """
         self.data.ctrl[:] = ctrl
         wall_peak = 0.0
@@ -259,12 +311,19 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         for _ in range(n_frames):
             ball_vz = float(self.data.qvel[self._ball_dofadr + 2])
             mujoco.mj_step(self.model, self.data)
-            on_floor, on_paddle, on_wall = self._ball_contacts()
-            if on_wall:
-                wall_peak = max(
-                    wall_peak, float(self.data.sensor("wall_touch").data[0])
-                )
-            if on_paddle:
+            (
+                face_force,
+                wall_force,
+                on_floor,
+                on_face,
+                on_racket,
+            ) = self._ball_contacts()
+            wall_sensed = max(
+                wall_force, float(self.data.sensor("wall_touch").data[0])
+            )
+            wall_peak = max(wall_peak, wall_sensed)
+            paddle_peak = max(paddle_peak, face_force)
+            if on_face or self._ball_on_paddle:
                 paddle_peak = max(
                     paddle_peak,
                     float(self.data.sensor("paddle_touch").data[0]),
@@ -277,7 +336,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 self.floor_bounce_count += 1
                 self.floor_bounce_total += 1
             self._ball_on_floor = on_floor
-            if on_paddle or on_wall:
+            self._ball_on_paddle = on_face
+            if on_racket or wall_sensed > 0.0:
                 self.floor_bounce_count = 0
         self._substep_wall_touch = wall_peak
         self._substep_paddle_touch = paddle_peak
@@ -487,6 +547,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.floor_bounce_count = 0
         self.floor_bounce_total = 0
         self._ball_on_floor = False
+        self._ball_on_paddle = False
         self._paddle_hit_since_last_wall = False
         # Open the PBRS shaping window from t=0 as if a virtual wall
         # hit had just happened. Without this the serve flight earns

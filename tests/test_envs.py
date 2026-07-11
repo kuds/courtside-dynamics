@@ -1109,6 +1109,61 @@ class TestWallBallDoubleBounce:
         finally:
             env.close()
 
+    def test_wall_contact_resets_consecutive_count(self):
+        """A wall rebound between floor bounces restarts the rally
+        count, mirroring the paddle-reset rule — 'bounce, wall, bounce'
+        is legal play and must not terminate."""
+        env = WallBallEnv(min_force=1.0)
+        try:
+            env.reset(seed=0)
+            # First floor bounce.
+            self._place_ball(env, [1.5, 0.0, 1.0])
+            terminated = truncated = False
+            info: dict = {}
+            for _ in range(200):
+                _, _, terminated, truncated, info = env.step(
+                    self._zero_action(env)
+                )
+                assert not (terminated or truncated)
+                if info["floor_bounce_count"] == 1:
+                    break
+            assert info["floor_bounce_count"] == 1
+
+            # Wall rebound: drive the ball into the wall (same setup as
+            # the wall-edge reward tests).
+            self._place_ball(env, [2.7, 0.0, 1.5], vel=(3.0, 0.0, 0.0))
+            reached_wall = False
+            for _ in range(60):
+                _, _, terminated, truncated, info = env.step(
+                    self._zero_action(env)
+                )
+                if info["wall_contact_count"] >= 1:
+                    reached_wall = True
+                    break
+                if terminated or truncated:
+                    break
+            assert reached_wall, "ball-into-wall never registered a contact"
+            assert info["floor_bounce_count"] == 0, (
+                "wall contact did not reset the consecutive bounce count"
+            )
+
+            # The next bounce is again the FIRST of a new sequence.
+            self._place_ball(env, [1.5, 0.0, 1.0])
+            for _ in range(200):
+                _, _, terminated, truncated, info = env.step(
+                    self._zero_action(env)
+                )
+                if info["floor_bounce_count"] == 1:
+                    break
+                if terminated or truncated:
+                    break
+            assert info["floor_bounce_count"] == 1
+            assert not terminated, (
+                "bounce after a wall reset still terminated the episode"
+            )
+        finally:
+            env.close()
+
     def test_resting_ball_chatter_is_not_a_bounce(self):
         """A ball resting on the floor must not accumulate bounces from
         contact chatter — the pre-impact-speed debounce filters the
@@ -1163,22 +1218,35 @@ class TestWallBallDoubleBounce:
             env.close()
 
     def test_paddle_floor_scrape_is_not_a_paddle_hit(self):
-        """An unpowered paddle sags until its face touches the floor.
-        That contact used to fire the paddle touch sensor — paying the
+        """An unpowered paddle sags until its face slams the floor.
+        That transient used to fire the paddle touch sensor — paying the
         bonus, opening the wall +1 gate, and resetting the stall clock —
         with the ball metres away. With touch events filtered to real
-        ball contacts the scrape is ignored, and with the ball parked
-        in-bounds (settled, so its chatter is below the bounce
-        debounce) the episode ends via stall exactly ``stall_steps``
-        after reset. The settle phase also drives the paddle sag to
-        completion, so under the old sensor logic the very first step
-        would read the scrape as a paddle rising edge."""
+        ball contacts the slam is ignored, and with the ball parked
+        in-bounds (settled, so its chatter is below the bounce debounce)
+        the episode ends via stall exactly ``stall_steps`` after reset.
+        The paddle is re-raised to its reset pose after the settle phase
+        so the sag and slam happen *inside* the env loop, where the
+        filter is exercised: under unfiltered sampling this rollout
+        registers a phantom paddle hit (~35 N at roughly step 131) and
+        the stall clock resets, failing both assertions."""
         env = WallBallEnv(min_force=0.0, stall_steps=150)
         try:
             env.reset(seed=0)
             # Park the ball in-bounds, at rest, away from paddle & wall.
             self._place_ball(env, [3.0, 4.0, 0.07])
             self._settle(env)
+            # Re-raise the paddle so it sags afresh during the env loop.
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            for name in (
+                "paddle_slide_x", "paddle_slide_y", "paddle_slide_z",
+                "paddle_yaw", "paddle_pitch",
+            ):
+                joint = env.model.joint(name)
+                qpos[int(joint.qposadr[0])] = 0.0
+                qvel[int(joint.dofadr[0])] = 0.0
+            env.set_state(qpos, qvel)
 
             floor_geom = int(env.model.geom("floor").id)
             face_geom = int(env.model.geom("paddle_face").id)
