@@ -424,7 +424,10 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
     @property
     def neutral_action(self) -> np.ndarray:
         """Return the normalized action that PD-holds both standing poses."""
-        return np.zeros(self.action_space.shape, dtype=self.action_space.dtype)
+        return np.zeros(
+            (self.action_layout.total_size,),
+            dtype=np.float32,
+        )
 
     @property
     def rally_state(self) -> RallySnapshot:

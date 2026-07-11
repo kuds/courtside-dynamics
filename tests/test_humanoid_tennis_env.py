@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from collections.abc import Iterator
 
@@ -766,8 +767,13 @@ def test_stable_baselines3_dummy_vecenv_and_vecnormalize_smoke():
 
 
 @pytest.mark.skipif(
-    sys.platform == "darwin",
-    reason="macOS test runners do not provide a headless MuJoCo GL context",
+    sys.platform == "darwin"
+    or (
+        sys.platform.startswith("linux")
+        and not os.environ.get("DISPLAY")
+        and os.environ.get("MUJOCO_GL") not in {"egl", "osmesa"}
+    ),
+    reason="test runner does not provide a MuJoCo GL context",
 )
 def test_rgb_array_render_smoke():
     env = HumanoidTennisCoopEnv(

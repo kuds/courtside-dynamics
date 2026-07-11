@@ -41,9 +41,6 @@ jobs:
   test:
     name: pytest (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    env:
-      # Headless MuJoCo renderer used by the environment smoke tests.
-      MUJOCO_GL: egl
     strategy:
       fail-fast: false
       matrix:
@@ -57,3 +54,6 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[train,dev]"
       - run: pytest
+      - name: MuJoCo rendering smoke test
+        if: matrix.python-version == '3.11'
+        run: xvfb-run -a pytest -q tests/test_humanoid_tennis_env.py::test_rgb_array_render_smoke
