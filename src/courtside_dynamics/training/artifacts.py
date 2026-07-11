@@ -137,6 +137,7 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "checkpoint_freq": cfg.checkpoint_freq,
             "video_freq": cfg.video_freq,
             "n_eval_episodes": cfg.n_eval_episodes,
+            "early_stop_patience": cfg.early_stop_patience,
             "video_length": cfg.video_length,
             "record_video": cfg.record_video,
             "normalize_obs": cfg.normalize_obs,
@@ -398,19 +399,27 @@ def write_run_summary(
     duration_seconds: float,
     device: str | None = None,
     status: str = "completed",
+    actual_timesteps: int | None = None,
 ) -> str:
     """Write a human-readable end-of-run report to ``log_dir/stage_summary.txt``.
 
     ``status`` distinguishes a run that reached its full budget
     (``"completed"``) from one cut short by KeyboardInterrupt
     (``"interrupted"``); the eval numbers are real either way.
+    ``actual_timesteps`` is the number of env steps actually trained --
+    it differs from ``cfg.total_timesteps`` when early stopping or an
+    interrupt cut the run short, and it is what the throughput figure
+    should be computed from.
     """
     env_name = _env_display_name(cfg)
     git_sha = _git_sha()
     short_sha = git_sha[:7] if git_sha else "unknown"
     duration_str = _format_duration(duration_seconds)
+    steps_trained = (
+        actual_timesteps if actual_timesteps is not None else cfg.total_timesteps
+    )
     throughput_fps = (
-        int(cfg.total_timesteps / duration_seconds) if duration_seconds > 0 else 0
+        int(steps_trained / duration_seconds) if duration_seconds > 0 else 0
     )
 
     lines: list[str] = []
@@ -432,7 +441,16 @@ def write_run_summary(
     )
     lines.append(_kv("Status", status))
     lines.append(_kv("Git SHA", short_sha))
-    lines.append(_kv("Timesteps", f"{cfg.total_timesteps:,}"))
+    if steps_trained < cfg.total_timesteps:
+        lines.append(
+            _kv(
+                "Timesteps",
+                f"{steps_trained:,} of {cfg.total_timesteps:,} budget "
+                "(stopped early)",
+            )
+        )
+    else:
+        lines.append(_kv("Timesteps", f"{cfg.total_timesteps:,}"))
     lines.append(_kv("Duration", duration_str))
     lines.append(_kv("Throughput", f"{throughput_fps} FPS"))
     lines.append(
@@ -468,6 +486,18 @@ def write_run_summary(
                     f"{best_mean:.3f} +/- {best_std:.3f} (at {best_step:,} steps)",
                 )
             )
+            # Make post-best collapse impossible to miss: the first
+            # real WallBall run ended 7 points below its best and the
+            # operator had to diff two lines to notice. Flag a drop
+            # bigger than 2 eval-stds AND 20% of the best mean.
+            delta = final_mean_reward - best_mean
+            regressed = delta < -max(2 * best_std, 0.2 * abs(best_mean))
+            note = (
+                "  <-- policy regressed after best; deploy best_model.zip"
+                if regressed
+                else ""
+            )
+            lines.append(_kv("Final vs best", f"{delta:+.3f}{note}"))
 
     if train_rewards:
         last_n = min(100, len(train_rewards))

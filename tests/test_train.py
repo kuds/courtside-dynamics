@@ -153,6 +153,47 @@ def test_verbose_in_model_kwargs_does_not_collide(env, tmp_path):
     assert model.verbose == 1
 
 
+def test_early_stop_patience_cuts_training_short(tmp_path):
+    """With ``early_stop_patience`` set and a flat eval reward (BallBalance
+    caps at +1/step), training must stop well before the full budget --
+    and the summary must record the shortfall. Regression target: the
+    first WallBall run trained 3.8M steps past its best checkpoint."""
+    import os
+
+    from courtside_dynamics.envs import BallBalanceEnv
+    from courtside_dynamics.training import TrainConfig, train
+
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=40),
+        algo="SAC",
+        total_timesteps=6_000,
+        log_dir=str(tmp_path),
+        n_envs=1,
+        seed=0,
+        eval_freq=200,
+        early_stop_patience=1,  # warm-up 1 eval + 1 non-improving eval
+        checkpoint_freq=0,
+        video_freq=0,
+        record_video=False,
+        info_dict_eval=False,
+        normalize_obs=False,
+        n_eval_episodes=1,
+        model_kwargs={"learning_starts": 16, "buffer_size": 500},
+    )
+    model = train(cfg)
+    assert model.num_timesteps < cfg.total_timesteps, (
+        f"early stop never fired: trained {model.num_timesteps} of "
+        f"{cfg.total_timesteps}"
+    )
+    summary = open(os.path.join(str(tmp_path), "stage_summary.txt")).read()
+    assert "stopped early" in summary
+    # The knob is part of the run's provenance snapshot.
+    import json
+
+    config = json.load(open(os.path.join(str(tmp_path), "config.json")))
+    assert config["train_config"]["early_stop_patience"] == 1
+
+
 def test_csv_logger_survives_learn(tmp_path):
     """The logger configured in train() must persist across model.learn so
     progress.csv is actually written -- SB3 only resets the logger when it
