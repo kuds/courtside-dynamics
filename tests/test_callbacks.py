@@ -407,3 +407,71 @@ def test_info_dict_eval_success_rate_omitted_when_key_absent(tmp_path):
     eval_env.close()
 
     assert "eval_info/success_rate" not in cb.model.logger.records
+
+
+def test_info_dict_eval_compact_schema_and_episode_distribution(tmp_path):
+    """Allowlisted metrics stay compact and report rally distributions."""
+    import gymnasium as gym
+    from gymnasium import spaces
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    class _OneStepMetricEnv(gym.Env):
+        metadata = {"render_modes": []}
+
+        def __init__(self) -> None:
+            self.action_space = spaces.Box(-1.0, 1.0, (1,), dtype=np.float32)
+            self.observation_space = spaces.Box(
+                -1.0, 1.0, (1,), dtype=np.float32
+            )
+            self.episode_index = -1
+
+        def reset(self, *, seed=None, options=None):
+            super().reset(seed=seed)
+            self.episode_index = (self.episode_index + 1) % 4
+            return np.zeros(1, dtype=np.float32), {}
+
+        def step(self, action):
+            del action
+            rally_count = (0, 1, 3, 4)[self.episode_index]
+            info = {
+                "rally_count": rally_count,
+                "term_ball_net": self.episode_index in {0, 2},
+                "debug_contact_peak": 999.0,
+            }
+            return np.zeros(1, dtype=np.float32), 0.0, True, False, info
+
+    eval_env = make_vec_env(_OneStepMetricEnv, n_envs=1)
+    cb = InfoDictEvalCallback(
+        eval_env=eval_env,
+        n_eval_episodes=4,
+        eval_freq=1,
+        info_keys=("rally_count",),
+        terminal_info_keys=("term_ball_net",),
+        episode_distribution_keys=("rally_count",),
+        csv_path=str(tmp_path / "eval_info.csv"),
+    )
+    cb.model = _FakeModel(action_dim=1)
+    cb.n_calls = cb.eval_freq
+    cb.num_timesteps = cb.eval_freq
+    cb._on_step()
+    eval_env.close()
+
+    tb = cb.model.logger.records
+    assert tb["eval_info/term_ball_net_ep_mean"] == pytest.approx(0.5)
+    assert tb["eval_info/rally_count_ep_min"] == 0.0
+    assert tb["eval_info/rally_count_ep_p50"] == pytest.approx(2.0)
+    assert tb["eval_info/rally_count_ep_p90"] == pytest.approx(3.7)
+    assert tb["eval_info/rally_count_ep_max"] == 4.0
+    assert not any("debug_contact_peak" in key for key in tb)
+    assert "eval_info/term_ball_net_mean" not in tb
+    assert "eval_info/term_ball_net_max" not in tb
+    assert "eval_info/term_ball_net_final" not in tb
+
+    with open(tmp_path / "eval_info.csv") as f:
+        rows = list(csv.DictReader(f))
+    metric_names = {row["metric"] for row in rows}
+    assert "rally_count_ep_p50" in metric_names
+    assert "term_ball_net_ep_mean" in metric_names
+    assert not any("debug_contact_peak" in name for name in metric_names)

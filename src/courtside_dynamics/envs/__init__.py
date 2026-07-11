@@ -6,6 +6,15 @@ the registration order in :mod:`courtside_dynamics`.
 
 from courtside_dynamics.envs.ball_balance import BallBalanceEnv
 from courtside_dynamics.envs.ball_bounce import BallBounceEnv
+from courtside_dynamics.envs.humanoid_tennis import (
+    HUMANOID_TENNIS_ACTION_NAMES,
+    HUMANOID_TENNIS_OBSERVATION_LAYOUT,
+    HUMANOID_TENNIS_OBSERVATION_NAMES,
+    CentralizedObservationLayout,
+    HumanoidTennisCoopEnv,
+    TennisRewardConfig,
+    TennisServeConfig,
+)
 from courtside_dynamics.envs.robot_models import (
     ROBOT_MODELS,
     SUPPORTED_ROBOT_MODELS,
@@ -14,15 +23,42 @@ from courtside_dynamics.envs.robot_models import (
     get_robot_model_spec,
     initialize_humanoid_tennis_home,
 )
+from courtside_dynamics.envs.tennis_rules import (
+    CourtSide,
+    RallyEvent,
+    RallyEventKind,
+    RallyPhase,
+    RallyRules,
+    RallySnapshot,
+    RallyStateMachine,
+    RallyTransition,
+    TerminationReason,
+)
 from courtside_dynamics.envs.wall_ball import WallBallEnv
 
 __all__ = [
     "BallBalanceEnv",
     "BallBounceEnv",
+    "CourtSide",
+    "CentralizedObservationLayout",
+    "HUMANOID_TENNIS_ACTION_NAMES",
+    "HUMANOID_TENNIS_OBSERVATION_LAYOUT",
+    "HUMANOID_TENNIS_OBSERVATION_NAMES",
+    "HumanoidTennisCoopEnv",
     "ROBOT_MODELS",
+    "RallyEvent",
+    "RallyEventKind",
+    "RallyPhase",
+    "RallyRules",
+    "RallySnapshot",
+    "RallyStateMachine",
+    "RallyTransition",
     "RobotModelSpec",
     "SUPPORTED_ROBOT_MODELS",
     "UNITREE_G1_ACTION_LAYOUT",
+    "TerminationReason",
+    "TennisRewardConfig",
+    "TennisServeConfig",
     "WallBallEnv",
     "get_robot_model_spec",
     "initialize_humanoid_tennis_home",

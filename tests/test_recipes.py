@@ -113,3 +113,63 @@ def test_ball_bounce_info_row_matches_header(tmp_path):
         assert len(row) == len(list(cfg.csv_header))
     finally:
         env.close()
+
+
+def test_humanoid_tennis_smoke_recipe_has_compact_recording_schema(tmp_path):
+    """Phase 3 records rally diagnostics without flattening every rule key."""
+    import numpy as np
+
+    from courtside_dynamics.callbacks._info import _scalar_info_keys
+    from courtside_dynamics.callbacks.video_record import _flatten_row
+
+    recipe_name = "HumanoidTennisCoopSmoke"
+    recipe = RECIPES[recipe_name]
+    cfg = build_train_config(recipe_name, log_dir=str(tmp_path))
+
+    assert "smoke" in recipe.description.lower()
+    assert "not a full-tennis training preset" in recipe.description.lower()
+    assert cfg.n_envs == 1
+    assert cfg.total_timesteps == 10_000
+    assert cfg.success_key == "rally_target_reached"
+    assert cfg.phase_key == "rally_phase"
+    assert cfg.info_eval_keys == (
+        "rally_count",
+        "valid_return_rate",
+        "legal_hit_count",
+    )
+    assert cfg.info_eval_distribution_keys == ("rally_count",)
+    assert "term_ball_net" in cfg.info_eval_terminal_keys
+    assert "term_second_bounce" in cfg.info_eval_terminal_keys
+    assert "term_out_of_bounds" in cfg.info_eval_terminal_keys
+
+    assert cfg.csv_header is not None and cfg.info_row_fn is not None
+    header = list(cfg.csv_header)
+    assert len(header) < 30
+    assert header[-3:] == ["reward", "total_reward", "done"]
+    assert {
+        "initial_ball_x",
+        "initial_ball_y",
+        "initial_ball_z",
+        "initial_ball_vx",
+        "initial_ball_vy",
+        "initial_ball_vz",
+    } <= set(header)
+
+    env = cfg.env_fn()
+    try:
+        env.reset(seed=0)
+        _, reward, terminated, truncated, info = env.step(
+            np.zeros(env.action_space.shape, dtype=np.float32)
+        )
+        row = _flatten_row(
+            cfg.info_row_fn(
+                info,
+                float(reward),
+                float(reward),
+                bool(terminated or truncated),
+            )
+        )
+        assert len(row) == len(header)
+        assert len(_scalar_info_keys(info)) > len(header)
+    finally:
+        env.close()

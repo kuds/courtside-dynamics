@@ -8,7 +8,16 @@ fix that.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Any
+
 import numpy as np
+
+from courtside_dynamics.envs.humanoid_tennis import (
+    HUMANOID_TENNIS_OBSERVATION_LAYOUT,
+    HumanoidTennisCoopEnv,
+)
+from courtside_dynamics.envs.tennis_rules import CourtSide
 
 
 def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
@@ -58,3 +67,124 @@ def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
         dtype=np.float32,
     )
     return np.clip(raw, -1.0, 1.0)
+
+
+# The receiving G1's right shoulder is pre-positioned to -0.2 radians by the
+# reset-only oracle fixture.  Under HumanoidTennisCoopEnv's piecewise action
+# mapping, this normalized value keeps that raw target fixed: stand=0.2,
+# lower=-3.0892, so (-0.2 - 0.2) / (0.2 - -3.0892) = -0.12161012.
+_ORACLE_SHOULDER_ACTION = np.float32(-0.12161012)
+
+
+def humanoid_tennis_oracle_reset_options(
+    serving_side: CourtSide | int | str = CourtSide.A,
+) -> dict[str, Any]:
+    """Return a mirrored reset-only physical-return fixture.
+
+    The ball begins near the serving baseline and the receiving racket begins
+    in a reachable static pose.  Once :meth:`HumanoidTennisCoopEnv.step`
+    starts, the harness writes no qpos/qvel or body state: the racket strike,
+    rebound, net crossing, and landing are all MuJoCo contacts/dynamics.
+    """
+    side = HumanoidTennisCoopEnv._coerce_side(serving_side)
+    if side is CourtSide.A:
+        return {
+            "serve_side": "a",
+            "ball_position": (-11.35, -1.5, 1.3),
+            "ball_velocity": (50.0, 5.05, 1.43),
+            "joint_positions": {
+                "player_b_right_shoulder_pitch_joint": -0.2,
+            },
+        }
+    return {
+        "serve_side": "b",
+        "ball_position": (11.35, 1.5, 1.3),
+        "ball_velocity": (-50.0, -5.05, 1.43),
+        "joint_positions": {
+            "player_a_right_shoulder_pitch_joint": -0.2,
+        },
+    }
+
+
+def humanoid_tennis_oracle_action(obs: np.ndarray) -> np.ndarray:
+    """Hold the mirrored physical-return fixture using the central action.
+
+    This is a feasibility oracle, not a learned-tennis baseline.  It uses the
+    observed serving-side one-hot to hold the opposing G1's pre-positioned
+    right shoulder while all other controls remain at their standing targets.
+    """
+    observation = np.asarray(obs)
+    expected_shape = (HUMANOID_TENNIS_OBSERVATION_LAYOUT.total_size,)
+    if observation.shape != expected_shape:
+        raise ValueError(
+            f"humanoid-tennis observation must have shape {expected_shape}"
+        )
+    action = np.zeros(58, dtype=np.float32)
+    rally_start = HUMANOID_TENNIS_OBSERVATION_LAYOUT.rally_state.start
+    assert rally_start is not None
+    serving_side_a = observation[rally_start + 4] >= 0.5
+    action[51 if serving_side_a else 22] = _ORACLE_SHOULDER_ACTION
+    return action
+
+
+@dataclass(frozen=True, slots=True)
+class HumanoidTennisOracleResult:
+    """Compact outcome returned by :func:`run_humanoid_tennis_oracle`."""
+
+    serving_side: CourtSide
+    steps: int
+    total_reward: float
+    rally_count: int
+    terminated: bool
+    truncated: bool
+    event_kinds: tuple[str, ...]
+    final_info: dict[str, Any]
+
+
+def run_humanoid_tennis_oracle(
+    env: Any,
+    *,
+    serving_side: CourtSide | int | str = CourtSide.A,
+    seed: int = 0,
+    max_steps: int = 300,
+) -> HumanoidTennisOracleResult:
+    """Run one deterministic physical legal return without mid-rally writes."""
+    if max_steps < 1:
+        raise ValueError("max_steps must be at least one")
+    side = HumanoidTennisCoopEnv._coerce_side(serving_side)
+    observation, info = env.reset(
+        seed=seed,
+        options=humanoid_tennis_oracle_reset_options(side),
+    )
+    total_reward = 0.0
+    events: list[str] = []
+    terminated = False
+    truncated = False
+    steps = 0
+    for loop_step in range(1, max_steps + 1):
+        steps = loop_step
+        action = humanoid_tennis_oracle_action(observation)
+        observation, reward, terminated, truncated, info = env.step(action)
+        total_reward += float(reward)
+        events.extend(info["step_event_kinds"])
+        if info["rally_count"] >= 1 or terminated or truncated:
+            break
+    return HumanoidTennisOracleResult(
+        serving_side=side,
+        steps=steps,
+        total_reward=total_reward,
+        rally_count=int(info["rally_count"]),
+        terminated=bool(terminated),
+        truncated=bool(truncated),
+        event_kinds=tuple(events),
+        final_info=dict(info),
+    )
+
+
+__all__ = [
+    "HumanoidTennisOracleResult",
+    "humanoid_tennis_oracle_action",
+    "humanoid_tennis_oracle_reset_options",
+    "run_humanoid_tennis_oracle",
+    "wall_ball_oracle_action",
+]
