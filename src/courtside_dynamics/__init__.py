@@ -13,7 +13,18 @@ from gymnasium.envs.registration import register
 # + solref tuned to regulation-like restitution; racket reaches a
 # grounded ball). Task dynamics changed, so the env id bumped to
 # WallBall-v2 -- results are not comparable with v1 runs.
-__version__ = "0.2.0"
+# 0.3.0: WallBall enforces the wall-ball rally rules it was always meant
+# to have: the episode terminates on the second consecutive floor
+# bounce (with ``double_bounce_penalty``), touch events are filtered to
+# real ball contacts (a sagging paddle scraping the floor no longer
+# pays the paddle bonus, opens the wall gate, or resets the stall
+# clock), the stall cutoff runs from reset instead of arming only after
+# the first contact, and the obs gains ``floor_bounce_count`` (20->21
+# dims). Kept as WallBall-v2 because this realizes the env's intended
+# termination spec rather than changing it, but reward/episode-length
+# curves (and saved policies, due to the obs change) are not comparable
+# with 0.2.x runs.
+__version__ = "0.3.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance-v0")`` etc.

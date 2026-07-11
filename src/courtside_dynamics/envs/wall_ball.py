@@ -39,11 +39,33 @@ The reward is intentionally narrow:
   step when the ball leaves the play volume, so the agent is
   incentivised to keep the rally alive rather than letting the ball
   escape.
+- ``double_bounce_penalty`` subtracts a flat amount on the terminating
+  step when the rally dies via a second consecutive floor bounce, so
+  letting the ball drop is never a cheaper escape than hitting it out.
 
-Episodes also terminate early when the ball goes "dead": if no new
-paddle/wall rising-edge fires for ``stall_steps`` consecutive steps
-*after the first event*, the remaining timesteps would be wasted compute
-on a ball stuck rolling on the floor, so we cut the episode short.
+Episodes terminate early when the rally is over:
+
+- **Double floor bounce**: as in real wall ball, the ball may touch the
+  floor at most once between consecutive paddle/wall contacts; the
+  second consecutive floor bounce ends the episode immediately. Bounces
+  are detected at substep resolution as ball-floor contact onsets with
+  a pre-impact downward speed above ``floor_bounce_min_speed`` — the
+  speed gate debounces the contact chatter of a ball settling or
+  rolling on the floor, which would otherwise read as a rapid string
+  of "bounces".
+- **Out of bounds**: the ball left the play volume.
+- **Stall**: no paddle/wall rising edge for ``stall_steps`` consecutive
+  steps. This catches balls too slow to bounce (rolling along the
+  floor) and whiffed serves alike. The counter runs from reset;
+  ``stall_steps`` is far longer than the serve flight, so a normal
+  serve cannot trip it before the agent has had a chance to make
+  contact.
+
+Contact events are filtered to *ball* contacts: the raw touch sensors
+sum every contact on their site, so without the filter an unpowered
+paddle sagging until its face scrapes the floor reads as a paddle "hit"
+(paying the bonus, opening the wall +1 gate, and resetting the stall
+clock with the ball metres away).
 """
 from __future__ import annotations
 
@@ -58,7 +80,11 @@ from courtside_dynamics.envs._base import CourtsideMujocoEnv
 
 # Cartesian bounds for "ball is still in play". Outside these, the
 # episode terminates. Paddle starts near x=-2, wall sits at x=4, so
-# we leave a generous margin behind the paddle.
+# we leave a generous margin behind the paddle. The floor geom is a
+# MuJoCo plane, which collides as an infinite half-space (its size only
+# affects rendering), so the z bound cannot fire from ordinary play --
+# it is a guard against solver blow-ups that produce large-but-finite
+# states (NaN/inf ones are caught by the nonfinite-obs check instead).
 _BALL_MIN_X = -6.0
 _BALL_MAX_X = 5.0
 _BALL_MIN_Y = -5.5
@@ -79,6 +105,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         paddle_hit_bonus: float = 0.25,
         track_shaping_scale: float = 0.5,
         out_of_bounds_penalty: float = 1.0,
+        double_bounce_penalty: float = 1.0,
+        floor_bounce_min_speed: float = 0.5,
         stall_steps: int = 200,
         **kwargs: Any,
     ) -> None:
@@ -92,6 +120,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             paddle_hit_bonus=paddle_hit_bonus,
             track_shaping_scale=track_shaping_scale,
             out_of_bounds_penalty=out_of_bounds_penalty,
+            double_bounce_penalty=double_bounce_penalty,
+            floor_bounce_min_speed=floor_bounce_min_speed,
             stall_steps=stall_steps,
             **kwargs,
         )
@@ -103,6 +133,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.paddle_hit_bonus = float(paddle_hit_bonus)
         self.track_shaping_scale = float(track_shaping_scale)
         self.out_of_bounds_penalty = float(out_of_bounds_penalty)
+        self.double_bounce_penalty = float(double_bounce_penalty)
+        # Minimum pre-impact downward speed for a ball-floor contact
+        # onset to count as a bounce. A settling/rolling ball chatters
+        # through many near-zero-energy contact onsets that must not
+        # count toward the double-bounce rule.
+        self.floor_bounce_min_speed = float(floor_bounce_min_speed)
         self.stall_steps = int(stall_steps)
 
         # Runtime bookkeeping (reset in ``reset_model``).
@@ -112,7 +148,11 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._prev_wall_touch = 0.0
         self._prev_paddle_touch = 0.0
         self._steps_since_event = 0
-        self._first_event_seen = False
+        # Consecutive floor bounces with no paddle/wall contact between
+        # them (the wall-ball rally rule: the second one is a dead
+        # rally) and the per-episode total, for diagnostics.
+        self.floor_bounce_count = 0
+        self.floor_bounce_total = 0
         # Strict per-cycle gate: True iff a paddle hit has happened
         # since the most recent wall contact. Wall +1 fires only when
         # this is True at the moment of the wall edge.
@@ -129,31 +169,64 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._return_shaping_total: float = 0.0
 
         # Obs: ball pos(3) + ball vel(3) + paddle qpos/qvel(10) +
-        # paddle_hit_since_last_wall flag(1) + paddle_head→ball
-        # relative xyz(3) = 20. The flag exposes the wall-reward gate
-        # state: True iff the next wall contact will pay +1 (and,
-        # equivalently, that this cycle's paddle bonus is already
-        # consumed), which an MLP policy can't infer from raw state
-        # alone. The relative xyz spares the policy from learning the
-        # joint→world mapping by hand.
+        # paddle_hit_since_last_wall flag(1) + floor_bounce_count(1) +
+        # paddle_head→ball relative xyz(3) = 21. The flag exposes the
+        # wall-reward gate state: True iff the next wall contact will
+        # pay +1 (and, equivalently, that this cycle's paddle bonus is
+        # already consumed), which an MLP policy can't infer from raw
+        # state alone. floor_bounce_count exposes the double-bounce
+        # termination state — when it reads 1 the next floor bounce
+        # ends the episode, which is likewise not inferable from the
+        # ball's instantaneous position/velocity. The relative xyz
+        # spares the policy from learning the joint→world mapping by
+        # hand.
         CourtsideMujocoEnv.__init__(
             self,
             asset_path("wall_ball.xml"),
             episode_len=episode_len,
-            obs_dim=20,
+            obs_dim=21,
             **kwargs,
         )
 
         # Cache the ball's DOF offset so serve velocities don't depend on
         # a hard-coded index into qvel.
         self._ball_dofadr = int(self.model.joint("ball_x").dofadr[0])
+        # Geom ids for the contact-pair checks in
+        # _step_mujoco_simulation (floor-bounce detection and filtering
+        # touch events down to real ball contacts).
+        self._ball_geom_id = int(self.model.geom("ball_geom").id)
+        self._floor_geom_id = int(self.model.geom("floor").id)
+        self._paddle_geom_id = int(self.model.geom("paddle_face").id)
+        self._wall_geom_id = int(self.model.geom("wall_geom").id)
+        # Whether the ball was in floor contact on the previous substep,
+        # persisted across frames so a contact spanning a frame boundary
+        # isn't double-counted as a fresh bounce.
+        self._ball_on_floor = False
         # Peak touch-sensor readings across the substeps of the most
         # recent frame (see _step_mujoco_simulation).
         self._substep_wall_touch = 0.0
         self._substep_paddle_touch = 0.0
 
+    def _ball_contacts(self) -> tuple[bool, bool, bool]:
+        """Return (floor, paddle, wall) flags for the ball's active contacts."""
+        ncon = int(self.data.ncon)
+        if ncon == 0:
+            return False, False, False
+        geom1 = self.data.contact.geom1[:ncon]
+        geom2 = self.data.contact.geom2[:ncon]
+        ball = self._ball_geom_id
+        involves_ball = (geom1 == ball) | (geom2 == ball)
+        if not involves_ball.any():
+            return False, False, False
+        other = np.where(geom1 == ball, geom2, geom1)[involves_ball]
+        return (
+            bool((other == self._floor_geom_id).any()),
+            bool((other == self._paddle_geom_id).any()),
+            bool((other == self._wall_geom_id).any()),
+        )
+
     def _step_mujoco_simulation(self, ctrl, n_frames):
-        """Step the physics one substep at a time, tracking touch peaks.
+        """Step the physics one substep at a time, tracking contact events.
 
         The ball's contact with the paddle/wall is stiff and brief --
         with realistic restitution it can begin and end entirely inside
@@ -163,18 +236,49 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         would silently fail to open on a real paddle contact. Sampling
         the two touch sensors at every substep and keeping the peak
         makes edge detection immune to contact duration.
+
+        Two refinements happen here, at substep resolution, because both
+        are invisible at frame resolution:
+
+        - Touch peaks are sampled only in substeps where the ball is
+          actually touching the corresponding geom. The raw sensors sum
+          every contact on their site, so an unpowered paddle sagging
+          until its face scraped the FLOOR used to register as a paddle
+          "hit" with the ball metres away.
+        - Floor bounces are detected as ball-floor contact onsets whose
+          pre-impact downward speed exceeds ``floor_bounce_min_speed``
+          (the debounce for settling/rolling chatter). Any paddle/wall
+          contact resets the consecutive-bounce count, mirroring the
+          wall-ball rally rule; the reset runs after bounce detection so
+          a racket contact in the same substep as a floor touch absolves
+          the bounce rather than terminating on a scooped pickup.
         """
         self.data.ctrl[:] = ctrl
         wall_peak = 0.0
         paddle_peak = 0.0
         for _ in range(n_frames):
+            ball_vz = float(self.data.qvel[self._ball_dofadr + 2])
             mujoco.mj_step(self.model, self.data)
-            wall_peak = max(
-                wall_peak, float(self.data.sensor("wall_touch").data[0])
-            )
-            paddle_peak = max(
-                paddle_peak, float(self.data.sensor("paddle_touch").data[0])
-            )
+            on_floor, on_paddle, on_wall = self._ball_contacts()
+            if on_wall:
+                wall_peak = max(
+                    wall_peak, float(self.data.sensor("wall_touch").data[0])
+                )
+            if on_paddle:
+                paddle_peak = max(
+                    paddle_peak,
+                    float(self.data.sensor("paddle_touch").data[0]),
+                )
+            if (
+                on_floor
+                and not self._ball_on_floor
+                and ball_vz < -self.floor_bounce_min_speed
+            ):
+                self.floor_bounce_count += 1
+                self.floor_bounce_total += 1
+            self._ball_on_floor = on_floor
+            if on_paddle or on_wall:
+                self.floor_bounce_count = 0
         self._substep_wall_touch = wall_peak
         self._substep_paddle_touch = paddle_peak
         # Matches gymnasium's MujocoEnv: force-related quantities are
@@ -203,11 +307,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # Per-component reward breakdown, surfaced in ``info`` so training
         # diagnostics can tell whether the agent is completing rallies
         # (rew_wall) or just farming the dense shaping term (rew_shaping).
-        # The four components sum exactly to ``reward``.
+        # The five components sum exactly to ``reward``.
         rew_wall = 0.0
         rew_paddle = 0.0
         rew_shaping = 0.0
         rew_oob = 0.0
+        rew_double_bounce = 0.0
         event_this_step = False
 
         if paddle_edge:
@@ -269,7 +374,6 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
 
         if event_this_step:
             self._steps_since_event = 0
-            self._first_event_seen = True
         else:
             self._steps_since_event += 1
 
@@ -286,16 +390,29 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             reward -= self.out_of_bounds_penalty
             rew_oob -= self.out_of_bounds_penalty
 
-        # Stall: cut the episode if the ball has gone dead. Only counts
-        # *after* the first event has fired, otherwise a slow serve
-        # flight would spuriously trip it before the agent has had a
-        # chance to make contact.
-        stalled = (
-            self._first_event_seen
-            and self._steps_since_event >= self.stall_steps
-        )
+        # Double bounce: the rally is dead once the ball has touched the
+        # floor twice with no paddle/wall contact between (the counter
+        # is maintained at substep resolution in
+        # _step_mujoco_simulation). Penalized like OOB so neither
+        # failure mode is a cheaper escape than the other; skipped when
+        # OOB fires on the same step so one failure pays one penalty.
+        double_bounce = self.floor_bounce_count >= 2
+        if double_bounce and not ball_out_of_bounds:
+            reward -= self.double_bounce_penalty
+            rew_double_bounce -= self.double_bounce_penalty
+
+        # Stall: cut the episode if the ball has gone dead (e.g. rolling
+        # along the floor too slowly for a debounced floor bounce to
+        # register). The counter runs from reset: ``stall_steps`` is far
+        # longer than the serve flight, so a normal serve can't trip it
+        # before the agent has had a chance to make contact, and a
+        # whiffed serve that stays in bounds is still cut off instead of
+        # burning the whole episode.
+        stalled = self._steps_since_event >= self.stall_steps
         obs_nonfinite = not bool(np.isfinite(obs).all())
-        terminated = bool(obs_nonfinite or ball_out_of_bounds or stalled)
+        terminated = bool(
+            obs_nonfinite or ball_out_of_bounds or double_bounce or stalled
+        )
         truncated = self.step_number >= self.episode_len
 
         # Mutually-exclusive termination cause, in priority order, so the
@@ -304,7 +421,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # semantics: termination wins over truncation when both fire).
         term_nonfinite = obs_nonfinite
         term_oob = ball_out_of_bounds and not term_nonfinite
-        term_stall = stalled and not (term_nonfinite or ball_out_of_bounds)
+        term_double_bounce = double_bounce and not (
+            term_nonfinite or ball_out_of_bounds
+        )
+        term_stall = stalled and not (
+            term_nonfinite or ball_out_of_bounds or double_bounce
+        )
         term_timeout = truncated and not terminated
 
         # PBRS terminal correction: if the episode ends mid-return, the
@@ -323,9 +445,14 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             # Backward-compat keys consumed by callbacks/CSV writers.
             "sensor_data": wall_touch,
             "bounce_count": self.bounce_count,
-            # Diagnostic counters / sensors.
+            # Diagnostic counters / sensors. ``floor_bounce_count`` is
+            # the consecutive count driving the double-bounce rule (it
+            # resets on every paddle/wall contact); ``floor_bounce_total``
+            # accumulates over the whole episode.
             "wall_contact_count": self.wall_contact_count,
             "paddle_hit_count": self.paddle_hit_count,
+            "floor_bounce_count": self.floor_bounce_count,
+            "floor_bounce_total": self.floor_bounce_total,
             "paddle_touch": paddle_touch,
             "wall_touch": wall_touch,
             "stalled": bool(stalled),
@@ -334,11 +461,13 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "rew_paddle": rew_paddle,
             "rew_shaping": rew_shaping,
             "rew_oob": rew_oob,
+            "rew_double_bounce": rew_double_bounce,
             # Termination-cause flags. Mutually exclusive: at most one is
             # True (exactly one on the terminating step), so per-episode
-            # aggregation turns these into a clean OOB / stall / timeout /
-            # nonfinite breakdown that sums to <= 1.
+            # aggregation turns these into a clean OOB / double-bounce /
+            # stall / timeout / nonfinite breakdown that sums to <= 1.
             "term_oob": bool(term_oob),
+            "term_double_bounce": bool(term_double_bounce),
             "term_stall": bool(term_stall),
             "term_timeout": bool(term_timeout),
             "term_nonfinite": bool(term_nonfinite),
@@ -355,7 +484,9 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._substep_wall_touch = 0.0
         self._substep_paddle_touch = 0.0
         self._steps_since_event = 0
-        self._first_event_seen = False
+        self.floor_bounce_count = 0
+        self.floor_bounce_total = 0
+        self._ball_on_floor = False
         self._paddle_hit_since_last_wall = False
         # Open the PBRS shaping window from t=0 as if a virtual wall
         # hit had just happened. Without this the serve flight earns
@@ -404,6 +535,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         "paddle_yaw_qpos", "paddle_yaw_qvel",
         "paddle_pitch_qpos", "paddle_pitch_qvel",
         "paddle_hit_since_last_wall",
+        "floor_bounce_count",
         "paddle_to_ball_dx", "paddle_to_ball_dy", "paddle_to_ball_dz",
     )
 
@@ -418,6 +550,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             paddle_head_pos = np.array(self.data.body("paddle_head").xpos)
         rel = ball_pos - paddle_head_pos
         gate_open = np.array([float(self._paddle_hit_since_last_wall)])
+        floor_bounces = np.array([float(self.floor_bounce_count)])
         return np.concatenate(
             (
                 ball_pos,
@@ -427,6 +560,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                     "paddle_yaw", "paddle_pitch",
                 ),
                 gate_open,
+                floor_bounces,
                 rel,
             ),
             axis=0,
