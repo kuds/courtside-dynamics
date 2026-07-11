@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from gymnasium.envs.registration import register
 
-__version__ = "0.1.1"
+# 0.2.0: WallBall contact physics made realistic (ball contact priority
+# + solref tuned to regulation-like restitution; racket reaches a
+# grounded ball). Task dynamics changed, so the env id bumped to
+# WallBall-v2 -- results are not comparable with v1 runs.
+__version__ = "0.2.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance-v0")`` etc.
@@ -27,8 +31,12 @@ register(
     max_episode_steps=1000,
 )
 
+# v2: realistic ball restitution (v1's ball was nearly perfectly
+# inelastic -- it died on the first wall contact, capping every rally
+# at one exchange) and a slide_z range that can address a grounded
+# ball. Results are not comparable with v1.
 register(
-    id="CourtsideDynamics/WallBall-v1",
+    id="CourtsideDynamics/WallBall-v2",
     entry_point="courtside_dynamics.envs.wall_ball:WallBallEnv",
     max_episode_steps=750,
 )

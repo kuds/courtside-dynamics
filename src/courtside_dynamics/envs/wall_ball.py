@@ -49,6 +49,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import mujoco
 import numpy as np
 from gymnasium import utils
 
@@ -146,13 +147,46 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # Cache the ball's DOF offset so serve velocities don't depend on
         # a hard-coded index into qvel.
         self._ball_dofadr = int(self.model.joint("ball_x").dofadr[0])
+        # Peak touch-sensor readings across the substeps of the most
+        # recent frame (see _step_mujoco_simulation).
+        self._substep_wall_touch = 0.0
+        self._substep_paddle_touch = 0.0
+
+    def _step_mujoco_simulation(self, ctrl, n_frames):
+        """Step the physics one substep at a time, tracking touch peaks.
+
+        The ball's contact with the paddle/wall is stiff and brief --
+        with realistic restitution it can begin and end entirely inside
+        one ``frame_skip`` window (5 x 2 ms). Gymnasium's default runs
+        all substeps in one ``mj_step`` call and the env then reads the
+        sensors once, so such a hit would be invisible: the reward gate
+        would silently fail to open on a real paddle contact. Sampling
+        the two touch sensors at every substep and keeping the peak
+        makes edge detection immune to contact duration.
+        """
+        self.data.ctrl[:] = ctrl
+        wall_peak = 0.0
+        paddle_peak = 0.0
+        for _ in range(n_frames):
+            mujoco.mj_step(self.model, self.data)
+            wall_peak = max(
+                wall_peak, float(self.data.sensor("wall_touch").data[0])
+            )
+            paddle_peak = max(
+                paddle_peak, float(self.data.sensor("paddle_touch").data[0])
+            )
+        self._substep_wall_touch = wall_peak
+        self._substep_paddle_touch = paddle_peak
+        # Matches gymnasium's MujocoEnv: force-related quantities are
+        # only computed on demand after stepping.
+        mujoco.mj_rnePostConstraint(self.model, self.data)
 
     def step(self, a):
         self.do_simulation(a, self.frame_skip)
         self.step_number += 1
 
-        wall_touch = float(self.data.sensor("wall_touch").data[0])
-        paddle_touch = float(self.data.sensor("paddle_touch").data[0])
+        wall_touch = self._substep_wall_touch
+        paddle_touch = self._substep_paddle_touch
 
         wall_edge = (
             wall_touch > self.min_force
@@ -318,6 +352,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.paddle_hit_count = 0
         self._prev_wall_touch = 0.0
         self._prev_paddle_touch = 0.0
+        self._substep_wall_touch = 0.0
+        self._substep_paddle_touch = 0.0
         self._steps_since_event = 0
         self._first_event_seen = False
         self._paddle_hit_since_last_wall = False
@@ -331,7 +367,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         qpos, qvel = self._noisy_init_state()
 
         # Serve: throw the ball *toward* the paddle (negative x) with a
-        # small upward lob and mild lateral jitter so the agent can't
+        # small upward lob and lateral jitter so the agent can't
         # memorize a single trajectory.
         vx = -(
             self.serve_speed
@@ -339,7 +375,18 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 -self.serve_speed_jitter, self.serve_speed_jitter
             )
         )
-        vy = self.np_random.uniform(-0.5, 0.5)
+        # The lateral component is always off-centre (|vy| in
+        # [0.8, 1.8], random sign) so the serve can never intersect a
+        # racket parked at its reset pose. With realistic ball
+        # restitution a straight serve rebounds off a *static* racket,
+        # paying the paddle bonus (and sometimes a full rally) for
+        # doing nothing -- the no-op baseline must stay <= 0 for the
+        # gated reward to mean anything. The minimum clears the parked
+        # face (half-width 0.2 + ball radius 0.07) across the whole
+        # serve-speed jitter range.
+        vy = self.np_random.uniform(0.8, 1.8)
+        if self.np_random.random() < 0.5:
+            vy = -vy
         vz = self.serve_lob
         qvel[self._ball_dofadr + 0] = vx
         qvel[self._ball_dofadr + 1] = vy

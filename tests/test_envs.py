@@ -216,7 +216,7 @@ def test_gymnasium_make_ids():
     for env_id in (
         "CourtsideDynamics/BallBalance-v0",
         "CourtsideDynamics/BallBounce-v0",
-        "CourtsideDynamics/WallBall-v1",
+        "CourtsideDynamics/WallBall-v2",
     ):
         env = gymnasium.make(env_id)
         try:
@@ -251,6 +251,101 @@ def test_asset_path_returns_existing_files():
     for name in ("ball_balance.xml", "ball_bounce.xml", "wall_ball.xml"):
         p = Path(asset_path(name))
         assert p.is_file(), f"Missing asset: {name}"
+
+
+class TestWallBallContactPhysics:
+    """Pin down the ball's contact restitution with physical measurements.
+
+    In the v1 model, MuJoCo's contact mixing averaged the ball's bouncy
+    ``solref`` with the wall/floor critically-damped defaults: measured
+    restitution was 0.13 off the floor and 0.00 off the wall, so the
+    ball died at the first wall contact and rallies beyond one exchange
+    were physically impossible (every training run capped at
+    ``bounce_count`` ~1). The ball geom now carries ``priority="1"`` and
+    a ``solref`` tuned to a regulation-like bounce; these drop/impact
+    tests keep contact deadness from silently returning.
+    """
+
+    @staticmethod
+    def _fresh_model():
+        import mujoco
+
+        from courtside_dynamics.assets import asset_path
+
+        model = mujoco.MjModel.from_xml_path(asset_path("wall_ball.xml"))
+        return mujoco, model, mujoco.MjData(model)
+
+    def test_floor_restitution_is_tennis_like(self):
+        """A 1 m drop must rebound like a real ball on hard court
+        (e ~ 0.73). Below the window the rally dies on the floor;
+        above it the soft contact is injecting energy."""
+        mujoco, model, data = self._fresh_model()
+        qadr = int(model.joint("ball_x").qposadr[0])
+        data.qpos[qadr : qadr + 3] = [0.0, 0.0, 1.07]  # 1 m above floor
+
+        prev_z, falling, apex = 1.07, True, None
+        for _ in range(3000):
+            mujoco.mj_step(model, data)
+            z = float(data.qpos[qadr + 2])
+            if falling and z > prev_z + 1e-6:
+                falling = False
+            if not falling and z < prev_z:
+                apex = prev_z - 0.07
+                break
+            prev_z = z
+        assert apex is not None, "ball never rebounded off the floor"
+        e = np.sqrt(apex / 1.0)
+        assert 0.55 <= e <= 0.9, (
+            f"floor restitution {e:.2f} outside tennis-like window "
+            "(v1 regression measured 0.13)"
+        )
+
+    def test_wall_returns_the_ball(self):
+        """An 8 m/s wall impact must come back with meaningful speed.
+        The v1 wall measured e=0.00: the ball dropped dead at its base
+        and a second exchange could never happen."""
+        mujoco, model, data = self._fresh_model()
+        qadr = int(model.joint("ball_x").qposadr[0])
+        dadr = int(model.joint("ball_x").dofadr[0])
+        data.qpos[qadr : qadr + 3] = [2.0, 0.0, 1.5]
+        data.qvel[dadr] = 8.0  # toward the wall
+
+        v_out = None
+        for _ in range(3000):
+            mujoco.mj_step(model, data)
+            if data.qvel[dadr] < -1e-3:
+                v_out = -float(data.qvel[dadr])
+                break
+        assert v_out is not None, "ball never came back off the wall"
+        assert v_out / 8.0 >= 0.3, (
+            f"wall restitution {v_out / 8.0:.2f} too dead for rallies "
+            "(v1 regression measured 0.00)"
+        )
+
+    def test_racket_can_address_grounded_ball(self):
+        """At the bottom of its z range the face's lower edge must reach
+        below a rolling ball's centre (z=0.07). At the old range the
+        face bottomed out at z=0.15, making a grounded ball unreachable
+        and 'rolling' an absorbing state."""
+        import mujoco
+
+        env = WallBallEnv()
+        try:
+            env.reset(seed=0)
+            zadr = int(env.model.joint("paddle_slide_z").qposadr[0])
+            lo = float(env.model.joint("paddle_slide_z").range[0])
+            env.data.qpos[zadr] = lo
+            mujoco.mj_forward(env.model, env.data)
+            face_bottom = float(env.data.body("paddle_head").xpos[2]) - 0.25
+            assert face_bottom <= 0.07, (
+                f"lowest face edge z={face_bottom:.2f} cannot reach a "
+                "rolling ball (centre z=0.07)"
+            )
+            assert face_bottom >= 0.0, (
+                "face bottom dips below the floor at min slide_z"
+            )
+        finally:
+            env.close()
 
 
 class TestWallBallRewardGate:

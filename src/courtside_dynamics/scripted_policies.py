@@ -42,7 +42,7 @@ def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
     desired_face_x = ball_x - 0.05
     target_x = float(np.clip(desired_face_x + 1.7, -3.0, 2.0))
     target_y = float(np.clip(ball_y, -3.0, 3.0))
-    target_z = float(np.clip(ball_z - 1.2, -0.8, 2.0))
+    target_z = float(np.clip(ball_z - 1.2, -0.9, 2.0))
     target_yaw = 0.0
     target_pitch = 0.0
 
