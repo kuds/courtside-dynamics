@@ -26,6 +26,10 @@ dependencies = [
     "mujoco>=3.3",
     "gymnasium>=1.0",
     "numpy>=1.26",
+    # Gymnasium imports these from its MuJoCo rendering module when the env
+    # classes are imported, but does not declare them as core dependencies.
+    "imageio",
+    "packaging",
 ]
 
 [project.optional-dependencies]
@@ -35,10 +39,6 @@ train = [
     "tensorboard",
     "pandas",
     "matplotlib",
-    # gymnasium.envs.mujoco imports imageio during rendering but doesn't
-    # declare it as a dep; pin it here so `pip install .[train]` is
-    # self-sufficient.
-    "imageio",
     # VecVideoRecorder requires moviepy to encode MP4s. Without it,
     # VideoRecordCallback fails with DependencyNotInstalled the first
     # time it fires.
@@ -74,7 +74,13 @@ where = ["src"]
 version = { attr = "courtside_dynamics.__version__" }
 
 [tool.setuptools.package-data]
-"courtside_dynamics.assets" = ["*.xml"]
+"courtside_dynamics.assets" = [
+    "*.xml",
+    "*.md",
+    "robots/*.xml",
+    "third_party/unitree_g1/*",
+    "third_party/unitree_g1/assets/*.STL",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

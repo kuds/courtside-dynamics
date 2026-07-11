@@ -1,0 +1,38 @@
+<mujoco model="tennis_racket">
+    <!-- Robot-independent rigid racket prefab. The body frame begins at the
+         butt of the grip with +z running toward the racket tip and +x normal
+         to the stringbed. A later robot adapter supplies only the wrist mount
+         transform; it must not change this physical definition silently. -->
+    <compiler angle="degree" coordinate="local" inertiafromgeom="false" />
+
+    <default>
+        <geom contype="8" conaffinity="7" condim="3" density="0" friction="0.45 0.01 0.001" margin="0.001" />
+        <default class="racket_frame">
+            <geom type="capsule" size="0.012" rgba="0.15 0.17 0.2 1" />
+        </default>
+    </default>
+
+    <worldbody>
+        <body name="tennis_racket">
+            <!-- Nominal unstrung-racket-scale mass and inertia. Collision
+                 geometry is massless so curriculum contact forgiveness can
+                 change its dimensions without changing wrist inertia. -->
+            <inertial pos="0 0 0.36" mass="0.30" diaginertia="0.0105 0.012 0.0018" />
+
+            <geom name="racket_grip" class="racket_frame" fromto="0 0 0.018 0 0 0.25" size="0.018" rgba="0.08 0.08 0.09 1" />
+            <geom name="racket_throat_negative" class="racket_frame" fromto="0 -0.014 0.23 0 -0.09 0.33" />
+            <geom name="racket_throat_positive" class="racket_frame" fromto="0 0.014 0.23 0 0.09 0.33" />
+            <geom name="racket_frame_negative" class="racket_frame" fromto="0 -0.14 0.32 0 -0.14 0.66" />
+            <geom name="racket_frame_positive" class="racket_frame" fromto="0 0.14 0.32 0 0.14 0.66" />
+            <geom name="racket_frame_bottom" class="racket_frame" fromto="0 -0.12 0.31 0 0.12 0.31" />
+            <geom name="racket_frame_top" class="racket_frame" fromto="0 -0.12 0.67 0 0.12 0.67" />
+
+            <!-- The thin physical stringbed is deliberately explicit rather
+                 than a visual-only mesh or proximity trigger. -->
+            <geom name="racket_stringbed" type="ellipsoid" pos="0 0 0.49" size="0.006 0.13 0.17" priority="2" margin="0.003" friction="0.35 0.005 0.0001" solref="0.008 0.15" rgba="0.88 0.9 0.72 0.42" />
+            <site name="racket_grip_mount" group="4" pos="0 0 0" size="0.01" rgba="0.2 0.8 1 0.5" />
+            <site name="racket_center" group="4" pos="0 0 0.49" size="0.012" rgba="1 0.2 0.2 0.55" />
+            <site name="racket_tip" group="4" pos="0 0 0.682" size="0.008" rgba="1 0.2 0.2 0.35" />
+        </body>
+    </worldbody>
+</mujoco>
