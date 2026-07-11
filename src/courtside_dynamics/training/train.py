@@ -30,6 +30,7 @@ from stable_baselines3.common.callbacks import (
     CallbackList,
     CheckpointCallback,
     EvalCallback,
+    StopTrainingOnNoModelImprovement,
 )
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.env_util import make_vec_env
@@ -127,6 +128,16 @@ class TrainConfig:
         (or use ``record_video=False``).
     n_eval_episodes:
         Episodes per ``EvalCallback`` evaluation.
+    early_stop_patience:
+        When set to N, stop training after N consecutive evaluations
+        without a new best mean reward (SB3's
+        ``StopTrainingOnNoModelImprovement`` wired into
+        ``EvalCallback``). The same count is used as the warm-up
+        (``min_evals``), so a run gets at least 2N evaluations before
+        it can stop. ``None`` (default) trains for the full budget.
+        Motivation: the first real WallBall run kept training for 10+
+        GPU-hours after its best checkpoint while the policy collapsed;
+        the best model was long saved and everything after was waste.
     video_length:
         Max steps per recorded rollout from ``VideoRecordCallback``.
     record_video:
@@ -184,6 +195,7 @@ class TrainConfig:
     checkpoint_freq: int = 250_000
     video_freq: int = 250_000
     n_eval_episodes: int = 30
+    early_stop_patience: int | None = None
     video_length: int = 10_000
     record_video: bool = True
     normalize_obs: bool = True
@@ -343,6 +355,18 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             os.path.join(cfg.log_dir, "best_vec_normalize.pkl")
         )
 
+    after_eval: BaseCallback | None = None
+    if cfg.early_stop_patience is not None and cfg.early_stop_patience > 0:
+        # min_evals = patience gives the run a warm-up of the same
+        # length as the patience window, so at least 2N evaluations
+        # happen before the stop can fire. verbose=1 so the stop
+        # reason is visible in the Colab cell output.
+        after_eval = StopTrainingOnNoModelImprovement(
+            max_no_improvement_evals=cfg.early_stop_patience,
+            min_evals=cfg.early_stop_patience,
+            verbose=1,
+        )
+
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=cfg.log_dir,
@@ -352,6 +376,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         n_eval_episodes=cfg.n_eval_episodes,
         eval_freq=_calls(cfg.eval_freq),
         callback_on_new_best=on_new_best,
+        callback_after_eval=after_eval,
     )
 
     callbacks: list[BaseCallback] = [eval_callback]
@@ -474,6 +499,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             duration_seconds=time.monotonic() - start_time,
             device=str(getattr(model, "device", "")) or None,
             status="interrupted" if interrupted else "completed",
+            actual_timesteps=int(model.num_timesteps),
         )
     finally:
         train_env.close()

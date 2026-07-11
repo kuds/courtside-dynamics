@@ -164,6 +164,17 @@ def plot_learning_curve(
     eval_npz = os.path.join(log_dir, "evaluations.npz")
     eval_data = np.load(eval_npz) if os.path.exists(eval_npz) else None
 
+    # Best-checkpoint step (what EvalCallback saved as best_model.zip).
+    # Marked on the eval panels so a post-best collapse -- curve falling
+    # away right of the marker -- is visible at a glance.
+    best_step = None
+    if eval_data is not None and "results" in eval_data:
+        results = eval_data["results"]
+        if results.size:
+            best_step = int(
+                eval_data["timesteps"][int(results.mean(axis=1).argmax())]
+            )
+
     def _plot_eval(ax, key, title, ylabel):
         if eval_data is None:
             ax.text(0.5, 0.5, "no evaluations.npz", ha="center", va="center")
@@ -178,6 +189,14 @@ def plot_learning_curve(
             ax.fill_between(
                 timesteps, mean - std, mean + std, alpha=0.25, label="+/-1 std"
             )
+            if best_step is not None:
+                ax.axvline(
+                    best_step,
+                    color="tab:green",
+                    linestyle="--",
+                    alpha=0.8,
+                    label="best checkpoint",
+                )
             ax.legend()
         ax.set_title(title)
         ax.set_xlabel("Timestep")
