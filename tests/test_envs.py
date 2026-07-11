@@ -24,10 +24,16 @@ import courtside_dynamics  # noqa: F401  (triggers registration)
 from courtside_dynamics.envs import (
     BallBalanceEnv,
     BallBounceEnv,
+    HumanoidTennisCoopEnv,
     WallBallEnv,
 )
 
-ENV_CLASSES = [BallBalanceEnv, BallBounceEnv, WallBallEnv]
+ENV_CLASSES = [
+    BallBalanceEnv,
+    BallBounceEnv,
+    WallBallEnv,
+    HumanoidTennisCoopEnv,
+]
 
 # Construction kwargs mirroring what each notebook uses at training time.
 # In particular ``min_force`` makes the touch-sensor rising-edge check
@@ -40,6 +46,7 @@ ENV_CLASSES_WITH_KWARGS = [
     (BallBalanceEnv, {}),
     (BallBounceEnv, {"min_force": 100.0}),
     (WallBallEnv, {"min_force": 1.0}),
+    (HumanoidTennisCoopEnv, {}),
 ]
 
 
@@ -217,6 +224,7 @@ def test_gymnasium_make_ids():
         "CourtsideDynamics/BallBalance-v0",
         "CourtsideDynamics/BallBounce-v0",
         "CourtsideDynamics/WallBall-v2",
+        "CourtsideDynamics/HumanoidTennisCoop-v0",
     ):
         env = gymnasium.make(env_id)
         try:
@@ -248,7 +256,12 @@ def test_asset_path_returns_existing_files():
 
     from courtside_dynamics.assets import asset_path
 
-    for name in ("ball_balance.xml", "ball_bounce.xml", "wall_ball.xml"):
+    for name in (
+        "ball_balance.xml",
+        "ball_bounce.xml",
+        "wall_ball.xml",
+        "humanoid_tennis.xml",
+    ):
         p = Path(asset_path(name))
         assert p.is_file(), f"Missing asset: {name}"
 

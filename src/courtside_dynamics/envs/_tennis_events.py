@@ -36,6 +36,29 @@ _SAFETY_EVENT_KINDS: Final = frozenset(
     {RallyEventKind.NONFINITE_STATE, RallyEventKind.UNSAFE_PHYSICS}
 )
 
+# Stable observation order for the contact-latch state exposed by
+# :meth:`SubstepTennisEventSampler.markov_state`.  Court A/B share one channel
+# because they are mutually exclusive classifications of the same physical
+# ball/court contact episode.
+TENNIS_CONTACT_CHANNELS: Final = (
+    "ball_racket_a",
+    "ball_racket_b",
+    "ball_court",
+    "ball_net",
+    "humanoid_a_net",
+    "humanoid_b_net",
+    "racket_a_net",
+    "racket_b_net",
+    "ball_humanoid_a",
+    "ball_humanoid_b",
+)
+
+TENNIS_CONTACT_MARKOV_LABELS: Final = tuple(
+    f"contact_latched_{channel}" for channel in TENNIS_CONTACT_CHANNELS
+) + tuple(
+    f"contact_release_progress_{channel}" for channel in TENNIS_CONTACT_CHANNELS
+)
+
 
 def _vec3_tuple(values: np.ndarray) -> tuple[float, float, float]:
     """Convert a three-vector to a precisely typed plain-Python tuple."""
@@ -83,6 +106,7 @@ class TennisSceneContactIndex:
 
     ball_geom: int
     court_geom: int
+    court_geoms: frozenset[int]
     net_geoms: frozenset[int]
     racket_a_geoms: frozenset[int]
     racket_b_geoms: frozenset[int]
@@ -94,6 +118,7 @@ class TennisSceneContactIndex:
         """Resolve semantic sets from stable categories and player prefixes."""
         ball_geom = int(model.geom("ball_geom").id)
         court_geom = int(model.geom("court_surface").id)
+        court_geoms: set[int] = set()
         net_geoms: set[int] = set()
         racket_a: set[int] = set()
         racket_b: set[int] = set()
@@ -104,7 +129,9 @@ class TennisSceneContactIndex:
             geom = model.geom(geom_id)
             name = geom.name
             category = int(geom.contype[0])
-            if category == COLLISION_NET:
+            if category == COLLISION_COURT:
+                court_geoms.add(geom_id)
+            elif category == COLLISION_NET:
                 net_geoms.add(geom_id)
             elif category == COLLISION_RACKET:
                 if name.startswith("player_a_racket_"):
@@ -120,6 +147,7 @@ class TennisSceneContactIndex:
         index = cls(
             ball_geom=ball_geom,
             court_geom=court_geom,
+            court_geoms=frozenset(court_geoms),
             net_geoms=frozenset(net_geoms),
             racket_a_geoms=frozenset(racket_a),
             racket_b_geoms=frozenset(racket_b),
@@ -131,6 +159,7 @@ class TennisSceneContactIndex:
 
     def _validate(self, model: mujoco.MjModel) -> None:
         groups = {
+            "court": self.court_geoms,
             "net": self.net_geoms,
             "racket_a": self.racket_a_geoms,
             "racket_b": self.racket_b_geoms,
@@ -142,7 +171,6 @@ class TennisSceneContactIndex:
             raise ValueError(f"missing semantic tennis geom groups: {missing}")
         all_groups = [
             {self.ball_geom},
-            {self.court_geom},
             *groups.values(),
         ]
         for left_index, left in enumerate(all_groups):
@@ -153,6 +181,13 @@ class TennisSceneContactIndex:
             raise ValueError("ball_geom has the wrong collision category")
         if int(model.geom(self.court_geom).contype[0]) != COLLISION_COURT:
             raise ValueError("court_surface has the wrong collision category")
+        if self.court_geom not in self.court_geoms:
+            raise ValueError("court_surface is missing from the court geom group")
+        if any(
+            int(model.geom(geom_id).contype[0]) != COLLISION_COURT
+            for geom_id in self.court_geoms
+        ):
+            raise ValueError("court geom group contains the wrong collision category")
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,6 +292,30 @@ class SubstepTennisEventSampler:
         self._buffer_contact_peaks = {}
         self._buffer_episode_peaks = {}
         self._substeps_sampled = 0
+
+    def markov_state(self) -> tuple[float, ...]:
+        """Return contact latches and hysteresis progress in stable order.
+
+        Contact rising-edge suppression persists across control steps.  These
+        values therefore belong in the policy observation: two otherwise
+        identical MuJoCo states can emit different events depending on whether
+        a semantic contact is still latched or is part-way through its release
+        hysteresis.  The first block contains latch flags; the second contains
+        normalized inactive-substep progress in ``[0, 1]``.
+        """
+        latched = tuple(
+            float(channel in self._latched_contacts)
+            for channel in TENNIS_CONTACT_CHANNELS
+        )
+        release = tuple(
+            min(
+                float(self._inactive_substeps.get(channel, 0))
+                / float(self.config.release_substeps),
+                1.0,
+            )
+            for channel in TENNIS_CONTACT_CHANNELS
+        )
+        return latched + release
 
     def sample_substep(
         self,
@@ -374,6 +433,41 @@ class SubstepTennisEventSampler:
             self._last_stable_position = ball_position.copy()
 
         return None
+
+    def record_safety_event(
+        self,
+        kind: RallyEventKind,
+        *,
+        control_substep: int,
+    ) -> None:
+        """Record a safety stop when MuJoCo cannot complete a substep.
+
+        ``mujoco.FatalError`` occurs before normal post-step sampling can run.
+        This narrow escape hatch lets the environment drain a valid batch and
+        return a terminal Gymnasium transition instead of leaving the sampler
+        permanently open or crashing a vectorized rollout.
+        """
+        if kind not in _SAFETY_EVENT_KINDS:
+            raise ValueError("record_safety_event accepts only safety kinds")
+        if self._control_step is None:
+            raise RuntimeError("begin_control_step must be called first")
+        if control_substep <= self._last_control_substep:
+            raise ValueError("control_substep must increase strictly")
+        self._last_control_substep = control_substep
+        self._physics_substep += 1
+        self._substeps_sampled += 1
+        if not any(event.kind in _SAFETY_EVENT_KINDS for event in self._buffer_events):
+            self._buffer_events.append(
+                RallyEvent(
+                    kind=kind,
+                    substep=self._physics_substep,
+                    event_id=self._allocate_event_id(),
+                )
+            )
+
+    def safety_event_kind(self, data: mujoco.MjData) -> RallyEventKind | None:
+        """Return a safety classification without advancing sampler state."""
+        return self._safety_event_kind(data)
 
     def end_control_step(self) -> TennisStepEventBatch:
         """Drain the current buffer exactly once."""
@@ -529,7 +623,7 @@ class SubstepTennisEventSampler:
     ) -> RallyEventKind | None:
         pair = frozenset({geom1, geom2})
         ball = self.index.ball_geom
-        if ball in pair and self.index.court_geom in pair:
+        if ball in pair and pair & self.index.court_geoms:
             side = CourtSide.from_x(contact_x, tie_breaker=tie_breaker)
             return (
                 RallyEventKind.BALL_COURT_A
@@ -594,6 +688,8 @@ class SubstepTennisEventSampler:
 
 __all__ = [
     "SubstepTennisEventSampler",
+    "TENNIS_CONTACT_CHANNELS",
+    "TENNIS_CONTACT_MARKOV_LABELS",
     "TennisEventSamplerConfig",
     "TennisSafetyLimits",
     "TennisSceneContactIndex",

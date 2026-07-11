@@ -41,6 +41,9 @@ jobs:
   test:
     name: pytest (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    env:
+      # Headless MuJoCo renderer used by the environment smoke tests.
+      MUJOCO_GL: egl
     strategy:
       fail-fast: false
       matrix:

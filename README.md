@@ -17,7 +17,7 @@ shared pipeline.
 | `CourtsideDynamics/BallBalance-v0`      | `courtside_dynamics.envs.ball_balance`    | Keep a ball on a 6-DOF tray.                                                |
 | `CourtsideDynamics/BallBounce-v0`       | `courtside_dynamics.envs.ball_bounce`     | Juggle a ball on a 6-DOF paddle.                                            |
 | `CourtsideDynamics/WallBall-v2`         | `courtside_dynamics.envs.wall_ball`       | Rally a ball against a wall with a 5-DOF racket and a gated wall-hit reward. |
-| `CourtsideDynamics/HumanoidTennisCoop-v0` | *Phase 2 rules; not registered yet*     | Centralized cooperative two-G1 rally environment.                            |
+| `CourtsideDynamics/HumanoidTennisCoop-v0` | `courtside_dynamics.envs.humanoid_tennis` | Centralized cooperative two-G1 physical rally environment.                   |
 
 ![](/Images/sac_ball_balance.gif)
 ![](/Images/sac_ball_bounce.gif)
@@ -25,15 +25,24 @@ shared pipeline.
 
 ### Humanoid tennis development status
 
-Phases 1–2 provide a regulation court, physical tennis ball and net, two
+Phases 1–3 provide a regulation court, physical tennis ball and net, two
 29-DoF Unitree G1 models, rigid right-wrist rackets, ordered substep contact
-events, and a deterministic cooperative rally state machine. The future
-centralized Gymnasium environment will expose one 58-value action vector:
+events, a deterministic cooperative rally state machine, and the registered
+centralized Gymnasium environment. It exposes one normalized 58-value action
+vector; zero is the two-player standing-reference PD hold:
 
 - player A: `[0:29]`;
 - player B: `[29:58]`;
 - player A right arm/racket subset: `[22:29]`;
 - player B right arm/racket subset: `[51:58]`.
+
+The centralized observation has 299 labeled values with stable public slices:
+player A proprioception `[0:71]`, player B proprioception `[71:142]`, physical
+racket A `[142:157]`, physical racket B `[157:172]`, ball
+position/velocity/spin `[172:181]`, useful ball-relative coordinates
+`[181:193]`, rally state `[193:221]`, contact-latch state `[221:241]`, and the
+active-action mask `[241:299]`. The final mask is all ones in Phase 3 and
+reserves the v0 contract for later constrained curriculum stages.
 
 The G1 simulation assets are pinned from MuJoCo Menagerie under BSD-3-Clause;
 see `THIRD_PARTY_NOTICES.md`. The physical G1 hardware is proprietary, and its
@@ -44,9 +53,27 @@ path, but its code is not a dependency of this Gymnasium/SB3 implementation.
 The rule reducer validates a return only after it crosses the net and is then
 volleyed or lands in bounds, suppresses duplicate contact episodes, and reports
 one explicit fault reason for double bounces, out balls, illegal hits, net
-contacts, or unsafe simulation. The cooperative Gymnasium environment is not
-registered yet, and this milestone does not claim that two free-standing
-humanoids can be trained end to end with vanilla PPO or SAC.
+contacts, or unsafe simulation. The shared default reward is +1 only for that
+confirmed legal return, -1 for an ordinary fault, and -2 for unsafe/non-finite
+physics; survival, feed crossings, first bounces, and unconfirmed racket taps
+pay zero. Optional hit shaping is escrowed and clawed back on a failed return.
+
+Reset feeds alternate sides, use bounded seeded noise, start 1.1–1.5 m high
+near the baseline, and have nonzero velocity toward the other player. Reset and
+step `info` retain the serve side and full initial ball qpos/qvel for recording.
+`scripted_policies.run_humanoid_tennis_oracle` supplies a mirrored deterministic
+physics/rules integration harness: a real ball hits a real wrist-mounted racket,
+crosses back over the net, and lands in bounds without mid-rally state writes.
+It is a feasibility fixture, not evidence of learned humanoid tennis.
+
+Phase 4 will add constrained curriculum/training recipes. This milestone does
+not claim that two free-standing humanoids can be trained end to end with
+vanilla PPO or SAC.
+
+`HumanoidTennisCoopSmoke` is intentionally only a 10,000-step integration
+recipe for exercising SB3, checkpoints, compact video CSV recording, and eval
+metrics. Its eval output includes fault-type episode rates and the
+min/p50/p90/max rally-length distribution; it is not a learning baseline.
 
 ## Layout
 
@@ -128,6 +155,15 @@ import courtside_dynamics  # noqa: F401  (triggers registration)
 env = gymnasium.make("CourtsideDynamics/BallBounce-v0")
 ```
 
+The cooperative tennis environment uses the same ordinary Gymnasium/SB3
+interface (not PettingZoo):
+
+```python
+env = gymnasium.make("CourtsideDynamics/HumanoidTennisCoop-v0")
+obs, info = env.reset(seed=0)
+obs, reward, terminated, truncated, info = env.step(env.unwrapped.neutral_action)
+```
+
 Pass `seed=...` to `build_train_config` / `TrainConfig` when comparing
 reward or env tweaks: it makes the whole run reproducible (SB3, the
 training workers, and every helper env get derived, non-overlapping
@@ -173,7 +209,10 @@ court/ball/racket calibration, collision-mask, two-G1 namespacing, action-slice,
 rigid wrist-mount, checksum/license, and finite-rollout coverage. Phase 2 adds
 pure mirrored rally traces plus MuJoCo substep tests for semantic contact
 rising edges, release hysteresis, sampled force peaks, net crossings, court
-classification, net faults, and unsafe-state detection.
+classification, net faults, and unsafe-state detection. Phase 3 locks the
+58-action/299-observation Gymnasium API, seeded alternating serves, registration,
+reward/info invariants, finite rollouts, rendering, and a mirrored physical
+legal-return oracle.
 
 ## Results
 

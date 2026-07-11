@@ -89,6 +89,8 @@ def _sample_steps(
 def test_scene_contact_index_resolves_all_required_semantic_groups():
     model, _ = _fresh_model()
     index = TennisSceneContactIndex.from_model(model)
+    assert len(index.court_geoms) == 2
+    assert index.court_geom in index.court_geoms
     assert len(index.net_geoms) == 7
     assert len(index.racket_a_geoms) == 8
     assert len(index.racket_b_geoms) == 8
@@ -96,7 +98,7 @@ def test_scene_contact_index_resolves_all_required_semantic_groups():
     assert len(index.humanoid_b_geoms) == 27
     groups = (
         {index.ball_geom},
-        {index.court_geom},
+        index.court_geoms,
         index.net_geoms,
         index.racket_a_geoms,
         index.racket_b_geoms,

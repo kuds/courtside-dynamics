@@ -49,6 +49,15 @@
              seams or overlapping collision contacts at painted lines. -->
         <geom name="court_surface" class="hard_court" pos="0 0 -0.025" size="18.285 7.775 0.025" material="court_material" />
 
+        <!-- Infinite physical catch plane beneath the finite visible run-off
+             slab. A powerful out ball can clear that slab entirely; without
+             this plane it falls forever and is mislabeled as a timeout. The
+             10 cm offset avoids overlapping contacts on the playable surface,
+             while the shared court collision category lets the substep event
+             sampler classify the eventual landing as out of bounds. -->
+        <geom name="out_of_bounds_catch_plane" class="hard_court" type="plane"
+              pos="0 0 -0.1" size="1 1 0.1" group="4" rgba="0 0 0 0" />
+
         <!-- Regulation singles court: 23.77 m x 8.23 m, measured to the
              outside edge of the painted boundary lines. -->
         <site name="court_play_area" class="semantic" pos="0 0 0.002" size="11.885 4.115 0.002" rgba="0.12 0.35 0.72 0.16" />
