@@ -1,0 +1,120 @@
+<mujoco model="humanoid_tennis_phase1">
+    <!-- Phase 1 court physics plus two centrally controlled Unitree G1
+         humanoids. The project adapter is derived from the pinned,
+         BSD-3-Clause MuJoCo Menagerie model documented in
+         THIRD_PARTY_NOTICES.md. -->
+    <compiler angle="degree" coordinate="local" inertiafromgeom="true" />
+    <option integrator="RK4" timestep="0.001" />
+    <size nconmax="2000" njmax="4000" />
+
+    <visual>
+        <headlight ambient="0.25 0.25 0.25" diffuse="0.8 0.8 0.8" specular="0.2 0.2 0.2" />
+        <rgba haze="0.15 0.25 0.35 1" />
+        <global azimuth="135" elevation="-25" />
+    </visual>
+
+    <default>
+        <geom condim="3" contype="0" conaffinity="0" margin="0.001" friction="0.6 0.02 0.001" />
+        <default class="hard_court">
+            <geom type="box" contype="1" conaffinity="18" friction="0.6 0.02 0.001" solref="0.01 1" />
+        </default>
+        <default class="net">
+            <geom contype="4" conaffinity="26" friction="0.3 0.01 0.001" solref="0.005 1" margin="0.002" rgba="0.88 0.88 0.9 0.62" />
+        </default>
+        <default class="semantic">
+            <site type="box" group="4" rgba="0.2 0.6 1 0.10" />
+        </default>
+    </default>
+
+    <asset>
+        <texture name="court_texture" type="2d" builtin="checker" rgb1="0.08 0.28 0.25" rgb2="0.09 0.31 0.28" width="512" height="512" mark="none" />
+        <material name="court_material" texture="court_texture" texrepeat="8 4" texuniform="true" reflectance="0.05" />
+        <material name="post_material" rgba="0.82 0.82 0.84 1" />
+        <model name="unitree_g1_tennis_model" file="robots/unitree_g1_tennis.xml" />
+        <!-- One convex wedge is mirrored to create the two halves of the
+             center-dipping net. A single mesh would be concave at y=0 and
+             MuJoCo's collision hull would incorrectly fill that dip. -->
+        <mesh name="net_half_mesh"
+              vertex="-0.005 -5.029 0  0.005 -5.029 0  -0.005 -5.029 1.07  0.005 -5.029 1.07  -0.005 0 0  0.005 0 0  -0.005 0 0.914  0.005 0 0.914"
+              face="0 4 2  2 4 6  1 3 5  3 7 5  0 1 4  1 5 4  2 6 3  3 6 7  0 2 1  1 2 3  4 5 6  5 7 6" />
+    </asset>
+
+    <worldbody>
+        <light name="key_light" pos="0 -8 12" dir="0 0 -1" directional="true" />
+        <camera name="broadcast" pos="0 -20 9" xyaxes="1 0 0 0 0.41 0.91" />
+        <camera name="sideline" pos="-1 -13 3.5" xyaxes="1 0 0 0 0.25 0.97" />
+
+        <!-- One continuous physical slab covers both the regulation court and
+             its run-off area. Semantic sites below divide it without adding
+             seams or overlapping collision contacts at painted lines. -->
+        <geom name="court_surface" class="hard_court" pos="0 0 -0.025" size="18.285 7.775 0.025" material="court_material" />
+
+        <!-- Regulation singles court: 23.77 m x 8.23 m, measured to the
+             outside edge of the painted boundary lines. -->
+        <site name="court_play_area" class="semantic" pos="0 0 0.002" size="11.885 4.115 0.002" rgba="0.12 0.35 0.72 0.16" />
+        <site name="court_side_a" class="semantic" pos="-5.9425 0 0.003" size="5.9425 4.115 0.003" rgba="0.15 0.45 0.85 0.08" />
+        <site name="court_side_b" class="semantic" pos="5.9425 0 0.003" size="5.9425 4.115 0.003" rgba="0.15 0.45 0.85 0.08" />
+
+        <!-- Ten-centimetre baselines and five-centimetre sidelines. These
+             sites are semantic/visual;
+             the continuous court slab supplies identical bounce physics on
+             the line and in the interior. -->
+        <site name="baseline_a" class="semantic" group="0" pos="-11.835 0 0.007" size="0.05 4.115 0.002" rgba="1 1 1 1" />
+        <site name="baseline_b" class="semantic" group="0" pos="11.835 0 0.007" size="0.05 4.115 0.002" rgba="1 1 1 1" />
+        <site name="sideline_negative" class="semantic" group="0" pos="0 -4.09 0.007" size="11.885 0.025 0.002" rgba="1 1 1 1" />
+        <site name="sideline_positive" class="semantic" group="0" pos="0 4.09 0.007" size="11.885 0.025 0.002" rgba="1 1 1 1" />
+
+        <!-- Explicit semantic run-off regions: 6.40 m behind each baseline
+             and 3.66 m outside each sideline. Back regions include corners. -->
+        <site name="out_of_bounds_back_a" class="semantic" pos="-15.085 0 0.003" size="3.2 7.775 0.003" rgba="0.85 0.2 0.15 0.06" />
+        <site name="out_of_bounds_back_b" class="semantic" pos="15.085 0 0.003" size="3.2 7.775 0.003" rgba="0.85 0.2 0.15 0.06" />
+        <site name="out_of_bounds_sideline_negative" class="semantic" pos="0 -5.945 0.003" size="11.885 1.83 0.003" rgba="0.85 0.2 0.15 0.06" />
+        <site name="out_of_bounds_sideline_positive" class="semantic" pos="0 5.945 0.003" size="11.885 1.83 0.003" rgba="0.85 0.2 0.15 0.06" />
+
+        <!-- Physical net. Two convex 1 cm-thick wedges reproduce the exact
+             0.914 m center and 1.07 m post heights. A solid net is an
+             intentional v1 approximation because contact is normally a fault. -->
+        <geom name="net_cloth_negative" class="net" type="mesh" mesh="net_half_mesh" />
+        <geom name="net_cloth_positive" class="net" type="mesh" mesh="net_half_mesh" quat="0 0 0 1" />
+        <geom name="net_top_cable_negative" class="net" type="capsule" size="0.012" fromto="0 -5.029 1.058 0 0 0.902" rgba="0.96 0.96 0.98 1" />
+        <geom name="net_top_cable_positive" class="net" type="capsule" size="0.012" fromto="0 0 0.902 0 5.029 1.058" rgba="0.96 0.96 0.98 1" />
+        <geom name="net_center_strap" class="net" type="box" pos="0 0 0.457" size="0.012 0.018 0.457" rgba="0.96 0.96 0.98 1" />
+        <geom name="net_post_negative" class="net" type="cylinder" pos="0 -5.029 0.535" size="0.04 0.535" material="post_material" />
+        <geom name="net_post_positive" class="net" type="cylinder" pos="0 5.029 0.535" size="0.04 0.535" material="post_material" />
+        <site name="net_center_height" pos="0 0 0.914" size="0.012" rgba="1 0.2 0.2 0.4" />
+        <site name="net_post_negative_height" pos="0 -5.029 1.07" size="0.012" rgba="1 0.2 0.2 0.4" />
+        <site name="net_post_positive_height" pos="0 5.029 1.07" size="0.012" rgba="1 0.2 0.2 0.4" />
+
+        <!-- Both free-base G1s use the same immutable actuator order. Player
+             A faces +x and player B faces -x, toward the net. Wrapping the
+             attached models keeps spawn transforms separate from the
+             third-party-derived robot definition. -->
+        <frame name="player_a_spawn" pos="-10.5 0 0">
+            <attach model="unitree_g1_tennis_model" body="pelvis" prefix="player_a_" />
+        </frame>
+        <frame name="player_b_spawn" pos="10.5 0 0" quat="0 0 0 1">
+            <attach model="unitree_g1_tennis_model" body="pelvis" prefix="player_b_" />
+        </frame>
+
+        <!-- Regulation-scale Type 2 tennis ball. Ball priority makes these
+             calibrated contact parameters win instead of being averaged with
+             unrelated robot/net defaults introduced in later phases. -->
+        <body name="ball" pos="-11.35 0 1.3">
+            <joint name="ball_free" type="free" limited="false" damping="0" armature="0" />
+            <geom name="ball_geom" type="sphere" size="0.0335" mass="0.0577" shellinertia="true" contype="2" conaffinity="29" rgba="0.92 0.95 0.18 1" friction="0.55 0.005 0.0001" priority="1" solref="0.02 0.075" />
+        </body>
+    </worldbody>
+
+    <!-- Explicit ball/court parameters keep tennis bounce calibration from
+         making robot feet or bodies artificially bouncy in the full scene. -->
+    <contact>
+        <pair name="ball_court_pair" geom1="ball_geom" geom2="court_surface" condim="6"
+              friction="0.65 0.65 0.005 0.0002 0.0002" solref="0.015 0.09"
+              solimp="0.9 0.95 0.001 0.5 2" margin="0.001" />
+    </contact>
+
+    <!-- The composite home state is assembled by
+         initialize_humanoid_tennis_home(). MuJoCo 3.3 cannot reliably expand
+         a full qpos keyframe across attached model assets; the registry-based
+         reset also makes the actuator ordering an explicitly tested API. -->
+</mujoco>

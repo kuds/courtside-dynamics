@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 # Single source of truth for the Colab check (also used by colab_setup).
 from courtside_dynamics.colab_setup import _in_colab
@@ -538,7 +539,7 @@ def record_best_model_video(
     out_path = out_path or os.path.join(str(log_dir), "best_model.mp4")
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
-    frames: list[np.ndarray] = []
+    frames: list[ArrayLike] = []
     total_reward = 0.0
     obs, _ = env.reset()
     for _ in range(video_length):

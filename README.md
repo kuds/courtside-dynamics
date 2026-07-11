@@ -17,11 +17,32 @@ shared pipeline.
 | `CourtsideDynamics/BallBalance-v0`      | `courtside_dynamics.envs.ball_balance`    | Keep a ball on a 6-DOF tray.                                                |
 | `CourtsideDynamics/BallBounce-v0`       | `courtside_dynamics.envs.ball_bounce`     | Juggle a ball on a 6-DOF paddle.                                            |
 | `CourtsideDynamics/WallBall-v2`         | `courtside_dynamics.envs.wall_ball`       | Rally a ball against a wall with a 5-DOF racket and a gated wall-hit reward. |
-| `CourtsideDynamics/HumanoidTennis-v0`   | *planned*                                 | Full humanoid tennis -- the project north star.                             |
+| `CourtsideDynamics/HumanoidTennisCoop-v0` | *Phase 1 physics; not registered yet*   | Centralized cooperative two-G1 rally environment.                            |
 
 ![](/Images/sac_ball_balance.gif)
 ![](/Images/sac_ball_bounce.gif)
 ![](/Images/sac_wall_ball.gif)
+
+### Humanoid tennis development status
+
+Phase 1 provides a regulation court, physical tennis ball and net, two
+29-DoF Unitree G1 models, and rigid right-wrist rackets. The future centralized
+Gymnasium environment will expose one 58-value action vector:
+
+- player A: `[0:29]`;
+- player B: `[29:58]`;
+- player A right arm/racket subset: `[22:29]`;
+- player B right arm/racket subset: `[51:58]`.
+
+The G1 simulation assets are pinned from MuJoCo Menagerie under BSD-3-Clause;
+see `THIRD_PARTY_NOTICES.md`. The physical G1 hardware is proprietary, and its
+inclusion does not imply Unitree endorsement. [LATENT](https://zzk273.github.io/LATENT/)
+is useful research evidence for G1 tennis and a future motion-prior training
+path, but its code is not a dependency of this Gymnasium/SB3 implementation.
+
+The cooperative environment and rally state machine are not registered yet,
+and this milestone does not claim that two free-standing humanoids can be
+trained end to end with vanilla PPO or SAC.
 
 ## Layout
 
@@ -29,7 +50,7 @@ shared pipeline.
 courtside-dynamics/
 ├── pyproject.toml                        # deps + package metadata
 ├── src/courtside_dynamics/
-│   ├── assets/*.xml                      # MJCF model files
+│   ├── assets/                           # MJCF, racket, court, and licensed robot assets
 │   ├── envs/                             # Gymnasium environments (shared base in _base.py)
 │   ├── callbacks/
 │   │   ├── video_record.py               # unified video + CSV recorder
@@ -54,10 +75,11 @@ courtside-dynamics/
 pip install -e ".[train,notebooks]"
 ```
 
-The base install pulls only `mujoco`, `gymnasium`, and `numpy`. The
-`train` extra adds `stable-baselines3`, `torch`, `tensorboard`,
-`pandas`, `matplotlib`, plus `imageio` and `moviepy` for video
-recording. The `notebooks` extra adds `mediapy`; it intentionally does
+The base install pulls `mujoco`, `gymnasium`, `numpy`, and the small
+`imageio`/`packaging` runtime dependencies imported by Gymnasium's MuJoCo
+module. The `train` extra adds `stable-baselines3`, `torch`, `tensorboard`,
+`pandas`, `matplotlib`, and `moviepy` for video recording. The `notebooks`
+extra adds `mediapy`; it intentionally does
 not install Jupyter itself (wherever the notebook runs, Jupyter already
 exists -- and on Colab installing it conflicts with `google-colab`'s
 pinned `jupyter-server`). The `dev` extra adds `pytest`, `ruff`, and
@@ -142,7 +164,9 @@ random-rollout sanity checks, and a targeted Wall Ball reward suite
 per-cycle paddle bonus, shaping clawback, and termination flags with
 an oracle-vs-noop comparison. Callbacks, the training entry point, the
 recipe registry, monitor-log loading, and the notebook report/audit
-helpers are covered by their own test modules.
+helpers are covered by their own test modules. Humanoid-tennis Phase 1 adds
+court/ball/racket calibration, collision-mask, two-G1 namespacing, action-slice,
+rigid wrist-mount, checksum/license, and finite-rollout coverage.
 
 ## Results
 
