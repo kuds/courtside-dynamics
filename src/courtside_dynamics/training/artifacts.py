@@ -14,7 +14,7 @@ import platform
 import statistics
 import subprocess
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -120,7 +120,7 @@ def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
 def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
     """Snapshot the resolved cfg + provenance to ``log_dir/config.json``."""
     payload: dict[str, Any] = {
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "timestamp_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "git_sha": _git_sha(),
         "versions": _versions(),
         "gpu": _gpu_info(),

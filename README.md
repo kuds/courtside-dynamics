@@ -101,6 +101,8 @@ courtside-dynamics/
 
 ## Installation
 
+Courtside Dynamics supports Python 3.11 through 3.13.
+
 ```bash
 # From a clone of this repo
 pip install -e ".[train,notebooks]"

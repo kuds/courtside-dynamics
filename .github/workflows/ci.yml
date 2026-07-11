@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.13"
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: pip install "ruff>=0.5"
@@ -38,13 +38,25 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: mypy
 
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install --upgrade pip build
+      - run: python -m build
+
   test:
     name: pytest (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -55,5 +67,5 @@ jobs:
       - run: pip install -e ".[train,dev]"
       - run: pytest
       - name: MuJoCo rendering smoke test
-        if: matrix.python-version == '3.11'
+        if: matrix.python-version == '3.13'
         run: xvfb-run -a pytest -q tests/test_humanoid_tennis_env.py::test_rgb_array_render_smoke
