@@ -17,7 +17,7 @@ import math
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from enum import Enum, IntEnum
+from enum import IntEnum, StrEnum
 from itertools import groupby
 from types import MappingProxyType
 from typing import Final
@@ -60,7 +60,7 @@ class RallyPhase(IntEnum):
     TERMINAL = 3
 
 
-class RallyEventKind(str, Enum):
+class RallyEventKind(StrEnum):
     """Semantic events emitted by the substep physics sampler."""
 
     BALL_RACKET_A = "ball_racket_a"

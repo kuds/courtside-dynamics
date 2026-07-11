@@ -102,6 +102,10 @@ def _launch_return(
     return receiver
 
 
+def test_rally_event_kind_string_uses_wire_value():
+    assert str(RallyEventKind.BALL_NET) == RallyEventKind.BALL_NET.value
+
+
 def test_reset_exposes_markov_rally_state_and_no_progress():
     snapshot = RallyStateMachine(serving_side=CourtSide.A).snapshot()
     assert snapshot.phase is RallyPhase.INITIAL_FEED
