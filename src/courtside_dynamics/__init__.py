@@ -9,11 +9,9 @@ from __future__ import annotations
 
 from gymnasium.envs.registration import register
 
-# 0.2.0: WallBall contact physics made realistic (ball contact priority
-# + solref tuned to regulation-like restitution; racket reaches a
-# grounded ball). Task dynamics changed, so the env id bumped to
-# WallBall-v2 -- results are not comparable with v1 runs.
-__version__ = "0.2.0"
+# 0.3.0: first registered centralized cooperative two-G1 tennis environment.
+# This adds a new environment/API without changing the existing task ids.
+__version__ = "0.3.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance-v0")`` etc.
@@ -39,6 +37,14 @@ register(
     id="CourtsideDynamics/WallBall-v2",
     entry_point="courtside_dynamics.envs.wall_ball:WallBallEnv",
     max_episode_steps=750,
+)
+
+register(
+    id="CourtsideDynamics/HumanoidTennisCoop-v0",
+    entry_point=(
+        "courtside_dynamics.envs.humanoid_tennis:HumanoidTennisCoopEnv"
+    ),
+    max_episode_steps=1000,
 )
 
 __all__ = ["__version__"]

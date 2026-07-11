@@ -19,6 +19,7 @@ from typing import Any
 from courtside_dynamics.envs import (
     BallBalanceEnv,
     BallBounceEnv,
+    HumanoidTennisCoopEnv,
     WallBallEnv,
 )
 from courtside_dynamics.training import TrainConfig
@@ -60,6 +61,83 @@ _BALL_BOUNCE_CSV_HEADER = [
 ]
 
 
+# Phase 3 exposes a compact recording schema. The full tennis ``info`` dict
+# intentionally retains detailed rule/contact traces for correctness audits;
+# flattening every scalar would create more than a hundred CSV columns.
+_HUMANOID_TENNIS_CSV_KEYS = (
+    "episode_step",
+    "serve_side",
+    "initial_ball_x",
+    "initial_ball_y",
+    "initial_ball_z",
+    "initial_ball_vx",
+    "initial_ball_vy",
+    "initial_ball_vz",
+    "ball_side",
+    "expected_returner",
+    "rally_phase",
+    "rally_count",
+    "legal_hit_count",
+    "bounce_count",
+    "net_crossing_count",
+    "valid_return_rate",
+    "event_valid_racket_hit",
+    "event_valid_return",
+    "event_first_bounce",
+    "termination_reason",
+    "termination_reason_name",
+    "term_timeout",
+    "rew_valid_return",
+    "rew_shaping",
+    "rew_shaping_clawback",
+    "rew_fault",
+)
+_HUMANOID_TENNIS_CSV_HEADER = [
+    *_HUMANOID_TENNIS_CSV_KEYS,
+    "reward", "total_reward", "done",
+]
+
+
+def _humanoid_tennis_info_row(
+    info: dict, reward: float, total_reward: float, done: bool
+) -> Sequence[object]:
+    return [
+        *(info[key] for key in _HUMANOID_TENNIS_CSV_KEYS),
+        reward,
+        total_reward,
+        done,
+    ]
+
+
+_HUMANOID_TENNIS_EVAL_KEYS = (
+    "rally_count",
+    "valid_return_rate",
+    "legal_hit_count",
+)
+_HUMANOID_TENNIS_TERMINAL_EVAL_KEYS = (
+    "duplicate_contact_suppressed_count",
+    "duplicate_event_suppressed_count",
+    "stale_event_suppressed_count",
+    # The episode means of these mutually exclusive flags form the fault
+    # distribution and remain comparable across future curriculum stages.
+    "term_unsafe",
+    "term_humanoid_net",
+    "term_racket_net",
+    "term_ball_humanoid_a",
+    "term_ball_humanoid_b",
+    "term_ball_net",
+    "term_out_of_bounds",
+    "term_second_bounce",
+    "term_failed_to_cross",
+    "term_reverse_crossing",
+    "term_wrong_hitter",
+    "term_double_hit",
+    "term_premature_hit",
+    "term_simultaneous_racket_contact",
+    "term_timeout",
+)
+
+
 RECIPES: dict[str, Recipe] = {
     "BallBalance": Recipe(
         env_cls=BallBalanceEnv,
@@ -97,6 +175,41 @@ RECIPES: dict[str, Recipe] = {
         description=(
             "Rally a ball against a wall with a 5-DOF racket and a "
             "strict gated wall-hit reward."
+        ),
+    ),
+    "HumanoidTennisCoopSmoke": Recipe(
+        env_cls=HumanoidTennisCoopEnv,
+        env_kwargs={"render_mode": "rgb_array", "episode_len": 250},
+        # This short run exercises Gymnasium/SB3 integration, evaluation,
+        # recording, and artifacts. Phase 4 owns constrained curriculum
+        # presets; this is not a viable free-standing tennis training claim.
+        default_total_timesteps=10_000,
+        name_prefix="humanoid_tennis_coop_smoke",
+        extra_cfg={
+            "n_envs": 1,
+            "eval_freq": 2_500,
+            "checkpoint_freq": 5_000,
+            "video_freq": 5_000,
+            "n_eval_episodes": 4,
+            "video_length": 250,
+            "csv_header": _HUMANOID_TENNIS_CSV_HEADER,
+            "info_row_fn": _humanoid_tennis_info_row,
+            "info_eval_keys": _HUMANOID_TENNIS_EVAL_KEYS,
+            "info_eval_terminal_keys": _HUMANOID_TENNIS_TERMINAL_EVAL_KEYS,
+            "info_eval_distribution_keys": ("rally_count",),
+            "success_key": "rally_target_reached",
+            "success_threshold": 1.0,
+            "phase_key": "rally_phase",
+            "phase_labels": {
+                0: "initial_feed",
+                1: "awaiting_return",
+                2: "return_in_flight",
+                3: "terminal",
+            },
+        },
+        description=(
+            "Pipeline and recording smoke run for the centralized two-G1 "
+            "tennis environment; not a full-tennis training preset."
         ),
     ),
 }

@@ -26,8 +26,9 @@ from __future__ import annotations
 import csv
 import os
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
+import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecEnv
 
@@ -67,6 +68,17 @@ class InfoDictEvalCallback(BaseCallback):
         "bounce_count"`` with threshold 1 yields "fraction of eval
         episodes that completed at least one full rally" -- the real task
         metric that mean reward (shaping-dominated) obscures.
+    info_keys:
+        Optional allowlist of scalar keys to aggregate on every step. The
+        default, ``None``, preserves the original all-scalars behaviour.
+    terminal_info_keys:
+        Scalar keys sampled only from terminal ``info`` snapshots. Each is
+        reported as ``<key>_ep_mean``; boolean ``term_*`` flags therefore
+        become a fault-type distribution across evaluation episodes.
+    episode_distribution_keys:
+        Terminal scalar keys for which episode-level min, median, 90th
+        percentile, and max metrics are emitted. ``rally_count`` is the
+        intended use.
     csv_path:
         Optional path. When set, every evaluation appends one row per
         metric in long format (``timestep,metric,value``) so the data
@@ -85,6 +97,9 @@ class InfoDictEvalCallback(BaseCallback):
         deterministic: bool = True,
         success_key: str | None = None,
         success_threshold: float = 1.0,
+        info_keys: Sequence[str] | None = None,
+        terminal_info_keys: Sequence[str] = (),
+        episode_distribution_keys: Sequence[str] = (),
         csv_path: str | None = None,
         verbose: int = 0,
     ) -> None:
@@ -98,6 +113,13 @@ class InfoDictEvalCallback(BaseCallback):
         self.deterministic = deterministic
         self.success_key = success_key
         self.success_threshold = success_threshold
+        self.info_keys = (
+            None if info_keys is None else tuple(dict.fromkeys(info_keys))
+        )
+        self.terminal_info_keys = tuple(dict.fromkeys(terminal_info_keys))
+        self.episode_distribution_keys = tuple(
+            dict.fromkeys(episode_distribution_keys)
+        )
         self.csv_path = csv_path
 
     def _on_step(self) -> bool:
@@ -147,7 +169,14 @@ class InfoDictEvalCallback(BaseCallback):
 
             # Scalar keys are stable within a step; compute once and reuse
             # for both the running stats and the terminal snapshot below.
-            step_keys = _scalar_info_keys(info)
+            scalar_keys = _scalar_info_keys(info)
+            if self.info_keys is None:
+                step_keys = scalar_keys
+            else:
+                scalar_key_set = set(scalar_keys)
+                step_keys = [
+                    key for key in self.info_keys if key in scalar_key_set
+                ]
             for key in step_keys:
                 value = float(info[key])
                 sums[key] += value
@@ -168,15 +197,42 @@ class InfoDictEvalCallback(BaseCallback):
                 # VecEnvs reset automatically and the next ``obs`` is
                 # already post-reset, so ``info`` holds the last step of
                 # the just-finished episode.
-                ep_terminal = {key: float(info[key]) for key in step_keys}
-                finals.update(ep_terminal)
+                scalar_key_set = set(scalar_keys)
+                terminal_requested = (
+                    *self.terminal_info_keys,
+                    *self.episode_distribution_keys,
+                )
+                if self.success_key is not None:
+                    terminal_requested = (*terminal_requested, self.success_key)
+                terminal_keys = tuple(
+                    dict.fromkeys(
+                        (
+                            *step_keys,
+                            *(
+                                key
+                                for key in terminal_requested
+                                if key in scalar_key_set
+                            ),
+                        )
+                    )
+                )
+                ep_terminal = {
+                    key: float(info[key]) for key in terminal_keys
+                }
+                finals.update({key: ep_terminal[key] for key in step_keys})
                 episode_finals.append(ep_terminal)
                 total_episodes += 1
 
         # Fall back to the last seen step if a rollout hit video_length
         # without termination and ``finals`` is empty.
         if not finals and last_info is not None:
-            for key in _scalar_info_keys(last_info):
+            scalar_keys = _scalar_info_keys(last_info)
+            if self.info_keys is not None:
+                scalar_key_set = set(scalar_keys)
+                scalar_keys = [
+                    key for key in self.info_keys if key in scalar_key_set
+                ]
+            for key in scalar_keys:
                 finals[key] = float(last_info[key])
 
         metrics: dict[str, float] = {
@@ -218,6 +274,22 @@ class InfoDictEvalCallback(BaseCallback):
                         for v in present
                     ]
                     metrics["success_rate"] = sum(successes) / len(successes)
+
+            for key in self.episode_distribution_keys:
+                values = [
+                    snapshot[key]
+                    for snapshot in episode_finals
+                    if key in snapshot
+                ]
+                if values:
+                    metrics[f"{key}_ep_min"] = min(values)
+                    metrics[f"{key}_ep_p50"] = float(
+                        np.quantile(values, 0.5)
+                    )
+                    metrics[f"{key}_ep_p90"] = float(
+                        np.quantile(values, 0.9)
+                    )
+                    metrics[f"{key}_ep_max"] = max(values)
 
         if self.phase_key is not None and phase_counts and total_steps > 0:
             for phase_int, count in phase_counts.items():

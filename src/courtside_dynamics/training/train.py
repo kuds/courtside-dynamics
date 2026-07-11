@@ -166,6 +166,14 @@ class TrainConfig:
         logs per-episode aggregates of every scalar ``info`` key from
         eval rollouts to TensorBoard. Set ``False`` to skip this pass
         (e.g. for envs that emit no interesting ``info`` scalars).
+    info_eval_keys / info_eval_terminal_keys:
+        Optional compact evaluation schema. ``info_eval_keys`` limits
+        per-step aggregation to an allowlist; ``None`` keeps the historical
+        all-scalars behaviour. ``info_eval_terminal_keys`` records selected
+        terminal values only, such as mutually exclusive fault flags.
+    info_eval_distribution_keys:
+        Terminal counters for which the evaluator reports episode
+        min/median/90th-percentile/max values.
     success_key / success_threshold:
         Forwarded to ``InfoDictEvalCallback``. When ``success_key`` is
         set, the fraction of eval episodes whose terminal
@@ -208,6 +216,9 @@ class TrainConfig:
     csv_header: Sequence[str] | None = None
     info_row_fn: InfoRowFn | None = None
     info_dict_eval: bool = True
+    info_eval_keys: Sequence[str] | None = None
+    info_eval_terminal_keys: Sequence[str] = field(default_factory=tuple)
+    info_eval_distribution_keys: Sequence[str] = field(default_factory=tuple)
     success_key: str | None = None
     success_threshold: float = 1.0
     phase_key: str | None = None
@@ -426,6 +437,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 phase_labels=cfg.phase_labels,
                 success_key=cfg.success_key,
                 success_threshold=cfg.success_threshold,
+                info_keys=cfg.info_eval_keys,
+                terminal_info_keys=cfg.info_eval_terminal_keys,
+                episode_distribution_keys=cfg.info_eval_distribution_keys,
                 csv_path=os.path.join(cfg.log_dir, "eval_info.csv"),
             )
         )
@@ -481,6 +495,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             )
         model.save(os.path.join(cfg.log_dir, "final_model"))
         if use_vec_normalize:
+            assert isinstance(train_env, VecNormalize)
             train_env.save(os.path.join(cfg.log_dir, "vec_normalize.pkl"))
             # EvalCallback last synced eval_env's running stats up to
             # eval_freq steps ago; re-sync so the final eval normalizes
@@ -490,12 +505,25 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         mean_reward, std_reward = evaluate_policy(
             model, eval_env, n_eval_episodes=cfg.n_eval_episodes
         )
-        print(f"Mean reward: {mean_reward:.2f} +/- {std_reward:.2f}")
+        mean_reward_value = (
+            sum(mean_reward) / len(mean_reward)
+            if isinstance(mean_reward, list)
+            else float(mean_reward)
+        )
+        std_reward_value = (
+            sum(std_reward) / len(std_reward)
+            if isinstance(std_reward, list)
+            else float(std_reward)
+        )
+        print(
+            f"Mean reward: {mean_reward_value:.2f} +/- "
+            f"{std_reward_value:.2f}"
+        )
         write_run_summary(
             cfg,
             cfg.log_dir,
-            final_mean_reward=float(mean_reward),
-            final_std_reward=float(std_reward),
+            final_mean_reward=mean_reward_value,
+            final_std_reward=std_reward_value,
             duration_seconds=time.monotonic() - start_time,
             device=str(getattr(model, "device", "")) or None,
             status="interrupted" if interrupted else "completed",

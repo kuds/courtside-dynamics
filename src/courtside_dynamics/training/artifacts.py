@@ -148,6 +148,15 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "model_kwargs": cfg.model_kwargs,
             "csv_header": list(cfg.csv_header) if cfg.csv_header else None,
             "info_dict_eval": cfg.info_dict_eval,
+            "info_eval_keys": (
+                list(cfg.info_eval_keys)
+                if cfg.info_eval_keys is not None
+                else None
+            ),
+            "info_eval_terminal_keys": list(cfg.info_eval_terminal_keys),
+            "info_eval_distribution_keys": list(
+                cfg.info_eval_distribution_keys
+            ),
             "success_key": cfg.success_key,
             "success_threshold": cfg.success_threshold,
             "phase_key": cfg.phase_key,
