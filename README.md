@@ -17,7 +17,7 @@ shared pipeline.
 | `CourtsideDynamics/BallBalance-v0`      | `courtside_dynamics.envs.ball_balance`    | Keep a ball on a 6-DOF tray.                                                |
 | `CourtsideDynamics/BallBounce-v0`       | `courtside_dynamics.envs.ball_bounce`     | Juggle a ball on a 6-DOF paddle.                                            |
 | `CourtsideDynamics/WallBall-v2`         | `courtside_dynamics.envs.wall_ball`       | Rally a ball against a wall with a 5-DOF racket and a gated wall-hit reward. |
-| `CourtsideDynamics/HumanoidTennisCoop-v0` | *Phase 1 physics; not registered yet*   | Centralized cooperative two-G1 rally environment.                            |
+| `CourtsideDynamics/HumanoidTennisCoop-v0` | *Phase 2 rules; not registered yet*     | Centralized cooperative two-G1 rally environment.                            |
 
 ![](/Images/sac_ball_balance.gif)
 ![](/Images/sac_ball_bounce.gif)
@@ -25,9 +25,10 @@ shared pipeline.
 
 ### Humanoid tennis development status
 
-Phase 1 provides a regulation court, physical tennis ball and net, two
-29-DoF Unitree G1 models, and rigid right-wrist rackets. The future centralized
-Gymnasium environment will expose one 58-value action vector:
+Phases 1–2 provide a regulation court, physical tennis ball and net, two
+29-DoF Unitree G1 models, rigid right-wrist rackets, ordered substep contact
+events, and a deterministic cooperative rally state machine. The future
+centralized Gymnasium environment will expose one 58-value action vector:
 
 - player A: `[0:29]`;
 - player B: `[29:58]`;
@@ -40,9 +41,12 @@ inclusion does not imply Unitree endorsement. [LATENT](https://zzk273.github.io/
 is useful research evidence for G1 tennis and a future motion-prior training
 path, but its code is not a dependency of this Gymnasium/SB3 implementation.
 
-The cooperative environment and rally state machine are not registered yet,
-and this milestone does not claim that two free-standing humanoids can be
-trained end to end with vanilla PPO or SAC.
+The rule reducer validates a return only after it crosses the net and is then
+volleyed or lands in bounds, suppresses duplicate contact episodes, and reports
+one explicit fault reason for double bounces, out balls, illegal hits, net
+contacts, or unsafe simulation. The cooperative Gymnasium environment is not
+registered yet, and this milestone does not claim that two free-standing
+humanoids can be trained end to end with vanilla PPO or SAC.
 
 ## Layout
 
@@ -166,7 +170,10 @@ an oracle-vs-noop comparison. Callbacks, the training entry point, the
 recipe registry, monitor-log loading, and the notebook report/audit
 helpers are covered by their own test modules. Humanoid-tennis Phase 1 adds
 court/ball/racket calibration, collision-mask, two-G1 namespacing, action-slice,
-rigid wrist-mount, checksum/license, and finite-rollout coverage.
+rigid wrist-mount, checksum/license, and finite-rollout coverage. Phase 2 adds
+pure mirrored rally traces plus MuJoCo substep tests for semantic contact
+rising edges, release hysteresis, sampled force peaks, net crossings, court
+classification, net faults, and unsafe-state detection.
 
 ## Results
 
