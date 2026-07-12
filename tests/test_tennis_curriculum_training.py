@@ -161,7 +161,13 @@ def _provenance(
     )
 
 
-def _summary(stage: int, successes: int, total: int = 100):
+def _summary(
+    stage: int,
+    successes: int,
+    total: int = 100,
+    *,
+    normalization_id: str = "raw",
+):
     stage_name = {
         0: "anchored_racket_intercept",
         1: "anchored_return",
@@ -169,6 +175,38 @@ def _summary(stage: int, successes: int, total: int = 100):
     }.get(stage, f"stage_{stage}")
     episodes = tuple(
         _episode(index, success=index < successes) for index in range(total)
+    )
+    return summarize_curriculum_episodes(
+        stage_name,
+        episodes,
+        provenance=_provenance(
+            stage,
+            stage_name,
+            normalization_id=normalization_id,
+        ),
+    )
+
+
+def _summary_by_side(
+    stage: int,
+    *,
+    side_a_successes: int,
+    side_b_successes: int,
+    episodes_per_side: int = 50,
+):
+    stage_name = {
+        0: "anchored_racket_intercept",
+        1: "anchored_return",
+        2: "anchored_randomized_return",
+    }.get(stage, f"stage_{stage}")
+    episodes = tuple(
+        _episode(
+            index,
+            success=(
+                index // 2 < (side_a_successes if index % 2 == 0 else side_b_successes)
+            ),
+        )
+        for index in range(episodes_per_side * 2)
     )
     return summarize_curriculum_episodes(
         stage_name,
@@ -223,6 +261,8 @@ def test_promotion_config_defaults_and_validation():
     assert config.min_unique_initial_states == 100
     assert config.prior_replay_probability == 0.20
     assert config.require_zero_unsafe is True
+    assert config.current_per_side_success_threshold == 0.80
+    assert config.prior_per_side_retention_threshold == 0.75
 
     with pytest.raises(ValueError):
         PromotionConfig(success_threshold=1.1)
@@ -234,6 +274,10 @@ def test_promotion_config_defaults_and_validation():
         PromotionConfig(min_episodes=0)
     with pytest.raises(ValueError):
         PromotionConfig(min_unique_initial_states=0)
+    with pytest.raises(ValueError):
+        PromotionConfig(current_per_side_success_threshold=1.1)
+    with pytest.raises(ValueError):
+        PromotionConfig(prior_per_side_retention_threshold=-0.1)
 
 
 def test_evaluator_uses_exact_schedule_and_ratio_of_sums():
@@ -518,6 +562,83 @@ def test_evaluator_applies_and_records_observation_transform(tmp_path):
     )
 
 
+def test_evaluator_accepts_selective_vecnormalize_subclass_artifact(tmp_path):
+    import gymnasium as gym
+    from gymnasium.spaces import Box
+    from stable_baselines3.common.vec_env import DummyVecEnv
+
+    from courtside_dynamics.training.train import SelectiveVecNormalize
+
+    class NormalizationEnv(gym.Env):
+        observation_space = Box(-np.inf, np.inf, shape=(2,), dtype=np.float64)
+        action_space = Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
+
+        def reset(self, *, seed=None, options=None):
+            del seed, options
+            return np.zeros(2), {}
+
+        def step(self, action):
+            del action
+            return np.zeros(2), 0.0, False, False, {}
+
+    seen: list[np.ndarray] = []
+
+    def policy(observation):
+        seen.append(np.asarray(observation).copy())
+        return np.zeros(1, dtype=np.float32)
+
+    env = _OneStepEvalEnv(
+        lambda _seed, _side: _terminal_info(
+            stage_success=True,
+            term_out_of_bounds=False,
+            termination_reason_name="stage_success",
+        ),
+        stage=0,
+        stage_name="anchored_racket_intercept",
+    )
+    suite = HeldOutSeedSuite(
+        base_seed=123,
+        launch_count=1,
+        max_position_offset=(0.0, 0.0, 0.0),
+        max_velocity_offset=(0.0, 0.0, 0.0),
+    )
+    normalization_path = tmp_path / "selective_vec_normalize.pkl"
+    normalizer = SelectiveVecNormalize(
+        DummyVecEnv([NormalizationEnv]),
+        training=False,
+        norm_obs=True,
+        norm_reward=False,
+        normalize_obs_excluded_indices=(1,),
+    )
+    normalizer.obs_rms.mean = np.asarray([100.0, -2.0])
+    normalizer.obs_rms.var = np.asarray([4.0, 9.0])
+    expected = [
+        normalizer.normalize_obs(np.asarray([123.0, 0.0])),
+        normalizer.normalize_obs(np.asarray([123.0, 1.0])),
+    ]
+    normalizer.save(str(normalization_path))
+    normalizer.close()
+
+    summary = evaluate_curriculum_stage(
+        policy,
+        lambda: env,
+        policy_id="selective-normalized-policy-v1",
+        normalization_id="selective-vecnormalize-sha256:abc",
+        normalization_artifact_path=normalization_path,
+        stage_name="anchored_racket_intercept",
+        suite=suite,
+    )
+
+    assert len(seen) == len(expected)
+    for actual, expected_observation in zip(seen, expected, strict=True):
+        np.testing.assert_allclose(actual, expected_observation)
+    assert [observation[1] for observation in seen] == [0.0, 1.0]
+    assert summary.provenance.observation_transform_name is not None
+    assert summary.provenance.observation_transform_name.endswith(
+        "SelectiveVecNormalize.normalize_obs"
+    )
+
+
 def test_evaluator_rejects_ambiguous_normalization_contracts(tmp_path):
     import pickle
 
@@ -594,9 +715,23 @@ def test_default_suite_produces_100_unique_physical_initial_states():
 
 
 def test_current_and_prior_threshold_boundaries_are_exact():
-    current = _summary(2, 80)
-    stage0 = _summary(0, 75)
-    stage1 = _summary(1, 75)
+    current = _summary_by_side(
+        2,
+        side_a_successes=40,
+        side_b_successes=40,
+    )
+    # Fifty mirrored episodes per side make 0.76 the first observed rate
+    # meeting a 0.75 per-side threshold.
+    stage0 = _summary_by_side(
+        0,
+        side_a_successes=38,
+        side_b_successes=38,
+    )
+    stage1 = _summary_by_side(
+        1,
+        side_a_successes=38,
+        side_b_successes=38,
+    )
     report = assess_curriculum_promotion(
         current,
         prior_stages=(stage0, stage1),
@@ -608,7 +743,11 @@ def test_current_and_prior_threshold_boundaries_are_exact():
     assert "explicitly" in report.reasons[-1]
 
     current_fail = assess_curriculum_promotion(
-        _summary(2, 79),
+        _summary_by_side(
+            2,
+            side_a_successes=40,
+            side_b_successes=39,
+        ),
         prior_stages=(stage0, stage1),
     )
     assert current_fail.current_stage_passed is False
@@ -616,11 +755,76 @@ def test_current_and_prior_threshold_boundaries_are_exact():
 
     retention_fail = assess_curriculum_promotion(
         current,
-        prior_stages=(stage0, _summary(1, 74)),
+        prior_stages=(
+            stage0,
+            _summary_by_side(
+                1,
+                side_a_successes=37,
+                side_b_successes=37,
+            ),
+        ),
     )
     assert retention_fail.current_stage_passed is True
     assert retention_fail.prior_retention_passed is False
     assert retention_fail.eligible_for_manual_promotion is False
+
+
+def test_aggregate_current_success_cannot_hide_one_weak_side():
+    current = _summary_by_side(
+        0,
+        side_a_successes=50,
+        side_b_successes=30,
+    )
+    assert current.success_rate == 0.80
+
+    side_success = {item.serving_side: item for item in current.success_by_serving_side}
+    assert side_success[CourtSide.A].episode_count == 50
+    assert side_success[CourtSide.A].success_rate == 1.0
+    assert side_success[CourtSide.B].success_count == 30
+    assert side_success[CourtSide.B].success_rate == 0.60
+    assert side_success[CourtSide.B].success_rate_ci95[0] < 0.60
+    assert side_success[CourtSide.B].success_rate_ci95[1] > 0.60
+
+    report = assess_curriculum_promotion(current)
+    assert report.current_stage_passed is False
+    assert report.eligible_for_manual_promotion is False
+    assert any(
+        "serving side 'b' success 0.600 is below 0.800" in reason
+        for reason in report.reasons
+    )
+
+    payload = report.to_dict()
+    assert payload["thresholds"]["current_per_side_success"] == 0.80
+    assert payload["current"]["success_by_serving_side"]["b"] == {
+        "serving_side": "b",
+        "episode_count": 50,
+        "success_count": 30,
+        "success_rate": 0.60,
+        "success_rate_ci95": list(side_success[CourtSide.B].success_rate_ci95),
+    }
+
+
+def test_aggregate_prior_retention_cannot_hide_one_weak_side():
+    current = _summary_by_side(
+        1,
+        side_a_successes=40,
+        side_b_successes=40,
+    )
+    prior = _summary_by_side(
+        0,
+        side_a_successes=50,
+        side_b_successes=25,
+    )
+    assert prior.success_rate == 0.75
+
+    report = assess_curriculum_promotion(current, prior_stages=(prior,))
+    assert report.current_stage_passed is True
+    assert report.prior_retention_passed is False
+    assert report.eligible_for_manual_promotion is False
+    assert any(
+        "serving side 'b' success 0.500 is below 0.750" in reason
+        for reason in report.reasons
+    )
 
 
 def test_promotion_rejects_too_few_episodes_for_any_gate():
@@ -695,6 +899,30 @@ def test_promotion_rejects_incompatible_evidence_provenance(field, value):
         prior,
         provenance=replace(prior.provenance, **{field: value}),
     )
+    with pytest.raises(ValueError, match="same policy"):
+        assess_curriculum_promotion(
+            current,
+            prior_stages=(incompatible,),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("normalization_id", "vecnormalize:different"),
+        ("normalization_artifact_sha256", "1" * 64),
+        ("observation_transform_sha256", "2" * 64),
+    ],
+)
+def test_promotion_rejects_incompatible_normalization_provenance(field, value):
+    normalization_id = "vecnormalize:test"
+    current = _summary(1, 80, normalization_id=normalization_id)
+    prior = _summary(0, 80, normalization_id=normalization_id)
+    incompatible = replace(
+        prior,
+        provenance=replace(prior.provenance, **{field: value}),
+    )
+
     with pytest.raises(ValueError, match="same policy"):
         assess_curriculum_promotion(
             current,

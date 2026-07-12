@@ -132,6 +132,7 @@ def test_humanoid_tennis_smoke_recipe_has_compact_recording_schema(tmp_path):
     assert cfg.total_timesteps == 10_000
     assert cfg.success_key == "rally_target_reached"
     assert cfg.phase_key == "rally_phase"
+    assert cfg.normalize_obs_excluded_indices == tuple(range(193, 299))
     assert cfg.info_eval_keys == (
         "rally_count",
         "valid_return_rate",
@@ -199,6 +200,7 @@ def test_humanoid_tennis_curriculum_recipes_are_fixed_stage_and_recordable(
     assert cfg.n_envs == 1
     assert cfg.algo == "PPO"
     assert cfg.success_key == "stage_success"
+    assert cfg.normalize_obs_excluded_indices == tuple(range(193, 299))
     assert "experimental" in recipe.description.lower()
     assert "convergence is not claimed" in recipe.description.lower()
     assert cfg.csv_header is not None and cfg.info_row_fn is not None

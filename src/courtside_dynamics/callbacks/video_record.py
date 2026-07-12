@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
@@ -157,17 +158,28 @@ class VideoRecordCallback(BaseCallback):
         get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
         train_vec_norm = get_vec_norm() if get_vec_norm is not None else None
         if train_vec_norm is not None:
-            from stable_baselines3.common.vec_env import (
-                VecNormalize,
-                sync_envs_normalization,
-            )
+            from stable_baselines3.common.vec_env import sync_envs_normalization
 
-            rec_env = VecNormalize(
+            normalizer_kwargs: dict[str, Any] = {}
+            excluded_indices = getattr(
+                train_vec_norm,
+                "normalize_obs_excluded_indices",
+                None,
+            )
+            if excluded_indices is not None:
+                normalizer_kwargs["normalize_obs_excluded_indices"] = (
+                    excluded_indices
+                )
+            rec_env = type(train_vec_norm)(
                 rec_env,
                 training=False,
                 norm_obs=train_vec_norm.norm_obs,
                 norm_reward=False,
                 clip_obs=train_vec_norm.clip_obs,
+                clip_reward=train_vec_norm.clip_reward,
+                gamma=train_vec_norm.gamma,
+                epsilon=train_vec_norm.epsilon,
+                **normalizer_kwargs,
             )
             try:
                 sync_envs_normalization(self.training_env, rec_env)

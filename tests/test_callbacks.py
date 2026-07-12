@@ -240,6 +240,65 @@ def test_video_callback_save_freq_zero_disables_recording(tmp_path):
     assert not list(tmp_path.iterdir()), "recording artifacts were written"
 
 
+def test_video_callback_preserves_selective_normalizer_contract(
+    tmp_path,
+    monkeypatch,
+):
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.video_record import VideoRecordCallback
+    from courtside_dynamics.envs import BallBalanceEnv
+    from courtside_dynamics.training import SelectiveVecNormalize
+
+    captured: dict[str, object] = {}
+
+    class _CaptureRecorder(_PassthroughVideoRecorder):
+        def __init__(
+            self,
+            venv,
+            video_folder,
+            record_video_trigger,
+            video_length,
+            name_prefix,
+        ):
+            captured["normalizer"] = venv
+            super().__init__(
+                venv,
+                video_folder,
+                record_video_trigger,
+                video_length,
+                name_prefix,
+            )
+
+    monkeypatch.setattr(
+        "courtside_dynamics.callbacks.video_record.VecVideoRecorder",
+        _CaptureRecorder,
+    )
+    train_env = SelectiveVecNormalize(
+        make_vec_env(lambda: BallBalanceEnv(episode_len=5), n_envs=1),
+        norm_obs=True,
+        norm_reward=False,
+        normalize_obs_excluded_indices=(0, 2),
+    )
+    model = _FakeModel(action_dim=6)
+    model.get_vec_normalize_env = lambda: train_env  # type: ignore[attr-defined]
+    model.get_env = lambda: train_env  # type: ignore[attr-defined]
+    callback = VideoRecordCallback(
+        env_fn=lambda: BallBalanceEnv(episode_len=5),
+        save_path=str(tmp_path),
+        video_length=2,
+        save_freq=1,
+    )
+    callback.model = model  # type: ignore[assignment]
+    try:
+        _run_callback_once(callback)
+        recorder_normalizer = captured["normalizer"]
+        assert isinstance(recorder_normalizer, SelectiveVecNormalize)
+        assert recorder_normalizer.normalize_obs_excluded_indices == (0, 2)
+    finally:
+        train_env.close()
+
+
 class TestSaveVecNormalizeOnNewBest:
     """The new-best snapshot is what makes ``best_model.zip`` replayable.
 
