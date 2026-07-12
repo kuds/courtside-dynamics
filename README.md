@@ -25,7 +25,7 @@ shared pipeline.
 
 ### Humanoid tennis development status
 
-Phases 1–3 provide a regulation court, physical tennis ball and net, two
+Phases 1–4 provide a regulation court, physical tennis ball and net, two
 29-DoF Unitree G1 models, rigid right-wrist rackets, ordered substep contact
 events, a deterministic cooperative rally state machine, and the registered
 centralized Gymnasium environment. It exposes one normalized 58-value action
@@ -41,8 +41,9 @@ player A proprioception `[0:71]`, player B proprioception `[71:142]`, physical
 racket A `[142:157]`, physical racket B `[157:172]`, ball
 position/velocity/spin `[172:181]`, useful ball-relative coordinates
 `[181:193]`, rally state `[193:221]`, contact-latch state `[221:241]`, and the
-active-action mask `[241:299]`. The final mask is all ones in Phase 3 and
-reserves the v0 contract for later constrained curriculum stages.
+active-action mask `[241:299]`. The mask is all ones in the default
+free-standing environment and selects the learned controls in a constrained
+curriculum instance, so every supported stage retains the same 58/299 API.
 
 The G1 simulation assets are pinned from MuJoCo Menagerie under BSD-3-Clause;
 see `THIRD_PARTY_NOTICES.md`. The physical G1 hardware is proprietary, and its
@@ -65,15 +66,60 @@ step `info` retain the serve side and full initial ball qpos/qvel for recording.
 physics/rules integration harness: a real ball hits a real wrist-mounted racket,
 crosses back over the net, and lands in bounds without mid-rally state writes.
 It is a feasibility fixture, not evidence of learned humanoid tennis.
+The constrained `run_humanoid_tennis_stage0_oracle` and
+`run_humanoid_tennis_stage1_oracle` similarly prove a physical intercept and a
+timed target return on both mirrored sides. The Stage 1 timing is deliberately
+sensitive and is not presented as a robust scripted tennis policy.
 
-Phase 4 will add constrained curriculum/training recipes. This milestone does
-not claim that two free-standing humanoids can be trained end to end with
-vanilla PPO or SAC.
+Phase 4 adds immutable, fixed-per-environment curriculum presets. Stage 0 is a
+fixed-pelvis two-shoulder intercept of a slow deterministic physical feed;
+Stage 1 requires a fixed-pelvis right-arm shot to land in a generous target;
+Stage 2 adds bounded seeded launch randomization. The learned player alternates
+with the serve side, and the observation's action mask exposes the active slice.
+Stage 0 activates only shoulder pitch/roll (`[22:24]` for A or `[51:53]` for
+B); Stages 1–2 activate the seven-value right-arm slice shown above.
+Both G1 pelvises are held by real MuJoCo weld constraints in these anchored
+tasks, all inactive joints receive standing-reference PD targets, and early
+contact forgiveness enlarges only the massless physical stringbed dimensions.
+
+The registry describes planned stages 3–5, but selecting one raises an explicit
+`NotImplementedError`; no fake partner or unvalidated foot constraint is
+substituted. Stage 6 exposes the existing two-free-standing environment mode
+without a training recipe. This milestone does not claim that two free-standing
+humanoids can be trained end to end with vanilla PPO or SAC.
+
+Curriculum parameters stay fixed for an environment instance. The v0
+observation includes the action mask but not target, launch-distribution, or
+racket-scale context, so reset-time stage mixing would be partially observed.
+The promotion evaluator instead uses a pinned, mirrored low-discrepancy launch
+suite with 100 distinct initial ball states and an advisory 80% current-stage /
+75% prior-stage-retention gate, with zero unsafe episodes required by default.
+Evaluation evidence records the exact curriculum and held-out-suite
+fingerprints, environment, package source/Git revision, live SB3 parameter
+hash, checkpoint hash, observation-normalization artifact hash, and exact
+Python/MuJoCo/Gymnasium/NumPy/Torch/SB3 runtime versions. Only the
+canonical preset, recipe horizon, default rule/contact settings, and standard
+held-out suite are promotion-eligible; easier custom variants remain useful
+experiments but cannot pass the gate. Normalized policies must supply their
+frozen `VecNormalize` snapshot; the evaluator loads and applies that exact
+artifact rather than accepting a separate transform callback. Raw observations
+cannot be mislabeled as normalized. Promotion requires fresh
+evidence for every earlier implemented stage from that same policy and
+normalizer. Automatic checkpoint promotion, replay-buffer migration, and mixed
+prior-level rehearsal are not implemented.
 
 `HumanoidTennisCoopSmoke` is intentionally only a 10,000-step integration
 recipe for exercising SB3, checkpoints, compact video CSV recording, and eval
 metrics. Its eval output includes fault-type episode rates and the
 min/p50/p90/max rally-length distribution; it is not a learning baseline.
+
+Three experimental fixed-stage recipes are available:
+`HumanoidTennisStage0Intercept`, `HumanoidTennisStage1AnchoredReturn`, and
+`HumanoidTennisStage2RandomizedReturn`. They default to experimental PPO runs;
+their budgets and SB3 settings are starting points, not evidence of learned
+convergence. SAC remains selectable explicitly, but its entropy tuner sees all
+58 dimensions and is not mask-aware; PPO also wastes exploration on inactive
+coordinates, so neither choice establishes full-task feasibility.
 
 ## Layout
 
@@ -82,7 +128,7 @@ courtside-dynamics/
 ├── pyproject.toml                        # deps + package metadata
 ├── src/courtside_dynamics/
 │   ├── assets/                           # MJCF, racket, court, and licensed robot assets
-│   ├── envs/                             # Gymnasium environments (shared base in _base.py)
+│   ├── envs/                             # Gymnasium environments and tennis curriculum contracts
 │   ├── callbacks/
 │   │   ├── video_record.py               # unified video + CSV recorder
 │   │   └── info_dict_eval.py             # per-episode info aggregates -> TB/CSV
@@ -90,7 +136,8 @@ courtside-dynamics/
 │   │   ├── train.py                      # SAC / PPO training entry point
 │   │   ├── algos.py                      # algo-name -> SB3 class registry
 │   │   ├── artifacts.py                  # config.json / stage_summary.txt writers + artifact registry
-│   │   └── monitor_log.py                # wall-clock-ordered monitor CSV loader
+│   │   ├── monitor_log.py                # wall-clock-ordered monitor CSV loader
+│   │   └── tennis_curriculum.py          # held-out metrics and advisory promotion gate
 │   ├── recipes.py                        # env+algo presets used by the notebook
 │   ├── notebook_utils.py                 # Drive mount, plots, replay, run report, artifact audit
 │   ├── scripted_policies.py              # hand-coded oracles for env validation
@@ -166,6 +213,30 @@ obs, info = env.reset(seed=0)
 obs, reward, terminated, truncated, info = env.step(env.unwrapped.neutral_action)
 ```
 
+The first constrained physical task can be constructed directly and checked
+with its non-neutral mirrored oracle:
+
+```python
+from courtside_dynamics.envs import HumanoidTennisCoopEnv
+from courtside_dynamics.scripted_policies import run_humanoid_tennis_stage0_oracle
+
+env = HumanoidTennisCoopEnv(curriculum_config=0, episode_len=150)
+result = run_humanoid_tennis_stage0_oracle(env, serving_side="a", seed=0)
+assert result.stage_success
+```
+
+For promotion, call `training.evaluate_curriculum_stage` with a fixed-stage
+environment factory plus stable `policy_id` and `normalization_id` values. Pass
+the evaluated SB3 checkpoint as `policy_artifact_path`. When
+`normalization_id` is not `"raw"`, also pass the frozen `VecNormalize` snapshot
+as `normalization_artifact_path`; the evaluator deserializes it and applies its
+own `normalize_obs` method. The IDs are human-readable labels; eligibility uses
+hashes derived from the live policy and those files. Then pass the resulting
+summary and fresh summaries for every earlier implemented stage to
+`training.assess_curriculum_promotion`. The report is JSON-compatible and
+advisory only; it never mutates a recipe, environment, checkpoint, or training
+run.
+
 Pass `seed=...` to `build_train_config` / `TrainConfig` when comparing
 reward or env tweaks: it makes the whole run reproducible (SB3, the
 training workers, and every helper env get derived, non-overlapping
@@ -214,7 +285,11 @@ rising edges, release hysteresis, sampled force peaks, net crossings, court
 classification, net faults, and unsafe-state detection. Phase 3 locks the
 58-action/299-observation Gymnasium API, seeded alternating serves, registration,
 reward/info invariants, finite rollouts, rendering, and a mirrored physical
-legal-return oracle.
+legal-return oracle. Phase 4 adds preset and target-boundary validation, exact
+alternating action masks, seeded randomized launches, physical weld stability,
+inactive-action/PD-hold invariants, a mirrored Stage 0 active-vs-neutral oracle,
+curriculum reward/termination precedence, recipe schemas, and deterministic
+held-out promotion metrics.
 
 ## Results
 

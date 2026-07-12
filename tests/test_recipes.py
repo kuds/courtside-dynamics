@@ -173,3 +173,117 @@ def test_humanoid_tennis_smoke_recipe_has_compact_recording_schema(tmp_path):
         assert len(_scalar_info_keys(info)) > len(header)
     finally:
         env.close()
+
+
+@pytest.mark.parametrize(
+    ("recipe_name", "stage", "active_count", "episode_len"),
+    [
+        ("HumanoidTennisStage0Intercept", 0, 2, 150),
+        ("HumanoidTennisStage1AnchoredReturn", 1, 7, 300),
+        ("HumanoidTennisStage2RandomizedReturn", 2, 7, 300),
+    ],
+)
+def test_humanoid_tennis_curriculum_recipes_are_fixed_stage_and_recordable(
+    recipe_name,
+    stage,
+    active_count,
+    episode_len,
+    tmp_path,
+):
+    import numpy as np
+
+    from courtside_dynamics.callbacks.video_record import _flatten_row
+
+    recipe = RECIPES[recipe_name]
+    cfg = build_train_config(recipe_name, log_dir=str(tmp_path))
+    assert cfg.n_envs == 1
+    assert cfg.algo == "PPO"
+    assert cfg.success_key == "stage_success"
+    assert "experimental" in recipe.description.lower()
+    assert "convergence is not claimed" in recipe.description.lower()
+    assert cfg.csv_header is not None and cfg.info_row_fn is not None
+
+    env = cfg.env_fn()
+    try:
+        _, reset_info = env.reset(seed=0)
+        assert env.episode_len == episode_len
+        assert reset_info["curriculum_stage"] == stage
+        assert reset_info["active_action_count"] == active_count
+        _, reward, terminated, truncated, info = env.step(
+            np.zeros(env.action_space.shape, dtype=np.float32)
+        )
+        row = _flatten_row(
+            cfg.info_row_fn(
+                info,
+                float(reward),
+                float(reward),
+                bool(terminated or truncated),
+            )
+        )
+        assert len(row) == len(list(cfg.csv_header))
+        assert {
+            "curriculum_stage",
+            "stage_success",
+            "target_hit",
+            "term_target_miss",
+        } <= set(cfg.csv_header)
+    finally:
+        env.close()
+
+
+def test_curriculum_recipe_allows_explicit_sac_despite_ppo_default(tmp_path):
+    cfg = build_train_config(
+        "HumanoidTennisStage0Intercept",
+        algo="SAC",
+        log_dir=str(tmp_path),
+    )
+    assert cfg.algo == "SAC"
+    assert cfg.name_prefix.endswith("_sac")
+
+
+def test_curriculum_recipe_writes_stage_provenance(tmp_path):
+    import json
+
+    from courtside_dynamics.training.artifacts import write_run_config
+
+    cfg = build_train_config(
+        "HumanoidTennisStage0Intercept",
+        log_dir=str(tmp_path),
+    )
+    path = write_run_config(cfg, str(tmp_path))
+    with open(path) as config_file:
+        payload = json.load(config_file)
+    curriculum = payload["env"]["curriculum"]
+    assert curriculum["curriculum_stage"] == 0
+    assert curriculum["curriculum_stage_name"] == "anchored_racket_intercept"
+    assert curriculum["active_joint_names"] == [
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+    ]
+    assert curriculum["launch_position_noise"] == [0.0, 0.0, 0.0]
+    assert curriculum["launch_speed"] > 0.0
+    assert curriculum["receiver_distance_from_net"] == 3.0
+    assert curriculum["fault_strictness"] == "regulation"
+    assert curriculum["curriculum_launch_overridden"] is False
+
+
+def test_training_notebook_preserves_curriculum_recipe_defaults():
+    import json
+    from pathlib import Path
+
+    notebook_path = Path(__file__).parents[1] / "notebooks" / "sb3_training.ipynb"
+    notebook = json.loads(notebook_path.read_text())
+    source = "".join(
+        line
+        for cell in notebook["cells"]
+        for line in cell.get("source", ())
+    )
+
+    assert 'ALGO = None' in source
+    assert 'TOTAL_TIMESTEPS = None' in source
+    assert 'ALGO = ALGO or RECIPES[ENV].default_algo' in source
+    assert 'recipe_n_envs = RECIPES[ENV].extra_cfg.get("n_envs")' in source
+    assert "cfg.checkpoint_freq =" not in source
+    assert "cfg.video_freq =" not in source
+    assert "HumanoidTennisStage0Intercept" in source
+    assert "HumanoidTennisStage2RandomizedReturn" in source

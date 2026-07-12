@@ -26,7 +26,11 @@ from gymnasium.envs.registration import register
 # intended termination spec rather than changing it, but
 # reward/episode-length curves (and saved policies, due to the obs
 # change) are not comparable with earlier runs.
-__version__ = "0.4.0"
+# 0.5.0: fixed-stage humanoid-tennis curriculum contracts, physical pelvis
+# welds, action masking/PD holds, Stage 0–2 objectives and recipes, and held-out
+# promotion metrics. The registered v0 action/observation dimensions remain
+# 58/299; stages 3–5 stay explicit planned-only presets.
+__version__ = "0.5.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance-v0")`` etc.

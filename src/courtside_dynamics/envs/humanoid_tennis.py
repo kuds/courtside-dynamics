@@ -52,6 +52,17 @@ from courtside_dynamics.envs.robot_models import (
     get_robot_model_spec,
     initialize_humanoid_tennis_home,
 )
+from courtside_dynamics.envs.tennis_curriculum import (
+    CurriculumConfig,
+    CurriculumStage,
+    LearnedPlayerMode,
+    MobilityMode,
+    PartnerMode,
+    ServeMode,
+    StageObjective,
+    get_curriculum_config,
+    get_curriculum_preset,
+)
 from courtside_dynamics.envs.tennis_rules import (
     CourtSide,
     RallyEvent,
@@ -287,21 +298,37 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         reward_config: TennisRewardConfig | None = None,
         rally_rules: RallyRules | None = None,
         sampler_config: TennisEventSamplerConfig | None = None,
-        rally_target: int = 1,
+        rally_target: int | None = None,
+        curriculum_config: (
+            CurriculumConfig | CurriculumStage | int | str | None
+        ) = None,
         **kwargs: Any,
     ) -> None:
         initial_side = self._coerce_side(initial_serve_side)
+        resolved_curriculum = self._resolve_curriculum(curriculum_config)
         resolved_serve = serve_config or TennisServeConfig()
         resolved_reward = reward_config or TennisRewardConfig()
-        resolved_rules = rally_rules or RallyRules()
+        resolved_rules = rally_rules or (
+            resolved_curriculum.rally_rules()
+            if resolved_curriculum is not None
+            else RallyRules()
+        )
         resolved_sampler = sampler_config or TennisEventSamplerConfig()
+        if rally_target is None:
+            resolved_rally_target = (
+                resolved_curriculum.rally_target
+                if resolved_curriculum is not None
+                else 1
+            )
+        else:
+            resolved_rally_target = int(rally_target)
         if episode_len < 1:
             raise ValueError("episode_len must be at least one")
         if frame_skip != 10:
             raise ValueError(
                 "frame_skip must be 10 for the 0.001 s model and 100 fps API"
             )
-        if rally_target < 1:
+        if resolved_rally_target < 1:
             raise ValueError("rally_target must be at least one")
 
         utils.EzPickle.__init__(
@@ -310,11 +337,12 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             episode_len=episode_len,
             frame_skip=frame_skip,
             initial_serve_side=initial_side,
-            serve_config=resolved_serve,
-            reward_config=resolved_reward,
-            rally_rules=resolved_rules,
-            sampler_config=resolved_sampler,
+            serve_config=serve_config,
+            reward_config=reward_config,
+            rally_rules=rally_rules,
+            sampler_config=sampler_config,
             rally_target=rally_target,
+            curriculum_config=resolved_curriculum,
             **kwargs,
         )
 
@@ -324,7 +352,11 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.reward_config = resolved_reward
         self.rally_rules = resolved_rules
         self.sampler_config = resolved_sampler
-        self.rally_target = int(rally_target)
+        self.rally_target = resolved_rally_target
+        self.curriculum_config = resolved_curriculum
+        self._curriculum_launch_overridden = (
+            resolved_curriculum is not None and serve_config is not None
+        )
         self.initial_serve_side = initial_side
         self._next_serve_side = initial_side
         self._pending_reset_options: dict[str, Any] = {}
@@ -364,6 +396,9 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         )
         self._control_low = self.model.actuator_ctrlrange[:, 0].copy()
         self._control_high = self.model.actuator_ctrlrange[:, 1].copy()
+        self._action_name_to_index = {
+            name: index for index, name in enumerate(self.action_names)
+        }
         if not (
             np.all(self._control_low <= self._stand_controls)
             and np.all(self._stand_controls <= self._control_high)
@@ -399,6 +434,35 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             CourtSide.A: int(self.model.site("player_a_racket_racket_center").id),
             CourtSide.B: int(self.model.site("player_b_racket_racket_center").id),
         }
+        self._racket_stringbed_geom_ids = {
+            CourtSide.A: int(
+                self.model.geom("player_a_racket_racket_stringbed").id
+            ),
+            CourtSide.B: int(
+                self.model.geom("player_b_racket_racket_stringbed").id
+            ),
+        }
+        self._pelvis_weld_ids = {
+            CourtSide.A: int(
+                self.model.equality("player_a_pelvis_curriculum_weld").id
+            ),
+            CourtSide.B: int(
+                self.model.equality("player_b_pelvis_curriculum_weld").id
+            ),
+        }
+        self._nominal_stringbed_sizes = {
+            side: self.model.geom_size[geom_id].copy()
+            for side, geom_id in self._racket_stringbed_geom_ids.items()
+        }
+        if self.curriculum_config is not None:
+            scale = self.curriculum_config.racket_contact_scale
+            for side, geom_id in self._racket_stringbed_geom_ids.items():
+                nominal = self._nominal_stringbed_sizes[side]
+                # Keep thickness, rigid-body mass, and inertia unchanged;
+                # only the physical stringbed's in-plane reach is forgiven.
+                self.model.geom_size[geom_id, 0] = nominal[0]
+                self.model.geom_size[geom_id, 1:3] = nominal[1:3] * scale
+            mujoco.mj_setConst(self.model, self.data)
 
         self._state_machine = RallyStateMachine(
             serving_side=initial_side,
@@ -416,6 +480,11 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             active_contact_latches=frozenset(),
         )
         self._pending_shaping = {CourtSide.A: 0.0, CourtSide.B: 0.0}
+        self._learned_returner: CourtSide | None = None
+        self._stage_success = False
+        self._stage_attempt_complete = False
+        self._target_hit = False
+        self._target_miss = False
         self._last_finite_observation = np.zeros(
             self.observation_layout.total_size,
             dtype=np.float64,
@@ -428,6 +497,125 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             (self.action_layout.total_size,),
             dtype=np.float32,
         )
+
+    @property
+    def active_action_mask(self) -> np.ndarray:
+        """Return a copy of the current policy-controlled action mask."""
+        return self._active_action_mask.astype(np.float32, copy=True)
+
+    @property
+    def curriculum_metadata(self) -> dict[str, Any]:
+        """Return fixed-stage provenance suitable for run artifacts."""
+        config = self.curriculum_config
+        if config is None:
+            return {"curriculum_enabled": False}
+        return {
+            "curriculum_enabled": True,
+            "curriculum_stage": int(config.stage),
+            "curriculum_stage_name": config.name,
+            "curriculum_matches_canonical_preset": (
+                config == get_curriculum_preset(config.stage).config
+            ),
+            "robot_model": self.robot_model,
+            "episode_len": self.episode_len,
+            "frame_skip": self.frame_skip,
+            "model_timestep": float(self.model.opt.timestep),
+            "control_timestep": float(self.dt),
+            "action_size": self.action_layout.total_size,
+            "observation_size": self.observation_layout.total_size,
+            "curriculum_objective": config.objective.value,
+            "curriculum_mobility": config.mobility.value,
+            "learned_player_mode": config.learned_players.value,
+            "partner_mode": config.partner_mode.value,
+            "launch_mode": config.launch.mode.value,
+            "launch_start_distance_from_net": (
+                config.launch.start_distance_from_net
+            ),
+            "launch_lateral_position": config.launch.lateral_position,
+            "launch_height": config.launch.height,
+            "launch_speed": config.launch.speed,
+            "launch_elevation_degrees": config.launch.elevation_degrees,
+            "launch_lateral_degrees": config.launch.lateral_degrees,
+            "launch_position_noise": config.launch.position_noise,
+            "launch_speed_noise": config.launch.speed_noise,
+            "launch_elevation_noise_degrees": (
+                config.launch.elevation_noise_degrees
+            ),
+            "launch_lateral_noise_degrees": (
+                config.launch.lateral_noise_degrees
+            ),
+            "launch_angular_velocity": config.launch.angular_velocity,
+            "racket_contact_scale": config.racket_contact_scale,
+            "receiver_distance_from_net": config.receiver_distance_from_net,
+            "playable_half_length": config.court.playable_half_length,
+            "playable_half_width": config.court.playable_half_width,
+            "target_min_depth": config.court.target_min_depth,
+            "target_max_depth": config.court.target_max_depth,
+            "target_center_y": config.court.target_center_y,
+            "target_half_width": config.court.target_half_width,
+            "target_miss_is_terminal": config.court.target_miss_is_terminal,
+            "rally_target": self.rally_target,
+            "fault_strictness": config.fault_strictness.value,
+            "effective_ball_net_is_fault": self.rally_rules.ball_net_is_fault,
+            "effective_strict_reverse_crossing": (
+                self.rally_rules.strict_reverse_crossing
+            ),
+            "effective_strict_double_hit": self.rally_rules.strict_double_hit,
+            "sampler_min_contact_force": self.sampler_config.min_contact_force,
+            "sampler_release_substeps": self.sampler_config.release_substeps,
+            "sampler_crossing_deadband": self.sampler_config.crossing_deadband,
+            "safety_max_ball_linear_speed": (
+                self.sampler_config.safety.max_ball_linear_speed
+            ),
+            "safety_max_abs_qvel": self.sampler_config.safety.max_abs_qvel,
+            "safety_max_abs_qacc": self.sampler_config.safety.max_abs_qacc,
+            "stage_success_reward": config.stage_success_reward,
+            "terminate_on_success": config.terminate_on_success,
+            "valid_return_reward": self.reward_config.valid_return_reward,
+            "valid_hit_shaping": self.reward_config.valid_hit_shaping,
+            "fault_penalty": self.reward_config.fault_penalty,
+            "unsafe_physics_penalty": (
+                self.reward_config.unsafe_physics_penalty
+            ),
+            "active_joint_names": config.active_joint_names,
+            "pd_hold_joint_names": config.pd_hold_joint_names,
+            "curriculum_launch_overridden": self._curriculum_launch_overridden,
+            "override_serve_start_distance_from_net": (
+                self.serve_config.start_distance_from_net
+                if self._curriculum_launch_overridden
+                else None
+            ),
+            "override_serve_lateral_position": (
+                self.serve_config.lateral_position
+                if self._curriculum_launch_overridden
+                else None
+            ),
+            "override_serve_height": (
+                self.serve_config.height
+                if self._curriculum_launch_overridden
+                else None
+            ),
+            "override_serve_local_velocity": (
+                self.serve_config.local_velocity
+                if self._curriculum_launch_overridden
+                else None
+            ),
+            "override_serve_position_noise": (
+                self.serve_config.position_noise
+                if self._curriculum_launch_overridden
+                else None
+            ),
+            "override_serve_velocity_noise": (
+                self.serve_config.velocity_noise
+                if self._curriculum_launch_overridden
+                else None
+            ),
+            "override_serve_angular_velocity": (
+                self.serve_config.local_angular_velocity
+                if self._curriculum_launch_overridden
+                else None
+            ),
+        }
 
     @property
     def rally_state(self) -> RallySnapshot:
@@ -445,6 +633,53 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             raise ValueError("serve side must be 'a' or 'b'")
         return CourtSide(value)
 
+    @staticmethod
+    def _resolve_curriculum(
+        value: CurriculumConfig | CurriculumStage | int | str | None,
+    ) -> CurriculumConfig | None:
+        if value is None:
+            return None
+        config = (
+            value
+            if isinstance(value, CurriculumConfig)
+            else get_curriculum_config(value)
+        )
+        if config.stage in {
+            CurriculumStage.CONSTRAINED_STANDING_RETURN,
+            CurriculumStage.MOBILE_WITH_SCRIPTED_PARTNER,
+            CurriculumStage.TWO_CONSTRAINED_LEARNED,
+        }:
+            # Custom configs cannot silently turn a planned stage into a
+            # claimed implementation. Those stages need dedicated physical
+            # constraints/controllers and validation first.
+            get_curriculum_config(config.stage, require_available=True)
+        if config.stage in {
+            CurriculumStage.ANCHORED_RACKET_INTERCEPT,
+            CurriculumStage.ANCHORED_RETURN,
+            CurriculumStage.ANCHORED_RANDOMIZED_RETURN,
+        } and config.mobility is not MobilityMode.FIXED_BASE:
+            raise ValueError("implemented stages 0–2 require fixed-base mobility")
+        if config.stage in {
+            CurriculumStage.ANCHORED_RACKET_INTERCEPT,
+            CurriculumStage.ANCHORED_RETURN,
+            CurriculumStage.ANCHORED_RANDOMIZED_RETURN,
+        } and config.partner_mode is not PartnerMode.PD_HOLD:
+            raise ValueError("implemented stages 0–2 require a PD-held partner")
+        if (
+            config.stage is CurriculumStage.TWO_FREE_STANDING
+            and config.mobility is not MobilityMode.FREE_STANDING
+        ):
+            raise ValueError("stage 6 requires free-standing mobility")
+        if config.stage is CurriculumStage.TWO_FREE_STANDING and (
+            config.learned_players is not LearnedPlayerMode.BOTH
+            or config.partner_mode is not PartnerMode.LEARNED
+            or config.objective is not StageObjective.RALLY_TARGET
+        ):
+            raise ValueError(
+                "stage 6 requires two learned players and a rally-target objective"
+            )
+        return config
+
     def _action_to_controls(self, action: np.ndarray) -> np.ndarray:
         normalized = np.asarray(action, dtype=np.float64)
         if normalized.shape != (self.model.nu,):
@@ -461,6 +696,63 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             self._stand_controls + normalized * positive_span,
             self._stand_controls + normalized * negative_span,
         )
+
+    def _configure_action_mask(self, serving_side: CourtSide) -> None:
+        """Select fixed-size policy slices for this episode's learned side."""
+        config = self.curriculum_config
+        if config is None:
+            self._learned_returner = None
+            self._active_action_mask.fill(1.0)
+            return
+
+        self._active_action_mask.fill(0.0)
+        learned_sides: tuple[CourtSide, ...]
+        if config.learned_players is LearnedPlayerMode.BOTH:
+            learned_sides = (CourtSide.A, CourtSide.B)
+            self._learned_returner = None
+        else:
+            self._learned_returner = serving_side.opponent
+            learned_sides = (self._learned_returner,)
+        for side in learned_sides:
+            prefix = "player_a" if side is CourtSide.A else "player_b"
+            for joint_name in config.active_joint_names:
+                index = self._action_name_to_index[f"{prefix}_{joint_name}"]
+                self._active_action_mask[index] = 1.0
+
+    def _configure_curriculum_mobility(self, serving_side: CourtSide) -> None:
+        """Place/anchor curriculum robots once, before simulation begins."""
+        for equality_id in self._pelvis_weld_ids.values():
+            self.data.eq_active[equality_id] = 0
+
+        config = self.curriculum_config
+        if config is None or config.mobility is MobilityMode.FREE_STANDING:
+            return
+        if config.mobility is not MobilityMode.FIXED_BASE:
+            raise NotImplementedError(
+                "foot-constrained humanoid mobility is not implemented"
+            )
+
+        receiver = serving_side.opponent
+        receiver_qpos = self.data.qpos[self._player_qpos_slices[receiver]]
+        receiver_qvel = self.data.qvel[self._player_qvel_slices[receiver]]
+        receiver_qpos[0] = (
+            -config.receiver_distance_from_net
+            if receiver is CourtSide.A
+            else config.receiver_distance_from_net
+        )
+        receiver_qpos[1] = 0.0
+        receiver_qvel[:6] = 0.0
+
+        # Both bases are physically welded for anchored one-player stages.
+        # The non-learned G1 is an irrelevant PD-held feed-side partner; its
+        # anchor prevents a balance failure from contaminating the arm task.
+        for side, equality_id in self._pelvis_weld_ids.items():
+            player_qpos = self.data.qpos[self._player_qpos_slices[side]]
+            equality_data = self.model.eq_data[equality_id]
+            equality_data[0:3] = player_qpos[0:3]
+            equality_data[3:6] = 0.0
+            equality_data[6:10] = player_qpos[3:7]
+            self.data.eq_active[equality_id] = 1
 
     def action_for_control_targets(self, targets: Mapping[str, float]) -> np.ndarray:
         """Build a normalized action for selected named actuator targets.
@@ -566,6 +858,8 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             self.data,
             robot_model=self.robot_model,
         )
+        self._configure_action_mask(serving_side)
+        self._configure_curriculum_mobility(serving_side)
         for name, target in options.get("joint_positions", {}).items():
             joint = self.model.joint(name)
             self.data.qpos[int(joint.qposadr[0])] = target
@@ -604,6 +898,10 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             active_contact_latches=frozenset(),
         )
         self._pending_shaping = {CourtSide.A: 0.0, CourtSide.B: 0.0}
+        self._stage_success = False
+        self._stage_attempt_complete = False
+        self._target_hit = False
+        self._target_miss = False
         self._last_reset_info = self._build_initial_state_info(serving_side)
 
         observation = self._get_obs()
@@ -616,6 +914,11 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         self,
         serving_side: CourtSide,
     ) -> tuple[np.ndarray, np.ndarray]:
+        if (
+            self.curriculum_config is not None
+            and not self._curriculum_launch_overridden
+        ):
+            return self._sample_curriculum_launch(serving_side)
         config = self.serve_config
         position_noise = self.np_random.uniform(
             low=-np.asarray(config.position_noise),
@@ -642,11 +945,71 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             canonical_velocity[:2] *= -1.0
         return canonical_position, canonical_velocity
 
-    def _world_angular_velocity(self, serving_side: CourtSide) -> np.ndarray:
-        angular = np.asarray(
-            self.serve_config.local_angular_velocity,
+    def _sample_curriculum_launch(
+        self,
+        serving_side: CourtSide,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        config = self.curriculum_config
+        assert config is not None
+        launch = config.launch
+        if launch.mode is ServeMode.RANDOMIZED:
+            position_noise = self.np_random.uniform(
+                low=-np.asarray(launch.position_noise),
+                high=np.asarray(launch.position_noise),
+            )
+            speed = float(
+                self.np_random.uniform(
+                    launch.speed - launch.speed_noise,
+                    launch.speed + launch.speed_noise,
+                )
+            )
+            elevation = float(
+                self.np_random.uniform(
+                    launch.elevation_degrees - launch.elevation_noise_degrees,
+                    launch.elevation_degrees + launch.elevation_noise_degrees,
+                )
+            )
+            lateral = float(
+                self.np_random.uniform(
+                    launch.lateral_degrees - launch.lateral_noise_degrees,
+                    launch.lateral_degrees + launch.lateral_noise_degrees,
+                )
+            )
+        else:
+            position_noise = np.zeros(3, dtype=np.float64)
+            speed = launch.speed
+            elevation = launch.elevation_degrees
+            lateral = launch.lateral_degrees
+        canonical_position = np.array(
+            [
+                -launch.start_distance_from_net,
+                launch.lateral_position,
+                launch.height,
+            ],
             dtype=np.float64,
-        ).copy()
+        ) + position_noise
+        canonical_velocity = np.asarray(
+            launch.velocity(
+                speed=speed,
+                elevation_degrees=elevation,
+                lateral_degrees=lateral,
+            ),
+            dtype=np.float64,
+        )
+        if serving_side is CourtSide.B:
+            canonical_position[:2] *= -1.0
+            canonical_velocity[:2] *= -1.0
+        return canonical_position, canonical_velocity
+
+    def _world_angular_velocity(self, serving_side: CourtSide) -> np.ndarray:
+        if (
+            self.curriculum_config is not None
+            and not self._curriculum_launch_overridden
+        ):
+            values = self.curriculum_config.launch.angular_velocity
+        else:
+            values = self.serve_config.local_angular_velocity
+        angular = np.asarray(values, dtype=np.float64).copy()
         if serving_side is CourtSide.B:
             angular[:2] *= -1.0
         return angular
@@ -683,6 +1046,40 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         )
         return info
 
+    def _curriculum_info(self) -> dict[str, Any]:
+        config = self.curriculum_config
+        if config is None:
+            return {}
+        player_a = self.action_layout.player_a
+        player_b = self.action_layout.player_b
+        return {
+            **self.curriculum_metadata,
+            "active_action_count": int(np.count_nonzero(self._active_action_mask)),
+            "active_action_count_a": int(
+                np.count_nonzero(self._active_action_mask[player_a])
+            ),
+            "active_action_count_b": int(
+                np.count_nonzero(self._active_action_mask[player_b])
+            ),
+            "pd_held_action_count": int(
+                self.model.nu - np.count_nonzero(self._active_action_mask)
+            ),
+            "learned_returner": (
+                -1 if self._learned_returner is None else int(self._learned_returner)
+            ),
+            "learned_returner_name": (
+                "both"
+                if self._learned_returner is None
+                else self._learned_returner.label
+            ),
+            "stage_success": self._stage_success,
+            "stage_attempt_complete": self._stage_attempt_complete,
+            "target_hit": self._target_hit,
+            "target_miss": self._target_miss,
+            "term_stage_success": False,
+            "term_target_miss": False,
+        }
+
     def _get_reset_info(self) -> dict[str, Any]:
         info = self._state_machine.snapshot().to_info()
         info.update(self._last_reset_info)
@@ -694,6 +1091,7 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
                 "rally_target_reached": False,
             }
         )
+        info.update(self._curriculum_info())
         return info
 
     def _step_mujoco_simulation(self, ctrl: np.ndarray, n_frames: int) -> None:
@@ -742,6 +1140,61 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         ):
             mujoco.mj_rnePostConstraint(self.model, self.data)
 
+    def _evaluate_curriculum_objective(
+        self,
+        transition: RallyTransition,
+    ) -> tuple[bool, bool, bool, bool]:
+        """Return success, attempt-complete, target-hit, and target-miss.
+
+        The tennis state machine is reduced first. A rule fault therefore
+        always wins over a curriculum success that appears in the same
+        substep batch.
+        """
+        config = self.curriculum_config
+        if (
+            config is None
+            or transition.after.terminated
+            or self._stage_success
+            or (
+                self._target_miss
+                and config.court.target_miss_is_terminal
+            )
+        ):
+            return False, False, False, False
+
+        if config.objective is StageObjective.FIRST_VALID_RACKET_HIT:
+            assert self._learned_returner is not None
+            success = self._learned_returner in transition.valid_racket_hits
+            return success, success, False, False
+
+        if config.objective is StageObjective.RALLY_TARGET:
+            success = transition.after.rally_count >= self.rally_target
+            return success, success, False, False
+
+        assert config.objective is StageObjective.VALID_TARGET_RETURN
+        assert self._learned_returner is not None
+        if self._learned_returner not in transition.confirmed_returns:
+            return False, False, False, False
+
+        target_side = self._learned_returner.opponent
+        target_kind = (
+            RallyEventKind.BALL_COURT_A
+            if target_side is CourtSide.A
+            else RallyEventKind.BALL_COURT_B
+        )
+        for event in transition.processed_events:
+            if event.kind is not target_kind or event.position is None:
+                continue
+            playable = config.court.contains_playable(event.position)
+            target_hit = playable and config.court.contains_target(
+                event.position,
+                side=target_side,
+            )
+            return target_hit, True, target_hit, not target_hit
+        # A partner volley can confirm a tennis return, but it cannot satisfy
+        # the curriculum's explicit physical landing target.
+        return False, False, False, False
+
     def step(self, action):
         self.do_simulation(action, self.frame_skip)
         self.step_number += 1
@@ -776,6 +1229,18 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             step_events,
             contact_peaks=self._latest_event_batch.contact_peaks,
         )
+        (
+            stage_success_now,
+            stage_attempt_complete,
+            target_hit,
+            target_miss,
+        ) = self._evaluate_curriculum_objective(transition)
+        self._stage_success = self._stage_success or stage_success_now
+        self._stage_attempt_complete = (
+            self._stage_attempt_complete or stage_attempt_complete
+        )
+        self._target_hit = self._target_hit or target_hit
+        self._target_miss = self._target_miss or target_miss
 
         raw_observation = self._get_obs()
         observation_sanitized = not bool(np.isfinite(raw_observation).all())
@@ -785,15 +1250,41 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             observation = raw_observation
             self._last_finite_observation = observation.copy()
 
-        terminated = bool(transition.after.terminated)
-        truncated = bool(self.step_number >= self.episode_len)
-        reward, reward_info = self._reward(transition, terminated or truncated)
+        stage_success_terminal = bool(
+            stage_success_now
+            and self.curriculum_config is not None
+            and self.curriculum_config.terminate_on_success
+        )
+        target_miss_terminal = bool(
+            target_miss
+            and self.curriculum_config is not None
+            and self.curriculum_config.court.target_miss_is_terminal
+        )
+        terminated = bool(
+            transition.after.terminated
+            or stage_success_terminal
+            or target_miss_terminal
+        )
+        # A stage outcome on the final control step is a terminal task result,
+        # not an ambiguous simultaneous timeout.
+        truncated = bool(
+            self.step_number >= self.episode_len
+            and not (stage_success_terminal or target_miss_terminal)
+        )
+        reward, reward_info = self._reward(
+            transition,
+            terminated or truncated,
+            stage_success_now=stage_success_now,
+            target_miss_terminal=target_miss_terminal,
+        )
         info = self._build_step_info(
             transition,
             reward_info=reward_info,
             terminated=terminated,
             truncated=truncated,
             observation_sanitized=observation_sanitized,
+            stage_success_terminal=stage_success_terminal,
+            target_miss_terminal=target_miss_terminal,
         )
         if self.render_mode == "human":
             self.render()
@@ -803,10 +1294,27 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         self,
         transition: RallyTransition,
         episode_done: bool,
+        *,
+        stage_success_now: bool = False,
+        target_miss_terminal: bool = False,
     ) -> tuple[float, dict[str, float]]:
-        rew_return = (
-            self.reward_config.valid_return_reward
-            * len(transition.confirmed_returns)
+        if (
+            self.curriculum_config is not None
+            and self.curriculum_config.objective
+            is StageObjective.VALID_TARGET_RETURN
+        ):
+            # Target-return stages pay once, only after the physical landing
+            # satisfies the curriculum overlay.
+            rew_return = 0.0
+        else:
+            rew_return = (
+                self.reward_config.valid_return_reward
+                * len(transition.confirmed_returns)
+            )
+        rew_stage_success = (
+            self.curriculum_config.stage_success_reward
+            if stage_success_now and self.curriculum_config is not None
+            else 0.0
         )
         rew_shaping = 0.0
         rew_clawback = 0.0
@@ -815,7 +1323,13 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         # A volley may confirm the previous player's pending return and open a
         # new one in the same substep.  Commit old escrow before adding new.
         for side in transition.confirmed_returns:
-            self._pending_shaping[side] = 0.0
+            if (
+                self.curriculum_config is None
+                or self.curriculum_config.objective
+                is not StageObjective.VALID_TARGET_RETURN
+                or stage_success_now
+            ):
+                self._pending_shaping[side] = 0.0
         for side in transition.valid_racket_hits:
             amount = self.reward_config.valid_hit_shaping
             rew_shaping += amount
@@ -826,7 +1340,7 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             rew_clawback = -pending
             self._pending_shaping = {CourtSide.A: 0.0, CourtSide.B: 0.0}
 
-        if transition.terminated_now:
+        if transition.terminated_now or target_miss_terminal:
             if transition.after.termination_reason in {
                 TerminationReason.NONFINITE_STATE,
                 TerminationReason.UNSAFE_PHYSICS,
@@ -837,7 +1351,7 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
 
         components = {
             "rew_valid_return": float(rew_return),
-            "rew_stage_success": 0.0,
+            "rew_stage_success": float(rew_stage_success),
             "rew_shaping": float(rew_shaping),
             "rew_shaping_clawback": float(rew_clawback),
             "rew_fault": float(rew_fault),
@@ -854,11 +1368,22 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         terminated: bool,
         truncated: bool,
         observation_sanitized: bool,
+        stage_success_terminal: bool = False,
+        target_miss_terminal: bool = False,
     ) -> dict[str, Any]:
         info: dict[str, Any] = transition.to_info()
         info.update(self._last_reset_info)
         info.update(reward_info)
-        opportunities = int(transition.after.feed_crossed_net) + transition.after.rally_count
+        if stage_success_terminal or target_miss_terminal:
+            # A curriculum outcome stops before the newly opened next-player
+            # opportunity can be attempted. Count completed task attempts,
+            # not that unreachable future return.
+            opportunities = max(1, transition.after.rally_count)
+        else:
+            opportunities = (
+                int(transition.after.feed_crossed_net)
+                + transition.after.rally_count
+            )
         info.update(
             {
                 "episode_step": self.step_number,
@@ -908,6 +1433,10 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             strict=True,
         ):
             info[label] = float(value)
+        info.update(self._curriculum_info())
+        if self.curriculum_config is not None:
+            info["term_stage_success"] = stage_success_terminal
+            info["term_target_miss"] = target_miss_terminal
         return info
 
     @staticmethod

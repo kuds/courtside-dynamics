@@ -114,6 +114,26 @@
         </body>
     </worldbody>
 
+    <!-- Phase 4 fixed-base curriculum constraints. They are compiled into
+         the model but inactive in the default/free-standing environment.
+         Anchored stages place the learned receiver closer to the net, update
+         each weld's world anchor/pose once at reset, and enable it through
+         data.eq_active. No root qpos/qvel is rewritten during simulation. -->
+    <equality>
+        <weld name="player_a_pelvis_curriculum_weld"
+              body1="player_a_pelvis"
+              anchor="-3 0 0.783675"
+              relpose="0 0 0 1 0 0 0"
+              solref="0.005 1"
+              active="false" />
+        <weld name="player_b_pelvis_curriculum_weld"
+              body1="player_b_pelvis"
+              anchor="3 0 0.783675"
+              relpose="0 0 0 0 0 0 1"
+              solref="0.005 1"
+              active="false" />
+    </equality>
+
     <!-- Explicit ball/court parameters keep tennis bounce calibration from
          making robot feet or bodies artificially bouncy in the full scene. -->
     <contact>
