@@ -1298,3 +1298,40 @@ class TestWallBallDoubleBounce:
             )
         finally:
             env.close()
+
+
+class TestWallBallServe:
+    """Pin the parameterized serve-angle distribution."""
+
+    def test_serve_vy_within_configured_range(self):
+        """|vy| after reset stays inside [serve_vy_min, serve_vy_max]
+        (sign randomized), and widening the ceiling actually produces
+        serves beyond the old 1.8 default."""
+        env = WallBallEnv(serve_vy_min=0.8, serve_vy_max=2.6)
+        try:
+            dofadr = int(env.model.joint("ball_x").dofadr[0])
+            vys = []
+            for seed in range(40):
+                env.reset(seed=seed)
+                vys.append(float(env.data.qvel[dofadr + 1]))
+            abs_vys = [abs(v) for v in vys]
+            assert min(abs_vys) >= 0.8 - 1e-6
+            assert max(abs_vys) <= 2.6 + 1e-6
+            assert max(abs_vys) > 1.8, (
+                "widened ceiling never produced a serve beyond the old "
+                "default range"
+            )
+            assert any(v < 0 for v in vys) and any(v > 0 for v in vys), (
+                "serve side is not randomized"
+            )
+        finally:
+            env.close()
+
+    def test_serve_vy_range_validated(self):
+        """A floor of 0 (or an inverted range) would let straight
+        serves hit a parked racket and re-open the no-op free-ride, so
+        construction must fail fast."""
+        with pytest.raises(ValueError, match="serve_vy_min"):
+            WallBallEnv(serve_vy_min=0.0)
+        with pytest.raises(ValueError, match="serve_vy_min"):
+            WallBallEnv(serve_vy_min=2.0, serve_vy_max=1.0)

@@ -532,3 +532,63 @@ def test_warm_start_is_ppo_only(tmp_path):
     )
     with pytest.raises(ValueError, match="supports PPO only"):
         train(cfg)
+
+
+def test_run_summary_surfaces_headline_metric(tmp_path):
+    """With ``headline_key`` set, the stage summary reports the metric's
+    ``_ep_mean`` series: its last value and its own best (which need not
+    coincide with the best-reward checkpoint). Eval reward is dominated
+    by shaping on WallBall, so this is the line runs are compared on."""
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    (tmp_path / "eval_info.csv").write_text(
+        "timestep,metric,value\n"
+        "25000,bounce_count_ep_mean,0.0\n"
+        "50000,bounce_count_ep_mean,2.86\n"
+        "75000,bounce_count_ep_mean,2.14\n"
+    )
+
+    def env_fn():
+        raise RuntimeError("no env needed; probe degrades gracefully")
+
+    cfg = TrainConfig(
+        env_fn=env_fn,
+        log_dir=str(tmp_path),
+        headline_key="bounce_count",
+    )
+    write_run_summary(
+        cfg,
+        str(tmp_path),
+        final_mean_reward=1.0,
+        final_std_reward=0.5,
+        duration_seconds=10.0,
+    )
+    text = (tmp_path / "stage_summary.txt").read_text()
+    assert "bounce_count_ep_mean" in text
+    assert "Headline final: 2.14" in text
+    assert "2.86 (at 50,000 steps)" in text
+
+
+def test_run_summary_skips_headline_without_data(tmp_path):
+    """A headline key with no matching eval_info rows (typo, or a run
+    that died before the first eval) must not emit headline lines or
+    crash the report."""
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    def env_fn():
+        raise RuntimeError("no env needed; probe degrades gracefully")
+
+    cfg = TrainConfig(
+        env_fn=env_fn,
+        log_dir=str(tmp_path),
+        headline_key="bounce_count",
+    )
+    write_run_summary(
+        cfg,
+        str(tmp_path),
+        final_mean_reward=1.0,
+        final_std_reward=0.5,
+        duration_seconds=10.0,
+    )
+    text = (tmp_path / "stage_summary.txt").read_text()
+    assert "Headline" not in text
