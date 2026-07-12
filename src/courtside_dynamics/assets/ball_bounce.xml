@@ -1,4 +1,5 @@
 <mujoco model="ball_bounce">
+  <compiler angle="radian" />
   <option timestep=".002" />
   <asset>
     <texture name="grid" type="2d" builtin="checker" rgb1=".1 .2 .3"
@@ -29,7 +30,11 @@
     <general name="act_x" joint="rotate_x" ctrlrange="-1 1" gainprm="500 0 0" />
     <general name="act_y" joint="rotate_y" ctrlrange="-1 1" gainprm="500 0 0" />
     <general name="act_z" joint="rotate_z" ctrlrange="-1 1" gainprm="500 0 0" />
-    <motor ctrllimited="true" ctrlrange="-1 1" gear="50" joint="slider_z" name="slider_z_motor" />
+    <!-- The inferred 6.4 kg paddle weighs about 63 N.  gear=100 gives the
+         vertical policy enough authority to lift and deliberately strike the
+         ball; the old gear=50 could not overcome gravity away from a joint
+         limit. -->
+    <motor ctrllimited="true" ctrlrange="-1 1" gear="100" joint="slider_z" name="slider_z_motor" />
     <motor ctrllimited="true" ctrlrange="-1 1" gear="50" joint="slider_y" name="slider_y_motor" />
     <motor ctrllimited="true" ctrlrange="-1 1" gear="50" joint="slider_x" name="slider_x_motor" />
   </actuator>

@@ -31,7 +31,12 @@ from gymnasium.envs.registration import register
 # promotion metrics. The registered action/observation dimensions remain
 # 58/299; stages 3–5 stay explicit planned-only presets.
 # 0.6.0: registered Gymnasium IDs are unversioned.
-__version__ = "0.6.0"
+# 0.7.0: BallBounce uses substep ball-paddle pair contacts, rewards only
+# deliberate upward top-face rebounds, terminates relative to the paddle, and
+# corrects its rotation units and vertical actuator authority. Its observation
+# grows from 18 to 30 values to expose spin, contact-event state, and time.
+# Existing BallBounce policies are incompatible and should be retrained.
+__version__ = "0.7.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.
