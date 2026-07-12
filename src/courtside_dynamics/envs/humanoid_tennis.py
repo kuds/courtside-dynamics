@@ -14,8 +14,8 @@ available through :attr:`action_layout` and :attr:`action_names`.
 The observation layout is fixed at 299 values.  Besides both players'
 proprioception and the physical racket/ball state, it includes every hidden
 rally-state and contact-latch value that can affect the next event.  This
-keeps later curriculum stages from silently changing the v0 observation
-contract when joints or a scripted partner are masked.
+keeps later curriculum stages from silently changing the registered
+observation contract when joints or a scripted partner are masked.
 """
 
 from __future__ import annotations
@@ -277,7 +277,9 @@ HUMANOID_TENNIS_OBSERVATION_LAYOUT: Final = CentralizedObservationLayout(
 )
 
 if len(HUMANOID_TENNIS_OBSERVATION_NAMES) != 299:
-    raise RuntimeError("humanoid-tennis observation labels drifted from the v0 API")
+    raise RuntimeError(
+        "humanoid-tennis observation labels drifted from the registered API"
+    )
 
 
 class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):

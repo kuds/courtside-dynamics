@@ -221,13 +221,16 @@ def test_gymnasium_make_ids():
     import gymnasium
 
     for env_id in (
-        "CourtsideDynamics/BallBalance-v0",
-        "CourtsideDynamics/BallBounce-v0",
-        "CourtsideDynamics/WallBall-v2",
-        "CourtsideDynamics/HumanoidTennisCoop-v0",
+        "CourtsideDynamics/BallBalance",
+        "CourtsideDynamics/BallBounce",
+        "CourtsideDynamics/WallBall",
+        "CourtsideDynamics/HumanoidTennisCoop",
     ):
         env = gymnasium.make(env_id)
         try:
+            assert env.spec is not None
+            assert env.spec.id == env_id
+            assert env.spec.version is None
             env.reset(seed=0)
         finally:
             env.close()

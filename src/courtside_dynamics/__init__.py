@@ -11,10 +11,10 @@ from gymnasium.envs.registration import register
 
 # 0.2.0: WallBall contact physics made realistic (ball contact priority
 # + solref tuned to regulation-like restitution; racket reaches a
-# grounded ball). Task dynamics changed, so the env id bumped to
-# WallBall-v2 -- results are not comparable with v1 runs.
+# grounded ball). Task dynamics changed, so results are not comparable
+# with earlier runs.
 # 0.3.0: first registered centralized cooperative two-G1 tennis environment.
-# This adds a new environment/API without changing the existing task ids.
+# This adds a new environment/API without changing the existing task IDs.
 # 0.4.0: WallBall enforces the wall-ball rally rules it was always meant
 # to have: the episode terminates on the second consecutive floor
 # bounce (with ``double_bounce_penalty``), paddle/wall touch readings
@@ -22,44 +22,44 @@ from gymnasium.envs.registration import register
 # longer pays the paddle bonus, opens the wall gate, or resets the
 # stall clock), the stall cutoff runs from reset instead of arming only
 # after the first contact, and the obs gains ``floor_bounce_count``
-# (20->21 dims). Kept as WallBall-v2 because this realizes the env's
-# intended termination spec rather than changing it, but
+# (20->21 dims). This realizes the env's intended termination spec rather
+# than changing it, but
 # reward/episode-length curves (and saved policies, due to the obs
 # change) are not comparable with earlier runs.
 # 0.5.0: fixed-stage humanoid-tennis curriculum contracts, physical pelvis
 # welds, action masking/PD holds, Stage 0–2 objectives and recipes, and held-out
-# promotion metrics. The registered v0 action/observation dimensions remain
+# promotion metrics. The registered action/observation dimensions remain
 # 58/299; stages 3–5 stay explicit planned-only presets.
-__version__ = "0.5.0"
+# 0.6.0: registered Gymnasium IDs are unversioned.
+__version__ = "0.6.0"
 
 # Register environments with gymnasium so they can be created via
-# ``gymnasium.make("CourtsideDynamics/BallBalance-v0")`` etc.
+# ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.
 # ``max_episode_steps`` matches each env's internal ``episode_len``
 # default so the TimeLimit wrapper and the env's own truncation agree.
 register(
-    id="CourtsideDynamics/BallBalance-v0",
+    id="CourtsideDynamics/BallBalance",
     entry_point="courtside_dynamics.envs.ball_balance:BallBalanceEnv",
     max_episode_steps=750,
 )
 
 register(
-    id="CourtsideDynamics/BallBounce-v0",
+    id="CourtsideDynamics/BallBounce",
     entry_point="courtside_dynamics.envs.ball_bounce:BallBounceEnv",
     max_episode_steps=1000,
 )
 
-# v2: realistic ball restitution (v1's ball was nearly perfectly
-# inelastic -- it died on the first wall contact, capping every rally
-# at one exchange) and a slide_z range that can address a grounded
-# ball. Results are not comparable with v1.
+# WallBall uses realistic ball restitution and a slide_z range that can
+# address a grounded ball. Results from the earlier, nearly inelastic
+# implementation are not comparable.
 register(
-    id="CourtsideDynamics/WallBall-v2",
+    id="CourtsideDynamics/WallBall",
     entry_point="courtside_dynamics.envs.wall_ball:WallBallEnv",
     max_episode_steps=750,
 )
 
 register(
-    id="CourtsideDynamics/HumanoidTennisCoop-v0",
+    id="CourtsideDynamics/HumanoidTennisCoop",
     entry_point=(
         "courtside_dynamics.envs.humanoid_tennis:HumanoidTennisCoopEnv"
     ),

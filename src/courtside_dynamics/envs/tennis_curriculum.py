@@ -1,11 +1,11 @@
 """Immutable curriculum contracts for cooperative humanoid tennis.
 
 Curriculum configuration is fixed for the lifetime of an environment
-instance.  The v0 observation exposes the active-action mask, but it does not
-encode target-region, launch-distribution, or contact-forgiveness parameters;
-sampling different stages at reset would therefore make the task partially
-observed.  Phase 4 provides separate fixed-stage environments and held-out
-promotion evaluation instead.
+instance.  The registered observation exposes the active-action mask, but it
+does not encode target-region, launch-distribution, or contact-forgiveness
+parameters; sampling different stages at reset would therefore make the task
+partially observed.  Phase 4 provides separate fixed-stage environments and
+held-out promotion evaluation instead.
 """
 
 from __future__ import annotations
@@ -331,8 +331,9 @@ class CurriculumConfig:
             raise TypeError("terminate_on_success must be a bool")
         if not self.terminate_on_success:
             raise ValueError(
-                "v0 requires terminate_on_success=True because its fixed "
-                "observation does not expose a success latch"
+                "the fixed observation contract requires "
+                "terminate_on_success=True because it "
+                "does not expose a success latch"
             )
         if not isinstance(self.name, str) or not isinstance(self.description, str):
             raise TypeError("curriculum name and description must be strings")

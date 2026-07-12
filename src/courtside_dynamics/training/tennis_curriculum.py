@@ -188,8 +188,8 @@ class PromotionConfig:
 
     ``prior_replay_probability`` records the recommended rehearsal share for
     a future curriculum-aware observation/API. It does not enable hidden
-    reset-time stage mixing in v0; prior stages are protected by explicit
-    held-out retention gates here.
+    reset-time stage mixing in the registered environment; prior stages are
+    protected by explicit held-out retention gates here.
     """
 
     success_threshold: float = 0.80
