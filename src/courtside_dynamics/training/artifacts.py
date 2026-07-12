@@ -96,7 +96,11 @@ def _gpu_info() -> dict[str, Any]:
 
 def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
     """Construct the env once to capture class + space metadata."""
-    info: dict[str, Any] = {"class": None, "observation_shape": None, "action_shape": None}
+    info: dict[str, Any] = {
+        "class": None,
+        "observation_shape": None,
+        "action_shape": None,
+    }
     try:
         env = cfg.env_fn()
     except Exception:
@@ -109,6 +113,9 @@ def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
             info["observation_shape"] = list(obs_shape)
         if act_shape is not None:
             info["action_shape"] = list(act_shape)
+        curriculum_metadata = getattr(env, "curriculum_metadata", None)
+        if curriculum_metadata is not None:
+            info["curriculum"] = dict(curriculum_metadata)
     finally:
         try:
             env.close()

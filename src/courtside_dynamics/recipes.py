@@ -7,8 +7,9 @@ constructor kwargs, the per-env extras that go into ``TrainConfig``
 training. The notebook only has to pick a name (``"WallBall"``) and
 an algorithm (``"SAC"``) and call :func:`build_train_config`.
 
-Adding a new env is one entry in :data:`RECIPES`; the notebook needs no
-edits.
+The notebook picks a recipe name and may override its algorithm explicitly;
+otherwise each recipe's default algorithm and worker count survive. Adding a
+new env is one entry in :data:`RECIPES`; the notebook needs no edits.
 """
 from __future__ import annotations
 
@@ -32,6 +33,7 @@ class Recipe:
     env_cls: type
     env_kwargs: dict[str, Any] = field(default_factory=dict)
     default_total_timesteps: int = 1_000_000
+    default_algo: str = "SAC"
     name_prefix: str = "rl_model"
     extra_cfg: dict[str, Any] = field(default_factory=dict)
     description: str = ""
@@ -97,12 +99,44 @@ _HUMANOID_TENNIS_CSV_HEADER = [
     "reward", "total_reward", "done",
 ]
 
+_HUMANOID_TENNIS_CURRICULUM_CSV_KEYS = (
+    "curriculum_stage",
+    "curriculum_stage_name",
+    "curriculum_objective",
+    "active_action_count",
+    "active_action_count_a",
+    "active_action_count_b",
+    "stage_success",
+    "stage_attempt_complete",
+    "target_hit",
+    "target_miss",
+    "term_stage_success",
+    "term_target_miss",
+)
+_HUMANOID_TENNIS_CURRICULUM_CSV_HEADER = [
+    *_HUMANOID_TENNIS_CSV_KEYS,
+    *_HUMANOID_TENNIS_CURRICULUM_CSV_KEYS,
+    "reward", "total_reward", "done",
+]
+
 
 def _humanoid_tennis_info_row(
     info: dict, reward: float, total_reward: float, done: bool
 ) -> Sequence[object]:
     return [
         *(info[key] for key in _HUMANOID_TENNIS_CSV_KEYS),
+        reward,
+        total_reward,
+        done,
+    ]
+
+
+def _humanoid_tennis_curriculum_info_row(
+    info: dict, reward: float, total_reward: float, done: bool
+) -> Sequence[object]:
+    return [
+        *(info[key] for key in _HUMANOID_TENNIS_CSV_KEYS),
+        *(info[key] for key in _HUMANOID_TENNIS_CURRICULUM_CSV_KEYS),
         reward,
         total_reward,
         done,
@@ -136,6 +170,49 @@ _HUMANOID_TENNIS_TERMINAL_EVAL_KEYS = (
     "term_simultaneous_racket_contact",
     "term_timeout",
 )
+
+_HUMANOID_TENNIS_CURRICULUM_TERMINAL_EVAL_KEYS = (
+    *_HUMANOID_TENNIS_TERMINAL_EVAL_KEYS,
+    "stage_success",
+    "target_hit",
+    "target_miss",
+    "term_stage_success",
+    "term_target_miss",
+)
+
+
+def _tennis_curriculum_extra_cfg(*, video_length: int) -> dict[str, Any]:
+    """Shared fixed-stage recording/evaluation contract for Stages 0–2."""
+    return {
+        "n_envs": 1,
+        "eval_freq": 25_000,
+        "checkpoint_freq": 100_000,
+        "video_freq": 100_000,
+        "n_eval_episodes": 20,
+        "video_length": video_length,
+        "csv_header": _HUMANOID_TENNIS_CURRICULUM_CSV_HEADER,
+        "info_row_fn": _humanoid_tennis_curriculum_info_row,
+        "info_eval_keys": (
+            "stage_success",
+            "target_hit",
+            "rally_count",
+            "valid_return_rate",
+            "legal_hit_count",
+        ),
+        "info_eval_terminal_keys": (
+            _HUMANOID_TENNIS_CURRICULUM_TERMINAL_EVAL_KEYS
+        ),
+        "info_eval_distribution_keys": ("rally_count",),
+        "success_key": "stage_success",
+        "success_threshold": 1.0,
+        "phase_key": "rally_phase",
+        "phase_labels": {
+            0: "initial_feed",
+            1: "awaiting_return",
+            2: "return_in_flight",
+            3: "terminal",
+        },
+    }
 
 
 RECIPES: dict[str, Recipe] = {
@@ -175,6 +252,55 @@ RECIPES: dict[str, Recipe] = {
         description=(
             "Rally a ball against a wall with a 5-DOF racket and a "
             "strict gated wall-hit reward."
+        ),
+    ),
+    "HumanoidTennisStage0Intercept": Recipe(
+        env_cls=HumanoidTennisCoopEnv,
+        env_kwargs={
+            "render_mode": "rgb_array",
+            "episode_len": 150,
+            "curriculum_config": 0,
+        },
+        default_total_timesteps=500_000,
+        default_algo="PPO",
+        name_prefix="humanoid_tennis_stage0_intercept",
+        extra_cfg=_tennis_curriculum_extra_cfg(video_length=150),
+        description=(
+            "Experimental fixed-pelvis, two-shoulder physical intercept task. "
+            "Success is the first legal racket contact; convergence is not "
+            "claimed."
+        ),
+    ),
+    "HumanoidTennisStage1AnchoredReturn": Recipe(
+        env_cls=HumanoidTennisCoopEnv,
+        env_kwargs={
+            "render_mode": "rgb_array",
+            "episode_len": 300,
+            "curriculum_config": 1,
+        },
+        default_total_timesteps=1_000_000,
+        default_algo="PPO",
+        name_prefix="humanoid_tennis_stage1_anchored_return",
+        extra_cfg=_tennis_curriculum_extra_cfg(video_length=300),
+        description=(
+            "Experimental fixed-pelvis right-arm return into a generous "
+            "physical target region; convergence is not claimed."
+        ),
+    ),
+    "HumanoidTennisStage2RandomizedReturn": Recipe(
+        env_cls=HumanoidTennisCoopEnv,
+        env_kwargs={
+            "render_mode": "rgb_array",
+            "episode_len": 300,
+            "curriculum_config": 2,
+        },
+        default_total_timesteps=2_000_000,
+        default_algo="PPO",
+        name_prefix="humanoid_tennis_stage2_randomized_return",
+        extra_cfg=_tennis_curriculum_extra_cfg(video_length=300),
+        description=(
+            "Experimental fixed-pelvis target return with bounded seeded "
+            "launch randomization; convergence is not claimed."
         ),
     ),
     "HumanoidTennisCoopSmoke": Recipe(
@@ -246,7 +372,7 @@ def make_env_fn(env_name: str):
 def build_train_config(
     env_name: str,
     *,
-    algo: str = "SAC",
+    algo: str | None = None,
     log_dir: str,
     total_timesteps: int | None = None,
     quick_test: bool = False,
@@ -259,7 +385,9 @@ def build_train_config(
     env_name:
         Key into :data:`RECIPES` (e.g. ``"WallBall"``).
     algo:
-        ``"SAC"`` or ``"PPO"``.
+        ``"SAC"`` or ``"PPO"``. When omitted, uses the recipe's default;
+        the masked humanoid-tennis curricula default to PPO so SAC does not
+        auto-tune entropy against 51–56 inactive action dimensions.
     log_dir:
         Directory for monitor logs, TensorBoard, checkpoints, videos.
     total_timesteps:
@@ -278,12 +406,13 @@ def build_train_config(
             f"Unknown env '{env_name}'. Choose one of {sorted(RECIPES)}."
         )
     recipe = RECIPES[env_name]
+    resolved_algo = recipe.default_algo if algo is None else algo
 
     cfg_kwargs: dict[str, Any] = {
         "env_fn": make_env_fn(env_name),
-        "algo": algo,
+        "algo": resolved_algo,
         "log_dir": log_dir,
-        "name_prefix": f"{recipe.name_prefix}_{algo.lower()}",
+        "name_prefix": f"{recipe.name_prefix}_{resolved_algo.lower()}",
         "total_timesteps": recipe.default_total_timesteps,
     }
     cfg_kwargs.update(recipe.extra_cfg)
