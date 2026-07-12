@@ -255,7 +255,18 @@ RECIPES: dict[str, Recipe] = {
     ),
     "WallBall": Recipe(
         env_cls=WallBallEnv,
-        env_kwargs={"render_mode": "rgb_array", "min_force": 20.0},
+        # serve_vy_max widened from the 1.8 default: rally forensics on
+        # the 20260712 best model showed a skill cliff at exchange 3
+        # (survival 100%/100%/37%/7%/0%) because angled receive states
+        # only ever arise from the agent's own imprecise returns --
+        # off-distribution until it is too late. Serving up to ~23
+        # degrees off-axis (vy 2.6 vs vx ~6) puts those states in the
+        # training distribution from the first step of every episode.
+        env_kwargs={
+            "render_mode": "rgb_array",
+            "min_force": 20.0,
+            "serve_vy_max": 2.6,
+        },
         default_total_timesteps=1_500_000,
         name_prefix="wall_ball",
         extra_cfg={

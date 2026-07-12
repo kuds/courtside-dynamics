@@ -103,6 +103,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         serve_speed: float = 6.0,
         serve_lob: float = 2.0,
         serve_speed_jitter: float = 1.0,
+        serve_vy_min: float = 0.8,
+        serve_vy_max: float = 1.8,
         paddle_hit_bonus: float = 0.25,
         track_shaping_scale: float = 0.5,
         out_of_bounds_penalty: float = 1.0,
@@ -118,6 +120,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             serve_speed=serve_speed,
             serve_lob=serve_lob,
             serve_speed_jitter=serve_speed_jitter,
+            serve_vy_min=serve_vy_min,
+            serve_vy_max=serve_vy_max,
             paddle_hit_bonus=paddle_hit_bonus,
             track_shaping_scale=track_shaping_scale,
             out_of_bounds_penalty=out_of_bounds_penalty,
@@ -131,6 +135,20 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.serve_speed = float(serve_speed)
         self.serve_lob = float(serve_lob)
         self.serve_speed_jitter = float(serve_speed_jitter)
+        # Lateral serve speed range (|vy|, sign randomized). The 0.8
+        # default floor keeps the serve off a racket parked at its
+        # reset pose (see reset_model); the ceiling controls how
+        # angled the incoming ball can be. Widening the ceiling puts
+        # angled receive states -- which a rallying agent otherwise
+        # only creates itself, several exchanges in -- into the serve
+        # distribution from step one.
+        if not 0.0 < serve_vy_min <= serve_vy_max:
+            raise ValueError(
+                "serve_vy_min must satisfy 0 < serve_vy_min <= "
+                f"serve_vy_max, got ({serve_vy_min}, {serve_vy_max})"
+            )
+        self.serve_vy_min = float(serve_vy_min)
+        self.serve_vy_max = float(serve_vy_max)
         self.paddle_hit_bonus = float(paddle_hit_bonus)
         self.track_shaping_scale = float(track_shaping_scale)
         self.out_of_bounds_penalty = float(out_of_bounds_penalty)
@@ -568,15 +586,16 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             )
         )
         # The lateral component is always off-centre (|vy| in
-        # [0.8, 1.8], random sign) so the serve can never intersect a
-        # racket parked at its reset pose. With realistic ball
-        # restitution a straight serve rebounds off a *static* racket,
-        # paying the paddle bonus (and sometimes a full rally) for
-        # doing nothing -- the no-op baseline must stay <= 0 for the
-        # gated reward to mean anything. The minimum clears the parked
-        # face (half-width 0.2 + ball radius 0.07) across the whole
-        # serve-speed jitter range.
-        vy = self.np_random.uniform(0.8, 1.8)
+        # [serve_vy_min, serve_vy_max], random sign) so the serve can
+        # never intersect a racket parked at its reset pose. With
+        # realistic ball restitution a straight serve rebounds off a
+        # *static* racket, paying the paddle bonus (and sometimes a
+        # full rally) for doing nothing -- the no-op baseline must stay
+        # <= 0 for the gated reward to mean anything. The default
+        # minimum of 0.8 clears the parked face (half-width 0.2 + ball
+        # radius 0.07) across the whole serve-speed jitter range; going
+        # below it re-opens the free-ride.
+        vy = self.np_random.uniform(self.serve_vy_min, self.serve_vy_max)
         if self.np_random.random() < 0.5:
             vy = -vy
         vz = self.serve_lob
