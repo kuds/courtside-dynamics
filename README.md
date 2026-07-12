@@ -121,6 +121,14 @@ convergence. SAC remains selectable explicitly, but its entropy tuner sees all
 58 dimensions and is not mask-aware; PPO also wastes exploration on inactive
 coordinates, so neither choice establishes full-task feasibility.
 
+The dedicated
+[humanoid-tennis training notebook](notebooks/humanoid_tennis_training.ipynb)
+defaults to Stage 0, runs the mirrored physical oracle before training, reloads
+the best checkpoint with its matching observation normalizer, and writes the
+canonical held-out summaries plus an advisory promotion report. It trains one
+fixed stage per run and does not automate stage-to-stage weight transfer or
+curriculum advancement.
+
 ## Layout
 
 ```
@@ -143,7 +151,9 @@ courtside-dynamics/
 │   ├── scripted_policies.py              # hand-coded oracles for env validation
 │   └── colab_setup.py                    # Colab EGL bootstrap
 ├── tests/                                # env, training, callback, recipe, notebook-helper tests
-└── notebooks/sb3_training.ipynb          # one Colab driver for the whole curriculum
+└── notebooks/
+    ├── sb3_training.ipynb                # generic Colab driver for all recipes
+    └── humanoid_tennis_training.ipynb    # fixed-stage training + held-out promotion audit
 ```
 
 ## Installation
