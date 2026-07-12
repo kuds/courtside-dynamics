@@ -792,13 +792,13 @@ def test_rgb_array_render_smoke():
 
 
 def test_registered_environment_constructs_with_expected_time_limit():
-    spec = gym.spec("CourtsideDynamics/HumanoidTennisCoop-v0")
+    spec = gym.spec("CourtsideDynamics/HumanoidTennisCoop")
     assert spec.max_episode_steps == 1_000
     assert spec.entry_point == (
         "courtside_dynamics.envs.humanoid_tennis:HumanoidTennisCoopEnv"
     )
 
-    env = gym.make("CourtsideDynamics/HumanoidTennisCoop-v0")
+    env = gym.make("CourtsideDynamics/HumanoidTennisCoop")
     try:
         observation, info = env.reset(seed=0)
         assert isinstance(env.unwrapped, HumanoidTennisCoopEnv)
@@ -810,7 +810,7 @@ def test_registered_environment_constructs_with_expected_time_limit():
 
 def test_physical_oracle_accepts_registered_time_limit_wrapper():
     env = gym.make(
-        "CourtsideDynamics/HumanoidTennisCoop-v0",
+        "CourtsideDynamics/HumanoidTennisCoop",
         episode_len=300,
     )
     try:
