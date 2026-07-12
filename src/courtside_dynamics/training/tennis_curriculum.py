@@ -198,12 +198,22 @@ class PromotionConfig:
     min_unique_initial_states: int = 100
     prior_replay_probability: float = 0.20
     require_zero_unsafe: bool = True
+    current_per_side_success_threshold: float = 0.80
+    prior_per_side_retention_threshold: float = 0.75
 
     def __post_init__(self) -> None:
         for name, value in (
             ("success_threshold", self.success_threshold),
             ("prior_retention_threshold", self.prior_retention_threshold),
             ("prior_replay_probability", self.prior_replay_probability),
+            (
+                "current_per_side_success_threshold",
+                self.current_per_side_success_threshold,
+            ),
+            (
+                "prior_per_side_retention_threshold",
+                self.prior_per_side_retention_threshold,
+            ),
         ):
             if not math.isfinite(value) or not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be finite and lie in [0, 1]")
@@ -234,6 +244,41 @@ class RateSummary:
             raise ValueError("rate-summary counts must be non-negative")
         if not math.isfinite(self.rate) or not 0.0 <= self.rate <= 1.0:
             raise ValueError("rate-summary rates must lie in [0, 1]")
+
+
+@dataclass(frozen=True, slots=True)
+class SideSuccessSummary:
+    """Success evidence for one mirrored serving-side orientation."""
+
+    serving_side: CourtSide
+    episode_count: int
+    success_count: int
+    success_rate: float
+    success_rate_ci95: tuple[float, float]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.serving_side, CourtSide):
+            raise TypeError("serving_side must be a CourtSide")
+        if self.episode_count < 1:
+            raise ValueError("side-success evidence needs at least one episode")
+        if not 0 <= self.success_count <= self.episode_count:
+            raise ValueError("side-success count is inconsistent with episode count")
+        expected_rate = self.success_count / self.episode_count
+        if not math.isclose(self.success_rate, expected_rate, abs_tol=1e-12):
+            raise ValueError("side-success rate is inconsistent with its counts")
+        low, high = self.success_rate_ci95
+        if not 0.0 <= low <= self.success_rate <= high <= 1.0:
+            raise ValueError("side-success confidence interval is invalid")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible representation."""
+        return {
+            "serving_side": self.serving_side.label,
+            "episode_count": self.episode_count,
+            "success_count": self.success_count,
+            "success_rate": self.success_rate,
+            "success_rate_ci95": list(self.success_rate_ci95),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,6 +498,34 @@ class CurriculumEvaluationSummary:
         """Exact seed/side schedule represented by this summary."""
         return tuple(episode.condition for episode in self.episodes)
 
+    @property
+    def success_by_serving_side(self) -> tuple[SideSuccessSummary, ...]:
+        """Return independently scored evidence for each represented side."""
+        summaries: list[SideSuccessSummary] = []
+        for side in CourtSide:
+            side_episodes = tuple(
+                episode
+                for episode in self.episodes
+                if episode.condition.serving_side is side
+            )
+            if not side_episodes:
+                continue
+            success_count = sum(episode.stage_success for episode in side_episodes)
+            episode_count = len(side_episodes)
+            summaries.append(
+                SideSuccessSummary(
+                    serving_side=side,
+                    episode_count=episode_count,
+                    success_count=success_count,
+                    success_rate=success_count / episode_count,
+                    success_rate_ci95=_wilson_interval(
+                        success_count,
+                        episode_count,
+                    ),
+                )
+            )
+        return tuple(summaries)
+
     def fault_rate(self, name: str) -> float:
         """Return one fault rate, raising when the schema lacks ``name``."""
         for summary in self.fault_rates:
@@ -471,6 +544,10 @@ class CurriculumEvaluationSummary:
             "success_count": self.success_count,
             "success_rate": self.success_rate,
             "success_rate_ci95": list(self.success_rate_ci95),
+            "success_by_serving_side": {
+                summary.serving_side.label: summary.to_dict()
+                for summary in self.success_by_serving_side
+            },
             "valid_return_count": self.valid_return_count,
             "return_opportunity_count": self.return_opportunity_count,
             "valid_return_rate": self.valid_return_rate,
@@ -521,6 +598,12 @@ class PromotionReport:
             "thresholds": {
                 "success": self.config.success_threshold,
                 "prior_retention": self.config.prior_retention_threshold,
+                "current_per_side_success": (
+                    self.config.current_per_side_success_threshold
+                ),
+                "prior_per_side_retention": (
+                    self.config.prior_per_side_retention_threshold
+                ),
                 "min_episodes": self.config.min_episodes,
                 "min_unique_initial_states": (
                     self.config.min_unique_initial_states
@@ -741,10 +824,9 @@ def _load_normalization_transform(
         )
     with resolved.open("rb") as stream:
         normalizer = pickle.load(stream)
-    normalizer_class = f"{type(normalizer).__module__}.{type(normalizer).__qualname__}"
-    if normalizer_class != (
-        "stable_baselines3.common.vec_env.vec_normalize.VecNormalize"
-    ):
+    from stable_baselines3.common.vec_env import VecNormalize
+
+    if not isinstance(normalizer, VecNormalize):
         raise TypeError(
             "normalization_artifact_path must contain an SB3 VecNormalize snapshot"
         )
@@ -1227,6 +1309,26 @@ def evaluate_curriculum_stage(
     )
 
 
+def _side_success_lookup(
+    summary: CurriculumEvaluationSummary,
+) -> dict[CourtSide, SideSuccessSummary]:
+    return {
+        side_summary.serving_side: side_summary
+        for side_summary in summary.success_by_serving_side
+    }
+
+
+def _both_sides_meet(
+    summary: CurriculumEvaluationSummary,
+    threshold: float,
+) -> bool:
+    side_success = _side_success_lookup(summary)
+    return all(
+        side in side_success and side_success[side].success_rate >= threshold
+        for side in CourtSide
+    )
+
+
 def assess_curriculum_promotion(
     current: CurriculumEvaluationSummary,
     *,
@@ -1331,16 +1433,21 @@ def assess_curriculum_promotion(
             )
 
     current_success_passed = current.success_rate >= resolved.success_threshold
+    current_per_side_passed = _both_sides_meet(
+        current,
+        resolved.current_per_side_success_threshold,
+    )
     current_safe = (
         not resolved.require_zero_unsafe or current.fault_rate("unsafe") == 0.0
     )
-    current_passed = current_success_passed and current_safe
+    current_passed = current_success_passed and current_per_side_passed and current_safe
     retention_passed = all(
         stage.success_rate >= resolved.prior_retention_threshold
-        and (
-            not resolved.require_zero_unsafe
-            or stage.fault_rate("unsafe") == 0.0
+        and _both_sides_meet(
+            stage,
+            resolved.prior_per_side_retention_threshold,
         )
+        and (not resolved.require_zero_unsafe or stage.fault_rate("unsafe") == 0.0)
         for stage in priors
     )
     reasons: list[str] = []
@@ -1354,6 +1461,25 @@ def assess_curriculum_promotion(
             f"current stage success {current.success_rate:.3f} is below "
             f"{resolved.success_threshold:.3f}"
         )
+    current_side_success = _side_success_lookup(current)
+    for side in CourtSide:
+        side_summary = current_side_success.get(side)
+        if side_summary is None:
+            reasons.append(
+                f"current serving side {side.label!r} has no success evidence; "
+                "both sides are required"
+            )
+            continue
+        relation = (
+            "meets"
+            if side_summary.success_rate >= resolved.current_per_side_success_threshold
+            else "is below"
+        )
+        reasons.append(
+            f"current serving side {side.label!r} success "
+            f"{side_summary.success_rate:.3f} {relation} "
+            f"{resolved.current_per_side_success_threshold:.3f}"
+        )
     if resolved.require_zero_unsafe:
         relation = "is zero" if current_safe else "must be zero"
         reasons.append(
@@ -1362,14 +1488,37 @@ def assess_curriculum_promotion(
     if not priors:
         reasons.append("no prior-stage retention gates apply")
     for stage in priors:
-        relation = "meets" if (
-            stage.success_rate >= resolved.prior_retention_threshold
-        ) else "is below"
+        relation = (
+            "meets"
+            if (stage.success_rate >= resolved.prior_retention_threshold)
+            else "is below"
+        )
         reasons.append(
             f"prior stage {stage.stage_name!r} success "
             f"{stage.success_rate:.3f} {relation} "
             f"{resolved.prior_retention_threshold:.3f}"
         )
+        prior_side_success = _side_success_lookup(stage)
+        for side in CourtSide:
+            side_summary = prior_side_success.get(side)
+            if side_summary is None:
+                reasons.append(
+                    f"prior stage {stage.stage_name!r} serving side "
+                    f"{side.label!r} has no success evidence; both sides are required"
+                )
+                continue
+            side_relation = (
+                "meets"
+                if side_summary.success_rate
+                >= resolved.prior_per_side_retention_threshold
+                else "is below"
+            )
+            reasons.append(
+                f"prior stage {stage.stage_name!r} serving side "
+                f"{side.label!r} success {side_summary.success_rate:.3f} "
+                f"{side_relation} "
+                f"{resolved.prior_per_side_retention_threshold:.3f}"
+            )
         if resolved.require_zero_unsafe:
             unsafe_rate = stage.fault_rate("unsafe")
             unsafe_relation = "is zero" if unsafe_rate == 0.0 else "must be zero"
@@ -1377,7 +1526,10 @@ def assess_curriculum_promotion(
                 f"prior stage {stage.stage_name!r} unsafe rate "
                 f"{unsafe_rate:.3f} {unsafe_relation}"
             )
-    reasons.append("advisory only; promotion must be performed explicitly")
+    reasons.append(
+        "assessment is pure evidence only; an orchestrator must explicitly "
+        "consume it to advance"
+    )
 
     return PromotionReport(
         current=current,
@@ -1399,6 +1551,7 @@ __all__ = [
     "PromotionConfig",
     "PromotionReport",
     "RateSummary",
+    "SideSuccessSummary",
     "assess_curriculum_promotion",
     "evaluate_curriculum_stage",
     "summarize_curriculum_episodes",

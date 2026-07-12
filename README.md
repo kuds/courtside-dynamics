@@ -121,6 +121,23 @@ convergence. SAC remains selectable explicitly, but its entropy tuner sees all
 58 dimensions and is not mask-aware; PPO also wastes exploration on inactive
 coordinates, so neither choice establishes full-task feasibility.
 
+The dedicated
+[humanoid-tennis training notebook](notebooks/humanoid_tennis_training.ipynb)
+trains Stages 0–2 as a gated PPO transfer curriculum. Each stage remains an
+immutable fixed-stage run, but a passing best policy and its matching
+observation normalizer warm-start the next stage with a fresh optimizer and
+reward-normalization state. Advancement requires the one-shot canonical
+held-out success, mirrored-side, safety, and predecessor-retention gates;
+reward, episode length, rally count, and return counts remain diagnostics
+unless the notebook user enables them as additional criteria. The notebook
+writes per-stage evidence plus a curriculum lineage manifest and disconnects
+Colab by default after completion or an orderly promotion stop.
+
+The humanoid recipes normalize continuous physical observations (indices
+0–192) while keeping the bounded rally/contact/action-mask tail (193–298) raw.
+This prevents newly active curriculum flags from inheriting near-zero variance
+and clipping when a passing normalizer is transferred to the next stage.
+
 ## Layout
 
 ```
@@ -143,7 +160,9 @@ courtside-dynamics/
 │   ├── scripted_policies.py              # hand-coded oracles for env validation
 │   └── colab_setup.py                    # Colab EGL bootstrap
 ├── tests/                                # env, training, callback, recipe, notebook-helper tests
-└── notebooks/sb3_training.ipynb          # one Colab driver for the whole curriculum
+└── notebooks/
+    ├── sb3_training.ipynb                # generic Colab driver for all recipes
+    └── humanoid_tennis_training.ipynb    # gated Stage 0–2 transfer curriculum
 ```
 
 ## Installation
@@ -250,7 +269,7 @@ disk alone, after the Colab runtime is gone:
 
 | Artifact | What it answers |
 |----------|-----------------|
-| `config.json` | Exact env/algo/hyperparameters (incl. SB3-resolved defaults), package versions, GPU, git SHA. |
+| `config.json` | Exact env/algo/hyperparameters (incl. SB3-resolved defaults), package versions, GPU, git SHA, and any warm-start source hashes plus transfer/reset semantics. |
 | `stage_summary.txt` | End-of-run report: final/best eval, duration, throughput, device, final `train/*` health metrics. |
 | `evaluations.npz`, `eval_info.csv` | Deterministic eval curve + per-episode info aggregates (success rate, bounce/hit counts, termination-cause breakdown). |
 | `tensorboard/`, `tensorboard/progress.csv` | Live scalars and their CSV mirror (SAC `ent_coef`/losses, PPO `explained_variance`/`approx_kl`, ...). |

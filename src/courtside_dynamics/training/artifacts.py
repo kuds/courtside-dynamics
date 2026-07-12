@@ -151,8 +151,21 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "normalize_reward": cfg.normalize_reward,
             "clip_obs": cfg.clip_obs,
             "clip_reward": cfg.clip_reward,
+            "normalize_obs_excluded_indices": list(
+                cfg.normalize_obs_excluded_indices
+            ),
             "policy": cfg.policy,
             "model_kwargs": cfg.model_kwargs,
+            "warm_start": (
+                {
+                    "source_run_dir": str(cfg.warm_start.source_run_dir),
+                    "reset_observation_indices": list(
+                        cfg.warm_start.reset_observation_indices
+                    ),
+                }
+                if cfg.warm_start is not None
+                else None
+            ),
             "csv_header": list(cfg.csv_header) if cfg.csv_header else None,
             "info_dict_eval": cfg.info_dict_eval,
             "info_eval_keys": (
@@ -267,6 +280,26 @@ def update_run_config_with_model(model: Any, log_dir: str) -> str | None:
     except (OSError, json.JSONDecodeError):
         return None
     payload["resolved_model"] = _model_info(model)
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2, default=repr)
+        f.write("\n")
+    return path
+
+
+def update_run_config_with_initialization(
+    initialization: dict[str, Any],
+    log_dir: str,
+) -> str | None:
+    """Bind resolved warm-start provenance to ``config.json``."""
+    path = os.path.join(log_dir, "config.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    payload["initialization"] = initialization
     with open(path, "w") as f:
         json.dump(payload, f, indent=2, default=repr)
         f.write("\n")

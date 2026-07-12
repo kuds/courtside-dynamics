@@ -11,16 +11,34 @@ and hard to notice from a training curve alone:
 3. ``policy`` is actually used -- it used to be hardcoded to
    ``"MlpPolicy"`` so the configured value was silently ignored.
 """
+
 from __future__ import annotations
 
+import hashlib
+import json
+
+import numpy as np
 import pytest
+import torch
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import VecNormalize
 
 from courtside_dynamics.envs import BallBalanceEnv
+from courtside_dynamics.training.artifacts import (
+    update_run_config_with_model,
+    write_run_config,
+)
 from courtside_dynamics.training.train import (
+    SelectiveVecNormalize,
+    TrainConfig,
+    WarmStartConfig,
     _build_algo,
     _env_steps_to_calls,
+    _load_warm_start_normalizer,
     _offset_seed,
+    _prepare_warm_start,
+    train,
 )
 
 
@@ -219,6 +237,298 @@ def test_csv_logger_survives_learn(tmp_path):
         model_kwargs={"learning_starts": 16, "buffer_size": 500},
     )
     train(cfg)
-    assert os.path.exists(
-        os.path.join(str(tmp_path), "tensorboard", "progress.csv")
-    ), "CSV logger was reset by learn(); progress.csv not written"
+    assert os.path.exists(os.path.join(str(tmp_path), "tensorboard", "progress.csv")), (
+        "CSV logger was reset by learn(); progress.csv not written"
+    )
+
+
+def test_warm_start_config_validates_and_canonicalizes_indices(tmp_path):
+    config = WarmStartConfig(tmp_path, reset_observation_indices=(3, 1))
+    assert config.reset_observation_indices == (1, 3)
+    with pytest.raises(TypeError, match="integers"):
+        WarmStartConfig(tmp_path, reset_observation_indices=(True,))
+    with pytest.raises(ValueError, match="non-negative"):
+        WarmStartConfig(tmp_path, reset_observation_indices=(-1,))
+    with pytest.raises(ValueError, match="unique"):
+        WarmStartConfig(tmp_path, reset_observation_indices=(1, 1))
+
+
+def test_selective_vec_normalize_round_trip_and_pickle(tmp_path):
+    base_env = make_vec_env(lambda: BallBalanceEnv(), n_envs=1)
+    normalizer = SelectiveVecNormalize(
+        base_env,
+        norm_obs=True,
+        norm_reward=False,
+        normalize_obs_excluded_indices=(0, 2),
+    )
+    try:
+        shape = normalizer.observation_space.shape
+        assert shape is not None
+        normalizer.obs_rms.mean = np.linspace(1.0, 2.0, shape[0])
+        normalizer.obs_rms.var = np.linspace(2.0, 3.0, shape[0])
+        raw = np.linspace(-3.0, 3.0, shape[0], dtype=np.float64)[None, :]
+        normalized = normalizer.normalize_obs(raw)
+        np.testing.assert_allclose(normalized[..., (0, 2)], raw[..., (0, 2)])
+        np.testing.assert_allclose(
+            normalizer.unnormalize_obs(normalized),
+            raw,
+            atol=1e-7,
+        )
+
+        path = tmp_path / "selective.pkl"
+        normalizer.save(str(path))
+        loaded_base = make_vec_env(lambda: BallBalanceEnv(), n_envs=1)
+        loaded = VecNormalize.load(str(path), loaded_base)
+        try:
+            assert isinstance(loaded, SelectiveVecNormalize)
+            assert loaded.normalize_obs_excluded_indices == (0, 2)
+            loaded_normalized = loaded.normalize_obs(raw)
+            np.testing.assert_allclose(loaded_normalized, normalized)
+        finally:
+            loaded.close()
+    finally:
+        normalizer.close()
+
+
+def _make_ppo_warm_start_source(tmp_path, *, excluded_indices=(0,)):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+
+    def env_fn():
+        return BallBalanceEnv(episode_len=12)
+
+    source_cfg = TrainConfig(
+        env_fn=env_fn,
+        algo="PPO",
+        log_dir=str(source_dir),
+        n_envs=1,
+        normalize_obs=True,
+        normalize_reward=True,
+        normalize_obs_excluded_indices=tuple(excluded_indices),
+        model_kwargs={"n_steps": 8, "batch_size": 4, "n_epochs": 1},
+    )
+    raw_env = make_vec_env(env_fn, n_envs=1, seed=7)
+    normalizer = SelectiveVecNormalize(
+        raw_env,
+        norm_obs=True,
+        norm_reward=True,
+        normalize_obs_excluded_indices=tuple(excluded_indices),
+    )
+    model = _build_algo(
+        "PPO",
+        normalizer,
+        str(source_dir),
+        n_steps=8,
+        batch_size=4,
+        n_epochs=1,
+        seed=7,
+    )
+    with torch.no_grad():
+        first_parameter = next(model.policy.parameters())
+        first_parameter.fill_(0.125)
+    shape = normalizer.observation_space.shape
+    assert shape is not None
+    normalizer.obs_rms.mean = np.linspace(10.0, 20.0, shape[0])
+    normalizer.obs_rms.var = np.linspace(2.0, 4.0, shape[0])
+    normalizer.obs_rms.count = 123.0
+    normalizer.ret_rms.mean = np.asarray(9.0)
+    normalizer.ret_rms.var = np.asarray(4.0)
+    normalizer.ret_rms.count = 55.0
+    model.save(source_dir / "best_model.zip")
+    normalizer.save(source_dir / "best_vec_normalize.pkl")
+    write_run_config(source_cfg, str(source_dir))
+    update_run_config_with_model(model, str(source_dir))
+    source_state = {
+        name: value.detach().cpu().clone()
+        for name, value in model.policy.state_dict().items()
+    }
+    normalizer.close()
+    return source_dir, env_fn, source_state
+
+
+def test_warm_start_normalizer_carries_obs_and_resets_target_state(tmp_path):
+    source_dir, env_fn, _source_state = _make_ppo_warm_start_source(tmp_path)
+    target_cfg = TrainConfig(
+        env_fn=env_fn,
+        algo="PPO",
+        log_dir=str(tmp_path / "target"),
+        n_envs=2,
+        normalize_obs=True,
+        normalize_reward=True,
+        normalize_obs_excluded_indices=(0,),
+        warm_start=WarmStartConfig(
+            source_dir,
+            reset_observation_indices=(1,),
+        ),
+    )
+    artifacts = _prepare_warm_start(target_cfg)
+    assert artifacts is not None
+    base_env = make_vec_env(env_fn, n_envs=2, seed=3)
+    loaded = _load_warm_start_normalizer(
+        base_env,
+        artifacts,
+        target_cfg,
+        norm_reward=True,
+    )
+    try:
+        assert loaded.num_envs == 2
+        assert loaded.normalize_obs_excluded_indices == (0,)
+        assert loaded.obs_rms.mean[0] == pytest.approx(10.0)
+        assert loaded.obs_rms.mean[1] == pytest.approx(
+            artifacts.reset_observation_values[0]
+        )
+        assert loaded.obs_rms.var[1] == pytest.approx(1.0)
+        assert loaded.obs_rms.count == pytest.approx(123.0)
+        assert loaded.ret_rms.mean == pytest.approx(0.0)
+        assert loaded.ret_rms.var == pytest.approx(1.0)
+        assert loaded.ret_rms.count == pytest.approx(1e-4)
+        np.testing.assert_array_equal(loaded.returns, np.zeros(2))
+        assert loaded.training is True
+    finally:
+        loaded.close()
+
+
+class _CaptureWarmStart(BaseCallback):
+    def __init__(self) -> None:
+        super().__init__()
+        self.policy_state: dict[str, torch.Tensor] | None = None
+        self.optimizer_state_count: int | None = None
+        self.start_timestep: int | None = None
+
+    def _on_training_start(self) -> None:
+        self.policy_state = {
+            name: value.detach().cpu().clone()
+            for name, value in self.model.policy.state_dict().items()
+        }
+        self.optimizer_state_count = len(self.model.policy.optimizer.state)
+        self.start_timestep = int(self.model.num_timesteps)
+
+    def _on_step(self) -> bool:
+        return True
+
+
+def test_train_warm_starts_policy_only_and_records_provenance(tmp_path):
+    source_dir, env_fn, source_state = _make_ppo_warm_start_source(tmp_path)
+    target_dir = tmp_path / "target"
+    capture = _CaptureWarmStart()
+    cfg = TrainConfig(
+        env_fn=env_fn,
+        algo="PPO",
+        total_timesteps=8,
+        log_dir=str(target_dir),
+        n_envs=1,
+        seed=13,
+        eval_freq=10_000,
+        checkpoint_freq=0,
+        video_freq=0,
+        record_video=False,
+        info_dict_eval=False,
+        n_eval_episodes=1,
+        normalize_obs=True,
+        normalize_reward=True,
+        normalize_obs_excluded_indices=(0,),
+        warm_start=WarmStartConfig(source_dir),
+        model_kwargs={"n_steps": 8, "batch_size": 4, "n_epochs": 1},
+        extra_callbacks=(capture,),
+    )
+    train(cfg)
+
+    assert capture.policy_state is not None
+    assert capture.policy_state.keys() == source_state.keys()
+    for name, expected in source_state.items():
+        torch.testing.assert_close(capture.policy_state[name], expected)
+    assert capture.optimizer_state_count == 0
+    assert capture.start_timestep == 0
+
+    config = json.loads((target_dir / "config.json").read_text())
+    initialization = config["initialization"]
+    assert initialization["mode"] == "policy_and_observation_stats"
+    assert initialization["optimizer_state_transferred"] is False
+    assert initialization["reward_statistics_reset"] is True
+    assert initialization["normalize_obs_excluded_indices"] == [0]
+    assert "policy.optimizer_state" in initialization["reset"]
+    for filename in ("best_model.zip", "best_vec_normalize.pkl", "config.json"):
+        expected = hashlib.sha256((source_dir / filename).read_bytes()).hexdigest()
+        assert initialization["source_artifacts"][filename]["sha256"] == expected
+
+
+def test_warm_start_rejects_invalid_source_before_writing_target(tmp_path):
+    target_dir = tmp_path / "target"
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(),
+        algo="PPO",
+        log_dir=str(target_dir),
+        warm_start=WarmStartConfig(tmp_path / "missing"),
+    )
+    with pytest.raises(ValueError, match="does not exist"):
+        train(cfg)
+    assert not target_dir.exists()
+
+    source_dir, env_fn, _source_state = _make_ppo_warm_start_source(tmp_path)
+    mismatched_dir = tmp_path / "mismatched"
+    mismatch = TrainConfig(
+        env_fn=env_fn,
+        algo="PPO",
+        log_dir=str(mismatched_dir),
+        normalize_obs_excluded_indices=(1,),
+        warm_start=WarmStartConfig(source_dir),
+    )
+    with pytest.raises(ValueError, match="excluded_indices differ"):
+        train(mismatch)
+    assert not mismatched_dir.exists()
+
+
+def test_warm_start_setup_failure_closes_every_constructed_env(tmp_path):
+    source_dir, _source_env_fn, _source_state = _make_ppo_warm_start_source(
+        tmp_path
+    )
+    source_config_path = source_dir / "config.json"
+    source_config = json.loads(source_config_path.read_text())
+    # Let cheap config validation pass, while leaving the serialized
+    # normalizer's real clip_obs=10 so loading fails after train/eval envs exist.
+    source_config["train_config"]["clip_obs"] = 5.0
+    source_config_path.write_text(json.dumps(source_config))
+
+    constructed: set[int] = set()
+    closed: set[int] = set()
+
+    def tracked_env_fn():
+        env = BallBalanceEnv(episode_len=12)
+        identity = id(env)
+        constructed.add(identity)
+        original_close = env.close
+
+        def tracked_close():
+            closed.add(identity)
+            original_close()
+
+        env.close = tracked_close
+        return env
+
+    cfg = TrainConfig(
+        env_fn=tracked_env_fn,
+        algo="PPO",
+        log_dir=str(tmp_path / "target"),
+        n_envs=1,
+        normalize_obs=True,
+        normalize_reward=True,
+        clip_obs=5.0,
+        normalize_obs_excluded_indices=(0,),
+        warm_start=WarmStartConfig(source_dir),
+    )
+    with pytest.raises(ValueError, match="normalizer clip_obs settings differ"):
+        train(cfg)
+
+    assert constructed
+    assert constructed <= closed
+
+
+def test_warm_start_is_ppo_only(tmp_path):
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(),
+        algo="SAC",
+        log_dir=str(tmp_path / "target"),
+        warm_start=WarmStartConfig(tmp_path),
+    )
+    with pytest.raises(ValueError, match="supports PPO only"):
+        train(cfg)

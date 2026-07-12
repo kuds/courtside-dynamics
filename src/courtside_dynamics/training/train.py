@@ -17,13 +17,20 @@ A typical notebook cell boils down to::
 The helper builds vectorized train / eval envs, wires ``EvalCallback`` and
 ``VideoRecordCallback``, and runs ``model.learn`` end-to-end.
 """
+
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import os
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
+import numpy as np
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.callbacks import (
     BaseCallback,
@@ -36,7 +43,10 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.logger import configure as configure_logger
+from stable_baselines3.common.running_mean_std import RunningMeanStd
+from stable_baselines3.common.utils import check_for_correct_spaces
 from stable_baselines3.common.vec_env import (
+    VecEnv,
     VecNormalize,
     sync_envs_normalization,
 )
@@ -53,6 +63,7 @@ from courtside_dynamics.training.algos import (
     resolve_algo as _resolve_algo,
 )
 from courtside_dynamics.training.artifacts import (
+    update_run_config_with_initialization,
     update_run_config_with_model,
     write_run_config,
     write_run_summary,
@@ -83,6 +94,119 @@ class _SaveVecNormalizeOnNewBest(BaseCallback):
         os.makedirs(os.path.dirname(self.save_path) or ".", exist_ok=True)
         vec_norm.save(self.save_path)
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class WarmStartConfig:
+    """Policy-only initialization from one canonical prior best run.
+
+    The source directory must contain the paired ``best_model.zip`` and
+    ``best_vec_normalize.pkl`` artifacts plus that run's ``config.json``.
+    Only policy tensors and observation running statistics transfer.  The new
+    run deliberately starts with fresh optimizer, reward-normalization,
+    schedule, timestep, buffer, logger, and callback state.
+
+    ``reset_observation_indices`` identifies deterministic observation fields
+    whose semantics changed between fixed stages (notably newly active mask
+    entries). Their carried mean is replaced with the target environment's
+    seeded reset value and their variance with one, so the initial normalized
+    value is zero instead of clipping against stale near-zero variance.
+    """
+
+    source_run_dir: str | Path
+    reset_observation_indices: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_run_dir, (str, os.PathLike)):
+            raise TypeError("source_run_dir must be a path")
+        if not str(self.source_run_dir).strip():
+            raise ValueError("source_run_dir must not be empty")
+        indices = tuple(self.reset_observation_indices)
+        if any(
+            isinstance(index, bool) or not isinstance(index, int) for index in indices
+        ):
+            raise TypeError("reset_observation_indices must contain integers")
+        if any(index < 0 for index in indices):
+            raise ValueError("reset_observation_indices must be non-negative")
+        if len(set(indices)) != len(indices):
+            raise ValueError("reset_observation_indices must be unique")
+        object.__setattr__(self, "reset_observation_indices", tuple(sorted(indices)))
+
+
+@dataclass(frozen=True, slots=True)
+class _WarmStartArtifacts:
+    source_run_dir: Path
+    model_path: Path
+    normalizer_path: Path
+    config_path: Path
+    source_config: dict[str, Any]
+    source_hashes: dict[str, str]
+    target_env_class: str
+    target_curriculum: dict[str, Any] | None
+    reset_observation_values: tuple[float, ...]
+
+
+class SelectiveVecNormalize(VecNormalize):
+    """VecNormalize that leaves selected one-dimensional observations raw.
+
+    Humanoid-tennis' semantic/discrete tail is already bounded and should not
+    inherit stale running statistics across stages.  Exclusions are symmetric:
+    ``normalize_obs`` restores raw values and ``unnormalize_obs`` restores the
+    corresponding normalized inputs, so both methods remain inverses.
+
+    The exclusion tuple is ordinary pickle state.  ``VecNormalize.save/load``
+    therefore preserves this subclass and its exact normalization contract.
+    """
+
+    def __init__(
+        self,
+        venv: VecEnv,
+        *,
+        normalize_obs_excluded_indices: Sequence[int] = (),
+        **kwargs: Any,
+    ) -> None:
+        self.normalize_obs_excluded_indices = _validate_observation_indices(
+            normalize_obs_excluded_indices,
+            name="normalize_obs_excluded_indices",
+        )
+        super().__init__(venv, **kwargs)
+        if self.normalize_obs_excluded_indices:
+            shape = self.observation_space.shape
+            if shape is None or len(shape) != 1:
+                raise ValueError(
+                    "normalize_obs_excluded_indices require a one-dimensional "
+                    "Box observation"
+                )
+            if self.normalize_obs_excluded_indices[-1] >= shape[0]:
+                raise ValueError(
+                    "normalize_obs_excluded_indices exceed the observation size"
+                )
+
+    def normalize_obs(self, obs: Any) -> Any:
+        normalized = super().normalize_obs(obs)
+        if not self.norm_obs or not self.normalize_obs_excluded_indices:
+            return normalized
+        if isinstance(normalized, dict):
+            raise TypeError("selective normalization requires a Box observation")
+        result = np.asarray(normalized).copy()
+        raw = np.asarray(obs)
+        result[..., self.normalize_obs_excluded_indices] = raw[
+            ..., self.normalize_obs_excluded_indices
+        ]
+        return result
+
+    def unnormalize_obs(self, obs: Any) -> Any:
+        unnormalized = super().unnormalize_obs(obs)
+        if not self.norm_obs or not self.normalize_obs_excluded_indices:
+            return unnormalized
+        if isinstance(unnormalized, dict):
+            raise TypeError("selective normalization requires a Box observation")
+        result = np.asarray(unnormalized).copy()
+        normalized = np.asarray(obs)
+        result[..., self.normalize_obs_excluded_indices] = normalized[
+            ..., self.normalize_obs_excluded_indices
+        ]
+        return result
 
 
 @dataclass
@@ -154,10 +278,19 @@ class TrainConfig:
         for SAC (interacts poorly with auto-tuned entropy temperature).
     clip_obs / clip_reward:
         Forwarded to ``VecNormalize``. Defaults match SB3 (10.0 each).
+    normalize_obs_excluded_indices:
+        Indices in a one-dimensional observation that remain raw while all
+        other coordinates use VecNormalize. The same exclusion tuple must be
+        used by a source and target warm-start run.
     policy:
         SB3 policy name, usually ``"MlpPolicy"``.
     model_kwargs:
         Extra kwargs forwarded to the SB3 algorithm constructor.
+    warm_start:
+        Optional policy-only initialization from a prior PPO run directory.
+        The canonical best checkpoint and matching VecNormalize snapshot are
+        validated and their policy/observation state is transferred into a
+        fresh target model. This is intentionally not a training resume.
     csv_header / info_row_fn:
         Passed through to ``VideoRecordCallback`` so envs can log their
         custom info rows.
@@ -210,9 +343,11 @@ class TrainConfig:
     normalize_reward: bool | None = None
     clip_obs: float = 10.0
     clip_reward: float = 10.0
+    normalize_obs_excluded_indices: tuple[int, ...] = ()
     policy: str = "MlpPolicy"
     verbose: int = 0
     model_kwargs: dict = field(default_factory=dict)
+    warm_start: WarmStartConfig | None = None
     csv_header: Sequence[str] | None = None
     info_row_fn: InfoRowFn | None = None
     info_dict_eval: bool = True
@@ -283,6 +418,227 @@ def _build_algo(
     )
 
 
+def _validate_observation_indices(
+    indices: Sequence[int],
+    *,
+    name: str,
+) -> tuple[int, ...]:
+    resolved = tuple(indices)
+    if any(isinstance(index, bool) or not isinstance(index, int) for index in resolved):
+        raise TypeError(f"{name} must contain integers")
+    if any(index < 0 for index in resolved):
+        raise ValueError(f"{name} must be non-negative")
+    if len(set(resolved)) != len(resolved):
+        raise ValueError(f"{name} must be unique")
+    return tuple(sorted(resolved))
+
+
+def _resolved_norm_reward(cfg: TrainConfig) -> bool:
+    return (
+        cfg.normalize_reward
+        if cfg.normalize_reward is not None
+        else cfg.algo.upper() == "PPO"
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _config_norm_reward(train_config: dict[str, Any]) -> bool:
+    configured = train_config.get("normalize_reward")
+    if configured is None:
+        return str(train_config.get("algo", "")).upper() == "PPO"
+    if not isinstance(configured, bool):
+        raise ValueError("source normalize_reward must be bool or null")
+    return configured
+
+
+def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
+    """Resolve and cheaply validate a canonical prior run before writing output."""
+    warm_start = cfg.warm_start
+    if warm_start is None:
+        return None
+    if cfg.algo.upper() != "PPO":
+        raise ValueError("policy-only warm start currently supports PPO only")
+    if not cfg.normalize_obs:
+        raise ValueError("policy-only warm start requires normalize_obs=True")
+
+    source_dir = Path(warm_start.source_run_dir).expanduser().resolve()
+    target_dir = Path(cfg.log_dir).expanduser().resolve()
+    if source_dir == target_dir:
+        raise ValueError("warm-start source and target log directories must differ")
+    if not source_dir.is_dir():
+        raise ValueError(f"warm-start source run does not exist: {source_dir}")
+
+    model_path = source_dir / "best_model.zip"
+    normalizer_path = source_dir / "best_vec_normalize.pkl"
+    config_path = source_dir / "config.json"
+    for label, path in (
+        ("best model", model_path),
+        ("best VecNormalize", normalizer_path),
+        ("run config", config_path),
+    ):
+        if not path.is_file():
+            raise ValueError(f"warm-start {label} is missing: {path}")
+
+    try:
+        source_config_value = json.loads(config_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"warm-start config is not valid JSON: {config_path}"
+        ) from error
+    if not isinstance(source_config_value, dict):
+        raise ValueError("warm-start config must contain a JSON object")
+    source_config: dict[str, Any] = source_config_value
+    source_train = source_config.get("train_config")
+    source_env = source_config.get("env")
+    if not isinstance(source_train, dict) or not isinstance(source_env, dict):
+        raise ValueError("warm-start config lacks train_config/env provenance")
+    if str(source_train.get("algo", "")).upper() != "PPO":
+        raise ValueError("warm-start source must be a PPO run")
+    if source_train.get("normalize_obs") is not True:
+        raise ValueError("warm-start source must have normalize_obs=True")
+    try:
+        source_exclusions = _validate_observation_indices(
+            source_train.get("normalize_obs_excluded_indices", ()),
+            name="source normalize_obs_excluded_indices",
+        )
+    except TypeError as error:
+        raise ValueError(str(error)) from error
+    target_exclusions = _validate_observation_indices(
+        cfg.normalize_obs_excluded_indices,
+        name="normalize_obs_excluded_indices",
+    )
+    if source_exclusions != target_exclusions:
+        raise ValueError("source and target normalize_obs_excluded_indices differ")
+    if _config_norm_reward(source_train) != _resolved_norm_reward(cfg):
+        raise ValueError("source and target reward-normalization settings differ")
+    for name, target in (("clip_obs", cfg.clip_obs), ("clip_reward", cfg.clip_reward)):
+        try:
+            source = float(source_train[name])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"warm-start source config lacks valid {name}") from error
+        if not math.isclose(source, float(target), rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError(f"source and target {name} settings differ")
+
+    target_env = cfg.env_fn()
+    try:
+        target_class = type(target_env).__name__
+        target_observation_shape = list(target_env.observation_space.shape or ())
+        target_action_shape = list(target_env.action_space.shape or ())
+        target_curriculum_value = getattr(target_env, "curriculum_metadata", None)
+        target_curriculum = (
+            dict(target_curriculum_value)
+            if isinstance(target_curriculum_value, Mapping)
+            else None
+        )
+        reset_values: tuple[float, ...] = ()
+        if warm_start.reset_observation_indices:
+            result = target_env.reset(seed=cfg.seed)
+            if not isinstance(result, tuple) or len(result) != 2:
+                raise TypeError("target reset must return (observation, info)")
+            observation = np.asarray(result[0])
+            if observation.ndim != 1:
+                raise ValueError(
+                    "reset_observation_indices require a one-dimensional observation"
+                )
+            if warm_start.reset_observation_indices[-1] >= observation.size:
+                raise ValueError(
+                    "reset_observation_indices exceed the observation size"
+                )
+            reset_values = tuple(
+                float(observation[index])
+                for index in warm_start.reset_observation_indices
+            )
+            if not all(math.isfinite(value) for value in reset_values):
+                raise ValueError("target reset observation values must be finite")
+    finally:
+        target_env.close()
+
+    if source_env.get("class") != target_class:
+        raise ValueError("source and target environment classes differ")
+    if source_env.get("observation_shape") != target_observation_shape:
+        raise ValueError("source and target observation spaces differ")
+    if source_env.get("action_shape") != target_action_shape:
+        raise ValueError("source and target action spaces differ")
+
+    return _WarmStartArtifacts(
+        source_run_dir=source_dir,
+        model_path=model_path,
+        normalizer_path=normalizer_path,
+        config_path=config_path,
+        source_config=source_config,
+        source_hashes={
+            "best_model.zip": _sha256_file(model_path),
+            "best_vec_normalize.pkl": _sha256_file(normalizer_path),
+            "config.json": _sha256_file(config_path),
+        },
+        target_env_class=target_class,
+        target_curriculum=target_curriculum,
+        reset_observation_values=reset_values,
+    )
+
+
+def _load_warm_start_normalizer(
+    base_env: VecEnv,
+    artifacts: _WarmStartArtifacts,
+    cfg: TrainConfig,
+    *,
+    norm_reward: bool,
+) -> VecNormalize:
+    """Attach source observation statistics and reset target-task state."""
+    normalizer = VecNormalize.load(str(artifacts.normalizer_path), base_env)
+    if normalizer.norm_obs is not True:
+        raise ValueError("warm-start normalizer must have norm_obs=True")
+    source_exclusions = _validate_observation_indices(
+        getattr(normalizer, "normalize_obs_excluded_indices", ()),
+        name="source normalize_obs_excluded_indices",
+    )
+    target_exclusions = _validate_observation_indices(
+        cfg.normalize_obs_excluded_indices,
+        name="normalize_obs_excluded_indices",
+    )
+    if source_exclusions != target_exclusions:
+        raise ValueError("source and target normalizer observation exclusions differ")
+    if normalizer.norm_reward != norm_reward:
+        raise ValueError("source and target normalizer norm_reward settings differ")
+    for name, target in (("clip_obs", cfg.clip_obs), ("clip_reward", cfg.clip_reward)):
+        source = float(getattr(normalizer, name))
+        if not math.isclose(source, float(target), rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError(f"source and target normalizer {name} settings differ")
+    if isinstance(normalizer.obs_rms, dict):
+        raise ValueError("policy-only warm start currently requires a Box observation")
+    mean = np.asarray(normalizer.obs_rms.mean)
+    variance = np.asarray(normalizer.obs_rms.var)
+    expected_shape = tuple(normalizer.observation_space.shape or ())
+    if mean.shape != expected_shape or variance.shape != expected_shape:
+        raise ValueError("warm-start observation statistics have the wrong shape")
+    if not np.all(np.isfinite(mean)) or not np.all(np.isfinite(variance)):
+        raise ValueError("warm-start observation statistics must be finite")
+    if np.any(variance < 0.0):
+        raise ValueError("warm-start observation variance must be non-negative")
+
+    indices = cfg.warm_start.reset_observation_indices if cfg.warm_start else ()
+    if indices:
+        index_array = np.asarray(indices, dtype=np.intp)
+        mean[index_array] = artifacts.reset_observation_values
+        variance[index_array] = 1.0
+
+    # Observation scale is the only running state intentionally transferred.
+    # A new fixed stage gets a fresh return distribution and rollout state.
+    normalizer.ret_rms = RunningMeanStd(shape=())
+    normalizer.returns = np.zeros(normalizer.num_envs)
+    normalizer.old_reward = np.array([])
+    normalizer.old_obs = np.array([])
+    normalizer.training = True
+    return normalizer
+
+
 def train(cfg: TrainConfig) -> BaseAlgorithm:
     """Run an end-to-end training loop for one ``TrainConfig``.
 
@@ -296,6 +652,13 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     # artifacts written -- a typo'd ``algo`` should fail in milliseconds,
     # not after constructing (and checking) a fleet of MuJoCo envs.
     _resolve_algo(cfg.algo)
+    cfg.normalize_obs_excluded_indices = _validate_observation_indices(
+        cfg.normalize_obs_excluded_indices,
+        name="normalize_obs_excluded_indices",
+    )
+    if cfg.normalize_obs_excluded_indices and not cfg.normalize_obs:
+        raise ValueError("normalize_obs_excluded_indices require normalize_obs=True")
+    warm_start_artifacts = _prepare_warm_start(cfg)
 
     os.makedirs(cfg.log_dir, exist_ok=True)
     write_run_config(cfg, cfg.log_dir)
@@ -319,220 +682,315 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     # offsets 1..n_envs-1 would replay a training worker's reset stream.
     eval_seed_offset = cfg.n_envs
 
-    train_env = make_vec_env(
-        checked_env_fn,
-        n_envs=cfg.n_envs,
-        seed=cfg.seed,
-        monitor_dir=os.path.join(cfg.log_dir, "monitor"),
-    )
-    eval_env = make_vec_env(
-        checked_env_fn, n_envs=1, seed=_offset_seed(cfg.seed, eval_seed_offset)
-    )
-
-    # PPO benefits from return normalization; SAC's auto-tuned alpha
-    # interacts poorly with it. ``normalize_reward=None`` picks the
-    # per-algo default; True/False forces the choice.
-    norm_reward = (
-        cfg.normalize_reward
-        if cfg.normalize_reward is not None
-        else cfg.algo.upper() == "PPO"
-    )
-    use_vec_normalize = cfg.normalize_obs or norm_reward
-    if use_vec_normalize:
-        train_env = VecNormalize(
-            train_env,
-            norm_obs=cfg.normalize_obs,
-            norm_reward=norm_reward,
-            clip_obs=cfg.clip_obs,
-            clip_reward=cfg.clip_reward,
-        )
-        # Eval envs always read the env's true reward (norm_reward=False)
-        # and freeze the running stats (training=False); SB3's EvalCallback
-        # syncs obs_rms/ret_rms from train_env before each eval.
-        eval_env = VecNormalize(
-            eval_env,
-            norm_obs=cfg.normalize_obs,
-            norm_reward=False,
-            clip_obs=cfg.clip_obs,
-            training=False,
-        )
-
-    def _calls(env_steps: int) -> int:
-        return _env_steps_to_calls(env_steps, cfg.n_envs)
-
-    on_new_best: BaseCallback | None = None
-    if use_vec_normalize:
-        on_new_best = _SaveVecNormalizeOnNewBest(
-            os.path.join(cfg.log_dir, "best_vec_normalize.pkl")
-        )
-
-    after_eval: BaseCallback | None = None
-    if cfg.early_stop_patience is not None and cfg.early_stop_patience > 0:
-        # min_evals = patience gives the run a warm-up of the same
-        # length as the patience window, so at least 2N evaluations
-        # happen before the stop can fire. verbose=1 so the stop
-        # reason is visible in the Colab cell output.
-        after_eval = StopTrainingOnNoModelImprovement(
-            max_no_improvement_evals=cfg.early_stop_patience,
-            min_evals=cfg.early_stop_patience,
-            verbose=1,
-        )
-
-    eval_callback = EvalCallback(
-        eval_env,
-        best_model_save_path=cfg.log_dir,
-        log_path=cfg.log_dir,
-        render=False,
-        deterministic=True,
-        n_eval_episodes=cfg.n_eval_episodes,
-        eval_freq=_calls(cfg.eval_freq),
-        callback_on_new_best=on_new_best,
-        callback_after_eval=after_eval,
-    )
-
-    callbacks: list[BaseCallback] = [eval_callback]
-    if cfg.checkpoint_freq > 0:
-        callbacks.append(
-            CheckpointCallback(
-                save_freq=_calls(cfg.checkpoint_freq),
-                save_path=os.path.join(cfg.log_dir, "checkpoints"),
-                name_prefix=cfg.name_prefix,
-                save_vecnormalize=use_vec_normalize,
-            )
-        )
-    if cfg.record_video and cfg.video_freq > 0:
-        callbacks.append(
-            VideoRecordCallback(
-                env_fn=cfg.env_fn,
-                save_path=os.path.join(cfg.log_dir, "videos"),
-                video_length=cfg.video_length,
-                save_freq=_calls(cfg.video_freq),
-                name_prefix=cfg.name_prefix,
-                csv_header=cfg.csv_header,
-                info_row_fn=cfg.info_row_fn,
-                seed=_offset_seed(cfg.seed, eval_seed_offset + 2),
-            )
-        )
-    info_eval_env = None
-    if cfg.info_dict_eval:
-        info_eval_env = make_vec_env(
+    opened_envs: list[VecEnv] = []
+    try:
+        train_env = make_vec_env(
             checked_env_fn,
-            n_envs=1,
-            seed=_offset_seed(cfg.seed, eval_seed_offset + 1),
+            n_envs=cfg.n_envs,
+            seed=cfg.seed,
+            monitor_dir=os.path.join(cfg.log_dir, "monitor"),
         )
+        opened_envs.append(train_env)
+        eval_env = make_vec_env(
+            checked_env_fn, n_envs=1, seed=_offset_seed(cfg.seed, eval_seed_offset)
+        )
+        opened_envs.append(eval_env)
+
+        # PPO benefits from return normalization; SAC's auto-tuned alpha
+        # interacts poorly with it. ``normalize_reward=None`` picks the
+        # per-algo default; True/False forces the choice.
+        norm_reward = _resolved_norm_reward(cfg)
+        use_vec_normalize = cfg.normalize_obs or norm_reward
         if use_vec_normalize:
-            info_eval_env = VecNormalize(
-                info_eval_env,
+            if warm_start_artifacts is not None:
+                train_env = _load_warm_start_normalizer(
+                    train_env,
+                    warm_start_artifacts,
+                    cfg,
+                    norm_reward=norm_reward,
+                )
+            else:
+                train_env = SelectiveVecNormalize(
+                    train_env,
+                    norm_obs=cfg.normalize_obs,
+                    norm_reward=norm_reward,
+                    clip_obs=cfg.clip_obs,
+                    clip_reward=cfg.clip_reward,
+                    normalize_obs_excluded_indices=(cfg.normalize_obs_excluded_indices),
+                )
+            # Eval envs always read the env's true reward (norm_reward=False)
+            # and freeze the running stats (training=False); SB3's EvalCallback
+            # syncs obs_rms/ret_rms from train_env before each eval.
+            eval_env = SelectiveVecNormalize(
+                eval_env,
                 norm_obs=cfg.normalize_obs,
                 norm_reward=False,
                 clip_obs=cfg.clip_obs,
                 training=False,
+                normalize_obs_excluded_indices=(cfg.normalize_obs_excluded_indices),
             )
-        callbacks.append(
-            InfoDictEvalCallback(
-                eval_env=info_eval_env,
-                n_eval_episodes=max(1, cfg.n_eval_episodes // 4),
-                eval_freq=_calls(cfg.eval_freq),
-                phase_key=cfg.phase_key,
-                phase_labels=cfg.phase_labels,
-                success_key=cfg.success_key,
-                success_threshold=cfg.success_threshold,
-                info_keys=cfg.info_eval_keys,
-                terminal_info_keys=cfg.info_eval_terminal_keys,
-                episode_distribution_keys=cfg.info_eval_distribution_keys,
-                csv_path=os.path.join(cfg.log_dir, "eval_info.csv"),
-            )
-        )
-    callbacks.extend(cfg.extra_callbacks)
 
-    # cfg.seed / cfg.verbose are the first-class knobs; an explicit value in
-    # model_kwargs still wins (setdefault), and routing both through
-    # model_kwargs avoids a duplicate-keyword TypeError at construction.
-    model_kwargs = dict(cfg.model_kwargs)
-    if cfg.seed is not None:
-        model_kwargs.setdefault("seed", cfg.seed)
-    model_kwargs.setdefault("verbose", cfg.verbose)
-    effective_verbose = model_kwargs["verbose"]
-    model = _build_algo(
-        cfg.algo,
-        train_env,
-        cfg.log_dir,
-        policy=cfg.policy,
-        **model_kwargs,
-    )
+        def _calls(env_steps: int) -> int:
+            return _env_steps_to_calls(env_steps, cfg.n_envs)
 
-    # Route SB3's own diagnostics (SAC ent_coef/actor/critic losses, PPO
-    # explained_variance/approx_kl, ...) to a CSV alongside TensorBoard so
-    # the run directory is self-diagnosing after the Colab runtime is gone.
-    # ``progress.csv`` is read back by stage_summary + plot_training_health.
-    # set_logger marks the logger custom, so SB3's learn() leaves it intact
-    # instead of resetting to its default (TensorBoard-only) configuration.
-    log_formats = ["csv", "tensorboard"]
-    if effective_verbose:
-        log_formats.append("stdout")
-    model.set_logger(
-        configure_logger(os.path.join(cfg.log_dir, "tensorboard"), log_formats)
-    )
-    update_run_config_with_model(model, cfg.log_dir)
-
-    interrupted = False
-    try:
-        try:
-            model.learn(
-                total_timesteps=cfg.total_timesteps,
-                callback=CallbackList(callbacks),
-                progress_bar=False,
-            )
-        except KeyboardInterrupt:
-            # A stopped Colab cell / ^C shouldn't vaporize hours of
-            # training. Salvage the run: fall through to save the model,
-            # normalization stats, final eval, and summary (marked
-            # "interrupted") so the run dir stays self-describing.
-            interrupted = True
-            print(
-                "Training interrupted -- saving final_model and summary "
-                "for the partial run."
-            )
-        model.save(os.path.join(cfg.log_dir, "final_model"))
+        on_new_best: BaseCallback | None = None
         if use_vec_normalize:
-            assert isinstance(train_env, VecNormalize)
-            train_env.save(os.path.join(cfg.log_dir, "vec_normalize.pkl"))
-            # EvalCallback last synced eval_env's running stats up to
-            # eval_freq steps ago; re-sync so the final eval normalizes
-            # observations with the end-of-training statistics.
-            sync_envs_normalization(train_env, eval_env)
+            on_new_best = _SaveVecNormalizeOnNewBest(
+                os.path.join(cfg.log_dir, "best_vec_normalize.pkl")
+            )
 
-        mean_reward, std_reward = evaluate_policy(
-            model, eval_env, n_eval_episodes=cfg.n_eval_episodes
+        after_eval: BaseCallback | None = None
+        if cfg.early_stop_patience is not None and cfg.early_stop_patience > 0:
+            # min_evals = patience gives the run a warm-up of the same
+            # length as the patience window, so at least 2N evaluations
+            # happen before the stop can fire. verbose=1 so the stop
+            # reason is visible in the Colab cell output.
+            after_eval = StopTrainingOnNoModelImprovement(
+                max_no_improvement_evals=cfg.early_stop_patience,
+                min_evals=cfg.early_stop_patience,
+                verbose=1,
+            )
+
+        eval_callback = EvalCallback(
+            eval_env,
+            best_model_save_path=cfg.log_dir,
+            log_path=cfg.log_dir,
+            render=False,
+            deterministic=True,
+            n_eval_episodes=cfg.n_eval_episodes,
+            eval_freq=_calls(cfg.eval_freq),
+            callback_on_new_best=on_new_best,
+            callback_after_eval=after_eval,
         )
-        mean_reward_value = (
-            sum(mean_reward) / len(mean_reward)
-            if isinstance(mean_reward, list)
-            else float(mean_reward)
-        )
-        std_reward_value = (
-            sum(std_reward) / len(std_reward)
-            if isinstance(std_reward, list)
-            else float(std_reward)
-        )
-        print(
-            f"Mean reward: {mean_reward_value:.2f} +/- "
-            f"{std_reward_value:.2f}"
-        )
-        write_run_summary(
-            cfg,
+
+        callbacks: list[BaseCallback] = [eval_callback]
+        if cfg.checkpoint_freq > 0:
+            callbacks.append(
+                CheckpointCallback(
+                    save_freq=_calls(cfg.checkpoint_freq),
+                    save_path=os.path.join(cfg.log_dir, "checkpoints"),
+                    name_prefix=cfg.name_prefix,
+                    save_vecnormalize=use_vec_normalize,
+                )
+            )
+        if cfg.record_video and cfg.video_freq > 0:
+            callbacks.append(
+                VideoRecordCallback(
+                    env_fn=cfg.env_fn,
+                    save_path=os.path.join(cfg.log_dir, "videos"),
+                    video_length=cfg.video_length,
+                    save_freq=_calls(cfg.video_freq),
+                    name_prefix=cfg.name_prefix,
+                    csv_header=cfg.csv_header,
+                    info_row_fn=cfg.info_row_fn,
+                    seed=_offset_seed(cfg.seed, eval_seed_offset + 2),
+                )
+            )
+        info_eval_env = None
+        if cfg.info_dict_eval:
+            info_eval_env = make_vec_env(
+                checked_env_fn,
+                n_envs=1,
+                seed=_offset_seed(cfg.seed, eval_seed_offset + 1),
+            )
+            opened_envs.append(info_eval_env)
+            if use_vec_normalize:
+                info_eval_env = SelectiveVecNormalize(
+                    info_eval_env,
+                    norm_obs=cfg.normalize_obs,
+                    norm_reward=False,
+                    clip_obs=cfg.clip_obs,
+                    training=False,
+                    normalize_obs_excluded_indices=(cfg.normalize_obs_excluded_indices),
+                )
+            callbacks.append(
+                InfoDictEvalCallback(
+                    eval_env=info_eval_env,
+                    n_eval_episodes=max(1, cfg.n_eval_episodes // 4),
+                    eval_freq=_calls(cfg.eval_freq),
+                    phase_key=cfg.phase_key,
+                    phase_labels=cfg.phase_labels,
+                    success_key=cfg.success_key,
+                    success_threshold=cfg.success_threshold,
+                    info_keys=cfg.info_eval_keys,
+                    terminal_info_keys=cfg.info_eval_terminal_keys,
+                    episode_distribution_keys=cfg.info_eval_distribution_keys,
+                    csv_path=os.path.join(cfg.log_dir, "eval_info.csv"),
+                )
+            )
+        callbacks.extend(cfg.extra_callbacks)
+
+        # cfg.seed / cfg.verbose are the first-class knobs; an explicit value in
+        # model_kwargs still wins (setdefault), and routing both through
+        # model_kwargs avoids a duplicate-keyword TypeError at construction.
+        model_kwargs = dict(cfg.model_kwargs)
+        if cfg.seed is not None:
+            model_kwargs.setdefault("seed", cfg.seed)
+        model_kwargs.setdefault("verbose", cfg.verbose)
+        effective_verbose = model_kwargs["verbose"]
+
+        # Load the source before constructing the target. SB3 restores the saved
+        # source seed while loading; constructing the fresh target afterwards
+        # re-establishes cfg.seed for the new run's stochastic sequence.
+        source_model: BaseAlgorithm | None = None
+        if warm_start_artifacts is not None:
+            source_model = _resolve_algo("PPO").load(
+                str(warm_start_artifacts.model_path),
+                device="cpu",
+            )
+            check_for_correct_spaces(
+                train_env,
+                source_model.observation_space,
+                source_model.action_space,
+            )
+
+        model = _build_algo(
+            cfg.algo,
+            train_env,
             cfg.log_dir,
-            final_mean_reward=mean_reward_value,
-            final_std_reward=std_reward_value,
-            duration_seconds=time.monotonic() - start_time,
-            device=str(getattr(model, "device", "")) or None,
-            status="interrupted" if interrupted else "completed",
-            actual_timesteps=int(model.num_timesteps),
+            policy=cfg.policy,
+            **model_kwargs,
         )
-    finally:
-        train_env.close()
-        eval_env.close()
-        if info_eval_env is not None:
-            info_eval_env.close()
+        if source_model is not None:
+            if type(source_model.policy) is not type(model.policy):
+                raise ValueError("source and target policy classes differ")
+            if model.policy.optimizer.state:
+                raise RuntimeError("fresh target PPO optimizer unexpectedly has state")
+            model.policy.load_state_dict(source_model.policy.state_dict(), strict=True)
 
-    return model
+            assert warm_start_artifacts is not None
+            assert isinstance(train_env, VecNormalize)
+            source_env = warm_start_artifacts.source_config["env"]
+            source_curriculum = source_env.get("curriculum")
+            assert not isinstance(train_env.obs_rms, dict)
+            initialization = {
+                "mode": "policy_and_observation_stats",
+                "source_run_dir": str(warm_start_artifacts.source_run_dir),
+                "source_artifacts": {
+                    name: {
+                        "path": str(warm_start_artifacts.source_run_dir / name),
+                        "sha256": digest,
+                    }
+                    for name, digest in warm_start_artifacts.source_hashes.items()
+                },
+                "source": {
+                    "algo": "PPO",
+                    "environment_class": source_env.get("class"),
+                    "curriculum": source_curriculum,
+                    "model_num_timesteps": int(source_model.num_timesteps),
+                    "policy_class": type(source_model.policy).__name__,
+                },
+                "target": {
+                    "algo": cfg.algo.upper(),
+                    "environment_class": warm_start_artifacts.target_env_class,
+                    "curriculum": warm_start_artifacts.target_curriculum,
+                    "policy_class": type(model.policy).__name__,
+                },
+                "transferred": [
+                    "policy.state_dict",
+                    "vec_normalize.obs_rms",
+                ],
+                "reset": [
+                    "policy.optimizer_state",
+                    "learning_rate_and_progress_schedule",
+                    "num_timesteps",
+                    "rollout_buffer",
+                    "vec_normalize.ret_rms",
+                    "vec_normalize.returns",
+                    "logger_and_callback_state",
+                ],
+                "normalize_obs_excluded_indices": list(
+                    cfg.normalize_obs_excluded_indices
+                ),
+                "reset_observation_indices": list(
+                    cfg.warm_start.reset_observation_indices
+                    if cfg.warm_start is not None
+                    else ()
+                ),
+                "reset_observation_values": list(
+                    warm_start_artifacts.reset_observation_values
+                ),
+                "observation_rms_count": float(train_env.obs_rms.count),
+                "reward_statistics_reset": True,
+                "optimizer_state_transferred": False,
+            }
+            update_run_config_with_initialization(initialization, cfg.log_dir)
+            del source_model
+
+        # Route SB3's own diagnostics (SAC ent_coef/actor/critic losses, PPO
+        # explained_variance/approx_kl, ...) to a CSV alongside TensorBoard so
+        # the run directory is self-diagnosing after the Colab runtime is gone.
+        # ``progress.csv`` is read back by stage_summary + plot_training_health.
+        # set_logger marks the logger custom, so SB3's learn() leaves it intact
+        # instead of resetting to its default (TensorBoard-only) configuration.
+        log_formats = ["csv", "tensorboard"]
+        if effective_verbose:
+            log_formats.append("stdout")
+        model.set_logger(
+            configure_logger(os.path.join(cfg.log_dir, "tensorboard"), log_formats)
+        )
+        update_run_config_with_model(model, cfg.log_dir)
+
+        interrupted = False
+        try:
+            try:
+                model.learn(
+                    total_timesteps=cfg.total_timesteps,
+                    callback=CallbackList(callbacks),
+                    reset_num_timesteps=True,
+                    progress_bar=False,
+                )
+            except KeyboardInterrupt:
+                # A stopped Colab cell / ^C shouldn't vaporize hours of
+                # training. Salvage the run: fall through to save the model,
+                # normalization stats, final eval, and summary (marked
+                # "interrupted") so the run dir stays self-describing.
+                interrupted = True
+                print(
+                    "Training interrupted -- saving final_model and summary "
+                    "for the partial run."
+                )
+            model.save(os.path.join(cfg.log_dir, "final_model"))
+            if use_vec_normalize:
+                assert isinstance(train_env, VecNormalize)
+                train_env.save(os.path.join(cfg.log_dir, "vec_normalize.pkl"))
+                # EvalCallback last synced eval_env's running stats up to
+                # eval_freq steps ago; re-sync so the final eval normalizes
+                # observations with the end-of-training statistics.
+                sync_envs_normalization(train_env, eval_env)
+
+            mean_reward, std_reward = evaluate_policy(
+                model, eval_env, n_eval_episodes=cfg.n_eval_episodes
+            )
+            mean_reward_value = (
+                sum(mean_reward) / len(mean_reward)
+                if isinstance(mean_reward, list)
+                else float(mean_reward)
+            )
+            std_reward_value = (
+                sum(std_reward) / len(std_reward)
+                if isinstance(std_reward, list)
+                else float(std_reward)
+            )
+            print(f"Mean reward: {mean_reward_value:.2f} +/- {std_reward_value:.2f}")
+            write_run_summary(
+                cfg,
+                cfg.log_dir,
+                final_mean_reward=mean_reward_value,
+                final_std_reward=std_reward_value,
+                duration_seconds=time.monotonic() - start_time,
+                device=str(getattr(model, "device", "")) or None,
+                status="interrupted" if interrupted else "completed",
+                actual_timesteps=int(model.num_timesteps),
+            )
+        finally:
+            train_env.close()
+            eval_env.close()
+            if info_eval_env is not None:
+                info_eval_env.close()
+            opened_envs.clear()
+
+        return model
+    finally:
+        for opened_env in reversed(opened_envs):
+            opened_env.close()

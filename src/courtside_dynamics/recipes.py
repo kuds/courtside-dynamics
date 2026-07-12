@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from courtside_dynamics.envs import (
+    HUMANOID_TENNIS_OBSERVATION_LAYOUT,
     BallBalanceEnv,
     BallBounceEnv,
     HumanoidTennisCoopEnv,
@@ -180,11 +181,25 @@ _HUMANOID_TENNIS_CURRICULUM_TERMINAL_EVAL_KEYS = (
     "term_target_miss",
 )
 
+# VecNormalize should learn scales for continuous physical state only. The
+# discrete/bounded rally state, contact memory, and active-action mask must stay
+# raw so newly reachable curriculum bits do not inherit near-zero variance and
+# clip at a stage boundary.
+_HUMANOID_TENNIS_NORMALIZATION_EXCLUSIONS = tuple(
+    range(
+        HUMANOID_TENNIS_OBSERVATION_LAYOUT.rally_state.start,
+        HUMANOID_TENNIS_OBSERVATION_LAYOUT.total_size,
+    )
+)
+
 
 def _tennis_curriculum_extra_cfg(*, video_length: int) -> dict[str, Any]:
     """Shared fixed-stage recording/evaluation contract for Stages 0–2."""
     return {
         "n_envs": 1,
+        "normalize_obs_excluded_indices": (
+            _HUMANOID_TENNIS_NORMALIZATION_EXCLUSIONS
+        ),
         "eval_freq": 25_000,
         "checkpoint_freq": 100_000,
         "video_freq": 100_000,
@@ -313,6 +328,9 @@ RECIPES: dict[str, Recipe] = {
         name_prefix="humanoid_tennis_coop_smoke",
         extra_cfg={
             "n_envs": 1,
+            "normalize_obs_excluded_indices": (
+                _HUMANOID_TENNIS_NORMALIZATION_EXCLUSIONS
+            ),
             "eval_freq": 2_500,
             "checkpoint_freq": 5_000,
             "video_freq": 5_000,
