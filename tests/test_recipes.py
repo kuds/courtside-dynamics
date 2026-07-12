@@ -289,3 +289,12 @@ def test_training_notebook_preserves_curriculum_recipe_defaults():
     assert "cfg.video_freq =" not in source
     assert "HumanoidTennisStage0Intercept" in source
     assert "HumanoidTennisStage2RandomizedReturn" in source
+
+
+def test_wall_ball_headline_metric_is_rally_count(tmp_path):
+    """WallBall names ``bounce_count`` as its headline metric:
+    success_rate saturates once every eval episode completes a single
+    exchange, and eval reward is dominated by tracking shaping, so runs
+    are compared on rally exchanges per episode instead."""
+    cfg = build_train_config("WallBall", log_dir=str(tmp_path))
+    assert cfg.headline_key == "bounce_count"

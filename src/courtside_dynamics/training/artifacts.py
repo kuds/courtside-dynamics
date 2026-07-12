@@ -179,6 +179,7 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             ),
             "success_key": cfg.success_key,
             "success_threshold": cfg.success_threshold,
+            "headline_key": cfg.headline_key,
             "phase_key": cfg.phase_key,
             "phase_labels": (
                 {str(k): v for k, v in cfg.phase_labels.items()}
@@ -388,6 +389,27 @@ def _read_eval_info_at_step(log_dir: str, target_step: int) -> dict[str, float]:
     return metrics
 
 
+def _read_eval_info_series(
+    log_dir: str, metric: str
+) -> list[tuple[int, float]]:
+    """All ``(timestep, value)`` points for one metric from ``eval_info.csv``."""
+    path = os.path.join(log_dir, "eval_info.csv")
+    if not os.path.exists(path):
+        return []
+    points: list[tuple[int, float]] = []
+    with open(path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row.get("metric") != metric:
+                continue
+            try:
+                points.append((int(row["timestep"]), float(row["value"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+    points.sort(key=lambda p: p[0])
+    return points
+
+
 _PROJECT_NAME = "courtside-dynamics"
 
 #: ``(label, path relative to log_dir)`` for every artifact a training
@@ -547,6 +569,28 @@ def write_run_summary(
                 else ""
             )
             lines.append(_kv("Final vs best", f"{delta:+.3f}{note}"))
+
+    # Headline task metric. Eval reward can be a poor progress measure
+    # (WallBall's is dominated by tracking shaping, and success_rate
+    # saturates once every episode completes one exchange), so when the
+    # recipe names a headline counter, surface its mean-over-eval-
+    # episodes terminal value alongside the reward lines. The best is
+    # over the metric's own series -- it need not coincide with the
+    # best-reward checkpoint.
+    if cfg.headline_key:
+        metric = f"{cfg.headline_key}_ep_mean"
+        headline = _read_eval_info_series(log_dir, metric)
+        if headline:
+            final_val = headline[-1][1]
+            head_step, head_val = max(headline, key=lambda p: p[1])
+            lines.append(_kv("Headline", metric))
+            lines.append(_kv("Headline final", f"{final_val:.2f}"))
+            lines.append(
+                _kv(
+                    "Headline best",
+                    f"{head_val:.2f} (at {head_step:,} steps)",
+                )
+            )
 
     if train_rewards:
         last_n = min(100, len(train_rewards))

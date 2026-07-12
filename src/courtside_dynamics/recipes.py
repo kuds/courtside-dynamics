@@ -263,6 +263,13 @@ RECIPES: dict[str, Recipe] = {
             # cycle (a gated wall hit). Surfaces eval_info/success_rate.
             "success_key": "bounce_count",
             "success_threshold": 1.0,
+            # Headline metric: rally exchanges per eval episode
+            # (bounce_count_ep_mean). success_rate saturates at 1.0
+            # once every episode completes a single exchange (the
+            # 20260712 run hit that by 250k steps), and eval reward is
+            # dominated by tracking shaping -- the exchange count is
+            # the task-native measure of rally quality.
+            "headline_key": "bounce_count",
         },
         description=(
             "Rally a ball against a wall with a 5-DOF racket and a "

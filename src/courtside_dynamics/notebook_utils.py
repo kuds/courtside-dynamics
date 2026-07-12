@@ -367,7 +367,26 @@ def plot_eval_info(
         print(f"[notebook_utils] eval_info.csv is empty: {csv_path}")
         return None
 
+    # The recipe's headline metric (config.json: train_config.headline_key)
+    # leads the grid, so the panel that answers "is the task improving?"
+    # is the first thing on screen.
+    headline_stem = None
+    config_path = os.path.join(str(log_dir), "config.json")
+    if os.path.exists(config_path):
+        import json as _json
+
+        try:
+            with open(config_path) as f:
+                headline_stem = (
+                    _json.load(f).get("train_config") or {}
+                ).get("headline_key")
+        except (OSError, ValueError):
+            headline_stem = None
+
     stems = sorted(series)
+    if headline_stem in series:
+        stems.remove(headline_stem)
+        stems.insert(0, headline_stem)
     n = len(stems)
     cols = min(max_cols, n)
     rows = (n + cols - 1) // cols
@@ -380,7 +399,10 @@ def plot_eval_info(
         for variant in sorted(series[stem]):
             xs, ys = series[stem][variant]
             ax.plot(xs, ys, marker=".", markersize=3, label=variant or "value")
-        ax.set_title(stem)
+        if stem == headline_stem:
+            ax.set_title(f"{stem} (headline)", fontweight="bold")
+        else:
+            ax.set_title(stem)
         ax.set_xlabel("Timestep")
         if any(v for v in series[stem]):
             ax.legend(fontsize=8)

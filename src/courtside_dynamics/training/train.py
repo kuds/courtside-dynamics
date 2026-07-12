@@ -310,9 +310,21 @@ class TrainConfig:
     success_key / success_threshold:
         Forwarded to ``InfoDictEvalCallback``. When ``success_key`` is
         set, the fraction of eval episodes whose terminal
-        ``info[success_key] >= success_threshold`` is logged as
+        ``info[success_key]`` >= ``success_threshold`` is logged as
         ``eval_info/success_rate`` -- the real task metric for sparse
         objectives (e.g. ``"bounce_count"`` for WallBall).
+    headline_key:
+        Info counter treated as the run's headline task metric. The
+        stage summary surfaces ``<headline_key>_ep_mean`` (the
+        mean-over-eval-episodes terminal value logged by
+        ``InfoDictEvalCallback``) next to the reward lines, and
+        ``plot_eval_info`` puts its panel first. Use this when eval
+        reward is a poor progress measure -- WallBall's reward is
+        dominated by tracking shaping, and its success_rate saturates
+        as soon as every episode completes one exchange, so runs are
+        compared on ``bounce_count_ep_mean`` (rally exchanges per
+        episode) instead. Reporting only: best-model selection and
+        early stopping still follow eval reward.
     verbose:
         SB3 ``verbose`` level for the algorithm; when non-zero, the
         per-rollout training table is also streamed to stdout (useful on
@@ -356,6 +368,7 @@ class TrainConfig:
     info_eval_distribution_keys: Sequence[str] = field(default_factory=tuple)
     success_key: str | None = None
     success_threshold: float = 1.0
+    headline_key: str | None = None
     phase_key: str | None = None
     phase_labels: dict[int, str] | None = None
     extra_callbacks: Iterable[BaseCallback] = field(default_factory=tuple)
