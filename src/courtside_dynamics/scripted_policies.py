@@ -72,51 +72,40 @@ def ball_bounce_oracle_action(obs: np.ndarray) -> np.ndarray:
 
 
 def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
-    """PD-controlled intercept-and-swing controller for :class:`WallBallEnv`.
+    """Intercept-and-swing target controller for :class:`WallBallEnv`.
 
-    The 5 actions correspond to ``paddle_slide_x``, ``paddle_slide_y``,
-    ``paddle_slide_z``, ``paddle_yaw``, and ``paddle_pitch`` motors with
-    ``ctrlrange=[-1, 1]``. The slide qpos values are offsets from the
-    paddle_base anchor at world ``(-2, 0, 1.2)``; with yaw=pitch=0 the
-    paddle_head face sits ``(0.3, 0, 0)`` ahead of the base, so the
-    face's world position is ``(-1.7 + slide_x_qpos, slide_y_qpos,
-    1.2 + slide_z_qpos)``. Inverting that gives the qpos targets below.
+    The three normalized actions are absolute position targets for the
+    paddle's x/y/z slides. The face has a fixed 10-degree upward pitch
+    and is anchored at world ``(-1.7, 0, 1.2)``, so its position is
+    ``(-1.7 + slide_x_qpos, slide_y_qpos, 1.2 + slide_z_qpos)``.
+    Inverting that transform gives the physical qpos targets below; the
+    env's force-limited servo tracks them.
 
     Two behaviours, keyed on the ball's x velocity:
 
-    - **Inbound** (ball flying toward the paddle): park the face where
-      the ball is *going to be*, not where it is — a ballistic lead in
-      y/z over the time the ball needs to reach the face plane. Pure
-      position tracking (the pre-2026-07 oracle) lags an angled serve
-      by more than the face half-width and whiffs; with the recipe's
-      ``serve_vy_max=2.6`` it completed zero gated returns over ten
-      seeds. Once aligned and close, swing: slam the x slide toward
-      the wall so the contact sends the ball back with pace instead of
-      relying on restitution off a static face.
+    - **Inbound** (ball flying toward the paddle): hold x near the home
+      column while using a ballistic lead in y/z to park the face where
+      the ball is *going to be*. Keeping x retracted preserves room to
+      accelerate through every contact; chasing the incoming ball to
+      the positive x limit produced one strong serve return followed by
+      weak, static-face rebounds. A small early z lift gives the low
+      post-wall returns some upward paddle velocity before the strike.
+      Once aligned and close, swing toward the wall.
     - **Outbound**: recover to the home column and track the ball's
       y/z, waiting for the wall rebound.
 
-    This is a feasibility oracle: it completes one or two gated wall
-    returns on every tested seed, proving the rally loop is physically
-    achievable under the gated reward — not a competitive baseline.
+    This is a feasibility oracle, not a competitive baseline.
     """
     ball_x, ball_y, ball_z = obs[0], obs[1], obs[2]
     ball_vx, ball_vy, ball_vz = obs[3], obs[4], obs[5]
-    paddle_x_qpos, paddle_x_qvel = obs[6], obs[7]
-    paddle_y_qpos, paddle_y_qvel = obs[8], obs[9]
-    paddle_z_qpos, paddle_z_qvel = obs[10], obs[11]
-    paddle_yaw_qpos, paddle_yaw_qvel = obs[12], obs[13]
-    paddle_pitch_qpos, paddle_pitch_qvel = obs[14], obs[15]
-    rel_dx, rel_dy, rel_dz = obs[18], obs[19], obs[20]
+    rel_dx, rel_dy, rel_dz = obs[14], obs[15], obs[16]
 
-    kp, kd = 8.0, 1.0
     inbound = ball_vx < -0.1
-    action_x: float | None = None
 
     if inbound:
-        # Ballistic lead: where will the ball be when it crosses the
-        # face plane (0.05 m ahead of the face)?
-        t_hit = max(0.0, (rel_dx - 0.05) / max(0.1, -ball_vx))
+        # Ballistic lead to the home contact plane (roughly 5 cm in
+        # front of the face centred at world x=-1.7).
+        t_hit = max(0.0, (ball_x + 1.65) / max(0.1, -ball_vx))
         pred_y = ball_y + ball_vy * t_hit
         pred_z = (
             ball_z + ball_vz * t_hit - 0.5 * _WALL_BALL_GRAVITY * t_hit**2
@@ -126,32 +115,27 @@ def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
             # is wrong past the bounce, so fall back to tracking its
             # current height (never below a reachable floor pickup).
             pred_z = max(ball_z, 0.15)
-        target_x = float(np.clip(ball_x - 0.05 + 1.7, -3.0, 2.0))
+        target_x = 0.0
         target_y = float(np.clip(pred_y, -3.0, 3.0))
         target_z = float(np.clip(pred_z - 1.2, -0.9, 2.0))
-        aligned = abs(rel_dy) < 0.22 and abs(rel_dz) < 0.28
-        if aligned and 0.0 < rel_dx <= 0.4:
+        if 0.0 < rel_dx <= 1.3:
+            target_z = float(np.clip(target_z + 0.2, -0.9, 2.0))
+        aligned = abs(rel_dy) < 0.25 and abs(rel_dz) < 0.30
+        if aligned and 0.0 < rel_dx <= 0.55:
             # Swing through the contact.
-            action_x = 1.0
+            target_x = 2.0
     else:
         target_x = 0.0
         target_y = float(np.clip(ball_y, -3.0, 3.0))
         target_z = float(np.clip(ball_z - 1.2, -0.9, 2.0))
 
-    if action_x is None:
-        action_x = kp * (target_x - paddle_x_qpos) - kd * paddle_x_qvel
-
-    raw = np.array(
-        [
-            action_x,
-            kp * (target_y - paddle_y_qpos) - kd * paddle_y_qvel,
-            kp * (target_z - paddle_z_qpos) - kd * paddle_z_qvel,
-            kp * (0.0 - paddle_yaw_qpos) - kd * paddle_yaw_qvel,
-            kp * (0.0 - paddle_pitch_qpos) - kd * paddle_pitch_qvel,
-        ],
-        dtype=np.float32,
-    )
-    return np.clip(raw, -1.0, 1.0)
+    targets = np.array([target_x, target_y, target_z], dtype=np.float64)
+    # Invert WallBallEnv's piecewise mapping around the qpos=0 home
+    # target. Negative and positive spans differ for x/z.
+    negative_spans = np.array([3.0, 3.0, 0.9])
+    positive_spans = np.array([2.0, 3.0, 2.0])
+    spans = np.where(targets >= 0.0, positive_spans, negative_spans)
+    return np.clip(targets / spans, -1.0, 1.0).astype(np.float32)
 
 
 # The receiving G1's right shoulder is pre-positioned to -0.2 radians by the

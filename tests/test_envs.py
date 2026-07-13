@@ -511,6 +511,102 @@ def test_asset_path_returns_existing_files():
         assert p.is_file(), f"Missing asset: {name}"
 
 
+class TestWallBallPaddleInterface:
+    """Pin the simplified face-only target-control contract."""
+
+    def test_three_normalized_targets_map_around_home(self):
+        env = WallBallEnv()
+        try:
+            assert env.action_space.shape == (3,)
+            np.testing.assert_allclose(env.action_space.low, -1.0)
+            np.testing.assert_allclose(env.action_space.high, 1.0)
+            assert env.action_space.dtype == np.float32
+            assert env.action_names == (
+                "paddle_target_x",
+                "paddle_target_y",
+                "paddle_target_z",
+            )
+            np.testing.assert_allclose(
+                env._action_to_controls(np.full(3, -1.0)),
+                [-3.0, -3.0, -0.9],
+            )
+            np.testing.assert_allclose(
+                env._action_to_controls(np.zeros(3)),
+                [0.0, 0.0, 0.0],
+            )
+            np.testing.assert_allclose(
+                env._action_to_controls(np.ones(3)),
+                [2.0, 3.0, 2.0],
+            )
+            # Finite inputs outside the declared Box are clipped.
+            np.testing.assert_allclose(
+                env._action_to_controls(np.array([2.0, -2.0, 0.0])),
+                [2.0, -3.0, 0.0],
+            )
+            with pytest.raises(ValueError, match="action must have shape"):
+                env.step(np.zeros(5, dtype=np.float32))
+        finally:
+            env.close()
+
+    def test_face_is_only_paddle_geom_and_upward_pitch_is_fixed(self):
+        env = WallBallEnv()
+        try:
+            joint_names = {
+                env.model.joint(index).name for index in range(env.model.njnt)
+            }
+            geom_names = {
+                env.model.geom(index).name for index in range(env.model.ngeom)
+            }
+            assert "paddle_yaw" not in joint_names
+            assert "paddle_pitch" not in joint_names
+            assert "paddle_grip" not in geom_names
+            assert "paddle_shaft" not in geom_names
+            assert {name for name in geom_names if name.startswith("paddle_")} == {
+                "paddle_face"
+            }
+
+            env.reset(seed=0)
+            for _ in range(30):
+                env.do_simulation(
+                    np.array([0.25, -0.25, 0.25], dtype=np.float32),
+                    env.frame_skip,
+                )
+            targets = env._action_to_controls(
+                np.array([0.25, -0.25, 0.25], dtype=np.float32)
+            )
+            actual = np.array(
+                [
+                    float(env.data.joint(name).qpos[0])
+                    for name in (
+                        "paddle_slide_x",
+                        "paddle_slide_y",
+                        "paddle_slide_z",
+                    )
+                ]
+            )
+            np.testing.assert_allclose(actual, targets, atol=0.03)
+            angle = np.deg2rad(10.0)
+            expected_rotation = np.array(
+                [
+                    [np.cos(angle), 0.0, -np.sin(angle)],
+                    [0.0, 1.0, 0.0],
+                    [np.sin(angle), 0.0, np.cos(angle)],
+                ]
+            )
+            rotation = env.data.body("paddle_head").xmat.reshape(3, 3)
+            np.testing.assert_allclose(rotation, expected_rotation, atol=1e-12)
+            np.testing.assert_allclose(
+                rotation[:, 0],
+                [np.cos(angle), 0.0, np.sin(angle)],
+                atol=1e-12,
+            )
+            assert np.max(np.abs(env.data.actuator_force)) <= 100.0 + 1e-9
+            assert np.isfinite(env.data.qpos).all()
+            assert np.isfinite(env.data.qvel).all()
+        finally:
+            env.close()
+
+
 class TestWallBallContactPhysics:
     """Pin down the ball's contact restitution with physical measurements.
 
@@ -580,6 +676,38 @@ class TestWallBallContactPhysics:
             "(v1 regression measured 0.00)"
         )
 
+    def test_fixed_paddle_pitch_lifts_a_horizontal_return(self):
+        """A horizontal inbound ball must leave the fixed face upward."""
+        mujoco, model, data = self._fresh_model()
+        qadr = int(model.joint("ball_x").qposadr[0])
+        dadr = int(model.joint("ball_x").dofadr[0])
+        data.qpos[qadr : qadr + 3] = [-1.1, 0.0, 1.2]
+        data.qvel[dadr : dadr + 3] = [-6.0, 0.0, 0.0]
+        data.ctrl[:] = 0.0
+        mujoco.mj_forward(model, data)
+
+        touched_paddle = False
+        rebound_velocity = None
+        for _ in range(1000):
+            mujoco.mj_step(model, data)
+            for contact in data.contact:
+                geom_names = {
+                    model.geom(contact.geom1).name,
+                    model.geom(contact.geom2).name,
+                }
+                if geom_names == {"ball_geom", "paddle_face"}:
+                    touched_paddle = True
+                    break
+            if touched_paddle and data.qvel[dadr] > 0.1:
+                rebound_velocity = data.qvel[dadr : dadr + 3].copy()
+                break
+
+        assert touched_paddle, "horizontal test ball never touched the paddle"
+        assert rebound_velocity is not None, "ball never rebounded from paddle"
+        assert rebound_velocity[2] > 0.1, (
+            f"fixed pitch did not lift return: vz={rebound_velocity[2]:.2f}"
+        )
+
     def test_racket_can_address_grounded_ball(self):
         """At the bottom of its z range the face's lower edge must reach
         below a rolling ball's centre (z=0.07). At the old range the
@@ -594,7 +722,11 @@ class TestWallBallContactPhysics:
             lo = float(env.model.joint("paddle_slide_z").range[0])
             env.data.qpos[zadr] = lo
             mujoco.mj_forward(env.model, env.data)
-            face_bottom = float(env.data.body("paddle_head").xpos[2]) - 0.25
+            paddle = env.data.body("paddle_head")
+            rotation = paddle.xmat.reshape(3, 3)
+            half_sizes = np.array([0.02, 0.2, 0.25])
+            z_half_extent = float(np.abs(rotation[2]) @ half_sizes)
+            face_bottom = float(paddle.xpos[2]) - z_half_extent
             assert face_bottom <= 0.07, (
                 f"lowest face edge z={face_bottom:.2f} cannot reach a "
                 "rolling ball (centre z=0.07)"
@@ -704,7 +836,8 @@ class TestWallBallRewardGate:
             finally:
                 env.close()
 
-        noop = lambda o: np.zeros(5, dtype=np.float32)  # noqa: E731
+        noop = lambda o: np.zeros(3, dtype=np.float32)  # noqa: E731
+        oracle_bounces_seen = []
         for seed in (0, 1, 2):
             noop_total, noop_bounces = run(noop, seed=seed)
             oracle_total, oracle_bounces = run(
@@ -725,6 +858,14 @@ class TestWallBallRewardGate:
                 f"{oracle_total} — completed returns must pay"
             )
             assert oracle_total > noop_total
+            oracle_bounces_seen.append(oracle_bounces)
+
+        # This controller change is intended to unlock more than the
+        # one-return ceiling seen in the failed training run. Keep a
+        # small deterministic multi-return canary in addition to the
+        # per-seed feasibility floor above.
+        assert np.median(oracle_bounces_seen) >= 2.0
+        assert max(oracle_bounces_seen) >= 3
 
     def test_stalled_ball_terminates_episode(self):
         """A dead ball should end the episode well before episode_len.
@@ -882,37 +1023,32 @@ class TestWallBallRewardGate:
             env.close()
 
     def test_obs_layout_and_markov_fields(self):
-        """The 26-dim obs carries rel-xyz at 18:21 plus the appended
-        Markov-completing fields: ball spin, stall progress, pending
-        advance.
-
-        The original 21 indices must keep their meaning (the oracle and
-        replay tooling address them positionally), so new fields are
-        appended, never inserted.
-        """
+        """The 22-dim observation removes the deleted yaw/pitch state
+        while retaining rel-xyz, spin, stall progress, and the pending
+        advance needed to make the task Markovian."""
         env = WallBallEnv()
         try:
             obs, _ = env.reset(seed=0)
-            assert obs.shape == (26,)
+            assert obs.shape == (22,)
             ball = np.array(env.data.joint("ball_x").qpos[:3])
             paddle = np.array(env.data.body("paddle_head").xpos)
-            np.testing.assert_allclose(obs[18:21], ball - paddle, atol=1e-6)
+            np.testing.assert_allclose(obs[14:17], ball - paddle, atol=1e-6)
             # Spin mirrors the free joint's rotational qvel.
             np.testing.assert_allclose(
-                obs[21:24],
+                obs[17:20],
                 np.asarray(env.data.joint("ball_x").qvel)[3:6],
                 atol=1e-6,
             )
             # Fresh reset: stall clock and pending advance both zero.
-            assert obs[24] == 0.0
-            assert obs[25] == 0.0
+            assert obs[20] == 0.0
+            assert obs[21] == 0.0
 
             # Under no-op the stall clock must tick up monotonically
             # (the serve produces no paddle/wall edge for many steps).
-            _, _, _, _, _ = env.step(np.zeros(5, dtype=np.float32))
-            obs2, *_ = env.step(np.zeros(5, dtype=np.float32))
-            assert 0.0 < obs2[24] <= 1.0
-            assert obs2[24] == env._steps_since_event / env.stall_steps
+            _, _, _, _, _ = env.step(np.zeros(3, dtype=np.float32))
+            obs2, *_ = env.step(np.zeros(3, dtype=np.float32))
+            assert 0.0 < obs2[20] <= 1.0
+            assert obs2[20] == env._steps_since_event / env.stall_steps
         finally:
             env.close()
 
@@ -939,15 +1075,15 @@ class TestWallBallRewardGate:
             env.set_state(qpos, qvel)
             for _ in range(60):
                 obs, _, terminated, truncated, info = env.step(
-                    np.zeros(5, dtype=np.float32)
+                    np.zeros(3, dtype=np.float32)
                 )
                 assert not (terminated or truncated)
                 if info["paddle_hit_count"] >= 1:
                     break
             else:
                 raise AssertionError("Ball never contacted the paddle")
-            assert obs[25] == 0.5, (
-                f"pending_advance obs is {obs[25]}, expected the 0.5 bonus"
+            assert obs[21] == 0.5, (
+                f"pending_advance obs is {obs[21]}, expected the 0.5 bonus"
             )
         finally:
             env.close()
@@ -1604,8 +1740,7 @@ class TestWallBallDoubleBounce:
     episode immediately, as in real wall ball. Bounce detection runs at
     substep resolution with a pre-impact-speed debounce (so the contact
     chatter of a settling or rolling ball doesn't read as bounces), and
-    touch events are filtered to real ball contacts (so a paddle sagging
-    onto the floor doesn't fake a hit).
+    touch events are filtered to real ball contacts.
     """
 
     @staticmethod
@@ -1834,36 +1969,19 @@ class TestWallBallDoubleBounce:
         finally:
             env.close()
 
-    def test_paddle_floor_scrape_is_not_a_paddle_hit(self):
-        """An unpowered paddle sags until its face slams the floor.
-        That transient used to fire the paddle touch sensor — paying the
-        bonus, opening the wall +1 gate, and resetting the stall clock —
-        with the ball metres away. With touch events filtered to real
-        ball contacts the slam is ignored, and with the ball parked
-        in-bounds (settled, so its chatter is below the bounce debounce)
-        the episode ends via stall exactly ``stall_steps`` after reset.
-        The paddle is re-raised to its reset pose after the settle phase
-        so the sag and slam happen *inside* the env loop, where the
-        filter is exercised: under unfiltered sampling this rollout
-        registers a phantom paddle hit (~35 N at roughly step 131) and
-        the stall clock resets, failing both assertions."""
+    def test_zero_target_holds_face_clear_and_does_not_fake_a_hit(self):
+        """The normalized zero action is an active home-position hold.
+
+        With the ball parked and settled far away, the target-controlled
+        face must stay clear of the floor, never register a phantom hit,
+        and let the stall clock fire exactly on schedule.
+        """
         env = WallBallEnv(min_force=0.0, stall_steps=150)
         try:
             env.reset(seed=0)
             # Park the ball in-bounds, at rest, away from paddle & wall.
             self._place_ball(env, [3.0, 4.0, 0.07])
             self._settle(env)
-            # Re-raise the paddle so it sags afresh during the env loop.
-            qpos = env.data.qpos.copy()
-            qvel = env.data.qvel.copy()
-            for name in (
-                "paddle_slide_x", "paddle_slide_y", "paddle_slide_z",
-                "paddle_yaw", "paddle_pitch",
-            ):
-                joint = env.model.joint(name)
-                qpos[int(joint.qposadr[0])] = 0.0
-                qvel[int(joint.dofadr[0])] = 0.0
-            env.set_state(qpos, qvel)
 
             floor_geom = int(env.model.geom("floor").id)
             face_geom = int(env.model.geom("paddle_face").id)
@@ -1885,10 +2003,7 @@ class TestWallBallDoubleBounce:
                         face_scraped_floor = True
                 if terminated or truncated:
                     break
-            assert face_scraped_floor, (
-                "test premise broken: the sagging paddle never touched "
-                "the floor"
-            )
+            assert not face_scraped_floor, "home-position hold scraped the floor"
             assert info["paddle_hit_count"] == 0, (
                 "paddle-floor scrape was counted as a paddle hit"
             )

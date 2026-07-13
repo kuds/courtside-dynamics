@@ -133,7 +133,7 @@ def test_auto_log_populates_csv_and_tensorboard(tmp_path, _stub_video_recorder):
         save_freq=1,
         name_prefix="test",
     )
-    cb.model = _FakeModel(action_dim=5)
+    cb.model = _FakeModel(action_dim=3)
     _run_callback_once(cb)
 
     # CSV: the scalar info keys + default reward columns should be in the
@@ -182,7 +182,7 @@ def test_explicit_info_row_fn_overrides_auto_detection(tmp_path, _stub_video_rec
         csv_header=["bounce_count", "reward"],
         info_row_fn=lambda info, r, tr, d: [info["bounce_count"], r],
     )
-    cb.model = _FakeModel(action_dim=5)
+    cb.model = _FakeModel(action_dim=3)
     _run_callback_once(cb)
 
     csv_files = list(tmp_path.glob("*.csv"))
@@ -389,7 +389,7 @@ def test_info_dict_eval_callback_aggregates(tmp_path):
         eval_freq=1,
         log_prefix="eval_info",
     )
-    cb.model = _FakeModel(action_dim=5)
+    cb.model = _FakeModel(action_dim=3)
     cb.n_calls = cb.eval_freq
     cb.num_timesteps = cb.eval_freq
     cb._on_step()
@@ -427,7 +427,7 @@ def test_info_dict_eval_success_rate_and_ep_mean(tmp_path):
         success_key="bounce_count",
         success_threshold=1.0,
     )
-    cb.model = _FakeModel(action_dim=5)
+    cb.model = _FakeModel(action_dim=3)
     cb.n_calls = cb.eval_freq
     cb.num_timesteps = cb.eval_freq
     cb._on_step()
@@ -459,7 +459,7 @@ def test_info_dict_eval_success_rate_omitted_when_key_absent(tmp_path):
         success_key="not_a_real_key",  # WallBall never emits this
         success_threshold=1.0,
     )
-    cb.model = _FakeModel(action_dim=5)
+    cb.model = _FakeModel(action_dim=3)
     cb.n_calls = cb.eval_freq
     cb.num_timesteps = cb.eval_freq
     cb._on_step()
@@ -571,7 +571,7 @@ def test_info_dict_eval_task_metric_selection_and_early_stop(tmp_path):
         early_stop_patience=2,
         early_stop_min_evals=0,
     )
-    cb.model = _FakeSavableModel(action_dim=5)
+    cb.model = _FakeSavableModel(action_dim=3)
 
     def meta():
         with open(tmp_path / "best_model_meta.json") as f:
@@ -631,7 +631,7 @@ def test_info_dict_eval_selection_writes_artifacts_end_to_end(tmp_path):
         ),
         best_model_save_path=str(tmp_path),
     )
-    cb.model = _FakeSavableModel(action_dim=5)
+    cb.model = _FakeSavableModel(action_dim=3)
     cb.n_calls = cb.eval_freq
     cb.num_timesteps = 12345
     cb._on_step()
