@@ -303,6 +303,8 @@ def test_training_notebook_preserves_curriculum_recipe_defaults():
 
     assert 'ALGO = None' in source
     assert 'TOTAL_TIMESTEPS = None' in source
+    assert 'REPO_REF = "main"' in source
+    assert "github.com/kuds/courtside-dynamics@{REPO_REF}" in source
     assert 'ALGO = ALGO or RECIPES[ENV].default_algo' in source
     assert 'recipe_n_envs = RECIPES[ENV].extra_cfg.get("n_envs")' in source
     assert "cfg.checkpoint_freq =" not in source
@@ -318,3 +320,16 @@ def test_wall_ball_headline_metric_is_rally_count(tmp_path):
     are compared on rally exchanges per episode instead."""
     cfg = build_train_config("WallBall", log_dir=str(tmp_path))
     assert cfg.headline_key == "bounce_count"
+
+
+def test_wall_ball_recipe_uses_simplified_paddle_interface(tmp_path):
+    cfg = build_train_config("WallBall", log_dir=str(tmp_path))
+    env = cfg.env_fn()
+    try:
+        assert env.action_space.shape == (3,)
+        assert env.observation_space.shape == (22,)
+        assert env.model.nu == 3
+        assert "face-only" in RECIPES["WallBall"].description
+        assert "fixed-orientation" in RECIPES["WallBall"].description
+    finally:
+        env.close()

@@ -306,8 +306,8 @@ RECIPES: dict[str, Recipe] = {
             "info_eval_distribution_keys": ("bounce_count",),
         },
         description=(
-            "Rally a ball against a wall with a 5-DOF racket and a "
-            "strict gated wall-hit reward."
+            "Rally a ball against a wall with a face-only, fixed-orientation "
+            "3-DOF target-controlled paddle and a strict gated wall-hit reward."
         ),
     ),
     "HumanoidTennisStage0Intercept": Recipe(

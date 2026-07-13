@@ -1,7 +1,9 @@
 """Wall Ball environment.
 
-A 5-DOF racket (x/y/z slide + yaw + pitch hinges) must rally a ball
-against a wall. The ball is served toward the racket on reset, so the
+A face-only, fixed-orientation paddle must rally a ball against a wall.
+The policy supplies three normalized absolute position targets for the
+paddle's x/y/z slides; a force-limited position servo handles the
+low-level motion. The ball is served toward the paddle on reset, so the
 agent's first job is to make contact, then drive the ball back into the
 wall, then receive the rebound, and so on.
 
@@ -96,6 +98,7 @@ from typing import Any
 import mujoco
 import numpy as np
 from gymnasium import utils
+from gymnasium.spaces import Box
 
 from courtside_dynamics.assets import asset_path
 from courtside_dynamics.envs._base import CourtsideMujocoEnv
@@ -115,7 +118,13 @@ _BALL_MIN_Z = -0.5
 
 
 class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
-    """Rally a ball against a wall with a 5-DOF racket."""
+    """Rally a ball with a fixed face and three Cartesian target actions."""
+
+    action_names: tuple[str, ...] = (
+        "paddle_target_x",
+        "paddle_target_y",
+        "paddle_target_z",
+    )
 
     def __init__(
         self,
@@ -218,10 +227,10 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # produces a nonfinite state so NaNs can't reach VecNormalize.
         self._last_finite_obs: np.ndarray | None = None
 
-        # Obs: ball pos(3) + ball vel(3) + paddle qpos/qvel(10) +
+        # Obs: ball pos(3) + ball vel(3) + paddle qpos/qvel(6) +
         # paddle_hit_since_last_wall flag(1) + floor_bounce_count(1) +
         # paddle_head→ball relative xyz(3) + ball angular velocity(3) +
-        # stall progress(1) + pending advance(1) = 26. Everything the
+        # stall progress(1) + pending advance(1) = 22. Everything the
         # env's own dynamics or reward depends on is observable — the
         # policy should never face two identical observations with
         # different futures:
@@ -247,15 +256,34 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # - pending_advance is the shaping+bonus total that a failed
         #   cycle would claw back on the terminating step; the refund
         #   rule makes terminal reward depend on this otherwise-hidden
-        #   accumulator. (New fields are appended so all pre-existing
-        #   indices keep their meaning.)
+        #   accumulator.
         CourtsideMujocoEnv.__init__(
             self,
             asset_path("wall_ball.xml"),
             episode_len=episode_len,
-            obs_dim=26,
+            obs_dim=22,
             **kwargs,
         )
+
+        # MuJoCo exposes the position actuators' physical qpos ranges as
+        # its default action space. The policy API stays normalized and
+        # centred on the home pose: zero targets qpos=0 even though the
+        # x and z joint limits are asymmetric. This is deliberately a
+        # target interface, not a raw force interface.
+        compiled_actions = tuple(
+            self.model.actuator(index).name for index in range(self.model.nu)
+        )
+        if compiled_actions != self.action_names:
+            raise ValueError("WallBall actuator order differs from the public API")
+        self.action_space = Box(
+            low=-1.0,
+            high=1.0,
+            shape=(len(self.action_names),),
+            dtype=np.float32,
+        )
+        self._control_low = self.model.actuator_ctrlrange[:, 0].copy()
+        self._control_high = self.model.actuator_ctrlrange[:, 1].copy()
+        self._control_home = np.zeros(self.model.nu, dtype=np.float64)
 
         # Cache the ball's DOF offset so serve velocities don't depend on
         # a hard-coded index into qvel.
@@ -267,16 +295,6 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._floor_geom_id = int(self.model.geom("floor").id)
         self._paddle_geom_id = int(self.model.geom("paddle_face").id)
         self._wall_geom_id = int(self.model.geom("wall_geom").id)
-        # The shaft and grip can also legally touch the ball. They never
-        # fire the face-mounted touch sensor (no reward), but they do
-        # interrupt the consecutive-floor-bounce sequence: a save off
-        # the racket frame is still a touch under the rally rule.
-        self._racket_frame_geom_ids = np.array(
-            [
-                int(self.model.geom("paddle_shaft").id),
-                int(self.model.geom("paddle_grip").id),
-            ]
-        )
         # Whether the ball was in floor contact on the previous substep,
         # persisted across frames so a contact spanning a frame boundary
         # isn't double-counted as a fresh bounce.
@@ -293,23 +311,22 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
 
     def _ball_contacts(
         self,
-    ) -> tuple[float, float, bool, bool, bool]:
+    ) -> tuple[float, float, bool, bool]:
         """Scan the ball's active contacts for one substep.
 
-        Returns ``(face_force, wall_force, on_floor, on_face,
-        on_racket)``: the largest normal force among ball-face and
-        ball-wall contact pairs (0.0 when none) plus contact flags for
-        the floor, the paddle face, and the full racket (face + shaft +
-        grip — the frame matters for the consecutive-bounce rally rule
-        but never pays reward). Forces come from ``mj_contactForce``,
-        which shares ``data.contact``'s snapshot: unlike the touch
-        sensors it neither lags the contact list under RK4 nor loses
-        edge hits whose contact point falls outside the sensor site's
-        thin box, and a ball-pair force is inherently ball-specific.
+        Returns ``(face_force, wall_force, on_floor, on_face)``: the
+        largest normal force among ball-face and ball-wall contact pairs
+        (0.0 when none), plus contact flags for the floor and paddle face.
+        The face is the paddle's only collision geometry. Forces come
+        from ``mj_contactForce``, which shares ``data.contact``'s
+        snapshot: unlike the touch sensors it neither lags the contact
+        list under RK4 nor loses edge hits whose contact point falls
+        outside the sensor site's thin box, and a ball-pair force is
+        inherently ball-specific.
         """
         face_force = 0.0
         wall_force = 0.0
-        on_floor = on_face = on_racket = False
+        on_floor = on_face = False
         force6 = np.zeros(6)
         ball = self._ball_geom_id
         for i in range(int(self.data.ncon)):
@@ -325,15 +342,37 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 on_floor = True
             elif other == self._paddle_geom_id:
                 on_face = True
-                on_racket = True
                 mujoco.mj_contactForce(self.model, self.data, i, force6)
                 face_force = max(face_force, float(force6[0]))
             elif other == self._wall_geom_id:
                 mujoco.mj_contactForce(self.model, self.data, i, force6)
                 wall_force = max(wall_force, float(force6[0]))
-            elif other in self._racket_frame_geom_ids:
-                on_racket = True
-        return face_force, wall_force, on_floor, on_face, on_racket
+        return face_force, wall_force, on_floor, on_face
+
+    def _action_to_controls(self, action: np.ndarray) -> np.ndarray:
+        """Map normalized x/y/z targets to physical slide coordinates.
+
+        Mapping each half of the action range independently keeps action
+        zero at the qpos=0 home pose despite asymmetric x/z limits.
+        Finite out-of-range inputs are clipped, matching Gymnasium's
+        bounded action-space convention.
+        """
+        normalized = np.asarray(action, dtype=np.float64)
+        if normalized.shape != self.action_space.shape:
+            raise ValueError(
+                f"action must have shape {self.action_space.shape}, "
+                f"got {normalized.shape}"
+            )
+        if not bool(np.isfinite(normalized).all()):
+            raise ValueError("action must contain only finite values")
+        normalized = np.clip(normalized, -1.0, 1.0)
+        positive_span = self._control_high - self._control_home
+        negative_span = self._control_home - self._control_low
+        return np.where(
+            normalized >= 0.0,
+            self._control_home + normalized * positive_span,
+            self._control_home + normalized * negative_span,
+        )
 
     def _step_mujoco_simulation(self, ctrl, n_frames):
         """Step the physics one substep at a time, tracking contact events.
@@ -373,7 +412,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
           touch absolves the bounce rather than terminating on a
           scooped pickup.
         """
-        self.data.ctrl[:] = ctrl
+        self.data.ctrl[:] = self._action_to_controls(ctrl)
         wall_peak = 0.0
         paddle_peak = 0.0
         for _ in range(n_frames):
@@ -384,7 +423,6 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 wall_force,
                 on_floor,
                 on_face,
-                on_racket,
             ) = self._ball_contacts()
             wall_sensed = max(
                 wall_force, float(self.data.sensor("wall_touch").data[0])
@@ -405,7 +443,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 self.floor_bounce_total += 1
             self._ball_on_floor = on_floor
             self._ball_on_paddle = on_face
-            if on_racket or wall_sensed > 0.0:
+            if on_face or wall_sensed > 0.0:
                 self.floor_bounce_count = 0
         self._substep_wall_touch = wall_peak
         self._substep_paddle_touch = paddle_peak
@@ -414,12 +452,18 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         mujoco.mj_rnePostConstraint(self.model, self.data)
 
     def step(self, a):
-        if not np.isfinite(np.asarray(a, dtype=np.float64)).all():
+        action = np.asarray(a, dtype=np.float64)
+        if action.shape != self.action_space.shape:
+            raise ValueError(
+                f"action must have shape {self.action_space.shape}, "
+                f"got {action.shape}"
+            )
+        if not bool(np.isfinite(action).all()):
             # A nonfinite action means the policy or a wrapper upstream
             # has blown up. Stepping MuJoCo with it would corrupt the
             # physics state; end the episode instead, without physics.
             return self._nonfinite_termination()
-        self.do_simulation(a, self.frame_skip)
+        self.do_simulation(action, self.frame_skip)
         self.step_number += 1
 
         wall_touch = self._substep_wall_touch
@@ -738,8 +782,6 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         "paddle_slide_x_qpos", "paddle_slide_x_qvel",
         "paddle_slide_y_qpos", "paddle_slide_y_qvel",
         "paddle_slide_z_qpos", "paddle_slide_z_qvel",
-        "paddle_yaw_qpos", "paddle_yaw_qvel",
-        "paddle_pitch_qpos", "paddle_pitch_qvel",
         "paddle_hit_since_last_wall",
         "floor_bounce_count",
         "paddle_to_ball_dx", "paddle_to_ball_dy", "paddle_to_ball_dz",
@@ -774,7 +816,6 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 ball_qvel[:3],
                 self._joints_obs(
                     "paddle_slide_x", "paddle_slide_y", "paddle_slide_z",
-                    "paddle_yaw", "paddle_pitch",
                 ),
                 gate_open,
                 floor_bounces,

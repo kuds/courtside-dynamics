@@ -36,7 +36,12 @@ from gymnasium.envs.registration import register
 # corrects its rotation units and vertical actuator authority. Its observation
 # grows from 18 to 30 values to expose spin, contact-event state, and time.
 # Existing BallBounce policies are incompatible and should be retrained.
-__version__ = "0.7.0"
+# 0.8.0: WallBall replaces its raw 5-motor racket with a face-only,
+# fixed-orientation paddle. Three normalized actions now command force-limited
+# x/y/z position targets, and yaw/pitch removal shrinks observations from 26 to
+# 22 values. Existing WallBall policies, normalizers, replay buffers, and raw
+# simulator states are incompatible and must not be resumed.
+__version__ = "0.8.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.
