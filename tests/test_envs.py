@@ -639,15 +639,74 @@ class TestWallBallRewardGate:
         finally:
             env.close()
 
-    def test_obs_shape_includes_paddle_to_ball_offset(self):
-        """The 21-dim obs ends with the paddle_head→ball relative xyz."""
+    def test_obs_layout_and_markov_fields(self):
+        """The 26-dim obs carries rel-xyz at 18:21 plus the appended
+        Markov-completing fields: ball spin, stall progress, pending
+        advance.
+
+        The original 21 indices must keep their meaning (the oracle and
+        replay tooling address them positionally), so new fields are
+        appended, never inserted.
+        """
         env = WallBallEnv()
         try:
             obs, _ = env.reset(seed=0)
-            assert obs.shape == (21,)
+            assert obs.shape == (26,)
             ball = np.array(env.data.joint("ball_x").qpos[:3])
             paddle = np.array(env.data.body("paddle_head").xpos)
-            np.testing.assert_allclose(obs[-3:], ball - paddle, atol=1e-6)
+            np.testing.assert_allclose(obs[18:21], ball - paddle, atol=1e-6)
+            # Spin mirrors the free joint's rotational qvel.
+            np.testing.assert_allclose(
+                obs[21:24],
+                np.asarray(env.data.joint("ball_x").qvel)[3:6],
+                atol=1e-6,
+            )
+            # Fresh reset: stall clock and pending advance both zero.
+            assert obs[24] == 0.0
+            assert obs[25] == 0.0
+
+            # Under no-op the stall clock must tick up monotonically
+            # (the serve produces no paddle/wall edge for many steps).
+            _, _, _, _, _ = env.step(np.zeros(5, dtype=np.float32))
+            obs2, *_ = env.step(np.zeros(5, dtype=np.float32))
+            assert 0.0 < obs2[24] <= 1.0
+            assert obs2[24] == env._steps_since_event / env.stall_steps
+        finally:
+            env.close()
+
+    def test_obs_pending_advance_tracks_paddle_bonus(self):
+        """After a paddle hit, the pending-advance obs must show the
+        banked bonus (the amount a failed cycle would claw back)."""
+        env = WallBallEnv(
+            min_force=1.0,
+            paddle_hit_bonus=0.5,
+            track_shaping_scale=0.0,
+        )
+        try:
+            env.reset(seed=0)
+            ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            face = env.data.body("paddle_head").xpos.copy()
+            qpos[ball_qposadr : ball_qposadr + 3] = face + np.array(
+                [0.5, 0.0, 0.05]
+            )
+            qvel[ball_dofadr : ball_dofadr + 6] = 0.0
+            qvel[ball_dofadr : ball_dofadr + 3] = [-3.0, 0.0, 0.0]
+            env.set_state(qpos, qvel)
+            for _ in range(60):
+                obs, _, terminated, truncated, info = env.step(
+                    np.zeros(5, dtype=np.float32)
+                )
+                assert not (terminated or truncated)
+                if info["paddle_hit_count"] >= 1:
+                    break
+            else:
+                raise AssertionError("Ball never contacted the paddle")
+            assert obs[25] == 0.5, (
+                f"pending_advance obs is {obs[25]}, expected the 0.5 bonus"
+            )
         finally:
             env.close()
 

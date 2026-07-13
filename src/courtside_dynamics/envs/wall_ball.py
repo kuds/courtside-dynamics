@@ -220,21 +220,40 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
 
         # Obs: ball pos(3) + ball vel(3) + paddle qpos/qvel(10) +
         # paddle_hit_since_last_wall flag(1) + floor_bounce_count(1) +
-        # paddle_head→ball relative xyz(3) = 21. The flag exposes the
-        # wall-reward gate state: True iff the next wall contact will
-        # pay +1 (and, equivalently, that this cycle's paddle bonus is
-        # already consumed), which an MLP policy can't infer from raw
-        # state alone. floor_bounce_count exposes the double-bounce
-        # termination state — when it reads 1 the next floor bounce
-        # ends the episode, which is likewise not inferable from the
-        # ball's instantaneous position/velocity. The relative xyz
-        # spares the policy from learning the joint→world mapping by
-        # hand.
+        # paddle_head→ball relative xyz(3) + ball angular velocity(3) +
+        # stall progress(1) + pending advance(1) = 26. Everything the
+        # env's own dynamics or reward depends on is observable — the
+        # policy should never face two identical observations with
+        # different futures:
+        #
+        # - The flag exposes the wall-reward gate state: True iff the
+        #   next wall contact will pay +1 (and, equivalently, that this
+        #   cycle's paddle bonus is already consumed), which an MLP
+        #   policy can't infer from raw state alone.
+        # - floor_bounce_count exposes the double-bounce termination
+        #   state — when it reads 1 the next floor bounce ends the
+        #   episode, likewise not inferable from the ball's
+        #   instantaneous position/velocity.
+        # - The relative xyz spares the policy from learning the
+        #   joint→world mapping by hand.
+        # - The ball's angular velocity (the free joint's rotational
+        #   DOFs) exposes spin: with sliding friction on every ball
+        #   contact, spin changes rebound direction, so two balls with
+        #   identical position+velocity but different spin behave
+        #   differently.
+        # - stall_progress is _steps_since_event / stall_steps: the
+        #   stall cut is *penalized*, so the clock that triggers the
+        #   fine must be visible to the policy being fined.
+        # - pending_advance is the shaping+bonus total that a failed
+        #   cycle would claw back on the terminating step; the refund
+        #   rule makes terminal reward depend on this otherwise-hidden
+        #   accumulator. (New fields are appended so all pre-existing
+        #   indices keep their meaning.)
         CourtsideMujocoEnv.__init__(
             self,
             asset_path("wall_ball.xml"),
             episode_len=episode_len,
-            obs_dim=21,
+            obs_dim=26,
             **kwargs,
         )
 
@@ -724,6 +743,9 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         "paddle_hit_since_last_wall",
         "floor_bounce_count",
         "paddle_to_ball_dx", "paddle_to_ball_dy", "paddle_to_ball_dz",
+        "ball_wx", "ball_wy", "ball_wz",
+        "stall_progress",
+        "pending_advance",
     )
 
     def _get_obs(
@@ -738,10 +760,18 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         rel = ball_pos - paddle_head_pos
         gate_open = np.array([float(self._paddle_hit_since_last_wall)])
         floor_bounces = np.array([float(self.floor_bounce_count)])
+        # Free-joint qvel is [vx, vy, vz, wx, wy, wz]; [3:6] is spin.
+        ball_qvel = np.asarray(self.data.joint("ball_x").qvel)
+        stall_progress = np.array(
+            [min(1.0, self._steps_since_event / max(1, self.stall_steps))]
+        )
+        pending_advance = np.array(
+            [self._pending_shaping + self._pending_bonus]
+        )
         return np.concatenate(
             (
                 ball_pos,
-                np.asarray(self.data.joint("ball_x").qvel[:3]),
+                ball_qvel[:3],
                 self._joints_obs(
                     "paddle_slide_x", "paddle_slide_y", "paddle_slide_z",
                     "paddle_yaw", "paddle_pitch",
@@ -749,6 +779,9 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 gate_open,
                 floor_bounces,
                 rel,
+                ball_qvel[3:6],
+                stall_progress,
+                pending_advance,
             ),
             axis=0,
         )
