@@ -295,8 +295,15 @@ RECIPES: dict[str, Recipe] = {
             # once every episode completes a single exchange (the
             # 20260712 run hit that by 250k steps), and eval reward is
             # dominated by tracking shaping -- the exchange count is
-            # the task-native measure of rally quality.
+            # the task-native measure of rally quality. Setting it also
+            # hands best-model selection and early stopping to this
+            # metric (see TrainConfig.headline_key): the 20260712 run's
+            # reward-selected best_model.zip completed zero rallies.
             "headline_key": "bounce_count",
+            # Episode min/median/p90/max of the exchange count, so the
+            # eval CSV shows whether a mean of 1.0 is "every episode
+            # rallies once" or "one episode rallied ten times".
+            "info_eval_distribution_keys": ("bounce_count",),
         },
         description=(
             "Rally a ball against a wall with a 5-DOF racket and a "
