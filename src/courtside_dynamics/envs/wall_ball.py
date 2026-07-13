@@ -5,7 +5,9 @@ against a wall. The ball is served toward the racket on reset, so the
 agent's first job is to make contact, then drive the ball back into the
 wall, then receive the rebound, and so on.
 
-The reward is intentionally narrow:
+The reward is intentionally narrow. Only the gated wall +1 is paid
+outright; everything else is a refundable *advance* against completing
+the rally cycle it belongs to:
 
 - Wall contacts earn +1, but **only** if a paddle hit happened since the
   previous wall contact. A "wall → wall" sequence with no paddle return
@@ -21,20 +23,25 @@ The reward is intentionally narrow:
   without that gate, juggling the ball on the paddle (the previous
   curriculum stage's skill!) farms the bonus indefinitely and is
   competitive with actually rallying.
-- ``track_shaping_scale`` adds potential-based shaping that rewards
-  reductions in the paddle→ball distance while a return is in progress.
-  The shaping window is opened **on reset** as if a virtual wall hit
-  had just happened — that way the agent gets dense PBRS signal during
-  the serve flight, before any sensor edge has fired. Strict PBRS is
-  ``F = γ·Φ(s') − Φ(s)``; this implementation uses ``Φ(s) − Φ(s')``
-  (γ treated as 1) for simplicity. With SAC's typical γ=0.99 the policy
-  bias is small but not exactly zero — keep ``track_shaping_scale``
-  modest relative to the +1 wall and paddle-hit rewards. The shaping
-  also has a terminal correction: any accumulated tracking shaping is
-  clawed back if the return window ends without a paddle hit (either
-  because the ball drifted out of the play volume or because a second
-  wall bounce happened with no return between). That preserves the
-  invariant that a no-op policy nets zero tracking shaping.
+- ``track_shaping_scale`` adds tracking shaping that rewards reductions
+  in the paddle→ball distance while a return is in progress. The
+  shaping window is opened **on reset** as if a virtual wall hit had
+  just happened — that way the agent gets dense signal during the serve
+  flight, before any sensor edge has fired. The per-step deltas
+  telescope to ``scale * (d_initial - d_final)`` over each window.
+- **Advances are refunded on a failed cycle.** The paddle bonus and the
+  tracking shaping are paid the moment they are earned (a from-scratch
+  learner needs the dense signal), but they are only *kept* if the
+  cycle completes with a gated wall contact. If the cycle instead ends
+  any other way — a wall→wall with no return between, out of bounds,
+  double bounce, stall, or the episode ending first — every advance
+  paid since the last completed cycle is clawed back on that step.
+  This is the fix for the exploit run ``20260712_190054`` converged
+  to: catch the serve (banking ~1.25 of serve-flight shaping plus the
+  0.25 touch bonus), deaden the ball, and wait out the stall clock for
+  a risk-free ~1.5 per episode while never touching the wall. Under
+  the refund rule a touch followed by anything but a completed return
+  nets zero advance, so no prefix of a rally can out-earn the rally.
 - ``out_of_bounds_penalty`` subtracts a flat amount on the terminating
   step when the ball leaves the play volume, so the agent is
   incentivised to keep the rally alive rather than letting the ball
@@ -42,6 +49,12 @@ The reward is intentionally narrow:
 - ``double_bounce_penalty`` subtracts a flat amount on the terminating
   step when the rally dies via a second consecutive floor bounce, so
   letting the ball drop is never a cheaper escape than hitting it out.
+- ``stall_penalty`` subtracts a flat amount on the terminating step
+  when the episode ends via the stall cut. Before this existed, stall
+  was the one *free* way to end an episode, which is exactly why the
+  catch-and-stall policy chose it; now every early-termination path
+  costs the same and the only non-negative strategy is to keep
+  rallying.
 
 Episodes terminate early when the rally is over:
 
@@ -60,6 +73,14 @@ Episodes terminate early when the rally is over:
   ``stall_steps`` is far longer than the serve flight, so a normal
   serve cannot trip it before the agent has had a chance to make
   contact.
+
+Nonfinite values never leave the env: a nonfinite action terminates the
+episode without stepping the physics, and if the simulation itself
+produces a nonfinite state the step returns the last finite observation
+instead. Either way the step is flagged ``term_nonfinite``. This
+matters because a single NaN observation reaching ``VecNormalize``
+permanently poisons its running statistics and silently ruins the rest
+of a training run.
 
 Paddle touch events are filtered to *ball* contacts: the raw touch
 sensor sums every contact on its site, so without the filter an
@@ -109,6 +130,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         track_shaping_scale: float = 0.5,
         out_of_bounds_penalty: float = 1.0,
         double_bounce_penalty: float = 1.0,
+        stall_penalty: float = 1.0,
         floor_bounce_min_speed: float = 0.5,
         stall_steps: int = 200,
         **kwargs: Any,
@@ -126,6 +148,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             track_shaping_scale=track_shaping_scale,
             out_of_bounds_penalty=out_of_bounds_penalty,
             double_bounce_penalty=double_bounce_penalty,
+            stall_penalty=stall_penalty,
             floor_bounce_min_speed=floor_bounce_min_speed,
             stall_steps=stall_steps,
             **kwargs,
@@ -153,6 +176,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.track_shaping_scale = float(track_shaping_scale)
         self.out_of_bounds_penalty = float(out_of_bounds_penalty)
         self.double_bounce_penalty = float(double_bounce_penalty)
+        self.stall_penalty = float(stall_penalty)
         # Minimum pre-impact downward speed for a ball-floor contact
         # onset to count as a bounce. A settling/rolling ball chatters
         # through many near-zero-energy contact onsets that must not
@@ -181,11 +205,18 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # flight produces dense shaping signal.
         self._returning = False
         self._prev_paddle_to_ball: float | None = None
-        # Cumulative tracking shaping awarded since the current return
-        # window opened. Clawed back if the window ends without a paddle
-        # hit (either via a second wall bounce or via episode end), so
-        # passive ball drift toward the paddle nets zero shaping.
-        self._return_shaping_total: float = 0.0
+        # Refundable advances paid during the current rally cycle (last
+        # completed gated wall contact -> next one). Both are paid
+        # immediately but clawed back if the cycle ends any way other
+        # than a gated wall contact, so no prefix of a rally -- catch
+        # the serve, juggle, stall out -- can out-earn the rally.
+        # Tracked separately so the clawback lands in the matching
+        # ``rew_*`` component and the breakdown still sums to reward.
+        self._pending_shaping: float = 0.0
+        self._pending_bonus: float = 0.0
+        # Most recent finite observation, echoed back if the sim ever
+        # produces a nonfinite state so NaNs can't reach VecNormalize.
+        self._last_finite_obs: np.ndarray | None = None
 
         # Obs: ball pos(3) + ball vel(3) + paddle qpos/qvel(10) +
         # paddle_hit_since_last_wall flag(1) + floor_bounce_count(1) +
@@ -364,6 +395,11 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         mujoco.mj_rnePostConstraint(self.model, self.data)
 
     def step(self, a):
+        if not np.isfinite(np.asarray(a, dtype=np.float64)).all():
+            # A nonfinite action means the policy or a wrapper upstream
+            # has blown up. Stepping MuJoCo with it would corrupt the
+            # physics state; end the episode instead, without physics.
+            return self._nonfinite_termination()
         self.do_simulation(a, self.frame_skip)
         self.step_number += 1
 
@@ -385,12 +421,13 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # Per-component reward breakdown, surfaced in ``info`` so training
         # diagnostics can tell whether the agent is completing rallies
         # (rew_wall) or just farming the dense shaping term (rew_shaping).
-        # The five components sum exactly to ``reward``.
+        # The six components sum exactly to ``reward``.
         rew_wall = 0.0
         rew_paddle = 0.0
         rew_shaping = 0.0
         rew_oob = 0.0
         rew_double_bounce = 0.0
+        rew_stall = 0.0
         event_this_step = False
 
         if paddle_edge:
@@ -399,56 +436,63 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             # flag doubles as "bonus consumed": repeat contacts before the
             # next wall hit would otherwise let the agent farm the bonus
             # by juggling the ball on the paddle without ever rallying.
+            # The bonus is an advance: it stays pending until this
+            # cycle's gated wall contact confirms it was earned.
             if not self._paddle_hit_since_last_wall:
                 reward += self.paddle_hit_bonus
                 rew_paddle += self.paddle_hit_bonus
+                self._pending_bonus += self.paddle_hit_bonus
             self._paddle_hit_since_last_wall = True
             self._returning = False
             self._prev_paddle_to_ball = None
-            self._return_shaping_total = 0.0
             event_this_step = True
 
         if wall_edge:
             self.wall_contact_count += 1
-            # If the previous return window didn't end in a paddle hit,
-            # the tracking shaping accumulated during it was unearned —
-            # claw it back now before opening the next window. This
-            # preserves the no-op zero-net-shaping invariant across
-            # multi-bounce episodes.
-            if self._returning and abs(self._return_shaping_total) > 1e-9:
-                reward -= self._return_shaping_total
-                rew_shaping -= self._return_shaping_total
-            # Strict gate: only pay the +1 if a paddle hit happened
-            # since the last wall contact.
             if self._paddle_hit_since_last_wall:
+                # Gated wall contact: the rally cycle completed, so the
+                # +1 pays and every advance from this cycle is earned.
                 self.bounce_count += 1
                 reward += 1.0
                 rew_wall += 1.0
+                self._pending_shaping = 0.0
+                self._pending_bonus = 0.0
+            else:
+                # Wall -> wall with no paddle return between: a failed
+                # cycle. Claw back the advances paid during it (only
+                # shaping can be pending here -- a paddle bonus would
+                # have opened the gate) before opening the next window.
+                reward -= self._pending_shaping + self._pending_bonus
+                rew_shaping -= self._pending_shaping
+                rew_paddle -= self._pending_bonus
+                self._pending_shaping = 0.0
+                self._pending_bonus = 0.0
             self._paddle_hit_since_last_wall = False
             # Open a fresh shaping window.
             self._returning = True
             self._prev_paddle_to_ball = None
-            self._return_shaping_total = 0.0
             event_this_step = True
 
-        # Potential-based tracking shaping: reward reductions in the
-        # paddle→ball distance while a return is in progress. Each delta
-        # is scale * (prev_dist - dist), which telescopes over the
-        # window to scale * (d_init - d_final). Clawback (above on
-        # consecutive wall, below on episode end) ensures a window that
-        # doesn't terminate in a paddle hit nets zero.
+        # Tracking shaping: reward reductions in the paddle→ball
+        # distance while a return is in progress. Each delta is
+        # scale * (prev_dist - dist), which telescopes over the window
+        # to scale * (d_init - d_final). Every delta joins the pending
+        # advance, so shaping is only kept when the cycle completes.
+        # Skipped when the state has gone nonfinite -- a NaN distance
+        # would otherwise poison the reward and the pending total.
         ball_pos = np.array(self.data.joint("ball_x").qpos[:3])
         paddle_head_pos = np.array(self.data.body("paddle_head").xpos)
         if self._returning and self.track_shaping_scale > 0.0:
             dist = float(np.linalg.norm(ball_pos - paddle_head_pos))
-            if self._prev_paddle_to_ball is not None:
-                delta = self.track_shaping_scale * (
-                    self._prev_paddle_to_ball - dist
-                )
-                reward += delta
-                rew_shaping += delta
-                self._return_shaping_total += delta
-            self._prev_paddle_to_ball = dist
+            if np.isfinite(dist):
+                if self._prev_paddle_to_ball is not None:
+                    delta = self.track_shaping_scale * (
+                        self._prev_paddle_to_ball - dist
+                    )
+                    reward += delta
+                    rew_shaping += delta
+                    self._pending_shaping += delta
+                self._prev_paddle_to_ball = dist
 
         if event_this_step:
             self._steps_since_event = 0
@@ -507,17 +551,33 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         )
         term_timeout = truncated and not terminated
 
-        # PBRS terminal correction: if the episode ends mid-return, the
-        # accumulated shaping was unearned (no paddle hit closed the
-        # window), so claw it back now.
-        if (
-            (terminated or truncated)
-            and self._returning
-            and abs(self._return_shaping_total) > 1e-9
-        ):
-            reward -= self._return_shaping_total
-            rew_shaping -= self._return_shaping_total
-            self._return_shaping_total = 0.0
+        # Stall is a failed rally like OOB and double bounce, and it is
+        # fined like one. Without this it was the sole free exit, and
+        # the optimal policy was to deaden the ball and wait it out.
+        if term_stall:
+            reward -= self.stall_penalty
+            rew_stall -= self.stall_penalty
+
+        # Terminal refund: the episode is ending, so whatever advance is
+        # still pending belongs to a cycle that never completed -- take
+        # it back. Ensures a failed cycle nets zero advance no matter
+        # how the episode ends (OOB, double bounce, stall, timeout,
+        # nonfinite state).
+        if terminated or truncated:
+            reward -= self._pending_shaping + self._pending_bonus
+            rew_shaping -= self._pending_shaping
+            rew_paddle -= self._pending_bonus
+            self._pending_shaping = 0.0
+            self._pending_bonus = 0.0
+
+        # Never emit a nonfinite observation: echo the last finite one
+        # instead (the episode is terminating via term_nonfinite). A
+        # single NaN obs ingested by VecNormalize's running statistics
+        # would silently corrupt every subsequent normalized step.
+        if obs_nonfinite and self._last_finite_obs is not None:
+            obs = self._last_finite_obs.copy()
+        else:
+            self._last_finite_obs = obs.copy()
 
         info = {
             # Backward-compat keys consumed by callbacks/CSV writers.
@@ -540,6 +600,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "rew_shaping": rew_shaping,
             "rew_oob": rew_oob,
             "rew_double_bounce": rew_double_bounce,
+            "rew_stall": rew_stall,
             # Termination-cause flags. Mutually exclusive: at most one is
             # True (exactly one on the terminating step), so per-episode
             # aggregation turns these into a clean OOB / double-bounce /
@@ -551,6 +612,49 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "term_nonfinite": bool(term_nonfinite),
         }
         return obs, reward, terminated, truncated, info
+
+    def _nonfinite_termination(self):
+        """Terminal transition for a nonfinite action, without physics.
+
+        Mirrors ``step``'s terminal bookkeeping: pending advances are
+        refunded, the observation is the last finite one, and the cause
+        is reported as ``term_nonfinite``. No fine on top -- a NaN
+        action is an upstream numerical failure, not a strategy the
+        penalty structure needs to price.
+        """
+        reward = -(self._pending_shaping + self._pending_bonus)
+        rew_shaping = -self._pending_shaping
+        rew_paddle = -self._pending_bonus
+        self._pending_shaping = 0.0
+        self._pending_bonus = 0.0
+        obs = (
+            self._last_finite_obs.copy()
+            if self._last_finite_obs is not None
+            else self._get_obs()
+        )
+        info = {
+            "sensor_data": 0.0,
+            "bounce_count": self.bounce_count,
+            "wall_contact_count": self.wall_contact_count,
+            "paddle_hit_count": self.paddle_hit_count,
+            "floor_bounce_count": self.floor_bounce_count,
+            "floor_bounce_total": self.floor_bounce_total,
+            "paddle_touch": 0.0,
+            "wall_touch": 0.0,
+            "stalled": False,
+            "rew_wall": 0.0,
+            "rew_paddle": rew_paddle,
+            "rew_shaping": rew_shaping,
+            "rew_oob": 0.0,
+            "rew_double_bounce": 0.0,
+            "rew_stall": 0.0,
+            "term_oob": False,
+            "term_double_bounce": False,
+            "term_stall": False,
+            "term_timeout": False,
+            "term_nonfinite": True,
+        }
+        return obs, reward, True, False, info
 
     def reset_model(self):
         self.step_number = 0
@@ -567,12 +671,13 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._ball_on_floor = False
         self._ball_on_paddle = False
         self._paddle_hit_since_last_wall = False
-        # Open the PBRS shaping window from t=0 as if a virtual wall
-        # hit had just happened. Without this the serve flight earns
-        # no shaping and the policy has to find the ball cold.
+        # Open the shaping window from t=0 as if a virtual wall hit
+        # had just happened. Without this the serve flight earns no
+        # shaping and the policy has to find the ball cold.
         self._returning = True
         self._prev_paddle_to_ball = None
-        self._return_shaping_total = 0.0
+        self._pending_shaping = 0.0
+        self._pending_bonus = 0.0
 
         qpos, qvel = self._noisy_init_state()
 
@@ -604,7 +709,9 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         qvel[self._ball_dofadr + 2] = vz
 
         self.set_state(qpos, qvel)
-        return self._get_obs()
+        obs = self._get_obs()
+        self._last_finite_obs = obs.copy()
+        return obs
 
     observation_names: tuple[str, ...] = (
         "ball_x", "ball_y", "ball_z",

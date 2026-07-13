@@ -400,6 +400,7 @@ class TestWallBallRewardGate:
             paddle_hit_bonus=0.0,
             out_of_bounds_penalty=0.0,
             double_bounce_penalty=0.0,
+            stall_penalty=0.0,
         )
         try:
             env.reset(seed=0)
@@ -422,45 +423,66 @@ class TestWallBallRewardGate:
         finally:
             env.close()
 
-    def test_oracle_outscores_noop(self):
-        """A hand-coded paddle tracker must score strictly above no-op.
+    def test_oracle_completes_gated_returns_under_recipe_settings(self):
+        """The oracle must complete real rallies, on the recipe's env.
 
-        This is the canary for the whole fix: if a controller with full
-        state access can't get nonzero reward, the env is unsolvable and
-        no RL agent will fix it.
+        This is the canary for the whole reward design, and it must be
+        strict: the pre-2026-07 version of this test only required
+        ``oracle > no-op``, which the oracle satisfied purely on
+        tracking shaping and the touch bonus — zero completed returns.
+        It therefore certified an env in which the best available
+        strategy was the catch-and-farm exploit that run
+        20260712_190054 then learned. The claim that actually matters
+        is: a full-state controller can close the rally loop (paddle
+        hit -> gated wall contact) under the *training* configuration,
+        and doing so out-earns both doing nothing and touch-then-fail.
         """
+        from courtside_dynamics.recipes import RECIPES
         from courtside_dynamics.scripted_policies import (
             wall_ball_oracle_action,
         )
 
+        env_kwargs = dict(RECIPES["WallBall"].env_kwargs)
+        env_kwargs.pop("render_mode", None)
+
         def run(action_fn, seed):
-            env = WallBallEnv(min_force=1.0, episode_len=750)
+            env = WallBallEnv(**env_kwargs)
             try:
                 obs, _ = env.reset(seed=seed)
                 total = 0.0
-                for _ in range(750):
-                    obs, reward, terminated, truncated, _ = env.step(
+                info: dict = {}
+                for _ in range(env.episode_len):
+                    obs, reward, terminated, truncated, info = env.step(
                         action_fn(obs)
                     )
                     total += reward
                     if terminated or truncated:
                         break
-                return total
+                return total, int(info.get("bounce_count", 0))
             finally:
                 env.close()
 
-        noop_total = run(lambda o: np.zeros(5, dtype=np.float32), seed=0)
-        oracle_total = run(wall_ball_oracle_action, seed=0)
-        # With the OOB penalty + tracking-shaping clawback, a no-op
-        # policy that lets the ball escape can land slightly negative;
-        # the strict "no positive reward" claim is what matters here.
-        assert noop_total <= 0.0, (
-            f"No-op policy earned {noop_total}, expected <= 0"
-        )
-        assert oracle_total > noop_total, (
-            f"Oracle ({oracle_total}) did not beat no-op ({noop_total}) — "
-            "env is not solvable by paddle tracking"
-        )
+        noop = lambda o: np.zeros(5, dtype=np.float32)  # noqa: E731
+        for seed in (0, 1, 2):
+            noop_total, noop_bounces = run(noop, seed=seed)
+            oracle_total, oracle_bounces = run(
+                wall_ball_oracle_action, seed=seed
+            )
+            assert noop_bounces == 0, (
+                f"seed {seed}: no-op completed a rally?! premise broken"
+            )
+            assert noop_total <= 0.0, (
+                f"seed {seed}: no-op earned {noop_total}, expected <= 0"
+            )
+            assert oracle_bounces >= 1, (
+                f"seed {seed}: oracle completed {oracle_bounces} gated "
+                "returns; the env is not demonstrably solvable"
+            )
+            assert oracle_total > 0.0, (
+                f"seed {seed}: oracle completed a rally yet earned "
+                f"{oracle_total} — completed returns must pay"
+            )
+            assert oracle_total > noop_total
 
     def test_stalled_ball_terminates_episode(self):
         """A dead ball should end the episode well before episode_len.
@@ -686,7 +708,7 @@ class TestWallBallRewardGate:
             env.set_state(qpos, qvel)
             env._returning = True
             env._prev_paddle_to_ball = None
-            env._return_shaping_total = 0.0
+            env._pending_shaping = 0.0
 
             cumulative = 0.0
             episode_done = False
@@ -719,7 +741,7 @@ class TestWallBallRewardGate:
             env.reset(seed=0)
             env._returning = True
             env._prev_paddle_to_ball = None
-            env._return_shaping_total = 0.0
+            env._pending_shaping = 0.0
 
             # The paddle's broad face is normal to ±x (per the
             # reorientation on main); approach it from +x with a small
@@ -820,11 +842,11 @@ class TestWallBallRewardGate:
         )
         try:
             env.reset(seed=0)
-            # Pretend the previous return window paid out +0.5 of
-            # shaping but ended without a paddle return.
+            # Pretend the current cycle paid out +0.5 of shaping
+            # advance but produced no paddle return.
             env._paddle_hit_since_last_wall = False
             env._returning = True
-            env._return_shaping_total = 0.5
+            env._pending_shaping = 0.5
             env._prev_paddle_to_ball = None
             env._prev_wall_touch = 0.0
 
@@ -869,7 +891,7 @@ class TestWallBallRewardGate:
             env.reset(seed=0)
             env._paddle_hit_since_last_wall = True
             env._returning = False
-            env._return_shaping_total = 0.0
+            env._pending_shaping = 0.0
             env._prev_wall_touch = 0.0
 
             qpos = env.data.qpos.copy()
@@ -991,6 +1013,284 @@ class TestWallBallRewardGate:
                     break
             else:
                 raise AssertionError("episode never terminated")
+        finally:
+            env.close()
+
+
+class TestWallBallAdvanceRefund:
+    """Pin down the refundable-advance rules that killed the stall exploit.
+
+    Run 20260712_190054 converged to: catch the serve (banking ~1.25 of
+    serve-flight shaping plus the 0.25 touch bonus), deaden the ball,
+    and wait out the stall clock — ~1.5 reward per episode, risk-free,
+    zero completed rallies, and reward-based selection crowned it
+    best_model.zip. These tests assert the two properties that make
+    that impossible: a touch followed by anything but a completed
+    return nets <= 0, and a completed return strictly out-earns it.
+    """
+
+    @staticmethod
+    def _zero_action(env):
+        return np.zeros(env.action_space.shape, dtype=np.float32)
+
+    @staticmethod
+    def _ball_addrs(env):
+        return (
+            int(env.model.joint("ball_x").qposadr[0]),
+            int(env.model.joint("ball_x").dofadr[0]),
+        )
+
+    @classmethod
+    def _shoot_ball_at_paddle(cls, env):
+        """Teleport the ball just in front of the face, flying into it."""
+        qposadr, dofadr = cls._ball_addrs(env)
+        qpos = env.data.qpos.copy()
+        qvel = env.data.qvel.copy()
+        face = env.data.body("paddle_head").xpos.copy()
+        qpos[qposadr : qposadr + 3] = face + np.array([0.5, 0.0, 0.05])
+        qvel[dofadr : dofadr + 6] = 0.0
+        qvel[dofadr : dofadr + 3] = [-3.0, 0.0, 0.0]
+        env.set_state(qpos, qvel)
+
+    @classmethod
+    def _deaden_ball(cls, env):
+        """Teleport the ball to a dead drop mid-court, in bounds.
+
+        Placed 5 mm above the floor rather than in exact contact:
+        placement *at* the contact distance makes the soft-contact
+        solver eject the ball upward fast enough (~0.65 m/s) that its
+        re-landings register as genuine debounced floor bounces and
+        the episode dies by double bounce instead of the stall these
+        tests are about. A 5 mm drop lands at ~0.3 m/s, under the
+        ``floor_bounce_min_speed=0.5`` gate, and settles silently.
+        """
+        qposadr, dofadr = cls._ball_addrs(env)
+        qpos = env.data.qpos.copy()
+        qvel = env.data.qvel.copy()
+        qpos[qposadr : qposadr + 3] = [1.0, 0.0, 0.075]
+        qvel[dofadr : dofadr + 6] = 0.0
+        env.set_state(qpos, qvel)
+
+    @classmethod
+    def _run_until_paddle_hit(cls, env, max_steps=80):
+        """Shoot the ball at the paddle; return reward accrued to the hit."""
+        cls._shoot_ball_at_paddle(env)
+        total = 0.0
+        for _ in range(max_steps):
+            _, reward, terminated, truncated, info = env.step(
+                cls._zero_action(env)
+            )
+            total += reward
+            if info["paddle_hit_count"] >= 1:
+                return total
+            assert not (terminated or truncated), (
+                "Episode ended before the paddle hit; premise broken"
+            )
+        raise AssertionError("Ball never contacted the paddle")
+
+    def _touch_then_stall_total(self, env):
+        """Reward for the 20260712 exploit: touch once, kill the ball."""
+        env.reset(seed=0)
+        total = self._run_until_paddle_hit(env)
+        self._deaden_ball(env)
+        for _ in range(env.stall_steps + 50):
+            _, reward, terminated, truncated, info = env.step(
+                self._zero_action(env)
+            )
+            total += reward
+            if terminated or truncated:
+                assert info["term_stall"], (
+                    f"Expected a stall termination, got "
+                    f"{ {k: v for k, v in info.items() if k.startswith('term_')} }"
+                )
+                assert info["bounce_count"] == 0
+                return total
+        raise AssertionError("Stall cut never fired")
+
+    def test_touch_then_stall_nets_nonpositive(self):
+        """The exploit episode must not out-earn doing nothing.
+
+        Under the pre-fix reward this scenario banked the paddle bonus
+        plus all approach shaping (~+1.5 on a real serve) and ended
+        free of charge. Now the advances are refunded at the stall cut
+        and the stall itself is fined, so the total must come out at
+        (or below) -stall_penalty.
+        """
+        env = WallBallEnv(min_force=1.0)
+        try:
+            total = self._touch_then_stall_total(env)
+            assert total <= 0.0, (
+                f"Touch-then-stall netted {total:+.3f}; the exploit "
+                "is profitable again"
+            )
+            assert total <= -0.5 * env.stall_penalty, (
+                f"Touch-then-stall netted {total:+.3f}; expected the "
+                f"stall fine (~-{env.stall_penalty}) to dominate"
+            )
+        finally:
+            env.close()
+
+    def test_completed_return_outscores_touch_then_fail(self):
+        """Closing the rally loop must strictly beat every prefix of it.
+
+        Same setup as the exploit test, except the ball is sent into
+        the wall after the paddle hit (a gated wall contact), and the
+        episode then times out. The advances stay earned, the +1 pays,
+        and the timeout refunds only the (empty) next cycle.
+        """
+        stall_env = WallBallEnv(min_force=1.0)
+        try:
+            stall_total = self._touch_then_stall_total(stall_env)
+        finally:
+            stall_env.close()
+
+        env = WallBallEnv(min_force=1.0, episode_len=160)
+        try:
+            env.reset(seed=0)
+            total = self._run_until_paddle_hit(env)
+            # Send the ball into the wall: gate is open, so this wall
+            # contact completes the cycle.
+            qposadr, dofadr = self._ball_addrs(env)
+            qpos = env.data.qpos.copy()
+            qvel = env.data.qvel.copy()
+            qpos[qposadr : qposadr + 3] = [2.7, 0.0, 1.5]
+            qvel[dofadr : dofadr + 6] = 0.0
+            qvel[dofadr : dofadr + 3] = [3.0, 0.0, 0.0]
+            env.set_state(qpos, qvel)
+            saw_wall = False
+            for _ in range(40):
+                _, reward, terminated, truncated, info = env.step(
+                    self._zero_action(env)
+                )
+                total += reward
+                if info["bounce_count"] >= 1:
+                    saw_wall = True
+                    break
+                assert not (terminated or truncated)
+            assert saw_wall, "Ball never reached the wall; premise broken"
+            # Let the episode run out via timeout with a dead ball.
+            self._deaden_ball(env)
+            while True:
+                _, reward, terminated, truncated, info = env.step(
+                    self._zero_action(env)
+                )
+                total += reward
+                if terminated or truncated:
+                    break
+            assert info["term_timeout"], (
+                "Expected a timeout ending; premise broken"
+            )
+            assert info["bounce_count"] == 1
+            assert total >= 1.0, (
+                f"Completed return netted only {total:+.3f}; the +1 and "
+                "earned advances should survive the timeout refund"
+            )
+            assert total > stall_total + 1.0, (
+                f"Completed return ({total:+.3f}) does not clearly beat "
+                f"touch-then-stall ({stall_total:+.3f})"
+            )
+        finally:
+            env.close()
+
+    def test_stall_termination_pays_stall_penalty(self):
+        """A stall ending costs ``stall_penalty``, like OOB/double bounce."""
+        env = WallBallEnv(
+            min_force=1.0,
+            paddle_hit_bonus=0.0,
+            track_shaping_scale=0.0,
+            out_of_bounds_penalty=0.0,
+            double_bounce_penalty=0.0,
+            stall_penalty=2.0,
+        )
+        try:
+            env.reset(seed=0)
+            self._deaden_ball(env)
+            total = 0.0
+            for _ in range(env.stall_steps + 50):
+                _, reward, terminated, truncated, info = env.step(
+                    self._zero_action(env)
+                )
+                total += reward
+                if terminated or truncated:
+                    break
+            assert info["term_stall"]
+            assert abs(total - (-2.0)) < 1e-6, (
+                f"Expected exactly the -2.0 stall fine, got {total:+.4f}"
+            )
+        finally:
+            env.close()
+
+    def test_timeout_refunds_pending_advances(self):
+        """An unfinished cycle's advances are refunded at truncation."""
+        env = WallBallEnv(
+            min_force=1.0,
+            episode_len=100,
+            paddle_hit_bonus=0.5,
+            track_shaping_scale=0.0,
+            out_of_bounds_penalty=0.0,
+            double_bounce_penalty=0.0,
+            stall_penalty=0.0,
+        )
+        try:
+            env.reset(seed=0)
+            total = self._run_until_paddle_hit(env)
+            assert total >= 0.5 - 1e-9, "Paddle bonus was not paid upfront"
+            self._deaden_ball(env)
+            while True:
+                _, reward, terminated, truncated, info = env.step(
+                    self._zero_action(env)
+                )
+                total += reward
+                if terminated or truncated:
+                    break
+            assert info["term_timeout"]
+            assert abs(total) < 1e-6, (
+                f"Timeout should refund the pending bonus to net 0, "
+                f"got {total:+.4f}"
+            )
+        finally:
+            env.close()
+
+    def test_nonfinite_action_terminates_without_physics(self):
+        """A NaN action ends the episode cleanly instead of stepping."""
+        env = WallBallEnv(min_force=1.0)
+        try:
+            obs_before, _ = env.reset(seed=0)
+            qpos_before = env.data.qpos.copy()
+            obs, reward, terminated, truncated, info = env.step(
+                np.full(env.action_space.shape, np.nan)
+            )
+            assert terminated and not truncated
+            assert info["term_nonfinite"]
+            assert np.isfinite(obs).all()
+            np.testing.assert_allclose(obs, obs_before)
+            np.testing.assert_allclose(env.data.qpos, qpos_before)
+            assert reward <= 0.0
+        finally:
+            env.close()
+
+    def test_nonfinite_observation_is_never_emitted(self):
+        """If the sim goes nonfinite, the last finite obs is echoed.
+
+        One NaN observation reaching VecNormalize permanently corrupts
+        its running statistics, so the guard is load-bearing for every
+        normalized training run.
+        """
+        env = WallBallEnv(min_force=1.0)
+        try:
+            env.reset(seed=0)
+            obs_ok, *_ = env.step(self._zero_action(env))
+            assert np.isfinite(obs_ok).all()
+            env._get_obs = lambda *a, **k: np.full(  # type: ignore[method-assign]
+                env.observation_space.shape, np.nan
+            )
+            obs, reward, terminated, truncated, info = env.step(
+                self._zero_action(env)
+            )
+            assert terminated
+            assert info["term_nonfinite"]
+            assert np.isfinite(obs).all()
+            np.testing.assert_allclose(obs, obs_ok)
         finally:
             env.close()
 

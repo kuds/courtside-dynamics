@@ -534,3 +534,117 @@ def test_info_dict_eval_compact_schema_and_episode_distribution(tmp_path):
     assert "rally_count_ep_p50" in metric_names
     assert "term_ball_net_ep_mean" in metric_names
     assert not any("debug_contact_peak" in name for name in metric_names)
+
+
+class _FakeSavableModel(_FakeModel):
+    """_FakeModel plus SB3's ``save`` contract (appends ``.zip``)."""
+
+    def __init__(self, action_dim: int = 1) -> None:
+        super().__init__(action_dim)
+        self.save_calls: list[str] = []
+
+    def save(self, path) -> None:
+        path = str(path)
+        if not path.endswith(".zip"):
+            path += ".zip"
+        with open(path, "wb") as f:
+            f.write(b"fake-model")
+        self.save_calls.append(path)
+
+
+def test_info_dict_eval_task_metric_selection_and_early_stop(tmp_path):
+    """Selection compares metrics lexicographically; patience stops training.
+
+    Regression scope: run 20260712_190054's best_model.zip was chosen by
+    mean eval reward and completed zero rallies. Selection must follow
+    the task metric, with reward only breaking ties, and the early stop
+    must count evaluations without improvement of that same score.
+    """
+    import json
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    cb = InfoDictEvalCallback(
+        eval_env=object(),  # never touched by the selection logic
+        best_metric_keys=("bounce_count_ep_mean", "episode_reward_mean"),
+        best_model_save_path=str(tmp_path),
+        early_stop_patience=2,
+        early_stop_min_evals=0,
+    )
+    cb.model = _FakeSavableModel(action_dim=5)
+
+    def meta():
+        with open(tmp_path / "best_model_meta.json") as f:
+            return json.load(f)
+
+    # First eval: always a new best.
+    cb.num_timesteps = 100
+    assert cb._update_best_and_maybe_stop(
+        {"bounce_count_ep_mean": 1.0, "episode_reward_mean": 5.0}
+    )
+    assert (tmp_path / "best_model.zip").exists()
+    assert meta()["timestep"] == 100
+
+    # Tied primary metric, better reward tie-break: an improvement.
+    cb.num_timesteps = 200
+    assert cb._update_best_and_maybe_stop(
+        {"bounce_count_ep_mean": 1.0, "episode_reward_mean": 6.0}
+    )
+    assert meta()["timestep"] == 200
+    assert meta()["selection_values"]["episode_reward_mean"] == 6.0
+
+    # Higher reward must NOT outrank a lower task metric.
+    cb.num_timesteps = 300
+    assert cb._update_best_and_maybe_stop(
+        {"bounce_count_ep_mean": 0.5, "episode_reward_mean": 99.0}
+    )
+    assert meta()["timestep"] == 200, "reward overrode the task metric"
+
+    # Second consecutive non-improvement hits patience=2: stop.
+    cb.num_timesteps = 400
+    assert not cb._update_best_and_maybe_stop(
+        {"bounce_count_ep_mean": 0.5, "episode_reward_mean": 99.0}
+    )
+    assert meta()["timestep"] == 200
+
+
+def test_info_dict_eval_selection_writes_artifacts_end_to_end(tmp_path):
+    """A live eval pass under ``best_metric_keys`` writes model + meta and
+    logs ``episode_reward_mean`` alongside the info aggregates."""
+    import json
+
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.envs import WallBallEnv
+
+    eval_env = make_vec_env(lambda: WallBallEnv(episode_len=30), n_envs=1)
+    cb = InfoDictEvalCallback(
+        eval_env=eval_env,
+        n_eval_episodes=2,
+        eval_freq=1,
+        success_key="bounce_count",
+        best_metric_keys=(
+            "bounce_count_ep_mean",
+            "success_rate",
+            "episode_reward_mean",
+        ),
+        best_model_save_path=str(tmp_path),
+    )
+    cb.model = _FakeSavableModel(action_dim=5)
+    cb.n_calls = cb.eval_freq
+    cb.num_timesteps = 12345
+    cb._on_step()
+    eval_env.close()
+
+    assert "eval_info/episode_reward_mean" in cb.model.logger.records
+    assert (tmp_path / "best_model.zip").exists()
+    with open(tmp_path / "best_model_meta.json") as f:
+        meta = json.load(f)
+    assert meta["timestep"] == 12345
+    assert meta["selection_keys"] == [
+        "bounce_count_ep_mean",
+        "success_rate",
+        "episode_reward_mean",
+    ]
+    assert set(meta["selection_values"]) == set(meta["selection_keys"])

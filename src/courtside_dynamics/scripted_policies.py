@@ -19,9 +19,13 @@ from courtside_dynamics.envs.humanoid_tennis import (
 )
 from courtside_dynamics.envs.tennis_rules import CourtSide
 
+#: Gravity used by the oracle's ballistic lead prediction. Matches
+#: MuJoCo's default ``option.gravity`` z component.
+_WALL_BALL_GRAVITY = 9.81
+
 
 def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
-    """PD-controlled paddle tracker for :class:`WallBallEnv`.
+    """PD-controlled intercept-and-swing controller for :class:`WallBallEnv`.
 
     The 5 actions correspond to ``paddle_slide_x``, ``paddle_slide_y``,
     ``paddle_slide_z``, ``paddle_yaw``, and ``paddle_pitch`` motors with
@@ -31,38 +35,72 @@ def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
     face's world position is ``(-1.7 + slide_x_qpos, slide_y_qpos,
     1.2 + slide_z_qpos)``. Inverting that gives the qpos targets below.
 
-    The paddle face is positioned slightly past the ball on the wall
-    side so that on the inbound trip the ball flies into the face,
-    instead of the paddle chasing the ball from behind.
+    Two behaviours, keyed on the ball's x velocity:
+
+    - **Inbound** (ball flying toward the paddle): park the face where
+      the ball is *going to be*, not where it is — a ballistic lead in
+      y/z over the time the ball needs to reach the face plane. Pure
+      position tracking (the pre-2026-07 oracle) lags an angled serve
+      by more than the face half-width and whiffs; with the recipe's
+      ``serve_vy_max=2.6`` it completed zero gated returns over ten
+      seeds. Once aligned and close, swing: slam the x slide toward
+      the wall so the contact sends the ball back with pace instead of
+      relying on restitution off a static face.
+    - **Outbound**: recover to the home column and track the ball's
+      y/z, waiting for the wall rebound.
+
+    This is a feasibility oracle: it completes one or two gated wall
+    returns on every tested seed, proving the rally loop is physically
+    achievable under the gated reward — not a competitive baseline.
     """
-    ball_x = obs[0]
-    ball_y = obs[1]
-    ball_z = obs[2]
+    ball_x, ball_y, ball_z = obs[0], obs[1], obs[2]
+    ball_vx, ball_vy, ball_vz = obs[3], obs[4], obs[5]
     paddle_x_qpos, paddle_x_qvel = obs[6], obs[7]
     paddle_y_qpos, paddle_y_qvel = obs[8], obs[9]
     paddle_z_qpos, paddle_z_qvel = obs[10], obs[11]
     paddle_yaw_qpos, paddle_yaw_qvel = obs[12], obs[13]
     paddle_pitch_qpos, paddle_pitch_qvel = obs[14], obs[15]
-
-    # Place the face just past the ball (toward the wall, +x). The
-    # ball arrives moving in -x, so face_x slightly larger than ball_x
-    # is wrong — it's slightly *less* than ball_x that puts the face
-    # in the ball's path. Use ball_x - 0.05 in world coords.
-    desired_face_x = ball_x - 0.05
-    target_x = float(np.clip(desired_face_x + 1.7, -3.0, 2.0))
-    target_y = float(np.clip(ball_y, -3.0, 3.0))
-    target_z = float(np.clip(ball_z - 1.2, -0.9, 2.0))
-    target_yaw = 0.0
-    target_pitch = 0.0
+    rel_dx, rel_dy, rel_dz = obs[18], obs[19], obs[20]
 
     kp, kd = 8.0, 1.0
+    inbound = ball_vx < -0.1
+    action_x: float | None = None
+
+    if inbound:
+        # Ballistic lead: where will the ball be when it crosses the
+        # face plane (0.05 m ahead of the face)?
+        t_hit = max(0.0, (rel_dx - 0.05) / max(0.1, -ball_vx))
+        pred_y = ball_y + ball_vy * t_hit
+        pred_z = (
+            ball_z + ball_vz * t_hit - 0.5 * _WALL_BALL_GRAVITY * t_hit**2
+        )
+        if pred_z < 0.1:
+            # The ball will bounce before arrival; the parabola above
+            # is wrong past the bounce, so fall back to tracking its
+            # current height (never below a reachable floor pickup).
+            pred_z = max(ball_z, 0.15)
+        target_x = float(np.clip(ball_x - 0.05 + 1.7, -3.0, 2.0))
+        target_y = float(np.clip(pred_y, -3.0, 3.0))
+        target_z = float(np.clip(pred_z - 1.2, -0.9, 2.0))
+        aligned = abs(rel_dy) < 0.22 and abs(rel_dz) < 0.28
+        if aligned and 0.0 < rel_dx <= 0.4:
+            # Swing through the contact.
+            action_x = 1.0
+    else:
+        target_x = 0.0
+        target_y = float(np.clip(ball_y, -3.0, 3.0))
+        target_z = float(np.clip(ball_z - 1.2, -0.9, 2.0))
+
+    if action_x is None:
+        action_x = kp * (target_x - paddle_x_qpos) - kd * paddle_x_qvel
+
     raw = np.array(
         [
-            kp * (target_x - paddle_x_qpos) - kd * paddle_x_qvel,
+            action_x,
             kp * (target_y - paddle_y_qpos) - kd * paddle_y_qvel,
             kp * (target_z - paddle_z_qpos) - kd * paddle_z_qvel,
-            kp * (target_yaw - paddle_yaw_qpos) - kd * paddle_yaw_qvel,
-            kp * (target_pitch - paddle_pitch_qpos) - kd * paddle_pitch_qvel,
+            kp * (0.0 - paddle_yaw_qpos) - kd * paddle_yaw_qvel,
+            kp * (0.0 - paddle_pitch_qpos) - kd * paddle_pitch_qvel,
         ],
         dtype=np.float32,
     )

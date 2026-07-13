@@ -18,12 +18,19 @@ classes of aggregate to TensorBoard:
 * ``<prefix>/phase_frac_<label>`` — fraction of eval steps spent in each
   phase, for envs that expose a categorical ``phase_key``.
 
-The callback is stateless across invocations; every ``_on_step`` trigger
-produces a fresh sample.
+The metric aggregation is stateless across invocations; every
+``_on_step`` trigger produces a fresh sample. When ``best_metric_keys``
+is set the callback additionally owns best-model selection and early
+stopping (see the parameter docs below): run ``20260712_190054`` proved
+that selecting checkpoints by mean eval reward crowns whatever policy
+maximizes the reward — including a degenerate one — while the task
+metric collapses to zero, so selection must key on the task metric
+itself.
 """
 from __future__ import annotations
 
 import csv
+import json
 import os
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -84,6 +91,25 @@ class InfoDictEvalCallback(BaseCallback):
         metric in long format (``timestep,metric,value``) so the data
         survives outside TensorBoard. The header is written on the
         first call.
+    best_metric_keys:
+        Ordered metric names (as they appear in this callback's metric
+        dict, e.g. ``("bounce_count_ep_mean", "success_rate",
+        "episode_reward_mean")``) compared lexicographically to decide
+        whether an evaluation is a new best. Empty (the default)
+        disables selection entirely. A metric absent from an
+        evaluation compares as ``-inf``.
+    best_model_save_path:
+        Directory that receives ``best_model.zip``, the paired
+        ``best_vec_normalize.pkl`` (when the model trains under
+        ``VecNormalize``), and ``best_model_meta.json`` (the selection
+        step, keys, and values — so "which checkpoint is this and why"
+        survives on disk) every time ``best_metric_keys`` improves.
+    early_stop_patience:
+        When set to N, stop training after N consecutive evaluations
+        without a new best under ``best_metric_keys`` — the task-metric
+        counterpart of SB3's ``StopTrainingOnNoModelImprovement``.
+    early_stop_min_evals:
+        Number of evaluations to complete before the stop may fire.
     """
 
     def __init__(
@@ -101,6 +127,10 @@ class InfoDictEvalCallback(BaseCallback):
         terminal_info_keys: Sequence[str] = (),
         episode_distribution_keys: Sequence[str] = (),
         csv_path: str | None = None,
+        best_metric_keys: Sequence[str] = (),
+        best_model_save_path: str | None = None,
+        early_stop_patience: int | None = None,
+        early_stop_min_evals: int = 0,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose)
@@ -121,6 +151,13 @@ class InfoDictEvalCallback(BaseCallback):
             dict.fromkeys(episode_distribution_keys)
         )
         self.csv_path = csv_path
+        self.best_metric_keys = tuple(dict.fromkeys(best_metric_keys))
+        self.best_model_save_path = best_model_save_path
+        self.early_stop_patience = early_stop_patience
+        self.early_stop_min_evals = int(early_stop_min_evals)
+        self._best_score: tuple[float, ...] | None = None
+        self._evals_since_best = 0
+        self._eval_count = 0
 
     def _on_step(self) -> bool:
         if self.eval_freq <= 0 or self.n_calls % self.eval_freq != 0:
@@ -150,6 +187,12 @@ class InfoDictEvalCallback(BaseCallback):
         # at episode granularity (e.g. mean terminal rally count, success
         # rate) rather than the step-weighted means above.
         episode_finals: list[dict[str, float]] = []
+        # Per-episode reward totals (the eval env runs with
+        # norm_reward=False, so these are the env's true returns). Kept
+        # so reward can serve as the final tie-break in
+        # ``best_metric_keys`` without a second rollout.
+        episode_rewards: list[float] = []
+        current_ep_reward = 0.0
         total_steps = 0
         total_episodes = 0
 
@@ -161,9 +204,10 @@ class InfoDictEvalCallback(BaseCallback):
             action, _ = self.model.predict(
                 obs, deterministic=self.deterministic
             )
-            obs, _rewards, dones, infos = self.eval_env.step(action)
+            obs, rewards, dones, infos = self.eval_env.step(action)
             assert not isinstance(obs, tuple)
             total_steps += 1
+            current_ep_reward += float(rewards[0])
             info = infos[0]
             last_info = info
 
@@ -221,6 +265,8 @@ class InfoDictEvalCallback(BaseCallback):
                 }
                 finals.update({key: ep_terminal[key] for key in step_keys})
                 episode_finals.append(ep_terminal)
+                episode_rewards.append(current_ep_reward)
+                current_ep_reward = 0.0
                 total_episodes += 1
 
         # Fall back to the last seen step if a rollout hit video_length
@@ -238,6 +284,10 @@ class InfoDictEvalCallback(BaseCallback):
         metrics: dict[str, float] = {
             "episode_length": total_steps / max(1, total_episodes),
         }
+        if episode_rewards:
+            metrics["episode_reward_mean"] = sum(episode_rewards) / len(
+                episode_rewards
+            )
         for key, total in sums.items():
             if counts[key] > 0:
                 metrics[f"{key}_mean"] = total / counts[key]
@@ -315,7 +365,84 @@ class InfoDictEvalCallback(BaseCallback):
                 f"finals={finals}"
             )
 
+        return self._update_best_and_maybe_stop(metrics)
+
+    def _update_best_and_maybe_stop(
+        self, metrics: Mapping[str, float]
+    ) -> bool:
+        """Task-metric best-model selection + patience-based early stop.
+
+        Scores are compared lexicographically over ``best_metric_keys``
+        with strict improvement, mirroring ``EvalCallback``'s strict
+        ``>`` on mean reward. Returns ``False`` (stopping training)
+        once ``early_stop_patience`` consecutive evaluations pass
+        without a new best, after ``early_stop_min_evals`` warm-up
+        evaluations.
+        """
+        if not self.best_metric_keys:
+            return True
+        self._eval_count += 1
+        score = tuple(
+            float(metrics.get(key, float("-inf")))
+            for key in self.best_metric_keys
+        )
+        if self._best_score is None or score > self._best_score:
+            self._best_score = score
+            self._evals_since_best = 0
+            self._save_best(metrics)
+        else:
+            self._evals_since_best += 1
+
+        if (
+            self.early_stop_patience is not None
+            and self.early_stop_patience > 0
+            and self._eval_count > self.early_stop_min_evals
+            and self._evals_since_best >= self.early_stop_patience
+        ):
+            # A run-ending decision is always worth one line, verbose
+            # or not (mirrors SB3's StopTrainingOnNoModelImprovement).
+            print(
+                f"Stopping training: no improvement in "
+                f"{'/'.join(self.best_metric_keys)} for the last "
+                f"{self._evals_since_best} evaluations."
+            )
+            return False
         return True
+
+    def _save_best(self, metrics: Mapping[str, float]) -> None:
+        """Write best_model.zip + paired normalizer stats + meta json."""
+        if self.best_model_save_path is None:
+            return
+        os.makedirs(self.best_model_save_path, exist_ok=True)
+        self.model.save(
+            os.path.join(self.best_model_save_path, "best_model")
+        )
+        get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
+        vec_norm = get_vec_norm() if get_vec_norm is not None else None
+        if vec_norm is not None:
+            # Paired stats snapshot: replaying best_model against
+            # end-of-training stats is a silent obs-distribution
+            # mismatch (see _SaveVecNormalizeOnNewBest in train.py).
+            vec_norm.save(
+                os.path.join(
+                    self.best_model_save_path, "best_vec_normalize.pkl"
+                )
+            )
+        meta = {
+            "timestep": int(self.num_timesteps),
+            "selection_keys": list(self.best_metric_keys),
+            "selection_values": {
+                key: float(metrics[key])
+                for key in self.best_metric_keys
+                if key in metrics
+            },
+        }
+        meta_path = os.path.join(
+            self.best_model_save_path, "best_model_meta.json"
+        )
+        with open(meta_path, "w") as f:
+            json.dump(meta, f, indent=2)
+            f.write("\n")
 
     def _append_csv(self, metrics: Mapping[str, float], timestep: int) -> None:
         """Append one (timestep, metric, value) row per metric in long format."""

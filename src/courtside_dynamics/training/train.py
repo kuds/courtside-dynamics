@@ -254,14 +254,17 @@ class TrainConfig:
         Episodes per ``EvalCallback`` evaluation.
     early_stop_patience:
         When set to N, stop training after N consecutive evaluations
-        without a new best mean reward (SB3's
-        ``StopTrainingOnNoModelImprovement`` wired into
-        ``EvalCallback``). The same count is used as the warm-up
-        (``min_evals``), so a run gets at least 2N evaluations before
-        it can stop. ``None`` (default) trains for the full budget.
-        Motivation: the first real WallBall run kept training for 10+
-        GPU-hours after its best checkpoint while the policy collapsed;
-        the best model was long saved and everything after was waste.
+        without a new best. "Best" follows the same metric as model
+        selection: the headline task metric when ``headline_key`` is
+        set (see below), otherwise mean eval reward via SB3's
+        ``StopTrainingOnNoModelImprovement``. The same count is used
+        as the warm-up (``min_evals``), so a run gets at least 2N
+        evaluations before it can stop. ``None`` (default) trains for
+        the full budget. Motivation: the first real WallBall run kept
+        training for 10+ GPU-hours after its best checkpoint while the
+        policy collapsed; run 20260712_190054 then spent 525k steps
+        confirming a reward plateau of a degenerate policy -- both the
+        selection and the stop must watch the metric that matters.
     video_length:
         Max steps per recorded rollout from ``VideoRecordCallback``.
     record_video:
@@ -323,8 +326,23 @@ class TrainConfig:
         dominated by tracking shaping, and its success_rate saturates
         as soon as every episode completes one exchange, so runs are
         compared on ``bounce_count_ep_mean`` (rally exchanges per
-        episode) instead. Reporting only: best-model selection and
-        early stopping still follow eval reward.
+        episode) instead.
+
+        When set (and ``info_dict_eval`` is on), the headline metric
+        also *owns model selection and early stopping*:
+        ``best_model.zip`` / ``best_vec_normalize.pkl`` are saved by
+        ``InfoDictEvalCallback`` on a new best
+        ``(<headline_key>_ep_mean, success_rate,
+        episode_reward_mean)`` lexicographic score (reward is only the
+        final tie-break), a ``best_model_meta.json`` records which
+        step won and why, and ``early_stop_patience`` counts
+        evaluations without improvement of that score. Run
+        20260712_190054 is the cautionary tale: reward-based selection
+        crowned a catch-and-stall policy with zero completed rallies
+        as ``best_model.zip`` while ``bounce_count_ep_mean`` sat at 0.
+        The info-dict evaluator then runs the full
+        ``n_eval_episodes`` (not the /4 reporting sample) so
+        selection isn't keyed to a noisy 7-episode estimate.
     verbose:
         SB3 ``verbose`` level for the algorithm; when non-zero, the
         per-rollout training table is also streamed to stdout (useful on
@@ -746,14 +764,29 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         def _calls(env_steps: int) -> int:
             return _env_steps_to_calls(env_steps, cfg.n_envs)
 
+        # When a headline task metric is declared (and the info-dict
+        # evaluator is on), InfoDictEvalCallback owns best-model
+        # selection and early stopping; EvalCallback is demoted to
+        # reward reporting (evaluations.npz + TensorBoard). Otherwise
+        # the historical reward-based selection stands. Rationale: run
+        # 20260712_190054's reward-selected "best" model completed zero
+        # rallies -- reward and the task metric can diverge, and the
+        # artifacts must follow the task metric when the recipe names
+        # one.
+        headline_selection = bool(cfg.info_dict_eval and cfg.headline_key)
+
         on_new_best: BaseCallback | None = None
-        if use_vec_normalize:
+        if use_vec_normalize and not headline_selection:
             on_new_best = _SaveVecNormalizeOnNewBest(
                 os.path.join(cfg.log_dir, "best_vec_normalize.pkl")
             )
 
         after_eval: BaseCallback | None = None
-        if cfg.early_stop_patience is not None and cfg.early_stop_patience > 0:
+        if (
+            not headline_selection
+            and cfg.early_stop_patience is not None
+            and cfg.early_stop_patience > 0
+        ):
             # min_evals = patience gives the run a warm-up of the same
             # length as the patience window, so at least 2N evaluations
             # happen before the stop can fire. verbose=1 so the stop
@@ -766,7 +799,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
 
         eval_callback = EvalCallback(
             eval_env,
-            best_model_save_path=cfg.log_dir,
+            best_model_save_path=(
+                None if headline_selection else cfg.log_dir
+            ),
             log_path=cfg.log_dir,
             render=False,
             deterministic=True,
@@ -816,10 +851,41 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     training=False,
                     normalize_obs_excluded_indices=(cfg.normalize_obs_excluded_indices),
                 )
+            if headline_selection:
+                # Selection duty: full episode count (a //4 sample
+                # quantizes bounce_count_ep_mean into sevenths at the
+                # default 30 episodes -- too noisy to pick checkpoints
+                # by), plus the lexicographic best score with reward
+                # as the last tie-break.
+                info_eval_episodes = cfg.n_eval_episodes
+                best_metric_keys = (
+                    f"{cfg.headline_key}_ep_mean",
+                    *(("success_rate",) if cfg.success_key else ()),
+                    "episode_reward_mean",
+                )
+                selection_kwargs: dict[str, Any] = {
+                    "best_metric_keys": best_metric_keys,
+                    "best_model_save_path": cfg.log_dir,
+                }
+                if (
+                    cfg.early_stop_patience is not None
+                    and cfg.early_stop_patience > 0
+                ):
+                    selection_kwargs["early_stop_patience"] = (
+                        cfg.early_stop_patience
+                    )
+                    selection_kwargs["early_stop_min_evals"] = (
+                        cfg.early_stop_patience
+                    )
+            else:
+                # Reporting only: a quarter of the eval budget keeps
+                # the extra rollout pass cheap.
+                info_eval_episodes = max(1, cfg.n_eval_episodes // 4)
+                selection_kwargs = {}
             callbacks.append(
                 InfoDictEvalCallback(
                     eval_env=info_eval_env,
-                    n_eval_episodes=max(1, cfg.n_eval_episodes // 4),
+                    n_eval_episodes=info_eval_episodes,
                     eval_freq=_calls(cfg.eval_freq),
                     phase_key=cfg.phase_key,
                     phase_labels=cfg.phase_labels,
@@ -829,6 +895,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     terminal_info_keys=cfg.info_eval_terminal_keys,
                     episode_distribution_keys=cfg.info_eval_distribution_keys,
                     csv_path=os.path.join(cfg.log_dir, "eval_info.csv"),
+                    **selection_kwargs,
                 )
             )
         callbacks.extend(cfg.extra_callbacks)

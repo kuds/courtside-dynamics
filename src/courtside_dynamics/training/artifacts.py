@@ -410,6 +410,23 @@ def _read_eval_info_series(
     return points
 
 
+def _read_best_model_meta(log_dir: str) -> dict[str, Any] | None:
+    """Load ``best_model_meta.json`` (task-metric selection provenance).
+
+    Written by ``InfoDictEvalCallback`` when a headline metric owns
+    best-model selection; absent on reward-selected runs.
+    """
+    path = os.path.join(log_dir, "best_model_meta.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 _PROJECT_NAME = "courtside-dynamics"
 
 #: ``(label, path relative to log_dir)`` for every artifact a training
@@ -426,6 +443,7 @@ EXPECTED_ARTIFACTS: tuple[tuple[str, str], ...] = (
     ("eval_info_csv", "eval_info.csv"),
     ("best_model", "best_model.zip"),
     ("best_vec_normalize", "best_vec_normalize.pkl"),
+    ("best_model_meta", "best_model_meta.json"),
     ("checkpoints_dir", "checkpoints"),
     ("videos_dir", "videos"),
     ("final_model", "final_model.zip"),
@@ -540,17 +558,21 @@ def write_run_summary(
     best_step: int | None = None
     best_mean: float | None = None
     best_std: float | None = None
+    eval_timesteps: np.ndarray | None = None
+    eval_means: np.ndarray | None = None
+    eval_stds: np.ndarray | None = None
     if os.path.exists(eval_npz):
         data = np.load(eval_npz)
         timesteps = data["timesteps"]
         results = data["results"]
         if results.size:
-            mean_per_eval = results.mean(axis=1)
-            std_per_eval = results.std(axis=1)
-            best_idx = int(mean_per_eval.argmax())
+            eval_timesteps = timesteps
+            eval_means = results.mean(axis=1)
+            eval_stds = results.std(axis=1)
+            best_idx = int(eval_means.argmax())
             best_step = int(timesteps[best_idx])
-            best_mean = float(mean_per_eval[best_idx])
-            best_std = float(std_per_eval[best_idx])
+            best_mean = float(eval_means[best_idx])
+            best_std = float(eval_stds[best_idx])
             lines.append(
                 _kv(
                     "Best eval",
@@ -569,6 +591,26 @@ def write_run_summary(
                 else ""
             )
             lines.append(_kv("Final vs best", f"{delta:+.3f}{note}"))
+
+    # Task-metric selection provenance: when best_model.zip was chosen
+    # by the headline metric rather than reward, say so -- the reward
+    # lines above describe a *different* checkpoint in that case.
+    best_meta = _read_best_model_meta(log_dir)
+    selected_step: int | None = None
+    if best_meta is not None:
+        try:
+            selected_step = int(best_meta["timestep"])
+        except (KeyError, TypeError, ValueError):
+            selected_step = None
+    if selected_step is not None:
+        keys = best_meta.get("selection_keys") or []
+        values = best_meta.get("selection_values") or {}
+        primary = keys[0] if keys else None
+        desc = f"step {selected_step:,}"
+        if primary is not None and primary in values:
+            desc += f" ({primary} {float(values[primary]):.2f})"
+        desc += "  [task-metric selection]"
+        lines.append(_kv("Best model", desc))
 
     # Headline task metric. Eval reward can be a poor progress measure
     # (WallBall's is dominated by tracking shaping, and success_rate
@@ -639,12 +681,29 @@ def write_run_summary(
     for key, value in hp_items:
         lines.append(f"  {key.ljust(key_width)}{value}")
 
-    if best_step is not None and best_mean is not None and best_std is not None:
+    # The section describes the checkpoint that best_model.zip actually
+    # holds: the task-metric-selected step when meta exists, else the
+    # reward-best step.
+    section_step = selected_step if selected_step is not None else best_step
+    if section_step is not None:
         lines.extend(
-            _section(f"Best Checkpoint Evaluation (step {best_step:,})")
+            _section(f"Best Checkpoint Evaluation (step {section_step:,})")
         )
-        lines.append(f"  {_kv('Reward', f'{best_mean:.3f} +/- {best_std:.3f}')}")
-        eval_info = _read_eval_info_at_step(log_dir, best_step)
+        section_mean: float | None = None
+        section_std: float | None = None
+        if section_step == best_step:
+            section_mean, section_std = best_mean, best_std
+        elif eval_timesteps is not None:
+            matches = np.flatnonzero(eval_timesteps == section_step)
+            if matches.size:
+                assert eval_means is not None and eval_stds is not None
+                section_mean = float(eval_means[matches[0]])
+                section_std = float(eval_stds[matches[0]])
+        if section_mean is not None and section_std is not None:
+            lines.append(
+                f"  {_kv('Reward', f'{section_mean:.3f} +/- {section_std:.3f}')}"
+            )
+        eval_info = _read_eval_info_at_step(log_dir, section_step)
         if eval_info:
             ep_len = eval_info.get("episode_length")
             if ep_len is not None:

@@ -592,3 +592,71 @@ def test_run_summary_skips_headline_without_data(tmp_path):
     )
     text = (tmp_path / "stage_summary.txt").read_text()
     assert "Headline" not in text
+
+
+def test_run_summary_reports_task_metric_selected_best_model(tmp_path):
+    """With ``best_model_meta.json`` present (task-metric selection), the
+    summary names the selected step and keys the best-checkpoint section
+    to it -- not to the reward-argmax step, which can be a different
+    (and, per run 20260712_190054, degenerate) checkpoint."""
+    import json
+
+    import numpy as np
+
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    # Reward series peaks at 75k...
+    np.savez(
+        tmp_path / "evaluations.npz",
+        timesteps=np.array([25_000, 50_000, 75_000]),
+        results=np.array([[0.5, 0.5], [1.0, 1.0], [2.0, 2.0]]),
+        ep_lengths=np.array([[30, 30], [30, 30], [30, 30]]),
+    )
+    # ...but the task metric selected 50k.
+    (tmp_path / "best_model_meta.json").write_text(
+        json.dumps(
+            {
+                "timestep": 50_000,
+                "selection_keys": [
+                    "bounce_count_ep_mean",
+                    "episode_reward_mean",
+                ],
+                "selection_values": {
+                    "bounce_count_ep_mean": 3.2,
+                    "episode_reward_mean": 1.0,
+                },
+            }
+        )
+    )
+    (tmp_path / "eval_info.csv").write_text(
+        "timestep,metric,value\n"
+        "50000,bounce_count_ep_mean,3.2\n"
+        "50000,bounce_count_final,3.0\n"
+        "75000,bounce_count_ep_mean,0.0\n"
+    )
+
+    def env_fn():
+        raise RuntimeError("no env needed; probe degrades gracefully")
+
+    cfg = TrainConfig(
+        env_fn=env_fn,
+        log_dir=str(tmp_path),
+        headline_key="bounce_count",
+    )
+    write_run_summary(
+        cfg,
+        str(tmp_path),
+        final_mean_reward=1.0,
+        final_std_reward=0.5,
+        duration_seconds=10.0,
+    )
+    text = (tmp_path / "stage_summary.txt").read_text()
+    assert "Best model" in text
+    assert "step 50,000 (bounce_count_ep_mean 3.20)" in text
+    assert "[task-metric selection]" in text
+    # The best-checkpoint section describes the *selected* step, with
+    # the reward looked up at that step (1.000), not the 75k argmax.
+    assert "Best Checkpoint Evaluation (step 50,000)" in text
+    assert "Reward:         1.000 +/- 0.000" in text
+    # The reward-series best line is still reported for context.
+    assert "2.000 +/- 0.000 (at 75,000 steps)" in text
