@@ -36,12 +36,7 @@ ENV_CLASSES = [
 ]
 
 # Construction kwargs mirroring what each notebook uses at training time.
-# In particular ``min_force`` makes the touch-sensor rising-edge check
-# actually discriminate between "in contact" and "not in contact" --
-# with ``min_force=0.0`` (the XML default) the check fires every step,
-# which masks reward bugs. See the
-# ``test_random_rollout_produces_some_reward`` docstring for the
-# relevance to Wall Ball.
+# Contact-force thresholds are kept aligned with the corresponding recipes.
 ENV_CLASSES_WITH_KWARGS = [
     (BallBalanceEnv, {}),
     (BallBounceEnv, {"min_force": 100.0}),
@@ -104,8 +99,8 @@ def test_random_rollout_produces_some_reward(env_cls, kwargs):
     """Random actions should hit at least one nonzero reward over 2000 steps.
 
     For Ball Balance the reward is +1/step so this is trivial. For Ball
-    Bounce gravity pulls the ball onto the paddle and an early contact
-    usually lands. Wall Ball is intentionally excluded: under the
+    Bounce random powered paddle motion produces deliberate rebound events.
+    Wall Ball is intentionally excluded: under the
     post-fix reward gate (no reward until the paddle has touched the
     ball) random actions can't earn anything within 2000 steps. See
     ``TestWallBallRewardGate`` for the targeted oracle-vs-noop check.
@@ -125,58 +120,305 @@ def test_random_rollout_produces_some_reward(env_cls, kwargs):
         env.close()
 
 
-def test_ball_bounce_info_exposes_bounce_count():
-    """``info["bounce_count"]`` tracks the env counter step-for-step.
+class TestBallBounceEvents:
+    """Pin down deliberate, substep-resolved BallBounce events."""
 
-    The counter is BallBounce's true task metric; exposing it in ``info``
-    is what lets ``InfoDictEvalCallback`` aggregate it and the recipe's
-    ``success_key="bounce_count"`` compute an eval success rate. The ball
-    spawns above the paddle, so a held-still paddle receives at least one
-    contact within a few hundred steps.
-    """
-    env = BallBounceEnv()
-    try:
-        env.reset(seed=0)
-        saw_bounce = False
-        for _ in range(500):
-            _, _, terminated, truncated, info = env.step(
-                np.zeros(env.action_space.shape, dtype=np.float32)
-            )
-            assert info["bounce_count"] == env.bounce_count
-            if info["bounce_count"] >= 1:
-                saw_bounce = True
-                break
-            if terminated or truncated:
-                break
-        assert saw_bounce, "Ball never contacted the paddle under no-op"
-    finally:
-        env.close()
+    @staticmethod
+    def _zero_action(env):
+        return np.zeros(env.action_space.shape, dtype=np.float32)
 
+    @staticmethod
+    def _set_ball_state(env, *, position, velocity):
+        qpos = env.init_qpos.copy()
+        qvel = env.init_qvel.copy()
+        joint = env.model.joint("ball_freejoint")
+        qposadr = int(joint.qposadr[0])
+        dofadr = int(joint.dofadr[0])
+        qpos[qposadr : qposadr + 3] = position
+        qpos[qposadr + 3 : qposadr + 7] = [1.0, 0.0, 0.0, 0.0]
+        qvel[:] = 0.0
+        qvel[dofadr : dofadr + 3] = velocity
+        env.set_state(qpos, qvel)
 
-def test_ball_bounce_no_reward_without_contact():
-    """No touch, no reward -- even at the default ``min_force=0``.
+    def test_controlled_upward_strike_earns_one_bounce(self):
+        """A powered top-face rebound is detected once and exposed in info."""
+        env = BallBounceEnv(min_force=100.0, release_substeps=5)
+        try:
+            env.reset(seed=0)
+            env.set_state(env.init_qpos.copy(), env.init_qvel.copy())
+            action = np.array([0, 0, 0, 1, 0, 0], dtype=np.float32)
 
-    Regression test: the old rising-edge check (``current >= min_force
-    and prev <= 0``) was satisfied by two consecutive zero-touch steps,
-    so a default-constructed env (e.g. via ``gymnasium.make``) paid +1
-    on every airborne step. The ball spawns ~0.3 above the paddle, so
-    the first few steps are guaranteed contact-free.
-    """
-    env = BallBounceEnv()
-    try:
-        env.reset(seed=0)
-        for _ in range(5):
-            _, reward, _, _, info = env.step(
-                np.zeros(env.action_space.shape, dtype=np.float32)
+            info = {}
+            reward = 0.0
+            saw_contact = False
+            for _ in range(60):
+                _, reward, terminated, truncated, info = env.step(action)
+                if info["contact_started"]:
+                    saw_contact = True
+                    assert reward == 0.0
+                    assert info["contact_latched"]
+                if reward > 0.0 or terminated or truncated:
+                    break
+
+            assert saw_contact
+            assert reward == 1.0
+            assert info["valid_bounce"] == 1
+            assert info["bounce_count"] == env.bounce_count == 1
+            assert info["contact_peak_force"] > 100.0
+            assert info["impact_relative_speed"] <= -env.min_impact_speed
+            assert (
+                info["paddle_normal_speed_at_impact"]
+                >= env.min_paddle_upward_speed
             )
-            assert info["touch_sensor"] == 0.0, (
-                "Test premise broken: ball already in contact"
+            assert info["rebound_relative_speed"] >= env.min_rebound_speed
+            assert not info["contact_latched"]
+
+            # The same physical contact cannot pay again while the ball is
+            # separating from the paddle.
+            for _ in range(10):
+                _, reward, terminated, truncated, info = env.step(action)
+                assert reward == 0.0
+                assert info["bounce_count"] == 1
+                assert not terminated and not truncated
+        finally:
+            env.close()
+
+    def test_rotation_only_top_face_strike_uses_contact_point_velocity(self):
+        """Angular paddle motion at an edge can qualify without origin motion."""
+        env = BallBounceEnv(min_force=20.0)
+        try:
+            env.reset(seed=0)
+            qpos = env.init_qpos.copy()
+            qvel = env.init_qvel.copy()
+            rotate_y = env.model.joint("rotate_y")
+            qvel[int(rotate_y.dofadr[0])] = 2.0
+            ball = env.model.joint("ball_freejoint")
+            qposadr = int(ball.qposadr[0])
+            dofadr = int(ball.dofadr[0])
+            qpos[qposadr : qposadr + 3] = [-0.15, 0.0, 0.068]
+            qpos[qposadr + 3 : qposadr + 7] = [1.0, 0.0, 0.0, 0.0]
+            qvel[dofadr : dofadr + 6] = 0.0
+            qvel[dofadr + 2] = -2.0
+            env.set_state(qpos, qvel)
+
+            total_reward = 0.0
+            info = {}
+            for _ in range(5):
+                _, reward, terminated, truncated, info = env.step(
+                    self._zero_action(env)
+                )
+                total_reward += reward
+                if reward > 0.0 or terminated or truncated:
+                    break
+
+            assert total_reward == 1.0
+            assert info["paddle_normal_speed_at_impact"] > 0.05
+            assert info["bounce_count"] == 1
+        finally:
+            env.close()
+
+    def test_brief_between_frame_contact_is_sampled_but_not_rewarded(self):
+        """A passive impact that is zero at the frame boundary is still seen."""
+        env = BallBounceEnv(min_force=100.0)
+        try:
+            env.reset(seed=0)
+            self._set_ball_state(
+                env,
+                position=(0.0, 0.0, 0.068),
+                velocity=(0.0, 0.0, -2.0),
             )
-            assert reward == 0.0, (
-                f"Reward {reward} paid with zero touch force"
+
+            _, reward, terminated, truncated, info = env.step(
+                self._zero_action(env)
             )
-    finally:
-        env.close()
+            assert float(env.data.sensor("touch_sensor").data[0]) == 0.0
+            assert info["touch_sensor"] > 100.0
+            assert info["contact_started"]
+            assert info["contact_episode_count"] == 1
+            assert info["contact_rejection_reason"] == "passive_paddle"
+            assert reward == 0.0
+            assert info["bounce_count"] == 0
+            assert not terminated and not truncated
+        finally:
+            env.close()
+
+    def test_underside_contact_is_rejected_and_terminates(self):
+        env = BallBounceEnv()
+        try:
+            env.reset(seed=0)
+            qpos = env.init_qpos.copy()
+            qvel = env.init_qvel.copy()
+            slider = env.model.joint("slider_z")
+            qpos[int(slider.qposadr[0])] = 0.2
+            ball = env.model.joint("ball_freejoint")
+            qposadr = int(ball.qposadr[0])
+            dofadr = int(ball.dofadr[0])
+            qpos[qposadr : qposadr + 3] = [0.0, 0.0, 0.132]
+            qpos[qposadr + 3 : qposadr + 7] = [1.0, 0.0, 0.0, 0.0]
+            qvel[:] = 0.0
+            qvel[dofadr + 2] = 2.0
+            env.set_state(qpos, qvel)
+
+            _, reward, terminated, truncated, info = env.step(
+                self._zero_action(env)
+            )
+            assert info["touch_sensor"] > 0.0
+            assert info["contact_rejection_reason"] == "underside_or_edge"
+            assert info["bounce_count"] == 0
+            assert reward == 0.0
+            assert terminated and not truncated
+            assert info["termination_reason"] == "ball_below_paddle"
+            assert info["term_ball_dropped"]
+            assert not info["term_nonfinite"]
+            assert not info["term_timeout"]
+        finally:
+            env.close()
+
+    def test_lateral_clearance_rearms_after_two_substeps(self):
+        """Leaving over an edge is a real release even near paddle height."""
+        env = BallBounceEnv(release_substeps=2, release_clearance=0.002)
+        try:
+            env.reset(seed=0)
+            self._set_ball_state(
+                env,
+                position=(0.4, 0.0, 0.06),
+                velocity=(0.0, 0.0, 0.0),
+            )
+            env._contact_latched = True
+            env._contact_candidate = False
+            env._contact_local_position[:] = (0.2, 0.0, 0.02)
+
+            env._step_mujoco_simulation(self._zero_action(env), 1)
+            assert env._contact_latched
+            assert env._contact_release_progress == 1
+
+            env._step_mujoco_simulation(self._zero_action(env), 1)
+            assert not env._contact_latched
+            assert env._contact_release_progress == 0
+        finally:
+            env.close()
+
+    def test_ball_below_elevated_paddle_terminates_without_contact(self):
+        env = BallBounceEnv()
+        try:
+            env.reset(seed=0)
+            qpos = env.init_qpos.copy()
+            qvel = env.init_qvel.copy()
+            slider = env.model.joint("slider_z")
+            qpos[int(slider.qposadr[0])] = 0.2
+            ball = env.model.joint("ball_freejoint")
+            qposadr = int(ball.qposadr[0])
+            qpos[qposadr : qposadr + 3] = [0.5, 0.0, 0.15]
+            qpos[qposadr + 3 : qposadr + 7] = [1.0, 0.0, 0.0, 0.0]
+            qvel[:] = 0.0
+            env.set_state(qpos, qvel)
+
+            obs, reward, terminated, truncated, info = env.step(
+                self._zero_action(env)
+            )
+            assert obs[2] > 0.0
+            assert info["contact_episode_count"] == 0
+            assert reward == 0.0
+            assert terminated and not truncated
+            assert info["term_ball_dropped"]
+        finally:
+            env.close()
+
+    def test_hidden_nonfinite_state_terminates_with_finite_outputs(self):
+        env = BallBounceEnv()
+        try:
+            env.reset(seed=0)
+            ball = env.model.joint("ball_freejoint")
+            dofadr = int(ball.dofadr[0])
+            env.data.qvel[dofadr + 3] = np.nan
+
+            obs, reward, terminated, truncated, info = env.step(
+                self._zero_action(env)
+            )
+            assert np.isfinite(obs).all()
+            assert np.isfinite(reward)
+            assert terminated and not truncated
+            assert info["term_nonfinite"]
+            assert info["termination_reason"] == "nonfinite_state"
+        finally:
+            env.close()
+
+    def test_noop_cannot_earn_a_valid_bounce(self):
+        """Gravity/passive restitution must not satisfy the training metric."""
+        for seed in range(20):
+            env = BallBounceEnv(min_force=100.0, episode_len=300)
+            try:
+                env.reset(seed=seed)
+                info = {}
+                while True:
+                    _, reward, terminated, truncated, info = env.step(
+                        self._zero_action(env)
+                    )
+                    assert reward == 0.0
+                    if terminated or truncated:
+                        break
+                assert info["bounce_count"] == env.bounce_count == 0
+            finally:
+                env.close()
+
+    def test_scripted_oracle_reaches_sustained_juggling_gate(self):
+        from courtside_dynamics.scripted_policies import (
+            ball_bounce_oracle_action,
+        )
+
+        counts = []
+        for seed in range(20):
+            env = BallBounceEnv(min_force=100.0)
+            try:
+                observation, _ = env.reset(seed=seed)
+                while True:
+                    observation, _, terminated, truncated, info = env.step(
+                        ball_bounce_oracle_action(observation)
+                    )
+                    if terminated or truncated:
+                        break
+                counts.append(info["bounce_count"])
+            finally:
+                env.close()
+
+        assert np.mean(counts) >= 9.0
+        assert sum(count >= 10 for count in counts) >= 15
+
+    def test_reset_states_respect_limits_and_unit_quaternion(self):
+        env = BallBounceEnv()
+        try:
+            for seed in range(100):
+                env.reset(seed=seed)
+                for name in (
+                    "rotate_x",
+                    "rotate_y",
+                    "rotate_z",
+                    "slider_x",
+                    "slider_y",
+                    "slider_z",
+                ):
+                    joint = env.model.joint(name)
+                    value = float(env.data.qpos[int(joint.qposadr[0])])
+                    assert float(joint.range[0]) <= value <= float(joint.range[1])
+                quaternion = env.data.joint("ball_freejoint").qpos[3:7]
+                assert np.linalg.norm(quaternion) == pytest.approx(1.0)
+        finally:
+            env.close()
+
+    def test_rotation_units_and_vertical_motor_authority(self):
+        env = BallBounceEnv()
+        try:
+            np.testing.assert_allclose(
+                env.model.joint("rotate_x").range, [-0.3, 0.3]
+            )
+            assert float(env.model.actuator("slider_z_motor").gear[0]) == 100.0
+            assert len(env.action_names) == env.action_space.shape[0]
+            assert env.action_names == tuple(
+                env.model.actuator(index).name
+                for index in range(env.model.nu)
+            )
+        finally:
+            env.close()
 
 
 @pytest.mark.parametrize("env_cls", ENV_CLASSES)

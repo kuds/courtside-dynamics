@@ -92,6 +92,26 @@ def test_contact_envs_wire_a_success_metric(env_name, tmp_path):
         env.close()
 
 
+def test_ball_bounce_recipe_requires_sustained_valid_bounces(tmp_path):
+    cfg = build_train_config("BallBounce", log_dir=str(tmp_path))
+
+    assert cfg.success_key == "bounce_count"
+    assert cfg.success_threshold == 10.0
+    assert cfg.headline_key == "bounce_count"
+    assert cfg.info_eval_keys == (
+        "bounce_count",
+        "contact_episode_count",
+        "touch_sensor",
+        "valid_bounce",
+    )
+    assert cfg.info_eval_terminal_keys == (
+        "term_ball_dropped",
+        "term_nonfinite",
+        "term_timeout",
+    )
+    assert cfg.info_eval_distribution_keys == ("bounce_count",)
+
+
 def test_ball_bounce_info_row_matches_header(tmp_path):
     """The custom CSV row must flatten to exactly the header width."""
     import numpy as np

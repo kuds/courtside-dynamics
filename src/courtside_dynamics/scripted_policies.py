@@ -20,6 +20,53 @@ from courtside_dynamics.envs.humanoid_tennis import (
 from courtside_dynamics.envs.tennis_rules import CourtSide
 
 
+def ball_bounce_oracle_action(obs: np.ndarray) -> np.ndarray:
+    """Track the ball and time powered top-face strikes in BallBounce.
+
+    The action order is rotate x/y/z, slide z/y/x.  Small PD terms keep the
+    paddle level, lateral PD tracks the ball, and the vertical motor alternates
+    between resetting low and striking upward as a descending ball enters the
+    hitting corridor.  This is a deterministic feasibility fixture, not a
+    training baseline.
+    """
+    observation = np.asarray(obs)
+    if observation.shape != (30,):
+        raise ValueError("BallBounce observation must have shape (30,)")
+
+    action = np.zeros(6, dtype=np.float32)
+    for action_index, (qpos_index, qvel_index) in enumerate(
+        ((6, 7), (8, 9), (10, 11))
+    ):
+        action[action_index] = np.clip(
+            -observation[qpos_index] - 0.03 * observation[qvel_index],
+            -1.0,
+            1.0,
+        )
+
+    # Actuator order is z/y/x while observation order is x/y/z.
+    action[4] = np.clip(
+        2.0 * (observation[1] - observation[14])
+        - 0.3 * observation[15],
+        -1.0,
+        1.0,
+    )
+    action[5] = np.clip(
+        2.0 * (observation[0] - observation[12])
+        - 0.3 * observation[13],
+        -1.0,
+        1.0,
+    )
+    ball_is_descending = observation[5] < 0.0
+    ball_paddle_gap = observation[2] - observation[16]
+    paddle_can_strike = observation[16] < 0.35
+    action[3] = (
+        1.0
+        if ball_is_descending and ball_paddle_gap < 0.12 and paddle_can_strike
+        else -1.0
+    )
+    return action
+
+
 def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
     """PD-controlled paddle tracker for :class:`WallBallEnv`.
 
@@ -351,6 +398,7 @@ __all__ = [
     "HumanoidTennisOracleResult",
     "HumanoidTennisStage0Result",
     "HumanoidTennisStage1Result",
+    "ball_bounce_oracle_action",
     "humanoid_tennis_oracle_action",
     "humanoid_tennis_oracle_reset_options",
     "humanoid_tennis_stage0_action",

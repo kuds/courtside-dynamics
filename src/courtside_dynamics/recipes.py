@@ -246,12 +246,28 @@ RECIPES: dict[str, Recipe] = {
         extra_cfg={
             "csv_header": _BALL_BOUNCE_CSV_HEADER,
             "info_row_fn": _ball_bounce_info_row,
-            # An eval episode "succeeds" once the paddle makes at least
-            # one fresh contact. Surfaces eval_info/success_rate.
+            # A single passive contact is not sustained juggling. The
+            # environment counts only deliberate top-face rebounds, and the
+            # recipe requires ten within one episode before reporting success.
             "success_key": "bounce_count",
-            "success_threshold": 1.0,
+            "success_threshold": 10.0,
+            "headline_key": "bounce_count",
+            "info_eval_keys": (
+                "bounce_count",
+                "contact_episode_count",
+                "touch_sensor",
+                "valid_bounce",
+            ),
+            "info_eval_terminal_keys": (
+                "term_ball_dropped",
+                "term_nonfinite",
+                "term_timeout",
+            ),
+            "info_eval_distribution_keys": ("bounce_count",),
         },
-        description="Juggle a ball on a 6-DOF paddle.",
+        description=(
+            "Deliberately juggle a ball from the top face of a 6-DOF paddle."
+        ),
     ),
     "WallBall": Recipe(
         env_cls=WallBallEnv,

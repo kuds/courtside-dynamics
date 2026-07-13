@@ -73,13 +73,21 @@ exact results can still vary across hardware and runtime stacks.
 | Environment ID | Task | Status |
 |---|---|---|
 | `CourtsideDynamics/BallBalance` | Keep a ball on a 6-DoF tray. | Available |
-| `CourtsideDynamics/BallBounce` | Juggle a ball on a 6-DoF paddle. | Available |
+| `CourtsideDynamics/BallBounce` | Deliberately rebound a ball from a 6-DoF paddle's top face. | Available |
 | `CourtsideDynamics/WallBall` | Rally against a wall with a 5-DoF racket and gated rewards. | Available |
 | `CourtsideDynamics/HumanoidTennisCoop` | Control two simulated Unitree G1 humanoids through one policy. | Available (experimental; free-standing default) |
 
 Starting with package version 0.6.0, registered environment IDs are
 unversioned. Callers using the previous version suffixes should use the IDs in
 the table.
+
+Package version 0.7.0 corrects BallBounce's rotation units and actuator
+authority and replaces control-boundary touch rewards with substep-resolved,
+top-face rebound events. Earlier BallBounce policies and learning curves are
+not comparable and should be retrained; the observation grows from 18 to 30
+values to include ball spin and the event detector's Markov state. Its training
+recipe reports success after ten deliberate rebounds in one episode; passive
+paddle contacts do not increment that metric.
 
 | Ball Balance | Ball Bounce | Wall Ball |
 |:---:|:---:|:---:|
