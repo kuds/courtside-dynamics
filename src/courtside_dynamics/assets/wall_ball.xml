@@ -20,12 +20,12 @@
             <geom name="wall_geom" size="0.1 5 1.5" type="box" rgba="0.7 0.7 0.9 1" />
         </body>
 
-        <!-- Face-only paddle with fixed world orientation. Its three
-             slide joints translate the face directly; there is no grip,
-             shaft, yaw, or pitch geometry that can intercept the ball.
-             The anchor moves 0.3 m forward from the old handle origin so
-             qpos=0 and every joint limit preserve the old face-centre
-             workspace exactly. -->
+        <!-- Face-only paddle with a fixed 10-degree upward pitch. Its
+             three slide joints translate the face directly; there is no
+             grip, shaft, yaw, or pitch degree of freedom that can intercept
+             the ball. The anchor moves 0.3 m forward from the old handle
+             origin so qpos=0 and every joint limit preserve the old
+             face-centre workspace exactly. -->
         <body name="paddle_base" pos="-1.7 0 1.2">
             <joint name="paddle_slide_x" type="slide" axis="1 0 0" range="-3 2" damping="5" />
             <joint name="paddle_slide_y" type="slide" axis="0 1 0" range="-3 3" damping="5" />
@@ -35,7 +35,7 @@
                  -0.8 the face bottomed out at z=0.15 and a grounded
                  ball was unreachable. -->
             <joint name="paddle_slide_z" type="slide" axis="0 0 1" range="-0.9 2" damping="5" />
-            <body name="paddle_head" pos="0 0 0">
+            <body name="paddle_head" pos="0 0 0" euler="0 -10 0">
                 <site name="paddle_sensor" pos="0 0 0" size="0.02 0.2 0.25" type="box" rgba="0 1 0 0.15" />
                 <!-- Keep the old complete racket mass (face + grip + shaft)
                      so this interface change does not also change collision

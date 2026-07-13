@@ -1,11 +1,11 @@
 """Wall Ball environment.
 
-A face-only, fixed-orientation paddle must rally a ball against a wall.
-The policy supplies three normalized absolute position targets for the
-paddle's x/y/z slides; a force-limited position servo handles the
-low-level motion. The ball is served toward the paddle on reset, so the
-agent's first job is to make contact, then drive the ball back into the
-wall, then receive the rebound, and so on.
+A face-only paddle with a fixed 10-degree upward pitch must rally a ball
+against a wall. The policy supplies three normalized absolute position
+targets for the paddle's x/y/z slides; a force-limited position servo
+handles the low-level motion. The ball is served toward the paddle on
+reset, so the agent's first job is to make contact, then drive the ball
+back into the wall, then receive the rebound, and so on.
 
 The reward is intentionally narrow. Only the gated wall +1 is paid
 outright; everything else is a refundable *advance* against completing
@@ -118,7 +118,7 @@ _BALL_MIN_Z = -0.5
 
 
 class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
-    """Rally a ball with a fixed face and three Cartesian target actions."""
+    """Rally with a 10-degree upward-pitched face and three target actions."""
 
     action_names: tuple[str, ...] = (
         "paddle_target_x",

@@ -548,7 +548,7 @@ class TestWallBallPaddleInterface:
         finally:
             env.close()
 
-    def test_face_is_only_paddle_geom_and_orientation_is_fixed(self):
+    def test_face_is_only_paddle_geom_and_upward_pitch_is_fixed(self):
         env = WallBallEnv()
         try:
             joint_names = {
@@ -585,9 +585,19 @@ class TestWallBallPaddleInterface:
                 ]
             )
             np.testing.assert_allclose(actual, targets, atol=0.03)
+            angle = np.deg2rad(10.0)
+            expected_rotation = np.array(
+                [
+                    [np.cos(angle), 0.0, -np.sin(angle)],
+                    [0.0, 1.0, 0.0],
+                    [np.sin(angle), 0.0, np.cos(angle)],
+                ]
+            )
+            rotation = env.data.body("paddle_head").xmat.reshape(3, 3)
+            np.testing.assert_allclose(rotation, expected_rotation, atol=1e-12)
             np.testing.assert_allclose(
-                env.data.body("paddle_head").xmat.reshape(3, 3),
-                np.eye(3),
+                rotation[:, 0],
+                [np.cos(angle), 0.0, np.sin(angle)],
                 atol=1e-12,
             )
             assert np.max(np.abs(env.data.actuator_force)) <= 100.0 + 1e-9
@@ -666,6 +676,38 @@ class TestWallBallContactPhysics:
             "(v1 regression measured 0.00)"
         )
 
+    def test_fixed_paddle_pitch_lifts_a_horizontal_return(self):
+        """A horizontal inbound ball must leave the fixed face upward."""
+        mujoco, model, data = self._fresh_model()
+        qadr = int(model.joint("ball_x").qposadr[0])
+        dadr = int(model.joint("ball_x").dofadr[0])
+        data.qpos[qadr : qadr + 3] = [-1.1, 0.0, 1.2]
+        data.qvel[dadr : dadr + 3] = [-6.0, 0.0, 0.0]
+        data.ctrl[:] = 0.0
+        mujoco.mj_forward(model, data)
+
+        touched_paddle = False
+        rebound_velocity = None
+        for _ in range(1000):
+            mujoco.mj_step(model, data)
+            for contact in data.contact:
+                geom_names = {
+                    model.geom(contact.geom1).name,
+                    model.geom(contact.geom2).name,
+                }
+                if geom_names == {"ball_geom", "paddle_face"}:
+                    touched_paddle = True
+                    break
+            if touched_paddle and data.qvel[dadr] > 0.1:
+                rebound_velocity = data.qvel[dadr : dadr + 3].copy()
+                break
+
+        assert touched_paddle, "horizontal test ball never touched the paddle"
+        assert rebound_velocity is not None, "ball never rebounded from paddle"
+        assert rebound_velocity[2] > 0.1, (
+            f"fixed pitch did not lift return: vz={rebound_velocity[2]:.2f}"
+        )
+
     def test_racket_can_address_grounded_ball(self):
         """At the bottom of its z range the face's lower edge must reach
         below a rolling ball's centre (z=0.07). At the old range the
@@ -680,7 +722,11 @@ class TestWallBallContactPhysics:
             lo = float(env.model.joint("paddle_slide_z").range[0])
             env.data.qpos[zadr] = lo
             mujoco.mj_forward(env.model, env.data)
-            face_bottom = float(env.data.body("paddle_head").xpos[2]) - 0.25
+            paddle = env.data.body("paddle_head")
+            rotation = paddle.xmat.reshape(3, 3)
+            half_sizes = np.array([0.02, 0.2, 0.25])
+            z_half_extent = float(np.abs(rotation[2]) @ half_sizes)
+            face_bottom = float(paddle.xpos[2]) - z_half_extent
             assert face_bottom <= 0.07, (
                 f"lowest face edge z={face_bottom:.2f} cannot reach a "
                 "rolling ball (centre z=0.07)"

@@ -74,7 +74,7 @@ exact results can still vary across hardware and runtime stacks.
 |---|---|---|
 | `CourtsideDynamics/BallBalance` | Keep a ball on a 6-DoF tray. | Available |
 | `CourtsideDynamics/BallBounce` | Deliberately rebound a ball from a 6-DoF paddle's top face. | Available |
-| `CourtsideDynamics/WallBall` | Rally against a wall with a face-only, fixed-orientation 3-DoF target-controlled paddle and gated rewards. | Available |
+| `CourtsideDynamics/WallBall` | Rally against a wall with a face-only paddle at a fixed 10° upward pitch, three target-controlled DoFs, and gated rewards. | Available |
 | `CourtsideDynamics/HumanoidTennisCoop` | Control two simulated Unitree G1 humanoids through one policy. | Available (experimental; free-standing default) |
 
 Starting with package version 0.6.0, registered environment IDs are
@@ -90,9 +90,9 @@ recipe reports success after ten deliberate rebounds in one episode; passive
 paddle contacts do not increment that metric.
 
 Package version 0.8.0 simplifies WallBall to the paddle face alone at a fixed
-orientation. Its three `[-1, 1]` actions are absolute x/y/z position targets
-tracked by force-limited servos, and its observation shrinks from 26 to 22
-values after removing yaw/pitch state. Previous WallBall models,
+10° upward pitch. Its three `[-1, 1]` actions are absolute x/y/z position
+targets tracked by force-limited servos, and its observation shrinks from 26
+to 22 values after removing yaw/pitch state. Previous WallBall models,
 `VecNormalize` statistics, replay buffers, and raw MuJoCo states are
 incompatible; start a fresh run rather than resuming a pre-0.8 artifact. The
 Wall Ball animation below was recorded with the legacy 5-action environment.

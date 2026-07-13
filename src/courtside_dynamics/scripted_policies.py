@@ -75,11 +75,11 @@ def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
     """Intercept-and-swing target controller for :class:`WallBallEnv`.
 
     The three normalized actions are absolute position targets for the
-    paddle's x/y/z slides. The fixed face is anchored at world
-    ``(-1.7, 0, 1.2)``, so its position is ``(-1.7 + slide_x_qpos,
-    slide_y_qpos, 1.2 + slide_z_qpos)``. Inverting that transform gives
-    the physical qpos targets below; the env's force-limited servo tracks
-    them.
+    paddle's x/y/z slides. The face has a fixed 10-degree upward pitch
+    and is anchored at world ``(-1.7, 0, 1.2)``, so its position is
+    ``(-1.7 + slide_x_qpos, slide_y_qpos, 1.2 + slide_z_qpos)``.
+    Inverting that transform gives the physical qpos targets below; the
+    env's force-limited servo tracks them.
 
     Two behaviours, keyed on the ball's x velocity:
 

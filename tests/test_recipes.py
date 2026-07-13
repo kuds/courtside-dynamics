@@ -330,6 +330,6 @@ def test_wall_ball_recipe_uses_simplified_paddle_interface(tmp_path):
         assert env.observation_space.shape == (22,)
         assert env.model.nu == 3
         assert "face-only" in RECIPES["WallBall"].description
-        assert "fixed-orientation" in RECIPES["WallBall"].description
+        assert "fixed 10-degree upward pitch" in RECIPES["WallBall"].description
     finally:
         env.close()
