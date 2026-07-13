@@ -602,15 +602,15 @@ def write_run_summary(
             selected_step = int(best_meta["timestep"])
         except (KeyError, TypeError, ValueError):
             selected_step = None
-    if selected_step is not None:
-        keys = best_meta.get("selection_keys") or []
-        values = best_meta.get("selection_values") or {}
-        primary = keys[0] if keys else None
-        desc = f"step {selected_step:,}"
-        if primary is not None and primary in values:
-            desc += f" ({primary} {float(values[primary]):.2f})"
-        desc += "  [task-metric selection]"
-        lines.append(_kv("Best model", desc))
+        if selected_step is not None:
+            keys = best_meta.get("selection_keys") or []
+            values = best_meta.get("selection_values") or {}
+            primary = keys[0] if keys else None
+            desc = f"step {selected_step:,}"
+            if primary is not None and primary in values:
+                desc += f" ({primary} {float(values[primary]):.2f})"
+            desc += "  [task-metric selection]"
+            lines.append(_kv("Best model", desc))
 
     # Headline task metric. Eval reward can be a poor progress measure
     # (WallBall's is dominated by tracking shaping, and success_rate
