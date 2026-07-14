@@ -11,6 +11,15 @@ The reward is intentionally narrow. Only the gated wall +1 is paid
 outright; everything else is a refundable *advance* against completing
 the rally cycle it belongs to:
 
+``rally_style`` selects the contact sequence for a whole run without changing
+the policy spaces. ``open`` preserves the original permissive rule,
+``volley`` ends the rally on any floor bounce, and ``one_bounce`` requires
+exactly one floor bounce before every paddle return. Strict styles process
+floor/paddle/wall contacts in MuJoCo substep order, so a later contact inside
+the same control frame cannot erase an earlier fault. Paddle pitch remains
+fixed at 10 degrees in every style; recipes may only change its world-space x
+home and target lane.
+
 - Wall contacts earn +1, but **only** if a paddle hit happened since the
   previous wall contact. A "wall → wall" sequence with no paddle return
   between is a failed rally and pays nothing, forcing the agent to
@@ -68,13 +77,15 @@ Episodes terminate early when the rally is over:
   speed gate debounces the contact chatter of a ball settling or
   rolling on the floor, which would otherwise read as a rapid string
   of "bounces".
+- **Style violation**: a volley touched the floor, a one-bounce return
+  contacted the paddle before its bounce, or an outgoing one-bounce shot
+  hit the floor before reaching the wall.
 - **Out of bounds**: the ball left the play volume.
-- **Stall**: no paddle/wall rising edge for ``stall_steps`` consecutive
-  steps. This catches balls too slow to bounce (rolling along the
-  floor) and whiffed serves alike. The counter runs from reset;
-  ``stall_steps`` is far longer than the serve flight, so a normal
-  serve cannot trip it before the agent has had a chance to make
-  contact.
+- **Stall**: no paddle/wall rising edge (or required one-bounce floor event)
+  for ``stall_steps`` consecutive steps. This catches balls too slow to
+  bounce (rolling along the floor) and whiffed serves alike. The counter runs
+  from reset; ``stall_steps`` is far longer than the serve flight, so a normal
+  serve cannot trip it before the agent has had a chance to make contact.
 
 Nonfinite values never leave the env: a nonfinite action terminates the
 episode without stepping the physics, and if the simulation itself
@@ -116,6 +127,17 @@ _BALL_MIN_Y = -5.5
 _BALL_MAX_Y = 5.5
 _BALL_MIN_Z = -0.5
 
+_RALLY_STYLES = frozenset({"open", "volley", "one_bounce"})
+_AWAIT_BOUNCE = 0
+_AWAIT_PADDLE = 1
+_AWAIT_WALL = 2
+_RALLY_PHASE_NAMES = {
+    _AWAIT_BOUNCE: "await_bounce",
+    _AWAIT_PADDLE: "await_paddle",
+    _AWAIT_WALL: "await_wall",
+}
+_CONTACT_EVENT_PRIORITY = {"floor": 0, "paddle": 1, "wall": 2}
+
 
 class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
     """Rally with a 10-degree upward-pitched face and three target actions."""
@@ -140,10 +162,43 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         out_of_bounds_penalty: float = 1.0,
         double_bounce_penalty: float = 1.0,
         stall_penalty: float = 1.0,
+        style_violation_penalty: float = 1.0,
         floor_bounce_min_speed: float = 0.5,
         stall_steps: int = 200,
+        rally_style: str = "open",
+        paddle_home_x: float = -1.7,
+        paddle_x_target_range: tuple[float, float] | None = None,
         **kwargs: Any,
     ) -> None:
+        if not isinstance(rally_style, str) or rally_style not in _RALLY_STYLES:
+            raise ValueError(
+                f"rally_style must be one of {sorted(_RALLY_STYLES)}, "
+                f"got {rally_style!r}"
+            )
+        if not np.isfinite(paddle_home_x):
+            raise ValueError("paddle_home_x must be finite")
+        if (
+            not np.isfinite(style_violation_penalty)
+            or style_violation_penalty < 0.0
+        ):
+            raise ValueError(
+                "style_violation_penalty must be finite and nonnegative"
+            )
+        resolved_target_range: tuple[float, float] | None = None
+        if paddle_x_target_range is not None:
+            if len(paddle_x_target_range) != 2:
+                raise ValueError("paddle_x_target_range must contain two values")
+            resolved_target_range = (
+                float(paddle_x_target_range[0]),
+                float(paddle_x_target_range[1]),
+            )
+            if not np.isfinite(resolved_target_range).all():
+                raise ValueError("paddle_x_target_range must be finite")
+            if resolved_target_range[0] >= resolved_target_range[1]:
+                raise ValueError(
+                    "paddle_x_target_range must be strictly increasing"
+                )
+
         utils.EzPickle.__init__(
             self,
             episode_len=episode_len,
@@ -158,8 +213,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             out_of_bounds_penalty=out_of_bounds_penalty,
             double_bounce_penalty=double_bounce_penalty,
             stall_penalty=stall_penalty,
+            style_violation_penalty=style_violation_penalty,
             floor_bounce_min_speed=floor_bounce_min_speed,
             stall_steps=stall_steps,
+            rally_style=rally_style,
+            paddle_home_x=paddle_home_x,
+            paddle_x_target_range=resolved_target_range,
             **kwargs,
         )
 
@@ -186,6 +245,10 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.out_of_bounds_penalty = float(out_of_bounds_penalty)
         self.double_bounce_penalty = float(double_bounce_penalty)
         self.stall_penalty = float(stall_penalty)
+        self.style_violation_penalty = float(style_violation_penalty)
+        self.rally_style = rally_style
+        self.paddle_home_x = float(paddle_home_x)
+        self.paddle_x_target_range = resolved_target_range
         # Minimum pre-impact downward speed for a ball-floor contact
         # onset to count as a bounce. A settling/rolling ball chatters
         # through many near-zero-energy contact onsets that must not
@@ -197,6 +260,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.bounce_count = 0           # rewarded wall contacts (post-paddle)
         self.wall_contact_count = 0     # all wall contacts incl. stray hits
         self.paddle_hit_count = 0
+        self.legal_paddle_hit_count = 0
+        self.one_bounce_recovery_count = 0
+        self.one_bounce_return_count = 0
+        self._rally_phase = (
+            _AWAIT_BOUNCE if rally_style == "one_bounce" else _AWAIT_PADDLE
+        )
         self._prev_wall_touch = 0.0
         self._prev_paddle_touch = 0.0
         self._steps_since_event = 0
@@ -285,6 +354,51 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._control_high = self.model.actuator_ctrlrange[:, 1].copy()
         self._control_home = np.zeros(self.model.nu, dtype=np.float64)
 
+        # ``paddle_home_x`` and ``paddle_x_target_range`` are public
+        # world-space coordinates. Convert them to the x slide's qpos space
+        # only after MuJoCo has compiled the model. This lets recipes move and
+        # restrict the paddle without editing the shared XML or changing the
+        # policy's normalized three-action interface.
+        mujoco.mj_forward(self.model, self.data)
+        x_joint = self.data.joint("paddle_slide_x")
+        self._paddle_x_qposadr = int(self.model.joint("paddle_slide_x").qposadr[0])
+        self._paddle_x_origin = float(
+            self.data.body("paddle_head").xpos[0] - x_joint.qpos[0]
+        )
+        physical_world_range = (
+            self._paddle_x_origin + float(self._control_low[0]),
+            self._paddle_x_origin + float(self._control_high[0]),
+        )
+        target_world_range = (
+            physical_world_range
+            if resolved_target_range is None
+            else resolved_target_range
+        )
+        tolerance = 1e-9
+        if (
+            target_world_range[0] < physical_world_range[0] - tolerance
+            or target_world_range[1] > physical_world_range[1] + tolerance
+        ):
+            raise ValueError(
+                "paddle_x_target_range must stay within the physical "
+                f"world-space range {physical_world_range}, got "
+                f"{target_world_range}"
+            )
+        if not (
+            target_world_range[0] - tolerance
+            <= self.paddle_home_x
+            <= target_world_range[1] + tolerance
+        ):
+            raise ValueError(
+                "paddle_home_x must lie inside paddle_x_target_range; "
+                f"got home {self.paddle_home_x} and range "
+                f"{target_world_range}"
+            )
+        self._control_low[0] = target_world_range[0] - self._paddle_x_origin
+        self._control_high[0] = target_world_range[1] - self._paddle_x_origin
+        self._control_home[0] = self.paddle_home_x - self._paddle_x_origin
+        self.paddle_x_target_range = target_world_range
+
         # Cache the ball's DOF offset so serve velocities don't depend on
         # a hard-coded index into qvel.
         self._ball_dofadr = int(self.model.joint("ball_x").dofadr[0])
@@ -304,19 +418,30 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # (see _step_mujoco_simulation), so the peak-sampling window
         # must include it or brief contacts lose their force reading.
         self._ball_on_paddle = False
+        self._ball_on_wall = False
         # Peak touch-sensor readings across the substeps of the most
         # recent frame (see _step_mujoco_simulation).
         self._substep_wall_touch = 0.0
         self._substep_paddle_touch = 0.0
+        # Candidate contact onsets from the most recent control frame.
+        # Strict rally modes combine these substep indices with the existing
+        # force-qualified paddle/wall edges so floor/paddle/wall order cannot
+        # be erased inside one five-substep frame.
+        self._substep_contact_events: list[tuple[int, int, str]] = []
+
+    @property
+    def rally_phase_name(self) -> str:
+        """Human-readable name for the current fixed-recipe rally phase."""
+        return _RALLY_PHASE_NAMES[self._rally_phase]
 
     def _ball_contacts(
         self,
-    ) -> tuple[float, float, bool, bool]:
+    ) -> tuple[float, float, bool, bool, bool]:
         """Scan the ball's active contacts for one substep.
 
-        Returns ``(face_force, wall_force, on_floor, on_face)``: the
-        largest normal force among ball-face and ball-wall contact pairs
-        (0.0 when none), plus contact flags for the floor and paddle face.
+        Returns ``(face_force, wall_force, on_floor, on_face, on_wall)``:
+        the largest normal force among ball-face and ball-wall contact pairs
+        (0.0 when none), plus contact flags for those three surfaces.
         The face is the paddle's only collision geometry. Forces come
         from ``mj_contactForce``, which shares ``data.contact``'s
         snapshot: unlike the touch sensors it neither lags the contact
@@ -326,7 +451,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         """
         face_force = 0.0
         wall_force = 0.0
-        on_floor = on_face = False
+        on_floor = on_face = on_wall = False
         force6 = np.zeros(6)
         ball = self._ball_geom_id
         for i in range(int(self.data.ncon)):
@@ -345,9 +470,55 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 mujoco.mj_contactForce(self.model, self.data, i, force6)
                 face_force = max(face_force, float(force6[0]))
             elif other == self._wall_geom_id:
+                on_wall = True
                 mujoco.mj_contactForce(self.model, self.data, i, force6)
                 wall_force = max(wall_force, float(force6[0]))
-        return face_force, wall_force, on_floor, on_face
+        return face_force, wall_force, on_floor, on_face, on_wall
+
+    def _ordered_frame_events(
+        self, *, paddle_edge: bool, wall_edge: bool
+    ) -> list[str]:
+        """Return force-qualified strict-mode events in substep order.
+
+        Floor events are already qualified by pre-impact speed. Paddle and
+        wall candidates are admitted only when the frame's existing force
+        edge qualifies them, preserving the established ``min_force``
+        contract. When two contacts share a MuJoCo snapshot, deterministic
+        floor -> paddle -> wall precedence makes a half-volley count as a
+        bounce and prevents a later wall from rescuing a dead outgoing shot.
+        """
+        selected = [
+            event
+            for event in self._substep_contact_events
+            if event[2] == "floor"
+        ]
+        fallback_substep = self.frame_skip
+        for event_name, qualified in (
+            ("paddle", paddle_edge),
+            ("wall", wall_edge),
+        ):
+            if not qualified:
+                continue
+            candidates = [
+                event
+                for event in self._substep_contact_events
+                if event[2] == event_name
+            ]
+            if candidates:
+                selected.append(min(candidates))
+            else:
+                # Sensor/contact-force timing can qualify an edge one
+                # substep after the physical contact snapshot disappears.
+                # Keep the event rather than silently dropping a real hit.
+                selected.append(
+                    (
+                        fallback_substep,
+                        _CONTACT_EVENT_PRIORITY[event_name],
+                        event_name,
+                    )
+                )
+        selected.sort()
+        return [event_name for _, _, event_name in selected]
 
     def _action_to_controls(self, action: np.ndarray) -> np.ndarray:
         """Map normalized x/y/z targets to physical slide coordinates.
@@ -405,17 +576,16 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
           signal catches brief contacts the other misses.
         - Floor bounces are detected as ball-floor contact onsets whose
           pre-impact downward speed exceeds ``floor_bounce_min_speed``
-          (the debounce for settling/rolling chatter). Any racket or
-          wall contact resets the consecutive-bounce count, mirroring
-          the wall-ball rally rule; the reset runs after bounce
-          detection so a racket contact in the same substep as a floor
-          touch absolves the bounce rather than terminating on a
-          scooped pickup.
+          (the debounce for settling/rolling chatter). ``open`` retains its
+          historical paddle/wall reset behavior. Strict modes defer those
+          updates to :meth:`step`, which processes substep-indexed events in
+          floor -> paddle -> wall order and latches the first rule fault.
         """
         self.data.ctrl[:] = self._action_to_controls(ctrl)
         wall_peak = 0.0
         paddle_peak = 0.0
-        for _ in range(n_frames):
+        self._substep_contact_events = []
+        for substep_index in range(n_frames):
             ball_vz = float(self.data.qvel[self._ball_dofadr + 2])
             mujoco.mj_step(self.model, self.data)
             (
@@ -423,6 +593,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 wall_force,
                 on_floor,
                 on_face,
+                on_wall,
             ) = self._ball_contacts()
             wall_sensed = max(
                 wall_force, float(self.data.sensor("wall_touch").data[0])
@@ -434,16 +605,46 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                     paddle_peak,
                     float(self.data.sensor("paddle_touch").data[0]),
                 )
-            if (
+            floor_onset = (
                 on_floor
                 and not self._ball_on_floor
                 and ball_vz < -self.floor_bounce_min_speed
-            ):
-                self.floor_bounce_count += 1
-                self.floor_bounce_total += 1
+            )
+            if floor_onset:
+                if self.rally_style == "open":
+                    self.floor_bounce_count += 1
+                    self.floor_bounce_total += 1
+                self._substep_contact_events.append(
+                    (
+                        substep_index,
+                        _CONTACT_EVENT_PRIORITY["floor"],
+                        "floor",
+                    )
+                )
+            if self.rally_style != "open":
+                if on_face and not self._ball_on_paddle:
+                    self._substep_contact_events.append(
+                        (
+                            substep_index,
+                            _CONTACT_EVENT_PRIORITY["paddle"],
+                            "paddle",
+                        )
+                    )
+                wall_active = on_wall or wall_sensed > 0.0
+                if wall_active and not self._ball_on_wall:
+                    self._substep_contact_events.append(
+                        (
+                            substep_index,
+                            _CONTACT_EVENT_PRIORITY["wall"],
+                            "wall",
+                        )
+                    )
             self._ball_on_floor = on_floor
             self._ball_on_paddle = on_face
-            if on_face or wall_sensed > 0.0:
+            self._ball_on_wall = on_wall or wall_sensed > 0.0
+            if self.rally_style == "open" and (
+                on_face or wall_sensed > 0.0
+            ):
                 self.floor_bounce_count = 0
         self._substep_wall_touch = wall_peak
         self._substep_paddle_touch = paddle_peak
@@ -491,35 +692,58 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         rew_oob = 0.0
         rew_double_bounce = 0.0
         rew_stall = 0.0
+        rew_style_violation = 0.0
         event_this_step = False
+        event_floor_bounce = any(
+            event_name == "floor"
+            for _, _, event_name in self._substep_contact_events
+        )
+        event_legal_paddle_hit = False
+        event_completed_return = False
+        event_style_violation = False
+        style_violation_reason: str | None = None
+        double_bounce_latched = False
 
-        if paddle_edge:
-            self.paddle_hit_count += 1
-            # Bonus only on the first paddle hit per wall cycle. The gate
-            # flag doubles as "bonus consumed": repeat contacts before the
-            # next wall hit would otherwise let the agent farm the bonus
-            # by juggling the ball on the paddle without ever rallying.
-            # The bonus is an advance: it stays pending until this
-            # cycle's gated wall contact confirms it was earned.
-            if not self._paddle_hit_since_last_wall:
+        def accept_paddle_hit() -> None:
+            """Open the gated return and pay its refundable first-hit bonus."""
+            nonlocal reward, rew_paddle, event_legal_paddle_hit
+            first_hit = not self._paddle_hit_since_last_wall
+            if first_hit:
+                self.legal_paddle_hit_count += 1
                 reward += self.paddle_hit_bonus
                 rew_paddle += self.paddle_hit_bonus
                 self._pending_bonus += self.paddle_hit_bonus
+                event_legal_paddle_hit = True
+                if self.rally_style == "one_bounce":
+                    self.one_bounce_recovery_count += 1
             self._paddle_hit_since_last_wall = True
+            self._rally_phase = _AWAIT_WALL
             self._returning = False
             self._prev_paddle_to_ball = None
-            event_this_step = True
 
-        if wall_edge:
+        def accept_wall_contact() -> None:
+            """Close the current cycle, paying only a gated legal return."""
+            nonlocal reward, rew_wall, rew_shaping, rew_paddle
+            nonlocal event_completed_return
             self.wall_contact_count += 1
-            if self._paddle_hit_since_last_wall:
+            legal_return = (
+                self._paddle_hit_since_last_wall
+                and (
+                    self.rally_style == "open"
+                    or self._rally_phase == _AWAIT_WALL
+                )
+            )
+            if legal_return:
                 # Gated wall contact: the rally cycle completed, so the
                 # +1 pays and every advance from this cycle is earned.
                 self.bounce_count += 1
+                if self.rally_style == "one_bounce":
+                    self.one_bounce_return_count += 1
                 reward += 1.0
                 rew_wall += 1.0
                 self._pending_shaping = 0.0
                 self._pending_bonus = 0.0
+                event_completed_return = True
             else:
                 # Wall -> wall with no paddle return between: a failed
                 # cycle. Claw back the advances paid during it (only
@@ -531,10 +755,75 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 self._pending_shaping = 0.0
                 self._pending_bonus = 0.0
             self._paddle_hit_since_last_wall = False
+            self.floor_bounce_count = 0
+            self._rally_phase = (
+                _AWAIT_BOUNCE
+                if self.rally_style == "one_bounce"
+                else _AWAIT_PADDLE
+            )
             # Open a fresh shaping window.
             self._returning = True
             self._prev_paddle_to_ball = None
-            event_this_step = True
+
+        if self.rally_style == "open":
+            # Preserve the original frame-edge behavior exactly for the
+            # backwards-compatible setup and its already-trained policies.
+            if paddle_edge:
+                self.paddle_hit_count += 1
+                accept_paddle_hit()
+                event_this_step = True
+            if wall_edge:
+                accept_wall_contact()
+                event_this_step = True
+        else:
+            # Strict modes process floor/paddle/wall contacts in MuJoCo
+            # substep order. Once a fault occurs, later contacts in the same
+            # control frame cannot rescue the rally or earn reward.
+            for contact_event in self._ordered_frame_events(
+                paddle_edge=paddle_edge, wall_edge=wall_edge
+            ):
+                if contact_event == "floor":
+                    self.floor_bounce_count += 1
+                    self.floor_bounce_total += 1
+                    if self.floor_bounce_count >= 2:
+                        double_bounce_latched = True
+                        break
+                    if self.rally_style == "volley":
+                        style_violation_reason = "floor_in_volley"
+                        break
+                    if self._rally_phase == _AWAIT_BOUNCE:
+                        self._rally_phase = _AWAIT_PADDLE
+                        # A required, legal bounce is rally progress. In the
+                        # rear-court preset it also prevents the wall-to-floor
+                        # flight from consuming the whole stall budget.
+                        event_this_step = True
+                    elif self._rally_phase == _AWAIT_WALL:
+                        style_violation_reason = "floor_before_wall"
+                        break
+                elif contact_event == "paddle":
+                    self.paddle_hit_count += 1
+                    if (
+                        self.rally_style == "one_bounce"
+                        and self._rally_phase == _AWAIT_BOUNCE
+                    ):
+                        style_violation_reason = "paddle_before_bounce"
+                        break
+                    if self._rally_phase == _AWAIT_PADDLE:
+                        accept_paddle_hit()
+                    # Repeat contacts while awaiting the wall remain
+                    # tolerated, but never pay another bonus.
+                    self.floor_bounce_count = 0
+                    self._returning = False
+                    self._prev_paddle_to_ball = None
+                    event_this_step = True
+                elif contact_event == "wall":
+                    accept_wall_contact()
+                    event_this_step = True
+
+            if style_violation_reason is not None:
+                event_style_violation = True
+                self._returning = False
+                self._prev_paddle_to_ball = None
 
         # Tracking shaping: reward reductions in the paddle→ball
         # distance while a return is in progress. Each delta is
@@ -545,7 +834,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # would otherwise poison the reward and the pending total.
         ball_pos = np.array(self.data.joint("ball_x").qpos[:3])
         paddle_head_pos = np.array(self.data.body("paddle_head").xpos)
-        if self._returning and self.track_shaping_scale > 0.0:
+        if (
+            self._returning
+            and style_violation_reason is None
+            and not double_bounce_latched
+            and self.track_shaping_scale > 0.0
+        ):
             dist = float(np.linalg.norm(ball_pos - paddle_head_pos))
             if np.isfinite(dist):
                 if self._prev_paddle_to_ball is not None:
@@ -571,20 +865,16 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             or ball_y > _BALL_MAX_Y
             or ball_z < _BALL_MIN_Z
         )
-        if ball_out_of_bounds:
-            reward -= self.out_of_bounds_penalty
-            rew_oob -= self.out_of_bounds_penalty
-
         # Double bounce: the rally is dead once the ball has touched the
         # floor twice with no paddle/wall contact between (the counter
         # is maintained at substep resolution in
         # _step_mujoco_simulation). Penalized like OOB so neither
         # failure mode is a cheaper escape than the other; skipped when
         # OOB fires on the same step so one failure pays one penalty.
-        double_bounce = self.floor_bounce_count >= 2
-        if double_bounce and not ball_out_of_bounds:
-            reward -= self.double_bounce_penalty
-            rew_double_bounce -= self.double_bounce_penalty
+        double_bounce = bool(
+            double_bounce_latched or self.floor_bounce_count >= 2
+        )
+        style_violation = style_violation_reason is not None
 
         # Stall: cut the episode if the ball has gone dead (e.g. rolling
         # along the floor too slowly for a debounced floor bounce to
@@ -596,7 +886,11 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         stalled = self._steps_since_event >= self.stall_steps
         obs_nonfinite = not bool(np.isfinite(obs).all())
         terminated = bool(
-            obs_nonfinite or ball_out_of_bounds or double_bounce or stalled
+            obs_nonfinite
+            or ball_out_of_bounds
+            or style_violation
+            or double_bounce
+            or stalled
         )
         truncated = self.step_number >= self.episode_len
 
@@ -606,13 +900,32 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # semantics: termination wins over truncation when both fire).
         term_nonfinite = obs_nonfinite
         term_oob = ball_out_of_bounds and not term_nonfinite
-        term_double_bounce = double_bounce and not (
+        term_style_violation = style_violation and not (
             term_nonfinite or ball_out_of_bounds
         )
+        term_double_bounce = double_bounce and not (
+            term_nonfinite or ball_out_of_bounds or style_violation
+        )
         term_stall = stalled and not (
-            term_nonfinite or ball_out_of_bounds or double_bounce
+            term_nonfinite
+            or ball_out_of_bounds
+            or style_violation
+            or double_bounce
         )
         term_timeout = truncated and not terminated
+
+        # Apply exactly one failure penalty using the same priority as the
+        # mutually-exclusive terminal flags. This keeps the breakdown
+        # auditable even when two physical failure conditions coincide.
+        if term_oob:
+            reward -= self.out_of_bounds_penalty
+            rew_oob -= self.out_of_bounds_penalty
+        elif term_style_violation:
+            reward -= self.style_violation_penalty
+            rew_style_violation -= self.style_violation_penalty
+        elif term_double_bounce:
+            reward -= self.double_bounce_penalty
+            rew_double_bounce -= self.double_bounce_penalty
 
         # Stall is a failed rally like OOB and double bounce, and it is
         # fined like one. Without this it was the sole free exit, and
@@ -652,11 +965,26 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             # accumulates over the whole episode.
             "wall_contact_count": self.wall_contact_count,
             "paddle_hit_count": self.paddle_hit_count,
+            "legal_paddle_hit_count": self.legal_paddle_hit_count,
+            "one_bounce_recovery_count": self.one_bounce_recovery_count,
+            "one_bounce_return_count": self.one_bounce_return_count,
+            # Friendly alias: ``bounce_count`` is retained for callbacks and
+            # best-model selection, while ``return_count`` reads naturally in
+            # mode-comparison reports.
+            "return_count": self.bounce_count,
             "floor_bounce_count": self.floor_bounce_count,
             "floor_bounce_total": self.floor_bounce_total,
             "paddle_touch": paddle_touch,
             "wall_touch": wall_touch,
             "stalled": bool(stalled),
+            "rally_style": self.rally_style,
+            "rally_phase": self._rally_phase,
+            "rally_phase_name": self.rally_phase_name,
+            "style_violation_reason": style_violation_reason,
+            "event_floor_bounce": bool(event_floor_bounce),
+            "event_legal_paddle_hit": bool(event_legal_paddle_hit),
+            "event_completed_return": bool(event_completed_return),
+            "event_style_violation": bool(event_style_violation),
             # Per-component reward breakdown (sums to ``reward``).
             "rew_wall": rew_wall,
             "rew_paddle": rew_paddle,
@@ -664,6 +992,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "rew_oob": rew_oob,
             "rew_double_bounce": rew_double_bounce,
             "rew_stall": rew_stall,
+            "rew_style_violation": rew_style_violation,
             # Termination-cause flags. Mutually exclusive: at most one is
             # True (exactly one on the terminating step), so per-episode
             # aggregation turns these into a clean OOB / double-bounce /
@@ -671,6 +1000,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "term_oob": bool(term_oob),
             "term_double_bounce": bool(term_double_bounce),
             "term_stall": bool(term_stall),
+            "term_style_violation": bool(term_style_violation),
             "term_timeout": bool(term_timeout),
             "term_nonfinite": bool(term_nonfinite),
         }
@@ -700,20 +1030,34 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "bounce_count": self.bounce_count,
             "wall_contact_count": self.wall_contact_count,
             "paddle_hit_count": self.paddle_hit_count,
+            "legal_paddle_hit_count": self.legal_paddle_hit_count,
+            "one_bounce_recovery_count": self.one_bounce_recovery_count,
+            "one_bounce_return_count": self.one_bounce_return_count,
+            "return_count": self.bounce_count,
             "floor_bounce_count": self.floor_bounce_count,
             "floor_bounce_total": self.floor_bounce_total,
             "paddle_touch": 0.0,
             "wall_touch": 0.0,
             "stalled": False,
+            "rally_style": self.rally_style,
+            "rally_phase": self._rally_phase,
+            "rally_phase_name": self.rally_phase_name,
+            "style_violation_reason": None,
+            "event_floor_bounce": False,
+            "event_legal_paddle_hit": False,
+            "event_completed_return": False,
+            "event_style_violation": False,
             "rew_wall": 0.0,
             "rew_paddle": rew_paddle,
             "rew_shaping": rew_shaping,
             "rew_oob": 0.0,
             "rew_double_bounce": 0.0,
             "rew_stall": 0.0,
+            "rew_style_violation": 0.0,
             "term_oob": False,
             "term_double_bounce": False,
             "term_stall": False,
+            "term_style_violation": False,
             "term_timeout": False,
             "term_nonfinite": True,
         }
@@ -724,15 +1068,25 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.bounce_count = 0
         self.wall_contact_count = 0
         self.paddle_hit_count = 0
+        self.legal_paddle_hit_count = 0
+        self.one_bounce_recovery_count = 0
+        self.one_bounce_return_count = 0
+        self._rally_phase = (
+            _AWAIT_BOUNCE
+            if self.rally_style == "one_bounce"
+            else _AWAIT_PADDLE
+        )
         self._prev_wall_touch = 0.0
         self._prev_paddle_touch = 0.0
         self._substep_wall_touch = 0.0
         self._substep_paddle_touch = 0.0
+        self._substep_contact_events = []
         self._steps_since_event = 0
         self.floor_bounce_count = 0
         self.floor_bounce_total = 0
         self._ball_on_floor = False
         self._ball_on_paddle = False
+        self._ball_on_wall = False
         self._paddle_hit_since_last_wall = False
         # Open the shaping window from t=0 as if a virtual wall hit
         # had just happened. Without this the serve flight earns no
@@ -743,6 +1097,19 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._pending_bonus = 0.0
 
         qpos, qvel = self._noisy_init_state()
+        # Move the *actual* reset pose to the configured home, retaining the
+        # same small randomized offset used by every other joint. Merely
+        # remapping action zero would leave the baseline paddle at the old
+        # front-court XML pose for its first control frame.
+        x_noise = (
+            qpos[self._paddle_x_qposadr]
+            - self.init_qpos[self._paddle_x_qposadr]
+        )
+        qpos[self._paddle_x_qposadr] = np.clip(
+            self._control_home[0] + x_noise,
+            self._control_low[0],
+            self._control_high[0],
+        )
 
         # Serve: throw the ball *toward* the paddle (negative x) with a
         # small upward lob and lateral jitter so the agent can't

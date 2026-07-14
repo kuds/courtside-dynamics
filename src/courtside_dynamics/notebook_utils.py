@@ -555,12 +555,14 @@ _WALL_BALL_REWARD_COMPONENTS: tuple[str, ...] = (
     "rew_oob",
     "rew_double_bounce",
     "rew_stall",
+    "rew_style_violation",
 )
 
 _WALL_BALL_TERMINATION_REASONS: tuple[str, ...] = (
     "out_of_bounds",
     "double_bounce",
     "stall",
+    "style_violation",
     "nonfinite",
     "timeout",
     "evaluation_cutoff",
@@ -575,14 +577,59 @@ _WALL_BALL_REQUIRED_INFO_KEYS = frozenset(
         "wall_contact_count",
         "floor_bounce_total",
         "floor_bounce_count",
+        "legal_paddle_hit_count",
+        "one_bounce_recovery_count",
+        "one_bounce_return_count",
+        "style_violation_reason",
         *_WALL_BALL_REWARD_COMPONENTS,
         "term_oob",
         "term_double_bounce",
         "term_stall",
+        "term_style_violation",
         "term_timeout",
         "term_nonfinite",
     }
 )
+
+_LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS: dict[str, Any] = {
+    "style_violation_penalty": 1.0,
+    "rally_style": "open",
+    "paddle_home_x": -1.7,
+    "paddle_x_target_range": None,
+}
+
+
+def _canonicalize_constructor_value(value: Any) -> Any:
+    """Normalize JSON arrays and runtime tuples for config comparison."""
+    if isinstance(value, Mapping):
+        return {
+            key: _canonicalize_constructor_value(child) for key, child in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize_constructor_value(child) for child in value]
+    return value
+
+
+def _wall_ball_constructor_kwargs_match(
+    training_kwargs: Mapping[str, Any],
+    evaluated_kwargs: Mapping[str, Any],
+) -> bool:
+    """Compare constructor settings while accepting new defaults in old runs."""
+    training_comparable = _canonicalize_constructor_value(
+        {key: value for key, value in training_kwargs.items() if key != "episode_len"}
+    )
+    evaluated_comparable = _canonicalize_constructor_value(
+        {key: value for key, value in evaluated_kwargs.items() if key != "episode_len"}
+    )
+    missing = object()
+    for key, default in _LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS.items():
+        if (
+            key not in training_comparable
+            and evaluated_comparable.get(key, missing)
+            == _canonicalize_constructor_value(default)
+        ):
+            del evaluated_comparable[key]
+    return training_comparable == evaluated_comparable
 
 
 def _distribution_summary(values: Sequence[float]) -> dict[str, float | int]:
@@ -615,6 +662,7 @@ def _termination_reason(
         ("out_of_bounds", "term_oob"),
         ("double_bounce", "term_double_bounce"),
         ("stall", "term_stall"),
+        ("style_violation", "term_style_violation"),
         ("nonfinite", "term_nonfinite"),
         ("timeout", "term_timeout"),
     )
@@ -652,8 +700,11 @@ def _rollout_wall_ball_seed(
     previous_counts = {
         "completed_returns": 0,
         "paddle_hits": 0,
+        "legal_paddle_hits": 0,
         "wall_contacts": 0,
         "floor_bounces": 0,
+        "one_bounce_recoveries": 0,
+        "one_bounce_returns": 0,
     }
     floor_bounces_waiting_for_paddle = 0
     recovered_cycles_waiting_for_wall = 0
@@ -678,8 +729,11 @@ def _rollout_wall_ball_seed(
         current_counts = {
             "completed_returns": int(info["bounce_count"]),
             "paddle_hits": int(info["paddle_hit_count"]),
+            "legal_paddle_hits": int(info["legal_paddle_hit_count"]),
             "wall_contacts": int(info["wall_contact_count"]),
             "floor_bounces": int(info["floor_bounce_total"]),
+            "one_bounce_recoveries": int(info["one_bounce_recovery_count"]),
+            "one_bounce_returns": int(info["one_bounce_return_count"]),
         }
         if any(
             current_counts[key] < previous_counts[key]
@@ -722,9 +776,12 @@ def _rollout_wall_ball_seed(
         "episode_length": int(episode_steps),
         "completed_returns": int(final_info["bounce_count"]),
         "paddle_hit_count": int(final_info["paddle_hit_count"]),
+        "legal_paddle_hit_count": int(final_info["legal_paddle_hit_count"]),
         "wall_contact_count": int(final_info["wall_contact_count"]),
         "floor_bounce_total": int(final_info["floor_bounce_total"]),
         "terminal_floor_bounce_count": int(final_info["floor_bounce_count"]),
+        "one_bounce_recovery_count": int(final_info["one_bounce_recovery_count"]),
+        "one_bounce_return_count": int(final_info["one_bounce_return_count"]),
         "post_floor_bounce_paddle_recoveries": int(
             post_floor_bounce_paddle_recoveries
         ),
@@ -738,11 +795,13 @@ def _rollout_wall_ball_seed(
         "terminated": bool(terminated),
         "truncated": bool(truncated),
         "evaluation_cutoff": bool(evaluation_cutoff),
+        "style_violation_reason": final_info["style_violation_reason"],
     }
     for key in (
         "term_oob",
         "term_double_bounce",
         "term_stall",
+        "term_style_violation",
         "term_timeout",
         "term_nonfinite",
     ):
@@ -774,9 +833,12 @@ def _summarize_wall_ball_episodes(
             "episode_length",
             "completed_returns",
             "paddle_hit_count",
+            "legal_paddle_hit_count",
             "wall_contact_count",
             "floor_bounce_total",
             "terminal_floor_bounce_count",
+            "one_bounce_recovery_count",
+            "one_bounce_return_count",
             "post_floor_bounce_paddle_recoveries",
             "post_floor_bounce_completed_returns",
             "unrecovered_floor_bounces",
@@ -810,6 +872,28 @@ def _summarize_wall_ball_episodes(
             "rate": sum(row["termination_reason"] == reason for row in rows) / n,
         }
         for reason in _WALL_BALL_TERMINATION_REASONS
+    }
+    style_violation_reasons = {
+        reason: {
+            "count": sum(
+                bool(row["term_style_violation"])
+                and str(row["style_violation_reason"] or "unspecified") == reason
+                for row in rows
+            ),
+            "rate": sum(
+                bool(row["term_style_violation"])
+                and str(row["style_violation_reason"] or "unspecified") == reason
+                for row in rows
+            )
+            / n,
+        }
+        for reason in sorted(
+            {
+                str(row["style_violation_reason"] or "unspecified")
+                for row in rows
+                if bool(row["term_style_violation"])
+            }
+        )
     }
     floor_totals = [int(row["floor_bounce_total"]) for row in rows]
     terminal_floor = [int(row["terminal_floor_bounce_count"]) for row in rows]
@@ -853,6 +937,7 @@ def _summarize_wall_ball_episodes(
         "step_survival": step_survival,
         "return_survival_curve": return_survival,
         "terminations": terminations,
+        "style_violation_reasons": style_violation_reasons,
         "floor_bounce_diagnostics": floor_diagnostics,
     }
 
@@ -1099,25 +1184,17 @@ def evaluate_best_wall_ball(
         ]
         observation_shape = list(env.observation_space.shape)
         action_shape = list(env.action_space.shape)
-        evaluated_constructor_kwargs = dict(
-            getattr(unwrapped, "_ezpickle_kwargs", {})
+        evaluated_constructor_kwargs = _canonicalize_constructor_value(
+            dict(getattr(unwrapped, "_ezpickle_kwargs", {}))
         )
     finally:
         env.close()
 
     training_constructor_kwargs = env_config.get("constructor_kwargs")
     if isinstance(training_constructor_kwargs, Mapping):
-        training_comparable = {
-            key: value
-            for key, value in training_constructor_kwargs.items()
-            if key != "episode_len"
-        }
-        evaluated_comparable = {
-            key: value
-            for key, value in evaluated_constructor_kwargs.items()
-            if key != "episode_len"
-        }
-        if training_comparable != evaluated_comparable:
+        if not _wall_ball_constructor_kwargs_match(
+            training_constructor_kwargs, evaluated_constructor_kwargs
+        ):
             raise ValueError(
                 "long-horizon WallBall constructor settings differ from the "
                 "training run (apart from the intentional episode_len override)"

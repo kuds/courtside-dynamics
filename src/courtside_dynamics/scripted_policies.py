@@ -138,6 +138,61 @@ def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
     return np.clip(targets / spans, -1.0, 1.0).astype(np.float32)
 
 
+def wall_ball_baseline_oracle_action(obs: np.ndarray) -> np.ndarray:
+    """Bounce-aware feasibility controller for ``WallBallBaseline``.
+
+    The controller uses only the public 22-value observation. Before the
+    required floor bounce it retreats to the back of the configured x lane;
+    after the bounce it predicts the y/z intercept and swings to the front of
+    the lane. Outbound shots trigger a recovery. This is a physics canary for
+    the calibrated preset, not a competitive training baseline.
+    """
+    observation = np.asarray(obs)
+    if observation.shape != (22,):
+        raise ValueError("WallBall observation must have shape (22,)")
+
+    ball_x, ball_y, ball_z = observation[0:3]
+    ball_vx, ball_vy, ball_vz = observation[3:6]
+    floor_bounce_count = observation[13]
+    paddle_x = ball_x - observation[14]
+    back_x = -3.2
+    front_x = -2.2
+    home_x = -2.7
+
+    if ball_vx < -0.1:
+        t_hit = max(
+            0.0,
+            (ball_x - front_x - 0.09) / max(0.1, -ball_vx),
+        )
+        target_y = float(np.clip(ball_y + ball_vy * t_hit, -3.0, 3.0))
+        target_z = (
+            ball_z
+            + ball_vz * t_hit
+            - 0.5 * _WALL_BALL_GRAVITY * t_hit**2
+        )
+        if floor_bounce_count < 1.0 and target_z < 0.07:
+            target_z = max(0.22, ball_z - 0.2)
+        target_z = float(np.clip(target_z, 0.18, 3.1))
+        close_after_bounce = (
+            floor_bounce_count >= 1.0 and ball_x - paddle_x <= 0.9
+        )
+        target_x = front_x if close_after_bounce else back_x
+    else:
+        target_x = back_x
+        target_y = float(np.clip(ball_y, -3.0, 3.0))
+        target_z = float(np.clip(ball_z, 0.18, 3.1))
+
+    # Baseline x is symmetric around home: [-3.2, -2.2] maps to [-1, 1].
+    action_x = (target_x - home_x) / 0.5
+    target_qpos_y = target_y
+    target_qpos_z = target_z - 1.2
+    action_y = target_qpos_y / 3.0
+    action_z = target_qpos_z / (2.0 if target_qpos_z >= 0.0 else 0.9)
+    return np.clip(
+        [action_x, action_y, action_z], -1.0, 1.0
+    ).astype(np.float32)
+
+
 # The receiving G1's right shoulder is pre-positioned to -0.2 radians by the
 # reset-only oracle fixture.  Under HumanoidTennisCoopEnv's piecewise action
 # mapping, this normalized value keeps that raw target fixed: stand=0.2,
@@ -428,5 +483,6 @@ __all__ = [
     "run_humanoid_tennis_oracle",
     "run_humanoid_tennis_stage0_oracle",
     "run_humanoid_tennis_stage1_oracle",
+    "wall_ball_baseline_oracle_action",
     "wall_ball_oracle_action",
 ]

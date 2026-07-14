@@ -20,6 +20,7 @@ from gymnasium.spaces import Box
 from courtside_dynamics.notebook_utils import (
     _rollout_wall_ball_seed,
     _summarize_wall_ball_episodes,
+    _wall_ball_constructor_kwargs_match,
     check_run_artifacts,
     evaluate_best_wall_ball,
     print_stage_summary,
@@ -209,6 +210,39 @@ def test_write_run_summary_lists_artifacts_from_shared_registry(tmp_path):
     assert "stage_summary:" not in text
 
 
+def test_wall_ball_constructor_comparison_accepts_only_omitted_new_defaults():
+    legacy_training = {
+        "episode_len": 750,
+        "min_force": 20.0,
+        "nested": {"range": [-3.2, -2.2]},
+    }
+    evaluated_defaults = {
+        "episode_len": 5_000,
+        "min_force": 20.0,
+        "nested": {"range": (-3.2, -2.2)},
+        "style_violation_penalty": 1.0,
+        "rally_style": "open",
+        "paddle_home_x": -1.7,
+        "paddle_x_target_range": None,
+    }
+
+    assert _wall_ball_constructor_kwargs_match(
+        legacy_training, evaluated_defaults
+    )
+    assert not _wall_ball_constructor_kwargs_match(
+        legacy_training,
+        {**evaluated_defaults, "rally_style": "one_bounce"},
+    )
+    assert not _wall_ball_constructor_kwargs_match(
+        legacy_training,
+        {**evaluated_defaults, "unrelated_new_setting": 1},
+    )
+    assert _wall_ball_constructor_kwargs_match(
+        {**legacy_training, "rally_style": "one_bounce"},
+        {**evaluated_defaults, "rally_style": "one_bounce"},
+    )
+
+
 def _wall_ball_row(
     *,
     reward: float,
@@ -217,19 +251,30 @@ def _wall_ball_row(
     floor_total: int,
     terminal_floor: int,
     reason: str,
+    legal_paddle_hits: int | None = None,
+    one_bounce_recoveries: int = 0,
+    one_bounce_returns: int = 0,
+    style_violation_reason: str | None = None,
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "episode_reward": reward,
         "episode_length": length,
         "completed_returns": returns,
         "paddle_hit_count": returns + 1,
+        "legal_paddle_hit_count": (
+            returns + 1 if legal_paddle_hits is None else legal_paddle_hits
+        ),
         "wall_contact_count": returns,
         "floor_bounce_total": floor_total,
         "terminal_floor_bounce_count": terminal_floor,
+        "one_bounce_recovery_count": one_bounce_recoveries,
+        "one_bounce_return_count": one_bounce_returns,
         "post_floor_bounce_paddle_recoveries": 0,
         "post_floor_bounce_completed_returns": 0,
         "unrecovered_floor_bounces": floor_total,
         "termination_reason": reason,
+        "term_style_violation": reason == "style_violation",
+        "style_violation_reason": style_violation_reason,
     }
     for key in (
         "rew_wall",
@@ -238,6 +283,7 @@ def _wall_ball_row(
         "rew_oob",
         "rew_double_bounce",
         "rew_stall",
+        "rew_style_violation",
     ):
         row[f"{key}_total"] = reward if key == "rew_wall" else 0.0
     return row
@@ -275,6 +321,11 @@ def test_summarize_wall_ball_episodes_survival_and_floor_proxy():
     assert summary["return_survival_curve"]["6"]["rate"] == 0.5
     assert summary["terminations"]["timeout"] == {"count": 1, "rate": 0.5}
     assert summary["terminations"]["out_of_bounds"] == {"count": 0, "rate": 0.0}
+    assert summary["terminations"]["style_violation"] == {
+        "count": 0,
+        "rate": 0.0,
+    }
+    assert summary["style_violation_reasons"] == {}
     assert summary["floor_bounce_diagnostics"] == {
         "total_contacts": 4,
         "episodes_with_any": 2,
@@ -289,6 +340,46 @@ def test_summarize_wall_ball_episodes_survival_and_floor_proxy():
     }
 
 
+def test_summarize_wall_ball_episodes_reports_strict_style_metrics():
+    rows = [
+        _wall_ball_row(
+            reward=-1.0,
+            length=100,
+            returns=0,
+            floor_total=0,
+            terminal_floor=0,
+            reason="style_violation",
+            legal_paddle_hits=0,
+            style_violation_reason="premature_volley",
+        ),
+        _wall_ball_row(
+            reward=3.0,
+            length=500,
+            returns=2,
+            floor_total=2,
+            terminal_floor=0,
+            reason="timeout",
+            legal_paddle_hits=2,
+            one_bounce_recoveries=2,
+            one_bounce_returns=2,
+        ),
+    ]
+
+    summary = _summarize_wall_ball_episodes(rows, survival_steps=(100, 500))
+
+    assert summary["metrics"]["legal_paddle_hit_count"]["mean"] == 1.0
+    assert summary["metrics"]["one_bounce_recovery_count"]["mean"] == 1.0
+    assert summary["metrics"]["one_bounce_return_count"]["mean"] == 1.0
+    assert summary["terminations"]["style_violation"] == {
+        "count": 1,
+        "rate": 0.5,
+    }
+    assert summary["style_violation_reasons"] == {
+        "premature_volley": {"count": 1, "rate": 0.5}
+    }
+    assert "rew_style_violation" in summary["reward_components"]
+
+
 class _FakeWallBallEnv(Env):
     metadata = {"render_modes": []}
 
@@ -297,6 +388,7 @@ class _FakeWallBallEnv(Env):
         self._ezpickle_kwargs = {
             "episode_len": episode_len,
             "min_force": 20.0,
+            "paddle_x_target_range": (-3.2, -2.2),
         }
         self.observation_space = Box(-100.0, 100.0, shape=(2,), dtype=np.float32)
         self.action_space = Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
@@ -321,15 +413,21 @@ class _FakeWallBallEnv(Env):
             "wall_contact_count": self._step,
             "floor_bounce_total": 0,
             "floor_bounce_count": 0,
+            "legal_paddle_hit_count": self._step,
+            "one_bounce_recovery_count": 0,
+            "one_bounce_return_count": 0,
+            "style_violation_reason": None,
             "rew_wall": 1.0,
             "rew_paddle": 0.0,
             "rew_shaping": 0.0,
             "rew_oob": 0.0,
             "rew_double_bounce": 0.0,
             "rew_stall": 0.0,
+            "rew_style_violation": 0.0,
             "term_oob": False,
             "term_double_bounce": False,
             "term_stall": False,
+            "term_style_violation": False,
             "term_timeout": truncated,
             "term_nonfinite": False,
         }
@@ -379,15 +477,21 @@ def test_rollout_counts_post_floor_bounce_recovery_and_return():
                 "wall_contact_count": wall_contacts,
                 "floor_bounce_total": floor_total,
                 "floor_bounce_count": 0,
+                "legal_paddle_hit_count": paddle_hits,
+                "one_bounce_recovery_count": int(self._step >= 2),
+                "one_bounce_return_count": int(self._step >= 3),
+                "style_violation_reason": None,
                 "rew_wall": float(returns),
                 "rew_paddle": 0.0,
                 "rew_shaping": 0.0,
                 "rew_oob": 0.0,
                 "rew_double_bounce": 0.0,
                 "rew_stall": 0.0,
+                "rew_style_violation": 0.0,
                 "term_oob": False,
                 "term_double_bounce": False,
                 "term_stall": False,
+                "term_style_violation": False,
                 "term_timeout": truncated,
                 "term_nonfinite": False,
             }
@@ -416,6 +520,9 @@ def test_rollout_counts_post_floor_bounce_recovery_and_return():
     assert row["post_floor_bounce_paddle_recoveries"] == 1
     assert row["post_floor_bounce_completed_returns"] == 1
     assert row["unrecovered_floor_bounces"] == 0
+    assert row["legal_paddle_hit_count"] == 1
+    assert row["one_bounce_recovery_count"] == 1
+    assert row["one_bounce_return_count"] == 1
 
 
 def _write_wall_ball_best_artifacts(tmp_path):
@@ -427,6 +534,7 @@ def _write_wall_ball_best_artifacts(tmp_path):
                     "constructor_kwargs": {
                         "episode_len": 750,
                         "min_force": 20.0,
+                        "paddle_x_target_range": [-3.2, -2.2],
                     },
                 },
                 "train_config": {
