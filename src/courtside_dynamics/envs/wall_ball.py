@@ -18,7 +18,9 @@ exactly one floor bounce before every paddle return. Strict styles process
 floor/paddle/wall contacts in MuJoCo substep order, so a later contact inside
 the same control frame cannot erase an earlier fault. Paddle pitch remains
 fixed at 10 degrees in every style; recipes may only change its world-space x
-home and target lane.
+home and target lane. ``one_bounce`` training can optionally replace a
+configurable fraction of normal serves with narrow ``incoming_wall`` or
+``post_bounce`` recovery fragments. Evaluation keeps that probability at zero.
 
 - Wall contacts earn +1, but **only** if a paddle hit happened since the
   previous wall contact. A "wall → wall" sequence with no paddle return
@@ -34,6 +36,13 @@ home and target lane.
   without that gate, juggling the ball on the paddle (the previous
   curriculum stage's skill!) farms the bonus indefinitely and is
   competitive with actually rallying.
+- A legal, policy-generated wall return arms one
+  ``recoverable_bounce_bonus``. Its first required floor bounce consumes the
+  opportunity and pays the bonus scaled by how centrally the ball projects
+  into ``recoverable_bounce_lateral_limit`` at the paddle's forward x plane.
+  Normal serves and synthetic recovery resets never arm it, so curriculum
+  state cannot receive credit for a trajectory the policy did not create;
+  contact chatter and later bounces cannot pay it twice.
 - ``track_shaping_scale`` adds tracking shaping that rewards reductions
   in the paddle→ball distance while a return is in progress. The
   shaping window is opened **on reset** as if a virtual wall hit had
@@ -137,6 +146,14 @@ _RALLY_PHASE_NAMES = {
     _AWAIT_WALL: "await_wall",
 }
 _CONTACT_EVENT_PRIORITY = {"floor": 0, "paddle": 1, "wall": 2}
+_RESET_NORMAL = 0
+_RESET_INCOMING_WALL = 1
+_RESET_POST_BOUNCE = 2
+_RESET_MODE_NAMES = {
+    _RESET_NORMAL: "normal",
+    _RESET_INCOMING_WALL: "incoming_wall",
+    _RESET_POST_BOUNCE: "post_bounce",
+}
 
 
 class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
@@ -168,6 +185,10 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         rally_style: str = "open",
         paddle_home_x: float = -1.7,
         paddle_x_target_range: tuple[float, float] | None = None,
+        recovery_reset_probability: float = 0.0,
+        post_bounce_reset_fraction: float = 0.5,
+        recoverable_bounce_bonus: float = 0.0,
+        recoverable_bounce_lateral_limit: float = 0.0,
         **kwargs: Any,
     ) -> None:
         if not isinstance(rally_style, str) or rally_style not in _RALLY_STYLES:
@@ -183,6 +204,27 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         ):
             raise ValueError(
                 "style_violation_penalty must be finite and nonnegative"
+            )
+        for name, value in (
+            ("recovery_reset_probability", recovery_reset_probability),
+            ("post_bounce_reset_fraction", post_bounce_reset_fraction),
+        ):
+            if not np.isfinite(value) or not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"{name} must be finite and in [0, 1]")
+        if (
+            not np.isfinite(recoverable_bounce_bonus)
+            or recoverable_bounce_bonus < 0.0
+        ):
+            raise ValueError(
+                "recoverable_bounce_bonus must be finite and nonnegative"
+            )
+        if (
+            not np.isfinite(recoverable_bounce_lateral_limit)
+            or recoverable_bounce_lateral_limit < 0.0
+        ):
+            raise ValueError(
+                "recoverable_bounce_lateral_limit must be finite and "
+                "nonnegative"
             )
         resolved_target_range: tuple[float, float] | None = None
         if paddle_x_target_range is not None:
@@ -219,6 +261,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             rally_style=rally_style,
             paddle_home_x=paddle_home_x,
             paddle_x_target_range=resolved_target_range,
+            recovery_reset_probability=float(recovery_reset_probability),
+            post_bounce_reset_fraction=float(post_bounce_reset_fraction),
+            recoverable_bounce_bonus=float(recoverable_bounce_bonus),
+            recoverable_bounce_lateral_limit=float(
+                recoverable_bounce_lateral_limit
+            ),
             **kwargs,
         )
 
@@ -249,6 +297,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.rally_style = rally_style
         self.paddle_home_x = float(paddle_home_x)
         self.paddle_x_target_range = resolved_target_range
+        self.recovery_reset_probability = float(recovery_reset_probability)
+        self.post_bounce_reset_fraction = float(post_bounce_reset_fraction)
+        self.recoverable_bounce_bonus = float(recoverable_bounce_bonus)
+        self.recoverable_bounce_lateral_limit = float(
+            recoverable_bounce_lateral_limit
+        )
         # Minimum pre-impact downward speed for a ball-floor contact
         # onset to count as a bounce. A settling/rolling ball chatters
         # through many near-zero-energy contact onsets that must not
@@ -292,6 +346,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # ``rew_*`` component and the breakdown still sums to reward.
         self._pending_shaping: float = 0.0
         self._pending_bonus: float = 0.0
+        # A legal, policy-generated wall return arms exactly one bonus for
+        # its next required floor bounce. Synthetic recovery resets never
+        # arm it: they teach interception without pretending the policy
+        # created the incoming trajectory.
+        self._recoverable_bounce_eligible = False
+        self._reset_mode = _RESET_NORMAL
         # Most recent finite observation, echoed back if the sim ever
         # produces a nonfinite state so NaNs can't reach VecNormalize.
         self._last_finite_obs: np.ndarray | None = None
@@ -299,7 +359,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # Obs: ball pos(3) + ball vel(3) + paddle qpos/qvel(6) +
         # paddle_hit_since_last_wall flag(1) + floor_bounce_count(1) +
         # paddle_head→ball relative xyz(3) + ball angular velocity(3) +
-        # stall progress(1) + pending advance(1) = 22. Everything the
+        # stall progress(1) + pending advance(1) + recoverable-bounce
+        # eligibility(1) = 23. Everything the
         # env's own dynamics or reward depends on is observable — the
         # policy should never face two identical observations with
         # different futures:
@@ -326,11 +387,14 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         #   cycle would claw back on the terminating step; the refund
         #   rule makes terminal reward depend on this otherwise-hidden
         #   accumulator.
+        # - recoverable_bounce_eligible distinguishes a genuine post-wall
+        #   trajectory (whose first legal bounce can earn the configured
+        #   bonus) from an otherwise identical synthetic recovery reset.
         CourtsideMujocoEnv.__init__(
             self,
             asset_path("wall_ball.xml"),
             episode_len=episode_len,
-            obs_dim=22,
+            obs_dim=23,
             **kwargs,
         )
 
@@ -401,6 +465,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
 
         # Cache the ball's DOF offset so serve velocities don't depend on
         # a hard-coded index into qvel.
+        self._ball_qposadr = int(self.model.joint("ball_x").qposadr[0])
         self._ball_dofadr = int(self.model.joint("ball_x").dofadr[0])
         # Geom ids for the contact-pair checks in
         # _step_mujoco_simulation (floor-bounce detection and filtering
@@ -428,11 +493,45 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # force-qualified paddle/wall edges so floor/paddle/wall order cannot
         # be erased inside one five-substep frame.
         self._substep_contact_events: list[tuple[int, int, str]] = []
+        self._substep_floor_bounce_state: tuple[
+            np.ndarray, np.ndarray
+        ] | None = None
 
     @property
     def rally_phase_name(self) -> str:
         """Human-readable name for the current fixed-recipe rally phase."""
         return _RALLY_PHASE_NAMES[self._rally_phase]
+
+    @property
+    def reset_mode(self) -> str:
+        """Reset fragment selected for the current episode."""
+        return _RESET_MODE_NAMES[self._reset_mode]
+
+    @property
+    def recovery_reset_probability(self) -> float:
+        """Probability that a one-bounce reset starts in recovery state."""
+        return self._recovery_reset_probability
+
+    @recovery_reset_probability.setter
+    def recovery_reset_probability(self, value: float) -> None:
+        if not np.isfinite(value) or not 0.0 <= float(value) <= 1.0:
+            raise ValueError(
+                "recovery_reset_probability must be finite and in [0, 1]"
+            )
+        self._recovery_reset_probability = float(value)
+
+    @property
+    def post_bounce_reset_fraction(self) -> float:
+        """Recovery-reset share that starts immediately after the bounce."""
+        return self._post_bounce_reset_fraction
+
+    @post_bounce_reset_fraction.setter
+    def post_bounce_reset_fraction(self, value: float) -> None:
+        if not np.isfinite(value) or not 0.0 <= float(value) <= 1.0:
+            raise ValueError(
+                "post_bounce_reset_fraction must be finite and in [0, 1]"
+            )
+        self._post_bounce_reset_fraction = float(value)
 
     def _ball_contacts(
         self,
@@ -520,6 +619,42 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         selected.sort()
         return [event_name for _, _, event_name in selected]
 
+    def _recoverable_bounce_score(self) -> float:
+        """Score the bounce's projected lateral intercept at paddle front.
+
+        MuJoCo's floor contact is sampled at the exact onset substep. Its
+        x/y velocity is sufficiently stable for a lateral projection even
+        when the soft contact has not yet settled enough for a trustworthy
+        post-impact z velocity. If the ball has already crossed the forward
+        paddle plane, its bounce y is the conservative fallback. A zero
+        lateral limit disables the shaping term.
+        """
+        limit = self.recoverable_bounce_lateral_limit
+        state = self._substep_floor_bounce_state
+        if limit <= 0.0 or state is None:
+            return 0.0
+        position, velocity = state
+        if not bool(np.isfinite(position).all() and np.isfinite(velocity).all()):
+            return 0.0
+        vx = float(velocity[0])
+        if vx >= -1e-9:
+            return 0.0
+        # Ball position is world-space; actuator limits are slide-joint qpos.
+        # Convert the resolved workspace back to world coordinates before
+        # projecting, and reject a bounce that is already behind the entire
+        # paddle lane (the ball is travelling toward decreasing x).
+        back_x = float(self._paddle_x_origin + self._control_low[0])
+        front_x = float(self._paddle_x_origin + self._control_high[0])
+        ball_x = float(position[0])
+        if ball_x < back_x:
+            return 0.0
+        time_to_front = (front_x - ball_x) / vx
+        if time_to_front > 0.0:
+            projected_y = float(position[1] + velocity[1] * time_to_front)
+        else:
+            projected_y = float(position[1])
+        return float(np.clip(1.0 - abs(projected_y) / limit, 0.0, 1.0))
+
     def _action_to_controls(self, action: np.ndarray) -> np.ndarray:
         """Map normalized x/y/z targets to physical slide coordinates.
 
@@ -585,6 +720,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         wall_peak = 0.0
         paddle_peak = 0.0
         self._substep_contact_events = []
+        self._substep_floor_bounce_state = None
         for substep_index in range(n_frames):
             ball_vz = float(self.data.qvel[self._ball_dofadr + 2])
             mujoco.mj_step(self.model, self.data)
@@ -621,6 +757,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                         "floor",
                     )
                 )
+                if self._substep_floor_bounce_state is None:
+                    ball_joint = self.data.joint("ball_x")
+                    self._substep_floor_bounce_state = (
+                        np.asarray(ball_joint.qpos[:3]).copy(),
+                        np.asarray(ball_joint.qvel[:3]).copy(),
+                    )
             if self.rally_style != "open":
                 if on_face and not self._ball_on_paddle:
                     self._substep_contact_events.append(
@@ -685,9 +827,10 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # Per-component reward breakdown, surfaced in ``info`` so training
         # diagnostics can tell whether the agent is completing rallies
         # (rew_wall) or just farming the dense shaping term (rew_shaping).
-        # The six components sum exactly to ``reward``.
+        # The components sum exactly to ``reward``.
         rew_wall = 0.0
         rew_paddle = 0.0
+        rew_recoverable_bounce = 0.0
         rew_shaping = 0.0
         rew_oob = 0.0
         rew_double_bounce = 0.0
@@ -700,6 +843,9 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         )
         event_legal_paddle_hit = False
         event_completed_return = False
+        event_recoverable_bounce = False
+        event_post_wall_bounce = False
+        recoverable_bounce_score = 0.0
         event_style_violation = False
         style_violation_reason: str | None = None
         double_bounce_latched = False
@@ -739,6 +885,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 self.bounce_count += 1
                 if self.rally_style == "one_bounce":
                     self.one_bounce_return_count += 1
+                    self._recoverable_bounce_eligible = True
                 reward += 1.0
                 rew_wall += 1.0
                 self._pending_shaping = 0.0
@@ -754,6 +901,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 rew_paddle -= self._pending_bonus
                 self._pending_shaping = 0.0
                 self._pending_bonus = 0.0
+                if self.rally_style == "one_bounce":
+                    self._recoverable_bounce_eligible = False
             self._paddle_hit_since_last_wall = False
             self.floor_bounce_count = 0
             self._rally_phase = (
@@ -792,6 +941,20 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                         style_violation_reason = "floor_in_volley"
                         break
                     if self._rally_phase == _AWAIT_BOUNCE:
+                        if self._recoverable_bounce_eligible:
+                            event_post_wall_bounce = True
+                            recoverable_bounce_score = (
+                                self._recoverable_bounce_score()
+                            )
+                            if recoverable_bounce_score > 0.0:
+                                bounce_reward = (
+                                    self.recoverable_bounce_bonus
+                                    * recoverable_bounce_score
+                                )
+                                reward += bounce_reward
+                                rew_recoverable_bounce += bounce_reward
+                                event_recoverable_bounce = True
+                            self._recoverable_bounce_eligible = False
                         self._rally_phase = _AWAIT_PADDLE
                         # A required, legal bounce is rally progress. In the
                         # rear-court preset it also prevents the wall-to-floor
@@ -984,10 +1147,19 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "event_floor_bounce": bool(event_floor_bounce),
             "event_legal_paddle_hit": bool(event_legal_paddle_hit),
             "event_completed_return": bool(event_completed_return),
+            "event_recoverable_bounce": bool(event_recoverable_bounce),
+            "event_post_wall_bounce": bool(event_post_wall_bounce),
             "event_style_violation": bool(event_style_violation),
+            "recoverable_bounce_score": recoverable_bounce_score,
+            "recoverable_bounce_eligible": bool(
+                self._recoverable_bounce_eligible
+            ),
+            "reset_mode": self.reset_mode,
+            "reset_mode_id": self._reset_mode,
             # Per-component reward breakdown (sums to ``reward``).
             "rew_wall": rew_wall,
             "rew_paddle": rew_paddle,
+            "rew_recoverable_bounce": rew_recoverable_bounce,
             "rew_shaping": rew_shaping,
             "rew_oob": rew_oob,
             "rew_double_bounce": rew_double_bounce,
@@ -1046,9 +1218,18 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "event_floor_bounce": False,
             "event_legal_paddle_hit": False,
             "event_completed_return": False,
+            "event_recoverable_bounce": False,
+            "event_post_wall_bounce": False,
             "event_style_violation": False,
+            "recoverable_bounce_score": 0.0,
+            "recoverable_bounce_eligible": bool(
+                self._recoverable_bounce_eligible
+            ),
+            "reset_mode": self.reset_mode,
+            "reset_mode_id": self._reset_mode,
             "rew_wall": 0.0,
             "rew_paddle": rew_paddle,
+            "rew_recoverable_bounce": 0.0,
             "rew_shaping": rew_shaping,
             "rew_oob": 0.0,
             "rew_double_bounce": 0.0,
@@ -1081,6 +1262,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._substep_wall_touch = 0.0
         self._substep_paddle_touch = 0.0
         self._substep_contact_events = []
+        self._substep_floor_bounce_state = None
         self._steps_since_event = 0
         self.floor_bounce_count = 0
         self.floor_bounce_total = 0
@@ -1095,6 +1277,26 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._prev_paddle_to_ball = None
         self._pending_shaping = 0.0
         self._pending_bonus = 0.0
+        self._recoverable_bounce_eligible = False
+        self._reset_mode = _RESET_NORMAL
+
+        # Recovery fragments are a training-only curriculum for the strict
+        # one-bounce task. A zero probability preserves the original reset
+        # RNG stream exactly; open/volley modes always retain their normal
+        # serve even if a caller sets the probability dynamically.
+        if (
+            self.rally_style == "one_bounce"
+            and self.recovery_reset_probability > 0.0
+            and self.np_random.random() < self.recovery_reset_probability
+        ):
+            if self.post_bounce_reset_fraction <= 0.0:
+                self._reset_mode = _RESET_INCOMING_WALL
+            elif self.post_bounce_reset_fraction >= 1.0:
+                self._reset_mode = _RESET_POST_BOUNCE
+            elif self.np_random.random() < self.post_bounce_reset_fraction:
+                self._reset_mode = _RESET_POST_BOUNCE
+            else:
+                self._reset_mode = _RESET_INCOMING_WALL
 
         qpos, qvel = self._noisy_init_state()
         # Move the *actual* reset pose to the configured home, retaining the
@@ -1111,29 +1313,55 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             self._control_high[0],
         )
 
-        # Serve: throw the ball *toward* the paddle (negative x) with a
-        # small upward lob and lateral jitter so the agent can't
-        # memorize a single trajectory.
-        vx = -(
-            self.serve_speed
-            + self.np_random.uniform(
-                -self.serve_speed_jitter, self.serve_speed_jitter
+        if self._reset_mode == _RESET_NORMAL:
+            # Serve: throw the ball *toward* the paddle (negative x) with a
+            # small upward lob and lateral jitter so the agent can't
+            # memorize a single trajectory.
+            vx = -(
+                self.serve_speed
+                + self.np_random.uniform(
+                    -self.serve_speed_jitter, self.serve_speed_jitter
+                )
             )
-        )
-        # The lateral component is always off-centre (|vy| in
-        # [serve_vy_min, serve_vy_max], random sign) so the serve can
-        # never intersect a racket parked at its reset pose. With
-        # realistic ball restitution a straight serve rebounds off a
-        # *static* racket, paying the paddle bonus (and sometimes a
-        # full rally) for doing nothing -- the no-op baseline must stay
-        # <= 0 for the gated reward to mean anything. The default
-        # minimum of 0.8 clears the parked face (half-width 0.2 + ball
-        # radius 0.07) across the whole serve-speed jitter range; going
-        # below it re-opens the free-ride.
-        vy = self.np_random.uniform(self.serve_vy_min, self.serve_vy_max)
-        if self.np_random.random() < 0.5:
-            vy = -vy
-        vz = self.serve_lob
+            # The lateral component is always off-centre (|vy| in
+            # [serve_vy_min, serve_vy_max], random sign) so the serve can
+            # never intersect a racket parked at its reset pose. With
+            # realistic ball restitution a straight serve rebounds off a
+            # *static* racket, paying the paddle bonus (and sometimes a
+            # full rally) for doing nothing -- the no-op baseline must stay
+            # <= 0 for the gated reward to mean anything.
+            vy = self.np_random.uniform(self.serve_vy_min, self.serve_vy_max)
+            if self.np_random.random() < 0.5:
+                vy = -vy
+            vz = self.serve_lob
+        elif self._reset_mode == _RESET_INCOMING_WALL:
+            # A narrow, centred post-wall flight. It still has to make its
+            # required floor bounce before the paddle may return it.
+            qpos[self._ball_qposadr : self._ball_qposadr + 3] = (
+                self.np_random.uniform(
+                    low=np.array([3.1, -0.75, 1.3]),
+                    high=np.array([3.5, 0.75, 1.7]),
+                )
+            )
+            vx = self.np_random.uniform(-8.5, -7.5)
+            vy = self.np_random.uniform(-0.4, 0.4)
+            vz = self.np_random.uniform(-1.5, 0.3)
+        else:
+            # Begin just after a legal floor bounce. The synthetic bounce is
+            # represented in the phase/counters, but it is not credited as a
+            # policy recovery and cannot pay recoverable_bounce_bonus.
+            qpos[self._ball_qposadr : self._ball_qposadr + 3] = (
+                self.np_random.uniform(
+                    low=np.array([-0.5, -0.75, 0.10]),
+                    high=np.array([0.5, 0.75, 0.15]),
+                )
+            )
+            vx = self.np_random.uniform(-7.5, -6.0)
+            vy = self.np_random.uniform(-0.4, 0.4)
+            vz = self.np_random.uniform(2.5, 3.5)
+            self._rally_phase = _AWAIT_PADDLE
+            self.floor_bounce_count = 1
+            self.floor_bounce_total = 1
         qvel[self._ball_dofadr + 0] = vx
         qvel[self._ball_dofadr + 1] = vy
         qvel[self._ball_dofadr + 2] = vz
@@ -1142,6 +1370,16 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         obs = self._get_obs()
         self._last_finite_obs = obs.copy()
         return obs
+
+    def _get_reset_info(self) -> dict[str, Any]:
+        """Expose the selected fragment without inventing rally credit."""
+        return {
+            "reset_mode": self.reset_mode,
+            "reset_mode_id": self._reset_mode,
+            "recoverable_bounce_eligible": bool(
+                self._recoverable_bounce_eligible
+            ),
+        }
 
     observation_names: tuple[str, ...] = (
         "ball_x", "ball_y", "ball_z",
@@ -1155,6 +1393,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         "ball_wx", "ball_wy", "ball_wz",
         "stall_progress",
         "pending_advance",
+        "recoverable_bounce_eligible",
     )
 
     def _get_obs(
@@ -1177,6 +1416,9 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         pending_advance = np.array(
             [self._pending_shaping + self._pending_bonus]
         )
+        recoverable_bounce_eligible = np.array(
+            [float(self._recoverable_bounce_eligible)]
+        )
         return np.concatenate(
             (
                 ball_pos,
@@ -1190,6 +1432,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 ball_qvel[3:6],
                 stall_progress,
                 pending_advance,
+                recoverable_bounce_eligible,
             ),
             axis=0,
         )

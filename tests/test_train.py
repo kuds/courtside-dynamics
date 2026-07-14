@@ -546,6 +546,9 @@ def test_run_summary_surfaces_headline_metric(tmp_path):
         "25000,bounce_count_ep_mean,0.0\n"
         "50000,bounce_count_ep_mean,2.86\n"
         "75000,bounce_count_ep_mean,2.14\n"
+        "75000,bounce_count_ep_ge_2_rate,0.4\n"
+        "75000,bounce_count_ep_ge_3_rate,0.1\n"
+        "75000,bounce_count_ep_ge_5_rate,0.0\n"
     )
 
     def env_fn():
@@ -555,6 +558,7 @@ def test_run_summary_surfaces_headline_metric(tmp_path):
         env_fn=env_fn,
         log_dir=str(tmp_path),
         headline_key="bounce_count",
+        info_eval_survival_thresholds={"bounce_count": (2, 3, 5)},
     )
     write_run_summary(
         cfg,
@@ -567,6 +571,9 @@ def test_run_summary_surfaces_headline_metric(tmp_path):
     assert "bounce_count_ep_mean" in text
     assert "Headline final: 2.14" in text
     assert "2.86 (at 50,000 steps)" in text
+    assert "Survival final:" in text
+    assert ">=2 40.0%" in text
+    assert ">=3 10.0%" in text
 
 
 def test_run_summary_skips_headline_without_data(tmp_path):
@@ -632,6 +639,9 @@ def test_run_summary_reports_task_metric_selected_best_model(tmp_path):
         "timestep,metric,value\n"
         "50000,bounce_count_ep_mean,3.2\n"
         "50000,bounce_count_final,3.0\n"
+        "50000,bounce_count_ep_ge_2_rate,0.8\n"
+        "50000,bounce_count_ep_ge_3_rate,0.25\n"
+        "50000,bounce_count_ep_ge_5_rate,0.0\n"
         "75000,bounce_count_ep_mean,0.0\n"
     )
 
@@ -642,6 +652,7 @@ def test_run_summary_reports_task_metric_selected_best_model(tmp_path):
         env_fn=env_fn,
         log_dir=str(tmp_path),
         headline_key="bounce_count",
+        info_eval_survival_thresholds={"bounce_count": (2, 3, 5)},
     )
     write_run_summary(
         cfg,
@@ -658,5 +669,8 @@ def test_run_summary_reports_task_metric_selected_best_model(tmp_path):
     # the reward looked up at that step (1.000), not the 75k argmax.
     assert "Best Checkpoint Evaluation (step 50,000)" in text
     assert "Reward:         1.000 +/- 0.000" in text
+    assert "Return survival:" in text
+    assert ">=2 80.0%" in text
+    assert ">=3 25.0%" in text
     # The reward-series best line is still reported for context.
     assert "2.000 +/- 0.000 (at 75,000 steps)" in text

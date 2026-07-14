@@ -547,6 +547,12 @@ WALL_BALL_LONG_HORIZON_ARTIFACTS: tuple[tuple[str, str], ...] = (
     ("best_long_eval_episodes", "best_model_long_horizon_episodes.csv"),
 )
 
+# Always report the practical rally gates, including explicit zeroes above
+# the observed maximum. The first WallBallBaseline run reached exactly one
+# return on every held-out seed; the former observed-max-only curve therefore
+# omitted the most important result: 0% survived a second return.
+WALL_BALL_RETURN_SURVIVAL_THRESHOLDS: tuple[int, ...] = (1, 2, 3, 5)
+
 
 _WALL_BALL_REWARD_COMPONENTS: tuple[str, ...] = (
     "rew_wall",
@@ -556,6 +562,7 @@ _WALL_BALL_REWARD_COMPONENTS: tuple[str, ...] = (
     "rew_double_bounce",
     "rew_stall",
     "rew_style_violation",
+    "rew_recoverable_bounce",
 )
 
 _WALL_BALL_TERMINATION_REASONS: tuple[str, ...] = (
@@ -596,6 +603,10 @@ _LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS: dict[str, Any] = {
     "rally_style": "open",
     "paddle_home_x": -1.7,
     "paddle_x_target_range": None,
+    "recovery_reset_probability": 0.0,
+    "post_bounce_reset_fraction": 0.5,
+    "recoverable_bounce_bonus": 0.0,
+    "recoverable_bounce_lateral_limit": 0.0,
 }
 
 
@@ -858,12 +869,16 @@ def _summarize_wall_ball_episodes(
         for threshold in survival_steps
     }
     max_returns = max(1, max(int(row["completed_returns"]) for row in rows))
+    return_thresholds = sorted(
+        set(range(1, max_returns + 1))
+        | set(WALL_BALL_RETURN_SURVIVAL_THRESHOLDS)
+    )
     return_survival = {
         str(threshold): {
             "count": sum(int(row["completed_returns"]) >= threshold for row in rows),
             "rate": sum(int(row["completed_returns"]) >= threshold for row in rows) / n,
         }
-        for threshold in range(1, max_returns + 1)
+        for threshold in return_thresholds
     }
 
     terminations = {
@@ -1055,9 +1070,18 @@ def evaluate_best_wall_ball(
     with open(meta_path) as handle:
         best_meta = json.load(handle)
     train_config = config.get("train_config") or {}
-    env_config = config.get("env") or {}
+    training_env_config = config.get("env") or {}
+    configured_evaluation_env = config.get("evaluation_env")
+    if isinstance(configured_evaluation_env, Mapping):
+        evaluation_env_config = configured_evaluation_env
+        constructor_profile = "evaluation"
+    else:
+        # Runs produced before separate evaluation profiles recorded only the
+        # training constructor. Preserve their verification path.
+        evaluation_env_config = training_env_config
+        constructor_profile = "training"
     selection_keys = best_meta.get("selection_keys") or []
-    if env_config.get("class") != "WallBallEnv":
+    if evaluation_env_config.get("class") != "WallBallEnv":
         raise ValueError("long-horizon helper requires a WallBallEnv run")
     if train_config.get("headline_key") != "bounce_count":
         raise ValueError(
@@ -1187,19 +1211,35 @@ def evaluate_best_wall_ball(
         evaluated_constructor_kwargs = _canonicalize_constructor_value(
             dict(getattr(unwrapped, "_ezpickle_kwargs", {}))
         )
+        recovery_reset_probability = getattr(
+            unwrapped, "recovery_reset_probability", None
+        )
+        if recovery_reset_probability is not None and not np.isclose(
+            float(recovery_reset_probability), 0.0, rtol=0.0, atol=1e-12
+        ):
+            raise ValueError(
+                "long-horizon WallBall evaluation requires normal-only "
+                "recovery_reset_probability=0"
+            )
     finally:
         env.close()
 
-    training_constructor_kwargs = env_config.get("constructor_kwargs")
-    if isinstance(training_constructor_kwargs, Mapping):
+    training_constructor_kwargs = training_env_config.get("constructor_kwargs")
+    evaluation_constructor_kwargs = evaluation_env_config.get(
+        "constructor_kwargs"
+    )
+    if isinstance(evaluation_constructor_kwargs, Mapping):
         if not _wall_ball_constructor_kwargs_match(
-            training_constructor_kwargs, evaluated_constructor_kwargs
+            evaluation_constructor_kwargs, evaluated_constructor_kwargs
         ):
             raise ValueError(
                 "long-horizon WallBall constructor settings differ from the "
-                "training run (apart from the intentional episode_len override)"
+                f"recorded {constructor_profile} profile (apart from the "
+                "intentional episode_len override)"
             )
-        environment_verification = "verified_against_training_constructor"
+        environment_verification = (
+            f"verified_against_{constructor_profile}_constructor"
+        )
     else:
         environment_verification = "legacy_config_without_constructor_kwargs"
 
@@ -1230,7 +1270,7 @@ def evaluate_best_wall_ball(
     _atomic_write_csv(episodes_path, rows, evaluation_id=evaluation_id)
     episodes_sha256 = _sha256(episodes_path)
     payload: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "evaluation_id": evaluation_id,
         "generated_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "training_run": {
@@ -1266,12 +1306,16 @@ def evaluate_best_wall_ball(
             "action_shape": action_shape,
             "verification": environment_verification,
             "training_constructor_kwargs": training_constructor_kwargs,
+            "evaluation_constructor_kwargs": evaluation_constructor_kwargs,
             "evaluated_constructor_kwargs": evaluated_constructor_kwargs,
         },
         "evaluation": {
             "episode_count": len(resolved_seeds),
             "seeds": list(resolved_seeds),
             "event_order_resolution": "policy_control_step",
+            "return_survival_thresholds": list(
+                WALL_BALL_RETURN_SURVIVAL_THRESHOLDS
+            ),
         },
         "outputs": {
             "episodes_csv": {
@@ -1296,6 +1340,12 @@ def evaluate_best_wall_ball(
         f"returns={returns['mean']:.2f} (p50={returns['p50']:.0f}, "
         f"p90={returns['p90']:.0f}), mean_steps={lengths['mean']:.1f}"
     )
+    survival_text = ", ".join(
+        f">={threshold}: "
+        f"{payload['return_survival_curve'][str(threshold)]['rate']:.1%}"
+        for threshold in WALL_BALL_RETURN_SURVIVAL_THRESHOLDS[1:]
+    )
+    print(f"Return survival: {survival_text}")
     return payload
 
 

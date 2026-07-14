@@ -94,15 +94,15 @@ def _gpu_info() -> dict[str, Any]:
     return info
 
 
-def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
-    """Construct the env once to capture class + space metadata."""
+def _probe_env_fn(env_fn: Any) -> dict[str, Any]:
+    """Construct one factory's env to capture class + space metadata."""
     info: dict[str, Any] = {
         "class": None,
         "observation_shape": None,
         "action_shape": None,
     }
     try:
-        env = cfg.env_fn()
+        env = env_fn()
     except Exception:
         return info
     try:
@@ -131,6 +131,11 @@ def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
     return info
 
 
+def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
+    """Capture the training environment profile (legacy helper name)."""
+    return _probe_env_fn(cfg.env_fn)
+
+
 def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
     """Snapshot the resolved cfg + provenance to ``log_dir/config.json``."""
     payload: dict[str, Any] = {
@@ -138,7 +143,12 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
         "git_sha": _git_sha(),
         "versions": _versions(),
         "gpu": _gpu_info(),
+        "recipe_name": cfg.recipe_name,
         "env": _probe_env(cfg),
+        # Keep ``env`` as the training profile for backwards compatibility.
+        # Evaluation may intentionally disable curriculum reset modes while
+        # preserving spaces and physics, so record that constructor too.
+        "evaluation_env": _probe_env_fn(cfg.eval_env_fn or cfg.env_fn),
         "train_config": {
             "algo": cfg.algo,
             "total_timesteps": cfg.total_timesteps,
@@ -184,6 +194,10 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "info_eval_distribution_keys": list(
                 cfg.info_eval_distribution_keys
             ),
+            "info_eval_survival_thresholds": {
+                key: list(thresholds)
+                for key, thresholds in cfg.info_eval_survival_thresholds.items()
+            },
             "success_key": cfg.success_key,
             "success_threshold": cfg.success_threshold,
             "headline_key": cfg.headline_key,
@@ -193,6 +207,9 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
                 if cfg.phase_labels
                 else None
             ),
+            "env_attr_schedules": [
+                dict(schedule) for schedule in cfg.env_attr_schedules
+            ],
         },
     }
     out = os.path.join(log_dir, "config.json")
@@ -465,6 +482,8 @@ EXPECTED_ARTIFACTS: tuple[tuple[str, str], ...] = (
 
 def _env_display_name(cfg: TrainConfig) -> str:
     """Friendly env name (e.g. ``WallBallEnv`` -> ``WallBall``)."""
+    if cfg.recipe_name:
+        return cfg.recipe_name
     info = _probe_env(cfg)
     cls = info.get("class") or ""
     return cls[:-3] if cls.endswith("Env") else (cls or "Unknown")
@@ -640,6 +659,22 @@ def write_run_summary(
                     f"{head_val:.2f} (at {head_step:,} steps)",
                 )
             )
+        survival_parts: list[str] = []
+        for threshold in cfg.info_eval_survival_thresholds.get(
+            cfg.headline_key, ()
+        ):
+            survival_metric = (
+                f"{cfg.headline_key}_ep_ge_{threshold}_rate"
+            )
+            survival_series = _read_eval_info_series(
+                log_dir, survival_metric
+            )
+            if survival_series:
+                survival_parts.append(
+                    f">={threshold} {survival_series[-1][1] * 100:.1f}%"
+                )
+        if survival_parts:
+            lines.append(_kv("Survival final", "  ".join(survival_parts)))
 
     if train_rewards:
         last_n = min(100, len(train_rewards))
@@ -729,6 +764,22 @@ def write_run_summary(
                         parts.append(f"max {peak:.2f}")
                     lines.append(
                         f"  {(base + ':').ljust(key_width)}{'  '.join(p for p in parts if p)}"
+                    )
+            if cfg.headline_key:
+                survival_parts = []
+                for threshold in cfg.info_eval_survival_thresholds.get(
+                    cfg.headline_key, ()
+                ):
+                    metric = (
+                        f"{cfg.headline_key}_ep_ge_{threshold}_rate"
+                    )
+                    if metric in eval_info:
+                        survival_parts.append(
+                            f">={threshold} {eval_info[metric] * 100:.1f}%"
+                        )
+                if survival_parts:
+                    lines.append(
+                        f"  {_kv('Return survival', '  '.join(survival_parts))}"
                     )
             phase_keys = sorted(
                 k for k in eval_info if k.startswith("phase_frac_")

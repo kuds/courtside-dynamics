@@ -509,6 +509,7 @@ def test_info_dict_eval_compact_schema_and_episode_distribution(tmp_path):
         info_keys=("rally_count",),
         terminal_info_keys=("term_ball_net",),
         episode_distribution_keys=("rally_count",),
+        episode_survival_thresholds={"rally_count": (2, 3, 5)},
         csv_path=str(tmp_path / "eval_info.csv"),
     )
     cb.model = _FakeModel(action_dim=1)
@@ -523,6 +524,9 @@ def test_info_dict_eval_compact_schema_and_episode_distribution(tmp_path):
     assert tb["eval_info/rally_count_ep_p50"] == pytest.approx(2.0)
     assert tb["eval_info/rally_count_ep_p90"] == pytest.approx(3.7)
     assert tb["eval_info/rally_count_ep_max"] == 4.0
+    assert tb["eval_info/rally_count_ep_ge_2_rate"] == pytest.approx(0.5)
+    assert tb["eval_info/rally_count_ep_ge_3_rate"] == pytest.approx(0.5)
+    assert tb["eval_info/rally_count_ep_ge_5_rate"] == 0.0
     assert not any("debug_contact_peak" in key for key in tb)
     assert "eval_info/term_ball_net_mean" not in tb
     assert "eval_info/term_ball_net_max" not in tb
@@ -532,6 +536,8 @@ def test_info_dict_eval_compact_schema_and_episode_distribution(tmp_path):
         rows = list(csv.DictReader(f))
     metric_names = {row["metric"] for row in rows}
     assert "rally_count_ep_p50" in metric_names
+    assert "rally_count_ep_ge_2_rate" in metric_names
+    assert "rally_count_ep_ge_5_rate" in metric_names
     assert "term_ball_net_ep_mean" in metric_names
     assert not any("debug_contact_peak" in name for name in metric_names)
 

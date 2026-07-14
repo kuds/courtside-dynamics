@@ -1023,13 +1023,14 @@ class TestWallBallRewardGate:
             env.close()
 
     def test_obs_layout_and_markov_fields(self):
-        """The 22-dim observation removes the deleted yaw/pitch state
+        """The 23-dim observation removes the deleted yaw/pitch state
         while retaining rel-xyz, spin, stall progress, and the pending
-        advance needed to make the task Markovian."""
+        advance and recovery-bonus eligibility needed to make the task
+        Markovian."""
         env = WallBallEnv()
         try:
             obs, _ = env.reset(seed=0)
-            assert obs.shape == (22,)
+            assert obs.shape == (23,)
             ball = np.array(env.data.joint("ball_x").qpos[:3])
             paddle = np.array(env.data.body("paddle_head").xpos)
             np.testing.assert_allclose(obs[14:17], ball - paddle, atol=1e-6)
@@ -1042,6 +1043,7 @@ class TestWallBallRewardGate:
             # Fresh reset: stall clock and pending advance both zero.
             assert obs[20] == 0.0
             assert obs[21] == 0.0
+            assert obs[22] == 0.0
 
             # Under no-op the stall clock must tick up monotonically
             # (the serve produces no paddle/wall edge for many steps).
@@ -1380,6 +1382,7 @@ class TestWallBallRewardGate:
                 components = (
                     info["rew_wall"]
                     + info["rew_paddle"]
+                    + info["rew_recoverable_bounce"]
                     + info["rew_shaping"]
                     + info["rew_oob"]
                     + info["rew_double_bounce"]
@@ -2071,7 +2074,7 @@ class TestWallBallRallyStyleConfiguration:
             obs, _ = env.reset(seed=0)
             assert env.rally_style == rally_style
             assert env.action_space.shape == (3,)
-            assert obs.shape == (22,)
+            assert obs.shape == (23,)
         finally:
             env.close()
 
@@ -2107,6 +2110,47 @@ class TestWallBallRallyStyleConfiguration:
     def test_style_violation_penalty_is_finite_and_nonnegative(self, penalty):
         with pytest.raises(ValueError, match="style_violation_penalty"):
             WallBallEnv(style_violation_penalty=penalty)
+
+    @pytest.mark.parametrize(
+        "name,value",
+        [
+            ("recovery_reset_probability", -0.01),
+            ("recovery_reset_probability", 1.01),
+            ("recovery_reset_probability", np.nan),
+            ("post_bounce_reset_fraction", -0.01),
+            ("post_bounce_reset_fraction", 1.01),
+            ("post_bounce_reset_fraction", np.inf),
+        ],
+    )
+    def test_recovery_reset_probabilities_are_validated(self, name, value):
+        with pytest.raises(ValueError, match=name):
+            WallBallEnv(**{name: value})
+
+    @pytest.mark.parametrize("value", [-1.0, np.nan, np.inf])
+    def test_recoverable_bounce_bonus_is_validated(self, value):
+        with pytest.raises(ValueError, match="recoverable_bounce_bonus"):
+            WallBallEnv(recoverable_bounce_bonus=value)
+
+    @pytest.mark.parametrize("value", [-1.0, np.nan, np.inf])
+    def test_recoverable_bounce_lateral_limit_is_validated(self, value):
+        with pytest.raises(
+            ValueError, match="recoverable_bounce_lateral_limit"
+        ):
+            WallBallEnv(recoverable_bounce_lateral_limit=value)
+
+    def test_recovery_probability_can_be_changed_safely(self):
+        env = WallBallEnv(rally_style="one_bounce")
+        try:
+            env.recovery_reset_probability = 0.75
+            env.post_bounce_reset_fraction = 0.25
+            assert env.recovery_reset_probability == 0.75
+            assert env.post_bounce_reset_fraction == 0.25
+            with pytest.raises(ValueError, match="recovery_reset_probability"):
+                env.recovery_reset_probability = 1.1
+            with pytest.raises(ValueError, match="post_bounce_reset_fraction"):
+                env.post_bounce_reset_fraction = -0.1
+        finally:
+            env.close()
 
     def test_baseline_world_range_maps_around_configured_home(self):
         env = WallBallEnv(
@@ -2179,6 +2223,120 @@ class TestWallBallRallyStyleConfiguration:
             env.close()
 
 
+class TestWallBallRecoveryResetCurriculum:
+    """Recovery fragments must teach state, not manufacture rally credit."""
+
+    @staticmethod
+    def _ball_state(env):
+        return (
+            np.asarray(env.data.joint("ball_x").qpos[:3]).copy(),
+            np.asarray(env.data.joint("ball_x").qvel[:3]).copy(),
+        )
+
+    def test_zero_probability_always_preserves_normal_one_bounce_reset(self):
+        env = WallBallEnv(
+            rally_style="one_bounce",
+            recovery_reset_probability=0.0,
+            post_bounce_reset_fraction=1.0,
+        )
+        try:
+            for seed in range(20):
+                obs, reset_info = env.reset(seed=seed)
+                assert env.reset_mode == "normal"
+                assert reset_info["reset_mode"] == "normal"
+                assert reset_info["reset_mode_id"] == 0
+                assert env.rally_phase_name == "await_bounce"
+                assert env.floor_bounce_count == 0
+                assert env.floor_bounce_total == 0
+                assert env.bounce_count == 0
+                assert env.one_bounce_recovery_count == 0
+                assert env.one_bounce_return_count == 0
+                assert env._recoverable_bounce_eligible is False
+                assert obs[-1] == 0.0
+        finally:
+            env.close()
+
+    @pytest.mark.parametrize("rally_style", ["open", "volley"])
+    def test_recovery_resets_are_never_sampled_outside_one_bounce(
+        self, rally_style
+    ):
+        env = WallBallEnv(
+            rally_style=rally_style,
+            recovery_reset_probability=1.0,
+            post_bounce_reset_fraction=1.0,
+        )
+        try:
+            for seed in range(10):
+                _, reset_info = env.reset(seed=seed)
+                assert env.reset_mode == "normal"
+                assert reset_info["reset_mode"] == "normal"
+        finally:
+            env.close()
+
+    def test_incoming_wall_reset_uses_calibrated_state_and_clean_counters(self):
+        env = WallBallEnv(
+            rally_style="one_bounce",
+            recovery_reset_probability=1.0,
+            post_bounce_reset_fraction=0.0,
+        )
+        try:
+            for seed in range(20):
+                obs, reset_info = env.reset(seed=seed)
+                pos, vel = self._ball_state(env)
+                assert env.reset_mode == "incoming_wall"
+                assert reset_info["reset_mode_id"] == 1
+                assert 3.1 <= pos[0] <= 3.5
+                assert -0.75 <= pos[1] <= 0.75
+                assert 1.3 <= pos[2] <= 1.7
+                assert -8.5 <= vel[0] <= -7.5
+                assert -0.4 <= vel[1] <= 0.4
+                assert -1.5 <= vel[2] <= 0.3
+                assert env.rally_phase_name == "await_bounce"
+                assert env.floor_bounce_count == 0
+                assert env.floor_bounce_total == 0
+                assert env.bounce_count == 0
+                assert env.wall_contact_count == 0
+                assert env.legal_paddle_hit_count == 0
+                assert env.one_bounce_recovery_count == 0
+                assert env.one_bounce_return_count == 0
+                assert env._recoverable_bounce_eligible is False
+                assert obs[-1] == 0.0
+        finally:
+            env.close()
+
+    def test_post_bounce_reset_starts_awaiting_paddle_without_credit(self):
+        env = WallBallEnv(
+            rally_style="one_bounce",
+            recovery_reset_probability=1.0,
+            post_bounce_reset_fraction=1.0,
+        )
+        try:
+            for seed in range(20):
+                obs, reset_info = env.reset(seed=seed)
+                pos, vel = self._ball_state(env)
+                assert env.reset_mode == "post_bounce"
+                assert reset_info["reset_mode_id"] == 2
+                assert -0.5 <= pos[0] <= 0.5
+                assert -0.75 <= pos[1] <= 0.75
+                assert 0.10 <= pos[2] <= 0.15
+                assert -7.5 <= vel[0] <= -6.0
+                assert -0.4 <= vel[1] <= 0.4
+                assert 2.5 <= vel[2] <= 3.5
+                assert env.rally_phase_name == "await_paddle"
+                assert env.floor_bounce_count == 1
+                assert env.floor_bounce_total == 1
+                assert env.bounce_count == 0
+                assert env.wall_contact_count == 0
+                assert env.legal_paddle_hit_count == 0
+                assert env.one_bounce_recovery_count == 0
+                assert env.one_bounce_return_count == 0
+                assert env._recoverable_bounce_eligible is False
+                assert obs[13] == 1.0
+                assert obs[-1] == 0.0
+        finally:
+            env.close()
+
+
 class TestWallBallRallyStyleInfoContract:
     """Keep the training/evaluation diagnostics stable across modes."""
 
@@ -2186,6 +2344,8 @@ class TestWallBallRallyStyleInfoContract:
         "event_floor_bounce",
         "event_legal_paddle_hit",
         "event_completed_return",
+        "event_recoverable_bounce",
+        "event_post_wall_bounce",
         "event_style_violation",
     )
 
@@ -2208,6 +2368,11 @@ class TestWallBallRallyStyleInfoContract:
             assert info["return_count"] == 0
             assert info["style_violation_reason"] is None
             assert info["rew_style_violation"] == 0.0
+            assert info["rew_recoverable_bounce"] == 0.0
+            assert info["recoverable_bounce_score"] == 0.0
+            assert info["recoverable_bounce_eligible"] is False
+            assert info["reset_mode"] == "normal"
+            assert info["reset_mode_id"] == 0
             assert info["term_style_violation"] is False
             for key in self._EVENT_KEYS:
                 assert info[key] is False
@@ -2345,6 +2510,153 @@ class TestWallBallRallyStyleSemantics:
             assert info["one_bounce_return_count"] == 1
             assert info["return_count"] == 1
             assert info["bounce_count"] == 1
+        finally:
+            env.close()
+
+    def test_synthetic_recovery_bounce_never_earns_agent_bonus(self):
+        env = self._strict_env(
+            "one_bounce",
+            recovery_reset_probability=1.0,
+            post_bounce_reset_fraction=0.0,
+            recoverable_bounce_bonus=0.6,
+            recoverable_bounce_lateral_limit=2.0,
+        )
+        try:
+            env.reset(seed=0)
+            assert env.reset_mode == "incoming_wall"
+            assert env._recoverable_bounce_eligible is False
+            self._place_ball(
+                env,
+                [1.5, 0.0, 0.7],
+                vel=[-4.0, 0.0, -2.0],
+            )
+            _, reward, terminated, truncated, info = self._step_until(
+                env, "event_floor_bounce"
+            )
+            assert not (terminated or truncated)
+            assert reward == pytest.approx(0.0)
+            assert info["event_post_wall_bounce"] is False
+            assert info["event_recoverable_bounce"] is False
+            assert info["recoverable_bounce_score"] == 0.0
+            assert info["rew_recoverable_bounce"] == 0.0
+        finally:
+            env.close()
+
+    def test_agent_wall_return_arms_one_central_recoverable_bounce_bonus(self):
+        env = self._strict_env(
+            "one_bounce",
+            recoverable_bounce_bonus=0.6,
+            recoverable_bounce_lateral_limit=2.0,
+        )
+        try:
+            env.reset(seed=0)
+            self._floor_bounce(env)
+            self._paddle_hit(env)
+            obs, _, terminated, truncated, info = self._wall_hit(env)
+            assert not (terminated or truncated)
+            assert info["event_completed_return"] is True
+            assert info["recoverable_bounce_eligible"] is True
+            assert obs[-1] == 1.0
+
+            self._place_ball(
+                env,
+                [1.5, 0.0, 0.7],
+                vel=[-4.0, 0.0, -2.0],
+            )
+            obs, reward, terminated, truncated, info = self._step_until(
+                env, "event_floor_bounce"
+            )
+            assert not (terminated or truncated)
+            assert info["event_post_wall_bounce"] is True
+            assert info["event_recoverable_bounce"] is True
+            assert info["recoverable_bounce_score"] == pytest.approx(1.0)
+            assert info["rew_recoverable_bounce"] == pytest.approx(0.6)
+            assert reward == pytest.approx(0.6)
+            assert info["recoverable_bounce_eligible"] is False
+            assert obs[-1] == 0.0
+
+            # A later bounce cannot farm the same policy-generated return.
+            self._place_ball(
+                env,
+                [1.5, 0.0, 0.7],
+                vel=[-4.0, 0.0, -2.0],
+            )
+            _, reward, terminated, truncated, info = self._step_until(
+                env, "event_floor_bounce"
+            )
+            assert terminated and not truncated
+            assert info["event_post_wall_bounce"] is False
+            assert info["event_recoverable_bounce"] is False
+            assert info["recoverable_bounce_score"] == 0.0
+            assert info["rew_recoverable_bounce"] == 0.0
+            assert reward == pytest.approx(0.0)
+        finally:
+            env.close()
+
+    def test_post_wall_bounce_outside_lateral_limit_consumes_without_bonus(self):
+        env = self._strict_env(
+            "one_bounce",
+            recoverable_bounce_bonus=0.6,
+            recoverable_bounce_lateral_limit=0.5,
+        )
+        try:
+            env.reset(seed=0)
+            self._floor_bounce(env)
+            self._paddle_hit(env)
+            self._wall_hit(env)
+            assert env._recoverable_bounce_eligible is True
+
+            self._place_ball(
+                env,
+                [1.5, 1.0, 0.7],
+                vel=[-4.0, 0.0, -2.0],
+            )
+            _, reward, terminated, truncated, info = self._step_until(
+                env, "event_floor_bounce"
+            )
+            assert not (terminated or truncated)
+            assert info["event_post_wall_bounce"] is True
+            assert info["event_recoverable_bounce"] is False
+            assert info["recoverable_bounce_score"] == 0.0
+            assert info["rew_recoverable_bounce"] == 0.0
+            assert reward == pytest.approx(0.0)
+            assert env._recoverable_bounce_eligible is False
+        finally:
+            env.close()
+
+    def test_recoverable_projection_uses_world_space_paddle_front(self):
+        env = self._strict_env(
+            "one_bounce",
+            paddle_home_x=-2.7,
+            paddle_x_target_range=(-3.2, -2.1),
+            recoverable_bounce_lateral_limit=2.0,
+        )
+        try:
+            env.reset(seed=0)
+            env._substep_floor_bounce_state = (
+                np.array([1.0, 0.0, 0.07]),
+                np.array([-4.0, 1.0, -2.0]),
+            )
+            # World front x=-2.1 gives t=(1.0 - -2.1)/4=.775,
+            # projected y=.775, and score=1-.775/2=.6125.
+            assert env._recoverable_bounce_score() == pytest.approx(0.6125)
+        finally:
+            env.close()
+
+    def test_bounce_behind_entire_paddle_lane_is_not_recoverable(self):
+        env = self._strict_env(
+            "one_bounce",
+            paddle_home_x=-2.7,
+            paddle_x_target_range=(-3.2, -2.1),
+            recoverable_bounce_lateral_limit=2.0,
+        )
+        try:
+            env.reset(seed=0)
+            env._substep_floor_bounce_state = (
+                np.array([-3.21, 0.0, 0.07]),
+                np.array([-4.0, 0.0, -2.0]),
+            )
+            assert env._recoverable_bounce_score() == 0.0
         finally:
             env.close()
 
