@@ -97,6 +97,14 @@ to 22 values after removing yaw/pitch state. Previous WallBall models,
 incompatible; start a fresh run rather than resuming a pre-0.8 artifact. The
 Wall Ball animation below was recorded with the legacy 5-action environment.
 
+WallBall also supports fixed per-run rally styles without changing that
+3-action/22-observation policy interface. `WallBallVolley` forbids floor
+contacts. `WallBallBaseline` requires exactly one bounce before each paddle
+return, starts the paddle farther back at world x=-2.7, restricts it to the
+[-3.2, -2.2] baseline lane, and uses a calibrated lower serve. The original
+`WallBall` recipe remains the permissive `open` setup for compatibility;
+train separate policies for the strict volley and baseline recipes.
+
 | Ball Balance | Ball Bounce | Wall Ball |
 |:---:|:---:|:---:|
 | ![A trained agent balancing a ball on a tray](Images/sac_ball_balance.gif) | ![A trained agent bouncing a ball on a paddle](Images/sac_ball_bounce.gif) | ![A trained agent rallying a ball against a wall](Images/sac_wall_ball.gif) |
@@ -116,6 +124,8 @@ available recipe keys are:
 - `BallBalance`
 - `BallBounce`
 - `WallBall`
+- `WallBallVolley`
+- `WallBallBaseline`
 - `HumanoidTennisStage0Intercept`
 - `HumanoidTennisStage1AnchoredReturn`
 - `HumanoidTennisStage2RandomizedReturn`

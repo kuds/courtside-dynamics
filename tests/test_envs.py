@@ -1364,10 +1364,9 @@ class TestWallBallRewardGate:
     def test_reward_components_sum_to_total(self):
         """The per-component reward breakdown in info must sum to reward.
 
-        Whatever the dynamics do, ``rew_wall + rew_paddle + rew_shaping +
-        rew_oob + rew_double_bounce`` has to equal the scalar reward on
-        every step -- that's the invariant that makes the composition
-        plots trustworthy.
+        Whatever the dynamics do, every ``rew_*`` component has to sum
+        to the scalar reward on every step -- that's the invariant that
+        makes the composition plots trustworthy.
         """
         env = WallBallEnv(min_force=1.0)
         try:
@@ -1384,6 +1383,8 @@ class TestWallBallRewardGate:
                     + info["rew_shaping"]
                     + info["rew_oob"]
                     + info["rew_double_bounce"]
+                    + info["rew_stall"]
+                    + info["rew_style_violation"]
                 )
                 assert abs(components - reward) < 1e-9, (
                     f"components {components} != reward {reward}"
@@ -1411,6 +1412,7 @@ class TestWallBallRewardGate:
                     + int(info["term_stall"])
                     + int(info["term_timeout"])
                     + int(info["term_nonfinite"])
+                    + int(info["term_style_violation"])
                 )
                 assert flags <= 1, f"overlapping termination flags: {info}"
                 if terminated or truncated:
@@ -2051,3 +2053,438 @@ class TestWallBallServe:
             WallBallEnv(serve_vy_min=0.0)
         with pytest.raises(ValueError, match="serve_vy_min"):
             WallBallEnv(serve_vy_min=2.0, serve_vy_max=1.0)
+
+
+class TestWallBallRallyStyleConfiguration:
+    """Pin the public configuration shared by all WallBall presets.
+
+    ``paddle_home_x`` and ``paddle_x_target_range`` are deliberately
+    world-space values: recipe authors should not need to know that the
+    XML's slide joint is measured relative to a base at x=-1.7.  The
+    policy still emits the same three normalized targets in every mode.
+    """
+
+    @pytest.mark.parametrize("rally_style", ["open", "volley", "one_bounce"])
+    def test_all_rally_styles_construct_with_same_spaces(self, rally_style):
+        env = WallBallEnv(rally_style=rally_style)
+        try:
+            obs, _ = env.reset(seed=0)
+            assert env.rally_style == rally_style
+            assert env.action_space.shape == (3,)
+            assert obs.shape == (22,)
+        finally:
+            env.close()
+
+    def test_invalid_rally_style_is_rejected(self):
+        with pytest.raises(ValueError, match="rally_style"):
+            WallBallEnv(rally_style="serve_and_volley")
+
+    @pytest.mark.parametrize(
+        "kwargs,parameter",
+        [
+            ({"paddle_home_x": -5.0}, "paddle_home_x"),
+            (
+                {
+                    "paddle_home_x": -2.7,
+                    "paddle_x_target_range": (-3.2, -3.0),
+                },
+                "paddle_home_x",
+            ),
+            ({"paddle_x_target_range": (-5.0, -2.0)}, "paddle_x_target_range"),
+            ({"paddle_x_target_range": (-2.0, 0.5)}, "paddle_x_target_range"),
+            ({"paddle_x_target_range": (-2.0, -3.0)}, "paddle_x_target_range"),
+            ({"paddle_x_target_range": (-2.0,)}, "paddle_x_target_range"),
+            ({"paddle_x_target_range": (-2.0, np.inf)}, "paddle_x_target_range"),
+        ],
+    )
+    def test_world_space_paddle_configuration_is_validated(
+        self, kwargs, parameter
+    ):
+        with pytest.raises((TypeError, ValueError), match=parameter):
+            WallBallEnv(**kwargs)
+
+    @pytest.mark.parametrize("penalty", [-1.0, np.nan, np.inf])
+    def test_style_violation_penalty_is_finite_and_nonnegative(self, penalty):
+        with pytest.raises(ValueError, match="style_violation_penalty"):
+            WallBallEnv(style_violation_penalty=penalty)
+
+    def test_baseline_world_range_maps_around_configured_home(self):
+        env = WallBallEnv(
+            rally_style="one_bounce",
+            paddle_home_x=-2.7,
+            paddle_x_target_range=(-3.2, -2.2),
+        )
+        try:
+            np.testing.assert_allclose(
+                env._action_to_controls(np.array([-1.0, 0.0, 0.0])),
+                [-1.5, 0.0, 0.0],
+            )
+            np.testing.assert_allclose(
+                env._action_to_controls(np.zeros(3)),
+                [-1.0, 0.0, 0.0],
+            )
+            np.testing.assert_allclose(
+                env._action_to_controls(np.array([1.0, 0.0, 0.0])),
+                [-0.5, 0.0, 0.0],
+            )
+            # Configuring x must not alter the y/z action contract.
+            np.testing.assert_allclose(
+                env._action_to_controls(np.array([0.0, -1.0, -1.0])),
+                [-1.0, -3.0, -0.9],
+            )
+            np.testing.assert_allclose(
+                env._action_to_controls(np.array([0.0, 1.0, 1.0])),
+                [-1.0, 3.0, 2.0],
+            )
+        finally:
+            env.close()
+
+    def test_reset_places_paddle_at_configured_world_home(self):
+        env = WallBallEnv(
+            rally_style="one_bounce",
+            paddle_home_x=-2.7,
+            paddle_x_target_range=(-3.2, -2.2),
+        )
+        try:
+            for seed in range(10):
+                env.reset(seed=seed)
+                slide_x = float(env.data.joint("paddle_slide_x").qpos[0])
+                head_x = float(env.data.body("paddle_head").xpos[0])
+                # Base x=-1.7 plus configured qpos=-1.0 gives the
+                # requested world home x=-2.7.  Reset noise remains.
+                assert abs(slide_x - (-1.0)) <= 0.011
+                assert abs(head_x - (-2.7)) <= 0.011
+                assert -3.2 <= head_x <= -2.2
+        finally:
+            env.close()
+
+    def test_default_open_configuration_remains_bit_for_bit_compatible(self):
+        env = WallBallEnv()
+        try:
+            env.reset(seed=0)
+            assert env.rally_style == "open"
+            np.testing.assert_allclose(
+                env._action_to_controls(np.full(3, -1.0)),
+                [-3.0, -3.0, -0.9],
+            )
+            np.testing.assert_allclose(
+                env._action_to_controls(np.zeros(3)),
+                [0.0, 0.0, 0.0],
+            )
+            np.testing.assert_allclose(
+                env._action_to_controls(np.ones(3)),
+                [2.0, 3.0, 2.0],
+            )
+        finally:
+            env.close()
+
+
+class TestWallBallRallyStyleInfoContract:
+    """Keep the training/evaluation diagnostics stable across modes."""
+
+    _EVENT_KEYS = (
+        "event_floor_bounce",
+        "event_legal_paddle_hit",
+        "event_completed_return",
+        "event_style_violation",
+    )
+
+    @pytest.mark.parametrize("rally_style", ["open", "volley", "one_bounce"])
+    def test_info_exposes_style_state_counters_and_step_events(
+        self, rally_style
+    ):
+        env = WallBallEnv(rally_style=rally_style)
+        try:
+            env.reset(seed=0)
+            _, reward, terminated, truncated, info = env.step(
+                np.zeros(env.action_space.shape, dtype=np.float32)
+            )
+            assert np.isfinite(reward)
+            assert not (terminated or truncated)
+            assert isinstance(info["rally_phase_name"], str)
+            assert info["legal_paddle_hit_count"] == 0
+            assert info["one_bounce_recovery_count"] == 0
+            assert info["one_bounce_return_count"] == 0
+            assert info["return_count"] == 0
+            assert info["style_violation_reason"] is None
+            assert info["rew_style_violation"] == 0.0
+            assert info["term_style_violation"] is False
+            for key in self._EVENT_KEYS:
+                assert info[key] is False
+        finally:
+            env.close()
+
+    @pytest.mark.parametrize(
+        "rally_style,reset_phase",
+        [
+            ("open", "await_paddle"),
+            ("volley", "await_paddle"),
+            ("one_bounce", "await_bounce"),
+        ],
+    )
+    def test_reset_clears_style_metrics_and_restores_initial_phase(
+        self, rally_style, reset_phase
+    ):
+        env = WallBallEnv(rally_style=rally_style)
+        try:
+            env.reset(seed=0)
+            env.legal_paddle_hit_count = 4
+            env.one_bounce_recovery_count = 3
+            env.one_bounce_return_count = 2
+            env._rally_phase = 2
+            env.reset(seed=1)
+            _, _, _, _, info = env.step(
+                np.zeros(env.action_space.shape, dtype=np.float32)
+            )
+            assert info["legal_paddle_hit_count"] == 0
+            assert info["one_bounce_recovery_count"] == 0
+            assert info["one_bounce_return_count"] == 0
+            assert info["rally_phase_name"] == reset_phase
+        finally:
+            env.close()
+
+
+class TestWallBallRallyStyleSemantics:
+    """Exercise strict volley/baseline rules with real MuJoCo contacts."""
+
+    @staticmethod
+    def _zero_action(env):
+        return np.zeros(env.action_space.shape, dtype=np.float32)
+
+    @staticmethod
+    def _place_ball(env, pos, vel=(0.0, 0.0, 0.0)):
+        qpos = env.data.qpos.copy()
+        qvel = env.data.qvel.copy()
+        ball_qposadr = int(env.model.joint("ball_x").qposadr[0])
+        ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+        qpos[ball_qposadr : ball_qposadr + 3] = pos
+        qvel[ball_dofadr : ball_dofadr + 6] = 0.0
+        qvel[ball_dofadr : ball_dofadr + 3] = vel
+        env.set_state(qpos, qvel)
+
+    def _step_until(self, env, event_key, limit=120):
+        for _ in range(limit):
+            transition = env.step(self._zero_action(env))
+            if transition[4][event_key]:
+                return transition
+            if transition[2] or transition[3]:
+                pytest.fail(
+                    f"episode ended before {event_key}: {transition[4]}"
+                )
+        pytest.fail(f"physics never produced {event_key} in {limit} steps")
+
+    def _floor_bounce(self, env):
+        self._place_ball(env, [1.5, 0.0, 0.7], vel=[0.0, 0.0, -2.0])
+        return self._step_until(env, "event_floor_bounce")
+
+    def _paddle_hit(self, env, *, legal=True):
+        face = env.data.body("paddle_head").xpos.copy()
+        self._place_ball(
+            env,
+            face + np.array([0.5, 0.0, 0.05]),
+            vel=[-3.0, 0.0, 0.0],
+        )
+        key = "event_legal_paddle_hit" if legal else "event_style_violation"
+        return self._step_until(env, key)
+
+    def _wall_hit(self, env):
+        self._place_ball(env, [2.7, 0.0, 1.5], vel=[3.0, 0.0, 0.0])
+        return self._step_until(env, "event_completed_return")
+
+    @staticmethod
+    def _strict_env(rally_style, **kwargs):
+        defaults = {
+            "rally_style": rally_style,
+            "min_force": 1.0,
+            "track_shaping_scale": 0.0,
+            "paddle_hit_bonus": 0.0,
+            "out_of_bounds_penalty": 0.0,
+            "double_bounce_penalty": 0.0,
+            "stall_penalty": 0.0,
+            "style_violation_penalty": 2.5,
+            "stall_steps": 300,
+        }
+        defaults.update(kwargs)
+        return WallBallEnv(**defaults)
+
+    def test_one_bounce_cycle_requires_floor_then_paddle_then_wall(self):
+        env = self._strict_env(
+            "one_bounce",
+            paddle_home_x=-2.7,
+            paddle_x_target_range=(-3.2, -2.2),
+        )
+        try:
+            env.reset(seed=0)
+
+            env._steps_since_event = 17
+            _, _, terminated, truncated, info = self._floor_bounce(env)
+            assert not (terminated or truncated)
+            assert info["event_floor_bounce"] is True
+            assert info["event_style_violation"] is False
+            assert info["rally_phase_name"] == "await_paddle"
+            assert info["floor_bounce_count"] == 1
+            # A required baseline bounce is progress, so it restarts
+            # the stall window just like a paddle/wall edge.
+            assert env._steps_since_event == 0
+
+            _, _, terminated, truncated, info = self._paddle_hit(env)
+            assert not (terminated or truncated)
+            assert info["event_legal_paddle_hit"] is True
+            assert info["event_style_violation"] is False
+            assert info["rally_phase_name"] == "await_wall"
+            assert info["paddle_hit_count"] == 1
+            assert info["legal_paddle_hit_count"] == 1
+            assert info["one_bounce_recovery_count"] == 1
+            assert info["one_bounce_return_count"] == 0
+
+            _, reward, terminated, truncated, info = self._wall_hit(env)
+            assert not (terminated or truncated)
+            assert reward == pytest.approx(1.0)
+            assert info["event_completed_return"] is True
+            assert info["rally_phase_name"] == "await_bounce"
+            assert info["one_bounce_return_count"] == 1
+            assert info["return_count"] == 1
+            assert info["bounce_count"] == 1
+        finally:
+            env.close()
+
+    def test_calibrated_baseline_serve_is_physically_solvable(self):
+        """An observation-only controller closes a legal cycle on real serves."""
+        from courtside_dynamics.recipes import RECIPES
+        from courtside_dynamics.scripted_policies import (
+            wall_ball_baseline_oracle_action,
+        )
+
+        env_kwargs = dict(RECIPES["WallBallBaseline"].env_kwargs)
+        env_kwargs.pop("render_mode", None)
+        env = WallBallEnv(**env_kwargs)
+        try:
+            for seed in range(5):
+                obs, _ = env.reset(seed=seed)
+                for _ in range(env.episode_len):
+                    obs, _, terminated, truncated, info = env.step(
+                        wall_ball_baseline_oracle_action(obs)
+                    )
+                    if info["bounce_count"] >= 1:
+                        break
+                    assert not (terminated or truncated), (
+                        f"seed {seed}: calibrated serve ended before a "
+                        f"legal return: {info}"
+                    )
+                assert info["bounce_count"] >= 1
+                assert info["one_bounce_recovery_count"] >= 1
+                assert info["one_bounce_return_count"] >= 1
+                assert info["floor_bounce_total"] >= 1
+        finally:
+            env.close()
+
+    def test_open_mode_reports_floor_event_without_changing_old_rule(self):
+        env = self._strict_env("open")
+        try:
+            env.reset(seed=0)
+            _, _, terminated, truncated, info = self._floor_bounce(env)
+            assert not (terminated or truncated)
+            assert info["event_floor_bounce"] is True
+            assert info["event_style_violation"] is False
+            assert info["style_violation_reason"] is None
+            assert info["term_style_violation"] is False
+            assert info["floor_bounce_count"] == 1
+        finally:
+            env.close()
+
+    def test_volley_floor_contact_is_terminal_style_violation(self):
+        env = self._strict_env("volley")
+        try:
+            env.reset(seed=0)
+            _, reward, terminated, truncated, info = self._floor_bounce(env)
+            assert terminated and not truncated
+            assert reward == pytest.approx(-2.5)
+            assert info["event_floor_bounce"] is True
+            assert info["event_style_violation"] is True
+            assert info["style_violation_reason"] == "floor_in_volley"
+            assert info["rew_style_violation"] == pytest.approx(-2.5)
+            assert info["term_style_violation"] is True
+            assert info["term_double_bounce"] is False
+            assert info["legal_paddle_hit_count"] == 0
+        finally:
+            env.close()
+
+    def test_one_bounce_paddle_before_floor_is_terminal_violation(self):
+        env = self._strict_env("one_bounce")
+        try:
+            env.reset(seed=0)
+            _, reward, terminated, truncated, info = self._paddle_hit(
+                env, legal=False
+            )
+            assert terminated and not truncated
+            assert reward == pytest.approx(-2.5)
+            assert info["event_legal_paddle_hit"] is False
+            assert info["event_style_violation"] is True
+            assert info["style_violation_reason"] == "paddle_before_bounce"
+            assert info["rew_style_violation"] == pytest.approx(-2.5)
+            assert info["term_style_violation"] is True
+            # Raw contact telemetry is preserved even though this hit
+            # is not allowed to open the reward gate.
+            assert info["paddle_hit_count"] == 1
+            assert info["legal_paddle_hit_count"] == 0
+            assert info["one_bounce_return_count"] == 0
+        finally:
+            env.close()
+
+    def test_floor_after_legal_paddle_before_wall_is_terminal_violation(self):
+        env = self._strict_env("one_bounce")
+        try:
+            env.reset(seed=0)
+            self._floor_bounce(env)
+            self._paddle_hit(env)
+            _, reward, terminated, truncated, info = self._floor_bounce(env)
+            assert terminated and not truncated
+            assert reward == pytest.approx(-2.5)
+            assert info["event_floor_bounce"] is True
+            assert info["event_style_violation"] is True
+            assert info["style_violation_reason"] == "floor_before_wall"
+            assert info["rew_style_violation"] == pytest.approx(-2.5)
+            assert info["term_style_violation"] is True
+            assert info["term_double_bounce"] is False
+            assert info["one_bounce_return_count"] == 0
+        finally:
+            env.close()
+
+    def test_legal_volley_cycle_never_counts_one_bounce_recovery(self):
+        env = self._strict_env("volley")
+        try:
+            env.reset(seed=0)
+            _, _, terminated, truncated, info = self._paddle_hit(env)
+            assert not (terminated or truncated)
+            assert info["event_legal_paddle_hit"] is True
+            assert info["rally_phase_name"] == "await_wall"
+            assert info["legal_paddle_hit_count"] == 1
+            assert info["one_bounce_recovery_count"] == 0
+
+            _, reward, terminated, truncated, info = self._wall_hit(env)
+            assert not (terminated or truncated)
+            assert reward == pytest.approx(1.0)
+            assert info["event_completed_return"] is True
+            assert info["rally_phase_name"] == "await_paddle"
+            assert info["one_bounce_return_count"] == 0
+            assert info["return_count"] == 1
+            assert info["one_bounce_recovery_count"] == 0
+        finally:
+            env.close()
+
+    def test_same_substep_events_are_ordered_floor_paddle_wall(self):
+        env = WallBallEnv(rally_style="one_bounce")
+        try:
+            env.reset(seed=0)
+            # Intentionally scrambled input proves sorting uses substep
+            # then explicit contact precedence, not insertion order.
+            env._substep_contact_events = [
+                (2, 2, "wall"),
+                (2, 0, "floor"),
+                (2, 1, "paddle"),
+            ]
+            assert env._ordered_frame_events(
+                paddle_edge=True, wall_edge=True
+            ) == ["floor", "paddle", "wall"]
+        finally:
+            env.close()

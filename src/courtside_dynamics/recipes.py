@@ -304,11 +304,86 @@ RECIPES: dict[str, Recipe] = {
             # eval CSV shows whether a mean of 1.0 is "every episode
             # rallies once" or "one episode rallied ten times".
             "info_eval_distribution_keys": ("bounce_count",),
+            "phase_key": "rally_phase",
+            "phase_labels": {
+                0: "await_bounce",
+                1: "await_paddle",
+                2: "await_wall",
+            },
         },
         description=(
             "Rally a ball against a wall with a face-only paddle at a fixed "
             "10-degree upward pitch, three target-controlled DOFs, and a "
             "strict gated wall-hit reward."
+        ),
+    ),
+    "WallBallVolley": Recipe(
+        env_cls=WallBallEnv,
+        env_kwargs={
+            "render_mode": "rgb_array",
+            "min_force": 20.0,
+            "serve_vy_max": 2.6,
+            "rally_style": "volley",
+            # World-space values that exactly preserve WallBall's current
+            # XML home pose and full x workspace. This preset changes the
+            # rally rule, not the paddle geometry.
+            "paddle_home_x": -1.7,
+            "paddle_x_target_range": (-4.7, 0.3),
+        },
+        default_total_timesteps=1_500_000,
+        name_prefix="wall_ball_volley",
+        extra_cfg={
+            "success_key": "bounce_count",
+            "success_threshold": 1.0,
+            "headline_key": "bounce_count",
+            "info_eval_distribution_keys": ("bounce_count",),
+            "phase_key": "rally_phase",
+            "phase_labels": {
+                0: "await_bounce",
+                1: "await_paddle",
+                2: "await_wall",
+            },
+        },
+        description=(
+            "Volley against the wall without letting the ball touch the "
+            "floor, using the full face-only paddle workspace."
+        ),
+    ),
+    "WallBallBaseline": Recipe(
+        env_cls=WallBallEnv,
+        env_kwargs={
+            "render_mode": "rgb_array",
+            "min_force": 20.0,
+            "rally_style": "one_bounce",
+            # Calibrated in world space: the lower, slower serve bounces
+            # around x=-1.72 before reaching a paddle kept near x=-2.7.
+            # The measured bounce -> paddle -> wall sequence succeeded in
+            # 500/500 scripted trials; a parked paddle scored 0/1,000.
+            "paddle_home_x": -2.7,
+            "paddle_x_target_range": (-3.2, -2.2),
+            "serve_speed": 5.5,
+            "serve_speed_jitter": 0.5,
+            "serve_lob": 0.0,
+            "serve_vy_min": 0.8,
+            "serve_vy_max": 2.0,
+        },
+        default_total_timesteps=1_500_000,
+        name_prefix="wall_ball_baseline",
+        extra_cfg={
+            "success_key": "bounce_count",
+            "success_threshold": 1.0,
+            "headline_key": "bounce_count",
+            "info_eval_distribution_keys": ("bounce_count",),
+            "phase_key": "rally_phase",
+            "phase_labels": {
+                0: "await_bounce",
+                1: "await_paddle",
+                2: "await_wall",
+            },
+        },
+        description=(
+            "Play one-bounce baseline rallies from a restricted rear paddle "
+            "zone with a calibrated bounce-first serve."
         ),
     ),
     "HumanoidTennisStage0Intercept": Recipe(

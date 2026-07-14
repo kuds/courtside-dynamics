@@ -107,7 +107,10 @@ def test_wall_ball_run_config_records_constructor_settings(tmp_path):
     assert kwargs["render_mode"] == "rgb_array"
 
 
-@pytest.mark.parametrize("env_name", ["BallBounce", "WallBall"])
+@pytest.mark.parametrize(
+    "env_name",
+    ["BallBounce", "WallBall", "WallBallVolley", "WallBallBaseline"],
+)
 def test_contact_envs_wire_a_success_metric(env_name, tmp_path):
     """Both contact-driven envs define ``success_key`` so eval runs log
     ``eval_info/success_rate``, and the key must exist in the env's
@@ -349,23 +352,67 @@ def test_training_notebook_preserves_curriculum_recipe_defaults():
     assert "HumanoidTennisStage2RandomizedReturn" in source
 
 
-def test_wall_ball_headline_metric_is_rally_count(tmp_path):
+@pytest.mark.parametrize(
+    "env_name", ["WallBall", "WallBallVolley", "WallBallBaseline"]
+)
+def test_wall_ball_headline_metric_is_rally_count(env_name, tmp_path):
     """WallBall names ``bounce_count`` as its headline metric:
     success_rate saturates once every eval episode completes a single
     exchange, and eval reward is dominated by tracking shaping, so runs
     are compared on rally exchanges per episode instead."""
-    cfg = build_train_config("WallBall", log_dir=str(tmp_path))
+    cfg = build_train_config(env_name, log_dir=str(tmp_path))
     assert cfg.headline_key == "bounce_count"
+    assert cfg.phase_key == "rally_phase"
+    assert cfg.phase_labels == {
+        0: "await_bounce",
+        1: "await_paddle",
+        2: "await_wall",
+    }
 
 
-def test_wall_ball_recipe_uses_simplified_paddle_interface(tmp_path):
-    cfg = build_train_config("WallBall", log_dir=str(tmp_path))
+@pytest.mark.parametrize(
+    "env_name", ["WallBall", "WallBallVolley", "WallBallBaseline"]
+)
+def test_wall_ball_recipe_uses_simplified_paddle_interface(env_name, tmp_path):
+    cfg = build_train_config(env_name, log_dir=str(tmp_path))
     env = cfg.env_fn()
     try:
         assert env.action_space.shape == (3,)
         assert env.observation_space.shape == (22,)
         assert env.model.nu == 3
-        assert "face-only" in RECIPES["WallBall"].description
-        assert "fixed 10-degree upward pitch" in RECIPES["WallBall"].description
     finally:
         env.close()
+
+
+def test_wall_ball_recipe_preserves_original_open_setup():
+    kwargs = RECIPES["WallBall"].env_kwargs
+    assert "rally_style" not in kwargs
+    assert "paddle_home_x" not in kwargs
+    assert "paddle_x_target_range" not in kwargs
+    assert "face-only" in RECIPES["WallBall"].description
+    assert "fixed 10-degree upward pitch" in RECIPES["WallBall"].description
+
+
+@pytest.mark.parametrize(
+    ("env_name", "rally_style", "home_x", "target_range"),
+    [
+        ("WallBallVolley", "volley", -1.7, (-4.7, 0.3)),
+        ("WallBallBaseline", "one_bounce", -2.7, (-3.2, -2.2)),
+    ],
+)
+def test_wall_ball_style_recipes_record_world_space_paddle_setup(
+    env_name, rally_style, home_x, target_range
+):
+    kwargs = RECIPES[env_name].env_kwargs
+    assert kwargs["rally_style"] == rally_style
+    assert kwargs["paddle_home_x"] == home_x
+    assert kwargs["paddle_x_target_range"] == target_range
+
+
+def test_wall_ball_baseline_recipe_uses_calibrated_bounce_first_serve():
+    kwargs = RECIPES["WallBallBaseline"].env_kwargs
+    assert kwargs["serve_speed"] == 5.5
+    assert kwargs["serve_speed_jitter"] == 0.5
+    assert kwargs["serve_lob"] == 0.0
+    assert kwargs["serve_vy_min"] == 0.8
+    assert kwargs["serve_vy_max"] == 2.0

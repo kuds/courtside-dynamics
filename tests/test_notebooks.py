@@ -150,7 +150,11 @@ def test_sb3_notebook_runs_long_horizon_eval_after_training() -> None:
     assert "LONG_HORIZON_EPISODE_LEN = 5_000" in source
     assert "LONG_HORIZON_N_EPISODES = 50" in source
     assert "LONG_HORIZON_SEED_START = 10_000" in source
-    assert 'if ENV == "WallBall" and RUN_LONG_HORIZON_EVAL:' in source
+    assert "WallBallVolley" in source
+    assert "WallBallBaseline" in source
+    assert "issubclass(RECIPES[ENV].env_cls, WallBallEnv)" in source
+    assert "if is_wall_ball_recipe and RUN_LONG_HORIZON_EVAL:" in source
+    assert 'if ENV == "WallBall" and RUN_LONG_HORIZON_EVAL:' not in source
     assert 'env_overrides={"episode_len": long_episode_len}' in source
     assert "WALL_BALL_LONG_HORIZON_ARTIFACTS" in source
     artifacts_index = source.index(
