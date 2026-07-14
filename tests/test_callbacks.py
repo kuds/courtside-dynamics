@@ -560,6 +560,7 @@ def test_info_dict_eval_task_metric_selection_and_early_stop(tmp_path):
     the task metric, with reward only breaking ties, and the early stop
     must count evaluations without improvement of that same score.
     """
+    import hashlib
     import json
 
     from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
@@ -573,6 +574,14 @@ def test_info_dict_eval_task_metric_selection_and_early_stop(tmp_path):
     )
     cb.model = _FakeSavableModel(action_dim=3)
 
+    class FakeNormalizer:
+        @staticmethod
+        def save(path) -> None:
+            with open(path, "wb") as handle:
+                handle.write(b"fake-normalizer")
+
+    cb.model.get_vec_normalize_env = lambda: FakeNormalizer()  # type: ignore[attr-defined]
+
     def meta():
         with open(tmp_path / "best_model_meta.json") as f:
             return json.load(f)
@@ -584,6 +593,12 @@ def test_info_dict_eval_task_metric_selection_and_early_stop(tmp_path):
     )
     assert (tmp_path / "best_model.zip").exists()
     assert meta()["timestep"] == 100
+    assert meta()["artifacts"]["best_model.zip"]["sha256"] == hashlib.sha256(
+        b"fake-model"
+    ).hexdigest()
+    assert meta()["artifacts"]["best_vec_normalize.pkl"][
+        "sha256"
+    ] == hashlib.sha256(b"fake-normalizer").hexdigest()
 
     # Tied primary metric, better reward tie-break: an improvement.
     cb.num_timesteps = 200
@@ -648,3 +663,4 @@ def test_info_dict_eval_selection_writes_artifacts_end_to_end(tmp_path):
         "episode_reward_mean",
     ]
     assert set(meta["selection_values"]) == set(meta["selection_keys"])
+    assert set(meta["artifacts"]) == {"best_model.zip"}

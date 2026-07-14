@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
+SB3_NOTEBOOK = REPOSITORY_ROOT / "notebooks" / "sb3_training.ipynb"
 HUMANOID_NOTEBOOK = (
     REPOSITORY_ROOT / "notebooks" / "humanoid_tennis_training.ipynb"
 )
@@ -19,6 +20,10 @@ def _source(cell: dict[str, Any]) -> str:
 
 def _load_humanoid_notebook() -> dict[str, Any]:
     return json.loads(HUMANOID_NOTEBOOK.read_text())
+
+
+def _load_sb3_notebook() -> dict[str, Any]:
+    return json.loads(SB3_NOTEBOOK.read_text())
 
 
 def test_humanoid_notebook_is_clean_and_code_cells_compile() -> None:
@@ -129,3 +134,45 @@ def test_humanoid_notebook_reports_optional_metrics_and_disconnects() -> None:
     assert "curriculum_manifest.json" in notebook_source
     assert "DISCONNECT_WHEN_DONE = True" in notebook_source
     assert "disconnect_runtime(delay_seconds=30)" in notebook_source
+
+
+def test_sb3_notebook_runs_long_horizon_eval_after_training() -> None:
+    notebook = _load_sb3_notebook()
+    source = "\n".join(_source(cell) for cell in notebook["cells"])
+
+    train_index = source.index("model = train(cfg)")
+    long_eval_index = source.index("evaluate_best_wall_ball(")
+    video_index = source.index("record_best_model_video(")
+    audit_index = source.index("missing = check_run_artifacts(")
+    assert train_index < long_eval_index < video_index < audit_index
+
+    assert "RUN_LONG_HORIZON_EVAL = True" in source
+    assert "LONG_HORIZON_EPISODE_LEN = 5_000" in source
+    assert "LONG_HORIZON_N_EPISODES = 50" in source
+    assert "LONG_HORIZON_SEED_START = 10_000" in source
+    assert 'if ENV == "WallBall" and RUN_LONG_HORIZON_EVAL:' in source
+    assert 'env_overrides={"episode_len": long_episode_len}' in source
+    assert "WALL_BALL_LONG_HORIZON_ARTIFACTS" in source
+    artifacts_index = source.index(
+        "long_horizon_artifacts = WALL_BALL_LONG_HORIZON_ARTIFACTS"
+    )
+    assert artifacts_index < long_eval_index
+    assert "best_model_long_horizon_eval.json" in source
+    assert "best_model_long_horizon_episodes.csv" in source
+    assert "cfg.env_fn =" not in source
+    assert "RECIPES[ENV].env_kwargs[" not in source
+
+
+def test_sb3_notebook_is_clean_and_code_cells_compile() -> None:
+    notebook = _load_sb3_notebook()
+    assert notebook["nbformat"] == 4
+    assert notebook["nbformat_minor"] == 5
+    for cell in notebook["cells"]:
+        if cell["cell_type"] != "code":
+            continue
+        assert cell["execution_count"] is None
+        assert cell["outputs"] == []
+        source = _source(cell)
+        if any(line.lstrip().startswith(("!", "%")) for line in source.splitlines()):
+            continue
+        compile(source, f"{SB3_NOTEBOOK}:{cell.get('id', 'unknown')}", "exec")

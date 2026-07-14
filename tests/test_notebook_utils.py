@@ -6,10 +6,22 @@ report inline, the second audits the run directory against the shared
 ``EXPECTED_ARTIFACTS`` registry and explains what a missing artifact
 usually means. Both must degrade gracefully on partial/crashed runs.
 """
+
 from __future__ import annotations
 
+import csv
+import hashlib
+import json
+
+import numpy as np
+from gymnasium import Env
+from gymnasium.spaces import Box
+
 from courtside_dynamics.notebook_utils import (
+    _rollout_wall_ball_seed,
+    _summarize_wall_ball_episodes,
     check_run_artifacts,
+    evaluate_best_wall_ball,
     print_stage_summary,
 )
 from courtside_dynamics.training.artifacts import EXPECTED_ARTIFACTS
@@ -66,6 +78,15 @@ def test_check_run_artifacts_all_present(tmp_path, capsys):
             full.write_text("x")
     assert check_run_artifacts(tmp_path) == []
     assert "All expected artifacts present." in capsys.readouterr().out
+
+
+def test_check_run_artifacts_accepts_conditional_post_training_outputs(
+    tmp_path, capsys
+):
+    extras = (("long_eval", "best_model_long_horizon_eval.json"),)
+    missing = check_run_artifacts(tmp_path, extra_artifacts=extras)
+    assert "best_model_long_horizon_eval.json" in missing
+    assert "long_eval:" in capsys.readouterr().out
 
 
 def _write_synthetic_evaluations(tmp_path, best_mean=6.0, tail_mean=-1.0):
@@ -186,3 +207,363 @@ def test_write_run_summary_lists_artifacts_from_shared_registry(tmp_path):
     assert "best_model" in text
     # The report never lists itself as an artifact.
     assert "stage_summary:" not in text
+
+
+def _wall_ball_row(
+    *,
+    reward: float,
+    length: int,
+    returns: int,
+    floor_total: int,
+    terminal_floor: int,
+    reason: str,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "episode_reward": reward,
+        "episode_length": length,
+        "completed_returns": returns,
+        "paddle_hit_count": returns + 1,
+        "wall_contact_count": returns,
+        "floor_bounce_total": floor_total,
+        "terminal_floor_bounce_count": terminal_floor,
+        "post_floor_bounce_paddle_recoveries": 0,
+        "post_floor_bounce_completed_returns": 0,
+        "unrecovered_floor_bounces": floor_total,
+        "termination_reason": reason,
+    }
+    for key in (
+        "rew_wall",
+        "rew_paddle",
+        "rew_shaping",
+        "rew_oob",
+        "rew_double_bounce",
+        "rew_stall",
+    ):
+        row[f"{key}_total"] = reward if key == "rew_wall" else 0.0
+    return row
+
+
+def test_summarize_wall_ball_episodes_survival_and_floor_proxy():
+    rows = [
+        _wall_ball_row(
+            reward=10.0,
+            length=5_000,
+            returns=20,
+            floor_total=2,
+            terminal_floor=0,
+            reason="timeout",
+        ),
+        _wall_ball_row(
+            reward=4.0,
+            length=1_200,
+            returns=5,
+            floor_total=2,
+            terminal_floor=2,
+            reason="double_bounce",
+        ),
+    ]
+
+    summary = _summarize_wall_ball_episodes(
+        rows, survival_steps=(750, 1_500, 3_000, 5_000)
+    )
+
+    assert summary["metrics"]["completed_returns"]["mean"] == 12.5
+    assert summary["step_survival"]["750"] == {"count": 2, "rate": 1.0}
+    assert summary["step_survival"]["1500"] == {"count": 1, "rate": 0.5}
+    assert summary["step_survival"]["5000"] == {"count": 1, "rate": 0.5}
+    assert summary["return_survival_curve"]["5"]["rate"] == 1.0
+    assert summary["return_survival_curve"]["6"]["rate"] == 0.5
+    assert summary["terminations"]["timeout"] == {"count": 1, "rate": 0.5}
+    assert summary["terminations"]["out_of_bounds"] == {"count": 0, "rate": 0.0}
+    assert summary["floor_bounce_diagnostics"] == {
+        "total_contacts": 4,
+        "episodes_with_any": 2,
+        "episodes_with_any_rate": 1.0,
+        "post_floor_bounce_paddle_recoveries": 0,
+        "episodes_with_paddle_recovery": 0,
+        "episodes_with_paddle_recovery_rate": 0.0,
+        "post_floor_bounce_completed_returns": 0,
+        "episodes_with_completed_return": 0,
+        "episodes_with_completed_return_rate": 0.0,
+        "contacts_reset_before_terminal_upper_bound": 2,
+    }
+
+
+class _FakeWallBallEnv(Env):
+    metadata = {"render_modes": []}
+
+    def __init__(self, episode_len: int, instances: list[_FakeWallBallEnv]):
+        self.episode_len = episode_len
+        self._ezpickle_kwargs = {
+            "episode_len": episode_len,
+            "min_force": 20.0,
+        }
+        self.observation_space = Box(-100.0, 100.0, shape=(2,), dtype=np.float32)
+        self.action_space = Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
+        self.reset_seeds: list[int | None] = []
+        self.closed = False
+        self._step = 0
+        instances.append(self)
+
+    def reset(self, *, seed=None, options=None):
+        del options
+        self.reset_seeds.append(seed)
+        self._step = 0
+        return np.zeros(2, dtype=np.float32), {}
+
+    def step(self, action):
+        assert np.asarray(action).shape == (1,)
+        self._step += 1
+        truncated = self._step >= self.episode_len
+        info = {
+            "bounce_count": self._step,
+            "paddle_hit_count": self._step,
+            "wall_contact_count": self._step,
+            "floor_bounce_total": 0,
+            "floor_bounce_count": 0,
+            "rew_wall": 1.0,
+            "rew_paddle": 0.0,
+            "rew_shaping": 0.0,
+            "rew_oob": 0.0,
+            "rew_double_bounce": 0.0,
+            "rew_stall": 0.0,
+            "term_oob": False,
+            "term_double_bounce": False,
+            "term_stall": False,
+            "term_timeout": truncated,
+            "term_nonfinite": False,
+        }
+        obs = np.full(2, self._step, dtype=np.float32)
+        return obs, 1.0, False, truncated, info
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeModel:
+    observation_space = Box(-100.0, 100.0, shape=(2,), dtype=np.float32)
+    action_space = Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
+
+    def __init__(self):
+        self.num_timesteps = 123
+        self.deterministic_values: list[bool] = []
+        self.observations: list[np.ndarray] = []
+
+    def predict(self, observation, *, deterministic):
+        obs = np.asarray(observation)
+        assert bool((obs >= 10.0).all()), "paired normalizer was not applied"
+        self.observations.append(obs.copy())
+        self.deterministic_values.append(deterministic)
+        return np.zeros(1, dtype=np.float32), None
+
+
+def test_rollout_counts_post_floor_bounce_recovery_and_return():
+    instances: list[_FakeWallBallEnv] = []
+
+    class ScriptedEnv(_FakeWallBallEnv):
+        def step(self, action):
+            assert np.asarray(action).shape == (1,)
+            self._step += 1
+            snapshots = (
+                (0, 0, 0, 1),  # floor bounce
+                (0, 1, 0, 1),  # paddle recovers it
+                (1, 1, 1, 1),  # gated wall return completes the cycle
+            )
+            returns, paddle_hits, wall_contacts, floor_total = snapshots[
+                self._step - 1
+            ]
+            truncated = self._step == len(snapshots)
+            info = {
+                "bounce_count": returns,
+                "paddle_hit_count": paddle_hits,
+                "wall_contact_count": wall_contacts,
+                "floor_bounce_total": floor_total,
+                "floor_bounce_count": 0,
+                "rew_wall": float(returns),
+                "rew_paddle": 0.0,
+                "rew_shaping": 0.0,
+                "rew_oob": 0.0,
+                "rew_double_bounce": 0.0,
+                "rew_stall": 0.0,
+                "term_oob": False,
+                "term_double_bounce": False,
+                "term_stall": False,
+                "term_timeout": truncated,
+                "term_nonfinite": False,
+            }
+            return np.zeros(2, dtype=np.float32), float(returns), False, truncated, info
+
+    class ZeroModel:
+        @staticmethod
+        def predict(_observation, *, deterministic):
+            assert deterministic is True
+            return np.zeros(1, dtype=np.float32), None
+
+    env = ScriptedEnv(3, instances)
+    try:
+        row = _rollout_wall_ball_seed(
+            env,
+            ZeroModel(),
+            lambda obs: obs,
+            seed=9,
+            episode_len=3,
+            deterministic=True,
+        )
+    finally:
+        env.close()
+
+    assert row["floor_bounce_total"] == 1
+    assert row["post_floor_bounce_paddle_recoveries"] == 1
+    assert row["post_floor_bounce_completed_returns"] == 1
+    assert row["unrecovered_floor_bounces"] == 0
+
+
+def _write_wall_ball_best_artifacts(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "env": {
+                    "class": "WallBallEnv",
+                    "constructor_kwargs": {
+                        "episode_len": 750,
+                        "min_force": 20.0,
+                    },
+                },
+                "train_config": {
+                    "algo": "SAC",
+                    "headline_key": "bounce_count",
+                    "normalize_obs": True,
+                    "clip_obs": 10.0,
+                    "normalize_obs_excluded_indices": [],
+                },
+            }
+        )
+    )
+    model_bytes = b"model"
+    normalizer_bytes = b"normalizer"
+    (tmp_path / "best_model.zip").write_bytes(model_bytes)
+    (tmp_path / "best_vec_normalize.pkl").write_bytes(normalizer_bytes)
+    (tmp_path / "best_model_meta.json").write_text(
+        json.dumps(
+            {
+                "timestep": 123,
+                "selection_keys": [
+                    "bounce_count_ep_mean",
+                    "success_rate",
+                    "episode_reward_mean",
+                ],
+                "artifacts": {
+                    "best_model.zip": {
+                        "sha256": hashlib.sha256(model_bytes).hexdigest(),
+                    },
+                    "best_vec_normalize.pkl": {
+                        "sha256": hashlib.sha256(normalizer_bytes).hexdigest(),
+                    },
+                },
+            }
+        )
+    )
+
+
+def test_evaluate_best_wall_ball_writes_drive_ready_metrics(tmp_path, monkeypatch):
+    from stable_baselines3.common.vec_env import VecNormalize
+
+    from courtside_dynamics.training import algos
+
+    _write_wall_ball_best_artifacts(tmp_path)
+    instances: list[_FakeWallBallEnv] = []
+    model = _FakeModel()
+
+    class FakeAlgo:
+        @staticmethod
+        def load(path, *, device):
+            assert path.endswith("best_model.zip")
+            assert device == "cpu"
+            return model
+
+    class FakeNormalizer:
+        training = True
+        norm_reward = True
+        norm_obs = True
+        clip_obs = 10.0
+        normalize_obs_excluded_indices = ()
+
+        @staticmethod
+        def normalize_obs(obs):
+            return np.asarray(obs) + 10.0
+
+    monkeypatch.setattr(algos, "resolve_algo", lambda _name: FakeAlgo)
+    monkeypatch.setattr(
+        VecNormalize,
+        "load",
+        staticmethod(lambda _path, _venv: FakeNormalizer()),
+    )
+
+    payload = evaluate_best_wall_ball(
+        tmp_path,
+        lambda: _FakeWallBallEnv(3, instances),
+        episode_len=3,
+        seeds=(101, 102),
+    )
+
+    assert payload["policy"]["best_model_meta"]["timestep"] == 123
+    assert payload["policy"]["pair_verification"] == (
+        "verified_by_best_model_meta_sha256"
+    )
+    assert payload["environment"]["verification"] == (
+        "verified_against_training_constructor"
+    )
+    assert payload["metrics"]["completed_returns"]["mean"] == 3.0
+    assert payload["terminations"]["timeout"] == {"count": 2, "rate": 1.0}
+    assert payload["terminations"]["double_bounce"] == {
+        "count": 0,
+        "rate": 0.0,
+    }
+    assert payload["step_survival"]["3"] == {"count": 2, "rate": 1.0}
+    assert model.deterministic_values == [True] * 6
+    assert any(instance.reset_seeds == [101, 102] for instance in instances)
+    assert all(instance.closed for instance in instances)
+
+    summary_path = tmp_path / "best_model_long_horizon_eval.json"
+    episodes_path = tmp_path / "best_model_long_horizon_episodes.csv"
+    assert json.loads(summary_path.read_text()) == payload
+    with episodes_path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert {row["evaluation_id"] for row in rows} == {payload["evaluation_id"]}
+    assert payload["outputs"]["episodes_csv"]["sha256"]
+    assert [int(row["seed"]) for row in rows] == [101, 102]
+    assert [int(row["completed_returns"]) for row in rows] == [3, 3]
+
+
+def test_evaluate_best_wall_ball_requires_task_selected_artifacts(tmp_path):
+    _write_wall_ball_best_artifacts(tmp_path)
+    (tmp_path / "best_vec_normalize.pkl").unlink()
+
+    try:
+        evaluate_best_wall_ball(
+            tmp_path,
+            lambda: None,
+            episode_len=3,
+            seeds=(1,),
+        )
+    except FileNotFoundError as exc:
+        assert "best_vec_normalize.pkl" in str(exc)
+    else:
+        raise AssertionError("missing paired normalizer did not fail")
+
+
+def test_evaluate_best_wall_ball_rejects_hash_mismatched_pair(tmp_path):
+    _write_wall_ball_best_artifacts(tmp_path)
+    (tmp_path / "best_vec_normalize.pkl").write_bytes(b"stale-normalizer")
+
+    try:
+        evaluate_best_wall_ball(
+            tmp_path,
+            lambda: None,
+            episode_len=3,
+            seeds=(1,),
+        )
+    except ValueError as exc:
+        assert "SHA-256" in str(exc)
+    else:
+        raise AssertionError("hash-mismatched model/normalizer pair did not fail")

@@ -13,7 +13,7 @@ new env is one entry in :data:`RECIPES`; the notebook needs no edits.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -414,14 +414,23 @@ _QUICK_TEST_OVERRIDES: dict[str, Any] = {
 }
 
 
-def make_env_fn(env_name: str):
+def make_env_fn(
+    env_name: str,
+    *,
+    env_overrides: Mapping[str, Any] | None = None,
+):
     """Return a zero-arg env factory for ``env_name``.
 
     Useful for tools (replay video, custom evaluation) that need a fresh
-    env outside of :func:`train`.
+    env outside of :func:`train`. ``env_overrides`` is copied into this
+    factory only; it never mutates the recipe or a training config that was
+    already built. This keeps post-training long-horizon evaluation isolated
+    from the environment used to train and select the checkpoint.
     """
     recipe = RECIPES[env_name]
     kwargs = dict(recipe.env_kwargs)
+    if env_overrides:
+        kwargs.update(env_overrides)
 
     def _factory():
         return recipe.env_cls(**kwargs)

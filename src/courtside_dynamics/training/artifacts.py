@@ -113,6 +113,13 @@ def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
             info["observation_shape"] = list(obs_shape)
         if act_shape is not None:
             info["action_shape"] = list(act_shape)
+        constructor_kwargs = getattr(env, "_ezpickle_kwargs", None)
+        if isinstance(constructor_kwargs, dict):
+            # EzPickle captures every resolved constructor default, including
+            # environment physics/reward settings that observation/action
+            # spaces alone cannot identify. The long-horizon evaluator uses
+            # this to reject recipe drift apart from its intentional horizon.
+            info["constructor_kwargs"] = dict(constructor_kwargs)
         curriculum_metadata = getattr(env, "curriculum_metadata", None)
         if curriculum_metadata is not None:
             info["curriculum"] = dict(curriculum_metadata)
