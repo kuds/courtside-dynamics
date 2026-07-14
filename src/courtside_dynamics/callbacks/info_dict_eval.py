@@ -30,6 +30,7 @@ itself.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 from collections import defaultdict
@@ -40,6 +41,14 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecEnv
 
 from courtside_dynamics.callbacks._info import _scalar_info_keys
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class InfoDictEvalCallback(BaseCallback):
@@ -414,20 +423,20 @@ class InfoDictEvalCallback(BaseCallback):
         if self.best_model_save_path is None:
             return
         os.makedirs(self.best_model_save_path, exist_ok=True)
-        self.model.save(
-            os.path.join(self.best_model_save_path, "best_model")
-        )
+        model_path = os.path.join(self.best_model_save_path, "best_model.zip")
+        self.model.save(os.path.splitext(model_path)[0])
+        artifact_paths = {"best_model.zip": model_path}
         get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
         vec_norm = get_vec_norm() if get_vec_norm is not None else None
         if vec_norm is not None:
             # Paired stats snapshot: replaying best_model against
             # end-of-training stats is a silent obs-distribution
             # mismatch (see _SaveVecNormalizeOnNewBest in train.py).
-            vec_norm.save(
-                os.path.join(
-                    self.best_model_save_path, "best_vec_normalize.pkl"
-                )
+            normalizer_path = os.path.join(
+                self.best_model_save_path, "best_vec_normalize.pkl"
             )
+            vec_norm.save(normalizer_path)
+            artifact_paths["best_vec_normalize.pkl"] = normalizer_path
         meta = {
             "timestep": int(self.num_timesteps),
             "selection_keys": list(self.best_metric_keys),
@@ -435,6 +444,13 @@ class InfoDictEvalCallback(BaseCallback):
                 key: float(metrics[key])
                 for key in self.best_metric_keys
                 if key in metrics
+            },
+            # Bind the checkpoint and its observation statistics to this
+            # selection event. A same-shape normalizer from another run would
+            # otherwise load successfully while silently changing every input.
+            "artifacts": {
+                name: {"sha256": _sha256_file(path)}
+                for name, path in artifact_paths.items()
             },
         }
         meta_path = os.path.join(

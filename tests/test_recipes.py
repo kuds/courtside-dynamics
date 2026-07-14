@@ -71,6 +71,42 @@ def test_make_env_fn_returns_fresh_instances():
         b.close()
 
 
+def test_make_env_fn_override_isolated_from_training_factory_and_recipe():
+    """A post-training horizon override must not alter training semantics."""
+    recipe_kwargs = dict(RECIPES["WallBall"].env_kwargs)
+    training_factory = make_env_fn("WallBall")
+    long_factory = make_env_fn("WallBall", env_overrides={"episode_len": 5_000})
+
+    training_env = training_factory()
+    long_env = long_factory()
+    try:
+        assert training_env.episode_len == 750
+        assert long_env.episode_len == 5_000
+        assert training_env.observation_space == long_env.observation_space
+        assert training_env.action_space == long_env.action_space
+        assert RECIPES["WallBall"].env_kwargs == recipe_kwargs
+    finally:
+        training_env.close()
+        long_env.close()
+
+
+def test_wall_ball_run_config_records_constructor_settings(tmp_path):
+    """Metrics can detect physics/reward recipe drift after training."""
+    import json
+
+    from courtside_dynamics.training.artifacts import write_run_config
+
+    cfg = build_train_config("WallBall", log_dir=str(tmp_path))
+    config_path = write_run_config(cfg, str(tmp_path))
+    with open(config_path) as handle:
+        kwargs = json.load(handle)["env"]["constructor_kwargs"]
+
+    assert kwargs["episode_len"] == 750
+    assert kwargs["min_force"] == 20.0
+    assert kwargs["serve_vy_max"] == 2.6
+    assert kwargs["render_mode"] == "rgb_array"
+
+
 @pytest.mark.parametrize("env_name", ["BallBounce", "WallBall"])
 def test_contact_envs_wire_a_success_metric(env_name, tmp_path):
     """Both contact-driven envs define ``success_key`` so eval runs log
