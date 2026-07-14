@@ -95,6 +95,13 @@ class InfoDictEvalCallback(BaseCallback):
         Terminal scalar keys for which episode-level min, median, 90th
         percentile, and max metrics are emitted. ``rally_count`` is the
         intended use.
+    episode_survival_thresholds:
+        Mapping from a terminal counter key to positive integer thresholds.
+        For every threshold, the callback logs the fraction of evaluation
+        episodes whose terminal counter reached it as
+        ``<key>_ep_ge_<threshold>_rate``. For example, WallBall configures
+        ``{"bounce_count": (2, 3, 5)}`` so a one-return plateau remains
+        visible even when the mean counter improves through rare outliers.
     csv_path:
         Optional path. When set, every evaluation appends one row per
         metric in long format (``timestep,metric,value``) so the data
@@ -141,6 +148,7 @@ class InfoDictEvalCallback(BaseCallback):
         early_stop_patience: int | None = None,
         early_stop_min_evals: int = 0,
         verbose: int = 0,
+        episode_survival_thresholds: Mapping[str, Sequence[int]] | None = None,
     ) -> None:
         super().__init__(verbose)
         self.eval_env = eval_env
@@ -159,6 +167,25 @@ class InfoDictEvalCallback(BaseCallback):
         self.episode_distribution_keys = tuple(
             dict.fromkeys(episode_distribution_keys)
         )
+        self.episode_survival_thresholds: dict[str, tuple[int, ...]] = {}
+        for key, configured_thresholds in (
+            episode_survival_thresholds or {}
+        ).items():
+            if not isinstance(key, str) or not key:
+                raise ValueError(
+                    "episode survival metric keys must be non-empty strings"
+                )
+            thresholds = tuple(dict.fromkeys(configured_thresholds))
+            if any(
+                isinstance(threshold, bool)
+                or not isinstance(threshold, int)
+                or threshold <= 0
+                for threshold in thresholds
+            ):
+                raise ValueError(
+                    "episode survival thresholds must be positive integers"
+                )
+            self.episode_survival_thresholds[key] = tuple(sorted(thresholds))
         self.csv_path = csv_path
         self.best_metric_keys = tuple(dict.fromkeys(best_metric_keys))
         self.best_model_save_path = best_model_save_path
@@ -254,6 +281,7 @@ class InfoDictEvalCallback(BaseCallback):
                 terminal_requested = (
                     *self.terminal_info_keys,
                     *self.episode_distribution_keys,
+                    *self.episode_survival_thresholds,
                 )
                 if self.success_key is not None:
                     terminal_requested = (*terminal_requested, self.success_key)
@@ -349,6 +377,18 @@ class InfoDictEvalCallback(BaseCallback):
                         np.quantile(values, 0.9)
                     )
                     metrics[f"{key}_ep_max"] = max(values)
+
+            for key, thresholds in self.episode_survival_thresholds.items():
+                values = [
+                    snapshot[key]
+                    for snapshot in episode_finals
+                    if key in snapshot
+                ]
+                if values:
+                    for threshold in thresholds:
+                        metrics[f"{key}_ep_ge_{threshold}_rate"] = sum(
+                            value >= threshold for value in values
+                        ) / len(values)
 
         if self.phase_key is not None and phase_counts and total_steps > 0:
             for phase_int, count in phase_counts.items():

@@ -156,6 +156,9 @@ def test_sb3_notebook_runs_long_horizon_eval_after_training() -> None:
     assert "if is_wall_ball_recipe and RUN_LONG_HORIZON_EVAL:" in source
     assert 'if ENV == "WallBall" and RUN_LONG_HORIZON_EVAL:' not in source
     assert 'env_overrides={"episode_len": long_episode_len}' in source
+    assert "make_eval_env_fn(" in source
+    assert '"return_survival_curve": long_eval["return_survival_curve"]' in source
+    assert "cfg.eval_env_fn or cfg.env_fn" in source
     assert "WALL_BALL_LONG_HORIZON_ARTIFACTS" in source
     artifacts_index = source.index(
         "long_horizon_artifacts = WALL_BALL_LONG_HORIZON_ARTIFACTS"

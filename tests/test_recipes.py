@@ -13,6 +13,7 @@ from courtside_dynamics.recipes import (
     RECIPES,
     build_train_config,
     make_env_fn,
+    make_eval_env_fn,
 )
 
 
@@ -25,6 +26,8 @@ def test_build_train_config_materializes(env_name, tmp_path):
     assert cfg.log_dir == str(tmp_path)
     assert cfg.total_timesteps == RECIPES[env_name].default_total_timesteps
     assert cfg.name_prefix.endswith("_sac")
+    assert cfg.recipe_name == env_name
+    assert cfg.eval_env_fn is not None
 
     env = cfg.env_fn()
     try:
@@ -90,6 +93,25 @@ def test_make_env_fn_override_isolated_from_training_factory_and_recipe():
         long_env.close()
 
 
+def test_make_eval_env_fn_layers_recipe_and_caller_overrides():
+    recipe_eval_overrides = dict(
+        RECIPES["WallBallBaseline"].eval_env_overrides
+    )
+    factory = make_eval_env_fn(
+        "WallBallBaseline", env_overrides={"episode_len": 5_000}
+    )
+
+    env = factory()
+    try:
+        assert env.episode_len == 5_000
+        assert env.recovery_reset_probability == 0.0
+        assert RECIPES["WallBallBaseline"].eval_env_overrides == (
+            recipe_eval_overrides
+        )
+    finally:
+        env.close()
+
+
 def test_wall_ball_run_config_records_constructor_settings(tmp_path):
     """Metrics can detect physics/reward recipe drift after training."""
     import json
@@ -99,12 +121,42 @@ def test_wall_ball_run_config_records_constructor_settings(tmp_path):
     cfg = build_train_config("WallBall", log_dir=str(tmp_path))
     config_path = write_run_config(cfg, str(tmp_path))
     with open(config_path) as handle:
-        kwargs = json.load(handle)["env"]["constructor_kwargs"]
+        payload = json.load(handle)
+    kwargs = payload["env"]["constructor_kwargs"]
 
+    assert payload["recipe_name"] == "WallBall"
+    assert payload["evaluation_env"]["constructor_kwargs"] == kwargs
     assert kwargs["episode_len"] == 750
     assert kwargs["min_force"] == 20.0
     assert kwargs["serve_vy_max"] == 2.6
     assert kwargs["render_mode"] == "rgb_array"
+
+
+def test_wall_ball_baseline_run_config_records_curriculum_schedule(tmp_path):
+    import json
+
+    from courtside_dynamics.training.artifacts import write_run_config
+
+    cfg = build_train_config("WallBallBaseline", log_dir=str(tmp_path))
+    config_path = write_run_config(cfg, str(tmp_path))
+    with open(config_path) as handle:
+        payload = json.load(handle)
+
+    assert payload["env"]["constructor_kwargs"][
+        "recovery_reset_probability"
+    ] == 0.6
+    assert payload["evaluation_env"]["constructor_kwargs"][
+        "recovery_reset_probability"
+    ] == 0.0
+    assert payload["train_config"]["env_attr_schedules"] == [
+        {
+            "attr_name": "recovery_reset_probability",
+            "start_value": 0.6,
+            "end_value": 0.15,
+            "hold_until_timesteps": 250_000,
+            "end_timesteps": 750_000,
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -378,7 +430,7 @@ def test_wall_ball_recipe_uses_simplified_paddle_interface(env_name, tmp_path):
     env = cfg.env_fn()
     try:
         assert env.action_space.shape == (3,)
-        assert env.observation_space.shape == (22,)
+        assert env.observation_space.shape == (23,)
         assert env.model.nu == 3
     finally:
         env.close()
@@ -397,7 +449,7 @@ def test_wall_ball_recipe_preserves_original_open_setup():
     ("env_name", "rally_style", "home_x", "target_range"),
     [
         ("WallBallVolley", "volley", -1.7, (-4.7, 0.3)),
-        ("WallBallBaseline", "one_bounce", -2.7, (-3.2, -2.2)),
+        ("WallBallBaseline", "one_bounce", -2.7, (-3.2, -2.1)),
     ],
 )
 def test_wall_ball_style_recipes_record_world_space_paddle_setup(
@@ -416,3 +468,30 @@ def test_wall_ball_baseline_recipe_uses_calibrated_bounce_first_serve():
     assert kwargs["serve_lob"] == 0.0
     assert kwargs["serve_vy_min"] == 0.8
     assert kwargs["serve_vy_max"] == 2.0
+
+
+def test_wall_ball_baseline_reports_multi_return_survival(tmp_path):
+    cfg = build_train_config("WallBallBaseline", log_dir=str(tmp_path))
+
+    assert cfg.success_threshold == 2.0
+    assert cfg.info_eval_survival_thresholds == {
+        "bounce_count": (2, 3, 5),
+    }
+    assert cfg.env_attr_schedules == (
+        {
+            "attr_name": "recovery_reset_probability",
+            "start_value": 0.6,
+            "end_value": 0.15,
+            "hold_until_timesteps": 250_000,
+            "end_timesteps": 750_000,
+        },
+    )
+
+
+def test_wall_ball_baseline_combines_recovery_curriculum_and_reward():
+    kwargs = RECIPES["WallBallBaseline"].env_kwargs
+
+    assert kwargs["recovery_reset_probability"] == 0.6
+    assert kwargs["post_bounce_reset_fraction"] == 0.5
+    assert kwargs["recoverable_bounce_bonus"] == 0.25
+    assert kwargs["recoverable_bounce_lateral_limit"] == 2.0

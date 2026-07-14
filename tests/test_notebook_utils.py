@@ -224,6 +224,10 @@ def test_wall_ball_constructor_comparison_accepts_only_omitted_new_defaults():
         "rally_style": "open",
         "paddle_home_x": -1.7,
         "paddle_x_target_range": None,
+        "recovery_reset_probability": 0.0,
+        "post_bounce_reset_fraction": 0.5,
+        "recoverable_bounce_bonus": 0.0,
+        "recoverable_bounce_lateral_limit": 0.0,
     }
 
     assert _wall_ball_constructor_kwargs_match(
@@ -284,6 +288,7 @@ def _wall_ball_row(
         "rew_double_bounce",
         "rew_stall",
         "rew_style_violation",
+        "rew_recoverable_bounce",
     ):
         row[f"{key}_total"] = reward if key == "rew_wall" else 0.0
     return row
@@ -378,6 +383,14 @@ def test_summarize_wall_ball_episodes_reports_strict_style_metrics():
         "premature_volley": {"count": 1, "rate": 0.5}
     }
     assert "rew_style_violation" in summary["reward_components"]
+    assert summary["return_survival_curve"]["3"] == {
+        "count": 0,
+        "rate": 0.0,
+    }
+    assert summary["return_survival_curve"]["5"] == {
+        "count": 0,
+        "rate": 0.0,
+    }
 
 
 class _FakeWallBallEnv(Env):
@@ -424,6 +437,7 @@ class _FakeWallBallEnv(Env):
             "rew_double_bounce": 0.0,
             "rew_stall": 0.0,
             "rew_style_violation": 0.0,
+            "rew_recoverable_bounce": 0.0,
             "term_oob": False,
             "term_double_bounce": False,
             "term_stall": False,
@@ -488,6 +502,7 @@ def test_rollout_counts_post_floor_bounce_recovery_and_return():
                 "rew_double_bounce": 0.0,
                 "rew_stall": 0.0,
                 "rew_style_violation": 0.0,
+                "rew_recoverable_bounce": 0.0,
                 "term_oob": False,
                 "term_double_bounce": False,
                 "term_stall": False,
@@ -622,6 +637,12 @@ def test_evaluate_best_wall_ball_writes_drive_ready_metrics(tmp_path, monkeypatc
         "verified_against_training_constructor"
     )
     assert payload["metrics"]["completed_returns"]["mean"] == 3.0
+    assert payload["schema_version"] == 2
+    assert payload["evaluation"]["return_survival_thresholds"] == [1, 2, 3, 5]
+    assert payload["return_survival_curve"]["5"] == {
+        "count": 0,
+        "rate": 0.0,
+    }
     assert payload["terminations"]["timeout"] == {"count": 2, "rate": 1.0}
     assert payload["terminations"]["double_bounce"] == {
         "count": 0,

@@ -141,22 +141,22 @@ def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
 def wall_ball_baseline_oracle_action(obs: np.ndarray) -> np.ndarray:
     """Bounce-aware feasibility controller for ``WallBallBaseline``.
 
-    The controller uses only the public 22-value observation. Before the
+    The controller uses the first 22 values of the public observation. Before the
     required floor bounce it retreats to the back of the configured x lane;
     after the bounce it predicts the y/z intercept and swings to the front of
     the lane. Outbound shots trigger a recovery. This is a physics canary for
     the calibrated preset, not a competitive training baseline.
     """
     observation = np.asarray(obs)
-    if observation.shape != (22,):
-        raise ValueError("WallBall observation must have shape (22,)")
+    if observation.shape not in {(22,), (23,)}:
+        raise ValueError("WallBall observation must have shape (22,) or (23,)")
 
     ball_x, ball_y, ball_z = observation[0:3]
     ball_vx, ball_vy, ball_vz = observation[3:6]
     floor_bounce_count = observation[13]
     paddle_x = ball_x - observation[14]
     back_x = -3.2
-    front_x = -2.2
+    front_x = -2.1
     home_x = -2.7
 
     if ball_vx < -0.1:
@@ -182,8 +182,10 @@ def wall_ball_baseline_oracle_action(obs: np.ndarray) -> np.ndarray:
         target_y = float(np.clip(ball_y, -3.0, 3.0))
         target_z = float(np.clip(ball_z, 0.18, 3.1))
 
-    # Baseline x is symmetric around home: [-3.2, -2.2] maps to [-1, 1].
-    action_x = (target_x - home_x) / 0.5
+    # The recovery preset extends only the forward half of the lane:
+    # [-3.2, -2.7] maps to [-1, 0], and [-2.7, -2.1] maps to [0, 1].
+    x_span = 0.6 if target_x >= home_x else 0.5
+    action_x = (target_x - home_x) / x_span
     target_qpos_y = target_y
     target_qpos_z = target_z - 1.2
     action_y = target_qpos_y / 3.0

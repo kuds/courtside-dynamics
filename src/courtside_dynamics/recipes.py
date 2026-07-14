@@ -38,6 +38,11 @@ class Recipe:
     name_prefix: str = "rl_model"
     extra_cfg: dict[str, Any] = field(default_factory=dict)
     description: str = ""
+    # Kept after the original dataclass fields for positional compatibility.
+    # Applied on top of ``env_kwargs`` only for evaluation, final scoring,
+    # videos, and post-training endurance audits. Curriculum recipes use this
+    # to force canonical full-episode resets without changing training.
+    eval_env_overrides: dict[str, Any] = field(default_factory=dict)
 
 
 def _ball_bounce_info_row(
@@ -360,20 +365,51 @@ RECIPES: dict[str, Recipe] = {
             # The measured bounce -> paddle -> wall sequence succeeded in
             # 500/500 scripted trials; a parked paddle scored 0/1,000.
             "paddle_home_x": -2.7,
-            "paddle_x_target_range": (-3.2, -2.2),
+            # A calibration sweep found -2.1 to be the safest modest forward
+            # extension: -1.8 created more out-of-bounds and style faults.
+            "paddle_x_target_range": (-3.2, -2.1),
             "serve_speed": 5.5,
             "serve_speed_jitter": 0.5,
             "serve_lob": 0.0,
             "serve_vy_min": 0.8,
             "serve_vy_max": 2.0,
+            # Early training is 40% normal serves, 30% incoming-wall
+            # fragments, and 30% post-bounce fragments. The global-step
+            # schedule below tapers the combined recovery share to 15%.
+            "recovery_reset_probability": 0.6,
+            "post_bounce_reset_fraction": 0.5,
+            # Reward the policy's outgoing shot only when its next bounce
+            # projects inside the paddle's lateral recovery corridor.
+            "recoverable_bounce_bonus": 0.25,
+            "recoverable_bounce_lateral_limit": 2.0,
+        },
+        eval_env_overrides={
+            # Evaluation must never sample recovery-curriculum starts: every
+            # score represents a complete baseline episode from the serve.
+            "recovery_reset_probability": 0.0,
         },
         default_total_timesteps=1_500_000,
         name_prefix="wall_ball_baseline",
         extra_cfg={
             "success_key": "bounce_count",
-            "success_threshold": 1.0,
+            # One return was solved by every held-out seed in the first
+            # baseline run; success now means surviving the actual skill
+            # cliff and completing a second return.
+            "success_threshold": 2.0,
             "headline_key": "bounce_count",
             "info_eval_distribution_keys": ("bounce_count",),
+            "info_eval_survival_thresholds": {
+                "bounce_count": (2, 3, 5),
+            },
+            "env_attr_schedules": (
+                {
+                    "attr_name": "recovery_reset_probability",
+                    "start_value": 0.6,
+                    "end_value": 0.15,
+                    "hold_until_timesteps": 250_000,
+                    "end_timesteps": 750_000,
+                },
+            ),
             "phase_key": "rally_phase",
             "phase_labels": {
                 0: "await_bounce",
@@ -382,8 +418,8 @@ RECIPES: dict[str, Recipe] = {
             },
         },
         description=(
-            "Play one-bounce baseline rallies from a restricted rear paddle "
-            "zone with a calibrated bounce-first serve."
+            "Play one-bounce baseline rallies from a rear paddle zone with "
+            "tapered post-wall recovery practice and normal-serve evaluation."
         ),
     ),
     "HumanoidTennisStage0Intercept": Recipe(
@@ -513,6 +549,31 @@ def make_env_fn(
     return _factory
 
 
+def make_eval_env_fn(
+    env_name: str,
+    *,
+    env_overrides: Mapping[str, Any] | None = None,
+):
+    """Return the canonical evaluation factory for ``env_name``.
+
+    The recipe's evaluation overrides are layered over its training kwargs,
+    then one-off caller overrides (such as a longer episode horizon) are
+    applied last. This keeps checkpoint selection and post-training audits on
+    standard full episodes even when the training factory samples curriculum
+    reset states.
+    """
+    recipe = RECIPES[env_name]
+    kwargs = dict(recipe.env_kwargs)
+    kwargs.update(recipe.eval_env_overrides)
+    if env_overrides:
+        kwargs.update(env_overrides)
+
+    def _factory():
+        return recipe.env_cls(**kwargs)
+
+    return _factory
+
+
 def build_train_config(
     env_name: str,
     *,
@@ -554,6 +615,8 @@ def build_train_config(
 
     cfg_kwargs: dict[str, Any] = {
         "env_fn": make_env_fn(env_name),
+        "eval_env_fn": make_eval_env_fn(env_name),
+        "recipe_name": env_name,
         "algo": resolved_algo,
         "log_dir": log_dir,
         "name_prefix": f"{recipe.name_prefix}_{resolved_algo.lower()}",

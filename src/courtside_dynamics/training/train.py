@@ -51,6 +51,9 @@ from stable_baselines3.common.vec_env import (
     sync_envs_normalization,
 )
 
+from courtside_dynamics.callbacks.env_attr_schedule import (
+    LinearEnvAttrScheduleCallback,
+)
 from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
 from courtside_dynamics.callbacks.video_record import (
     InfoRowFn,
@@ -219,6 +222,12 @@ class TrainConfig:
         Zero-arg factory returning a fresh Gymnasium env. The helper runs
         ``check_env`` on the first instance it builds and replicates the
         factory across ``n_envs`` workers.
+    eval_env_fn:
+        Optional zero-arg factory used exclusively for evaluation, final
+        scoring, and milestone videos. When omitted, ``env_fn`` is reused.
+        Curriculum recipes should provide a factory with curriculum resets
+        disabled so checkpoint selection always measures complete episodes
+        from the canonical starting state.
     algo:
         ``"SAC"`` or ``"PPO"``.
     total_timesteps:
@@ -310,6 +319,10 @@ class TrainConfig:
     info_eval_distribution_keys:
         Terminal counters for which the evaluator reports episode
         min/median/90th-percentile/max values.
+    info_eval_survival_thresholds:
+        Mapping from terminal counters to positive integer thresholds. The
+        info evaluator reports the fraction of episodes reaching every
+        threshold as ``<key>_ep_ge_<threshold>_rate``.
     success_key / success_threshold:
         Forwarded to ``InfoDictEvalCallback``. When ``success_key`` is
         set, the fraction of eval episodes whose terminal
@@ -353,6 +366,11 @@ class TrainConfig:
         machine get per-phase time-fraction logs.
     extra_callbacks:
         Additional callbacks to run alongside eval / video recording.
+    env_attr_schedules:
+        Declarative linear schedules for numeric attributes on every training
+        environment. Each mapping is forwarded to
+        ``LinearEnvAttrScheduleCallback`` and is driven by SB3's global
+        timestep count. Evaluation environments are never modified.
     """
 
     env_fn: Callable
@@ -390,6 +408,16 @@ class TrainConfig:
     phase_key: str | None = None
     phase_labels: dict[int, str] | None = None
     extra_callbacks: Iterable[BaseCallback] = field(default_factory=tuple)
+    # New fields stay after the original public dataclass fields so existing
+    # positional TrainConfig construction keeps its historical meaning.
+    eval_env_fn: Callable | None = None
+    recipe_name: str | None = None
+    info_eval_survival_thresholds: Mapping[str, Sequence[int]] = field(
+        default_factory=dict
+    )
+    env_attr_schedules: Sequence[Mapping[str, Any]] = field(
+        default_factory=tuple
+    )
 
 
 def _offset_seed(seed: int | None, offset: int) -> int | None:
@@ -683,6 +711,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     # artifacts written -- a typo'd ``algo`` should fail in milliseconds,
     # not after constructing (and checking) a fleet of MuJoCo envs.
     _resolve_algo(cfg.algo)
+    env_attr_schedule_callbacks = tuple(
+        LinearEnvAttrScheduleCallback(**dict(schedule))
+        for schedule in cfg.env_attr_schedules
+    )
     cfg.normalize_obs_excluded_indices = _validate_observation_indices(
         cfg.normalize_obs_excluded_indices,
         name="normalize_obs_excluded_indices",
@@ -696,16 +728,27 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     start_time = time.monotonic()
 
     # ``check_env`` replays several reset/step cycles; running it on every
-    # one of the n_envs + eval + info-eval instances just repeats the same
-    # verdict on identical envs. Check the first instance only.
-    env_checked = False
+    # worker repeats the same verdict. Training and evaluation factories may
+    # intentionally differ in reset distribution, though, so check the first
+    # instance from each profile independently.
+    train_env_checked = False
+    eval_env_checked = False
+    resolved_eval_env_fn = cfg.eval_env_fn or cfg.env_fn
 
-    def checked_env_fn():
-        nonlocal env_checked
+    def checked_train_env_fn():
+        nonlocal train_env_checked
         env = cfg.env_fn()
-        if not env_checked:
+        if not train_env_checked:
             check_env(env)
-            env_checked = True
+            train_env_checked = True
+        return env
+
+    def checked_eval_env_fn():
+        nonlocal eval_env_checked
+        env = resolved_eval_env_fn()
+        if not eval_env_checked:
+            check_env(env)
+            eval_env_checked = True
         return env
 
     # Helper envs (eval, info-eval, video) get seeds *past* the training
@@ -716,14 +759,16 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     opened_envs: list[VecEnv] = []
     try:
         train_env = make_vec_env(
-            checked_env_fn,
+            checked_train_env_fn,
             n_envs=cfg.n_envs,
             seed=cfg.seed,
             monitor_dir=os.path.join(cfg.log_dir, "monitor"),
         )
         opened_envs.append(train_env)
         eval_env = make_vec_env(
-            checked_env_fn, n_envs=1, seed=_offset_seed(cfg.seed, eval_seed_offset)
+            checked_eval_env_fn,
+            n_envs=1,
+            seed=_offset_seed(cfg.seed, eval_seed_offset),
         )
         opened_envs.append(eval_env)
 
@@ -824,7 +869,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         if cfg.record_video and cfg.video_freq > 0:
             callbacks.append(
                 VideoRecordCallback(
-                    env_fn=cfg.env_fn,
+                    env_fn=resolved_eval_env_fn,
                     save_path=os.path.join(cfg.log_dir, "videos"),
                     video_length=cfg.video_length,
                     save_freq=_calls(cfg.video_freq),
@@ -837,7 +882,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         info_eval_env = None
         if cfg.info_dict_eval:
             info_eval_env = make_vec_env(
-                checked_env_fn,
+                checked_eval_env_fn,
                 n_envs=1,
                 seed=_offset_seed(cfg.seed, eval_seed_offset + 1),
             )
@@ -894,10 +939,14 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     info_keys=cfg.info_eval_keys,
                     terminal_info_keys=cfg.info_eval_terminal_keys,
                     episode_distribution_keys=cfg.info_eval_distribution_keys,
+                    episode_survival_thresholds=(
+                        cfg.info_eval_survival_thresholds
+                    ),
                     csv_path=os.path.join(cfg.log_dir, "eval_info.csv"),
                     **selection_kwargs,
                 )
             )
+        callbacks.extend(env_attr_schedule_callbacks)
         callbacks.extend(cfg.extra_callbacks)
 
         # cfg.seed / cfg.verbose are the first-class knobs; an explicit value in

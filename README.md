@@ -97,13 +97,20 @@ to 22 values after removing yaw/pitch state. Previous WallBall models,
 incompatible; start a fresh run rather than resuming a pre-0.8 artifact. The
 Wall Ball animation below was recorded with the legacy 5-action environment.
 
-WallBall also supports fixed per-run rally styles without changing that
-3-action/22-observation policy interface. `WallBallVolley` forbids floor
+Package version 0.9.0 adds recovery-focused training to the strict baseline
+style. WallBall supports fixed per-run rally styles while keeping the same
+3-action interface. `WallBallVolley` forbids floor
 contacts. `WallBallBaseline` requires exactly one bounce before each paddle
 return, starts the paddle farther back at world x=-2.7, restricts it to the
-[-3.2, -2.2] baseline lane, and uses a calibrated lower serve. The original
-`WallBall` recipe remains the permissive `open` setup for compatibility;
-train separate policies for the strict volley and baseline recipes.
+[-3.2, -2.1] baseline lane, and uses a calibrated lower serve. Its training
+factory mixes normal serves with incoming-wall and post-bounce recovery
+fragments, then tapers that practice using global training steps. Checkpoint
+evaluation, videos, and post-training endurance scoring always start from a
+normal serve. A one-bit recoverability flag expands WallBall observations to
+23 values, so all 0.8 `WallBall`, `WallBallVolley`, and `WallBallBaseline`
+policies and `VecNormalize` statistics require a fresh run. The original
+`WallBall` recipe remains the permissive `open` setup; train separate policies
+for the strict volley and baseline recipes.
 
 | Ball Balance | Ball Bounce | Wall Ball |
 |:---:|:---:|:---:|
