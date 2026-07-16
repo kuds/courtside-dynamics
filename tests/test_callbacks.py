@@ -629,6 +629,308 @@ def test_info_dict_eval_task_metric_selection_and_early_stop(tmp_path):
     assert meta()["timestep"] == 200
 
 
+def test_info_dict_eval_min_delta_ignores_noise_improvements(tmp_path):
+    """Sub-delta differences neither crown a best nor reset the patience.
+
+    Regression scope: run 20260714_211111's best_model.zip was selected
+    by a ~1e-8 ``episode_reward_mean`` difference while every task
+    metric was 0.0, and that noise event reset the early-stop patience,
+    extending a provably dead run by 225k steps.
+    """
+    import json
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    cb = InfoDictEvalCallback(
+        eval_env=object(),  # never touched by the selection logic
+        best_metric_keys=("bounce_count_ep_mean", "episode_reward_mean"),
+        best_model_save_path=str(tmp_path),
+        early_stop_patience=2,
+        early_stop_min_evals=0,
+        # Half the granularity of a 30-episode mean: one real episode
+        # (1/30 ~= 0.033) clears it, float noise never does.
+        best_metric_min_delta=0.5 / 30,
+    )
+    cb.model = _FakeSavableModel(action_dim=3)
+    cb.model.get_vec_normalize_env = lambda: None  # type: ignore[attr-defined]
+
+    def best_timestep() -> int:
+        with open(tmp_path / "best_model_meta.json") as f:
+            return json.load(f)["timestep"]
+
+    cb.num_timesteps = 100
+    assert cb._update_best_and_maybe_stop(
+        {"bounce_count_ep_mean": 0.0, "episode_reward_mean": -1.0}
+    )
+    assert best_timestep() == 100
+
+    # Float-noise "improvement" on the reward tie-break: not a new best.
+    cb.num_timesteps = 200
+    assert cb._update_best_and_maybe_stop(
+        {"bounce_count_ep_mean": 0.0, "episode_reward_mean": -1.0 + 1e-8}
+    )
+    assert best_timestep() == 100
+
+    # A real one-episode change (1/30) clears the threshold.
+    cb.num_timesteps = 300
+    assert cb._update_best_and_maybe_stop(
+        {"bounce_count_ep_mean": 1.0 / 30, "episode_reward_mean": -1.0}
+    )
+    assert best_timestep() == 300
+
+    # Two flat evaluations exhaust patience=2: noise can no longer
+    # keep the run alive.
+    cb.num_timesteps = 400
+    assert cb._update_best_and_maybe_stop(
+        {"bounce_count_ep_mean": 1.0 / 30, "episode_reward_mean": -1.0 + 1e-8}
+    )
+    cb.num_timesteps = 500
+    assert not cb._update_best_and_maybe_stop(
+        {"bounce_count_ep_mean": 1.0 / 30, "episode_reward_mean": -1.0 - 1e-9}
+    )
+    assert best_timestep() == 300
+
+
+def test_info_dict_eval_warmup_does_not_count_against_patience():
+    """Earliest stop is eval ``min_evals + patience``.
+
+    Regression scope: the documented "at least 2N evaluations" contract
+    was violated because evaluations during the warm-up accrued
+    ``_evals_since_best``, allowing a stop at eval ``min_evals + 1``.
+    """
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    cb = InfoDictEvalCallback(
+        eval_env=object(),
+        best_metric_keys=("bounce_count_ep_mean",),
+        early_stop_patience=2,
+        early_stop_min_evals=3,
+    )
+    cb.model = _FakeSavableModel(action_dim=3)
+
+    flat = {"bounce_count_ep_mean": 0.0}
+    # Eval 1 sets the first best; evals 2-3 are warm-up and must not
+    # count toward the patience.
+    for step in (1, 2, 3, 4):
+        cb.num_timesteps = step
+        assert cb._update_best_and_maybe_stop(flat) is True, f"eval {step}"
+    # Eval 5 = min_evals (3) + patience (2): the stop may now fire.
+    cb.num_timesteps = 5
+    assert cb._update_best_and_maybe_stop(flat) is False
+
+
+def test_info_dict_eval_degenerate_signal_stops_dead_runs():
+    """Flat selection score + zero ball contact ends the run at the guard
+    window, long before patience.
+
+    Regression scope: run 20260714_211111 was provably dead (reward
+    exactly -1.0, zero paddle contact) from its second evaluation yet
+    burned 750k steps before the patience fired.
+    """
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    cb = InfoDictEvalCallback(
+        eval_env=object(),
+        best_metric_keys=("bounce_count_ep_mean",),
+        early_stop_patience=20,
+        degenerate_stop_evals=3,
+        degenerate_guard_keys=("paddle_hit_count_ep_mean",),
+    )
+    cb.model = _FakeSavableModel(action_dim=3)
+
+    dead = {"bounce_count_ep_mean": 0.0, "paddle_hit_count_ep_mean": 0.0}
+    cb.num_timesteps = 1
+    assert cb._update_best_and_maybe_stop(dead) is True
+    cb.num_timesteps = 2
+    assert cb._update_best_and_maybe_stop(dead) is True
+    cb.num_timesteps = 3
+    assert cb._update_best_and_maybe_stop(dead) is False
+
+
+def test_info_dict_eval_degenerate_guard_needs_zero_contact():
+    """A flat score with nonzero guard metrics (the policy touches the
+    ball) or a missing guard key must NOT trip the degenerate stop."""
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    for metrics in (
+        # Flat score, but the policy interacts with the ball.
+        {"bounce_count_ep_mean": 0.0, "paddle_hit_count_ep_mean": 0.5},
+        # Flat score, guard key absent: cannot conclude the run is dead.
+        {"bounce_count_ep_mean": 0.0},
+    ):
+        cb = InfoDictEvalCallback(
+            eval_env=object(),
+            best_metric_keys=("bounce_count_ep_mean",),
+            degenerate_stop_evals=3,
+            degenerate_guard_keys=("paddle_hit_count_ep_mean",),
+        )
+        cb.model = _FakeSavableModel(action_dim=3)
+        for step in (1, 2, 3, 4, 5):
+            cb.num_timesteps = step
+            assert cb._update_best_and_maybe_stop(metrics) is True, metrics
+
+
+def test_info_dict_eval_degenerate_guard_tolerates_float_noise():
+    """A float-noise selection key must not disarm the degenerate stop.
+
+    Regression scope: run 20260714_211111's episode_reward_mean jittered
+    by ~1e-8 between evaluations of a dead policy; a guard requiring
+    bitwise-identical scores would never fire on any key set that keeps
+    a continuous reward tie-break.
+    """
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    cb = InfoDictEvalCallback(
+        eval_env=object(),
+        best_metric_keys=("bounce_count_ep_mean", "episode_reward_mean"),
+        best_metric_min_delta=0.5 / 30,
+        degenerate_stop_evals=3,
+        degenerate_guard_keys=("paddle_hit_count_ep_mean",),
+    )
+    cb.model = _FakeSavableModel(action_dim=3)
+
+    outcomes = []
+    for step, reward in enumerate((-1.0, -1.0 + 1e-8, -1.0 - 2e-8), 1):
+        cb.num_timesteps = step
+        outcomes.append(
+            cb._update_best_and_maybe_stop(
+                {
+                    "bounce_count_ep_mean": 0.0,
+                    "episode_reward_mean": reward,
+                    "paddle_hit_count_ep_mean": 0.0,
+                }
+            )
+        )
+    assert outcomes == [True, True, False]
+
+
+def test_info_dict_eval_degenerate_guard_warmup():
+    """Evaluations inside ``degenerate_min_evals`` never enter the guard
+    window, so a curriculum run cannot be killed while its schedule still
+    holds the start distribution (where a dead full-difficulty eval is
+    expected by design)."""
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    cb = InfoDictEvalCallback(
+        eval_env=object(),
+        best_metric_keys=("bounce_count_ep_mean",),
+        degenerate_stop_evals=2,
+        degenerate_guard_keys=("paddle_hit_count_ep_mean",),
+        degenerate_min_evals=3,
+    )
+    cb.model = _FakeSavableModel(action_dim=3)
+
+    dead = {"bounce_count_ep_mean": 0.0, "paddle_hit_count_ep_mean": 0.0}
+    # Evals 1-3 are warm-up; evals 4-5 fill the window; stop at eval 5
+    # = degenerate_min_evals + degenerate_stop_evals.
+    for step in (1, 2, 3, 4):
+        cb.num_timesteps = step
+        assert cb._update_best_and_maybe_stop(dead) is True, f"eval {step}"
+    cb.num_timesteps = 5
+    assert cb._update_best_and_maybe_stop(dead) is False
+
+
+def test_info_dict_eval_confirm_best_banks_weaker_by_delta_order(
+    monkeypatch,
+):
+    """The banked best uses the same delta-tolerant ordering as
+    ``_improves``: when the first key ties within delta and the tie-break
+    key decides, the sample with the lower tie-break is the weaker one --
+    even if its first key is numerically larger, where a raw tuple
+    ``min`` would bank the stronger sample and ratchet the best up to a
+    lucky high-water mark."""
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    cb = InfoDictEvalCallback(
+        eval_env=object(),
+        best_metric_keys=(
+            "bounce_count_ep_mean",
+            "bounce_count_ep_ge_2_rate",
+        ),
+        confirm_best=True,
+        best_metric_min_delta=1.0 / 60,
+    )
+    cb.model = _FakeSavableModel(action_dim=3)
+
+    cb.num_timesteps = 100
+    assert cb._update_best_and_maybe_stop(
+        {"bounce_count_ep_mean": 1.0, "bounce_count_ep_ge_2_rate": 0.2}
+    )
+
+    # Primary (1.010, 0.90) vs confirmation (1.001, 0.95): key 0 ties
+    # within delta, key 1 says the confirmation is stronger, so the
+    # primary must be banked. Raw tuple min would pick (1.001, 0.95).
+    monkeypatch.setattr(
+        cb,
+        "_collect_metrics",
+        lambda: {
+            "bounce_count_ep_mean": 1.001,
+            "bounce_count_ep_ge_2_rate": 0.95,
+        },
+    )
+    cb.num_timesteps = 200
+    assert cb._update_best_and_maybe_stop(
+        {"bounce_count_ep_mean": 1.010, "bounce_count_ep_ge_2_rate": 0.90}
+    )
+    assert cb._best_score == (1.010, 0.90)
+
+
+def test_info_dict_eval_confirm_best_requires_second_batch(
+    tmp_path, monkeypatch
+):
+    """A candidate best must also win an independent confirmation batch.
+
+    Regression scope: run 20260714_050506's best checkpoint (600k) beat
+    its plateau by exactly one lucky 2-bounce episode in 30 -- a
+    single-batch fluke that a second sample would have rejected.
+    """
+    import json
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    cb = InfoDictEvalCallback(
+        eval_env=object(),
+        best_metric_keys=("bounce_count_ep_mean",),
+        best_model_save_path=str(tmp_path),
+        confirm_best=True,
+        best_metric_min_delta=0.5 / 30,
+    )
+    cb.model = _FakeSavableModel(action_dim=3)
+    cb.model.get_vec_normalize_env = lambda: None  # type: ignore[attr-defined]
+
+    def meta() -> dict:
+        with open(tmp_path / "best_model_meta.json") as f:
+            return json.load(f)
+
+    # The first evaluation is accepted without a confirmation pass:
+    # there is no best to defend yet.
+    cb.num_timesteps = 100
+    assert cb._update_best_and_maybe_stop({"bounce_count_ep_mean": 1.0})
+    assert meta()["timestep"] == 100
+    assert "confirmation_values" not in meta()
+
+    # Candidate improvement whose confirmation batch ties the old best:
+    # rejected, the fluke does not become best_model.zip.
+    monkeypatch.setattr(
+        cb, "_collect_metrics", lambda: {"bounce_count_ep_mean": 1.0}
+    )
+    cb.num_timesteps = 200
+    assert cb._update_best_and_maybe_stop({"bounce_count_ep_mean": 1.1})
+    assert meta()["timestep"] == 100
+
+    # Confirmed improvement: accepted, both batches recorded, and the
+    # stored best score is the weaker of the two samples.
+    monkeypatch.setattr(
+        cb, "_collect_metrics", lambda: {"bounce_count_ep_mean": 1.2}
+    )
+    cb.num_timesteps = 300
+    assert cb._update_best_and_maybe_stop({"bounce_count_ep_mean": 1.3})
+    assert meta()["timestep"] == 300
+    assert meta()["selection_values"] == {"bounce_count_ep_mean": 1.3}
+    assert meta()["confirmation_values"] == {"bounce_count_ep_mean": 1.2}
+    assert cb._best_score == (1.2,)
+
+
 def test_info_dict_eval_selection_writes_artifacts_end_to_end(tmp_path):
     """A live eval pass under ``best_metric_keys`` writes model + meta and
     logs ``episode_reward_mean`` alongside the info aggregates."""

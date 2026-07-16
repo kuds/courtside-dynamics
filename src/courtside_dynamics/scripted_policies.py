@@ -138,7 +138,12 @@ def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
     return np.clip(targets / spans, -1.0, 1.0).astype(np.float32)
 
 
-def wall_ball_baseline_oracle_action(obs: np.ndarray) -> np.ndarray:
+def wall_ball_baseline_oracle_action(
+    obs: np.ndarray,
+    *,
+    paddle_x_target_range: tuple[float, float] = (-3.2, -1.6),
+    paddle_home_x: float = -2.7,
+) -> np.ndarray:
     """Bounce-aware feasibility controller for ``WallBallBaseline``.
 
     The controller uses the first 22 values of the public observation. Before the
@@ -146,18 +151,31 @@ def wall_ball_baseline_oracle_action(obs: np.ndarray) -> np.ndarray:
     after the bounce it predicts the y/z intercept and swings to the front of
     the lane. Outbound shots trigger a recovery. This is a physics canary for
     the calibrated preset, not a competitive training baseline.
+
+    ``paddle_x_target_range`` / ``paddle_home_x`` must match the env's
+    kwargs: the controller both plans within the lane and inverts the
+    env's piecewise action mapping, whose spans derive from the same
+    values. Defaults track the ``WallBallBaseline`` recipe (pinned
+    together by a test); pass the values explicitly for any other lane.
     """
     observation = np.asarray(obs)
     if observation.shape not in {(22,), (23,)}:
         raise ValueError("WallBall observation must have shape (22,) or (23,)")
 
+    back_x, front_x = (
+        float(paddle_x_target_range[0]),
+        float(paddle_x_target_range[1]),
+    )
+    home_x = float(paddle_home_x)
+    if not back_x < home_x < front_x:
+        raise ValueError(
+            "paddle_home_x must lie strictly inside paddle_x_target_range"
+        )
+
     ball_x, ball_y, ball_z = observation[0:3]
     ball_vx, ball_vy, ball_vz = observation[3:6]
     floor_bounce_count = observation[13]
     paddle_x = ball_x - observation[14]
-    back_x = -3.2
-    front_x = -2.1
-    home_x = -2.7
 
     if ball_vx < -0.1:
         t_hit = max(
@@ -182,9 +200,10 @@ def wall_ball_baseline_oracle_action(obs: np.ndarray) -> np.ndarray:
         target_y = float(np.clip(ball_y, -3.0, 3.0))
         target_z = float(np.clip(ball_z, 0.18, 3.1))
 
-    # The recovery preset extends only the forward half of the lane:
-    # [-3.2, -2.7] maps to [-1, 0], and [-2.7, -2.1] maps to [0, 1].
-    x_span = 0.6 if target_x >= home_x else 0.5
+    # The baseline preset asymmetrically splits the lane around home:
+    # [back_x, home_x] maps to [-1, 0] and [home_x, front_x] to [0, 1],
+    # mirroring WallBallEnv._action_to_controls.
+    x_span = front_x - home_x if target_x >= home_x else home_x - back_x
     action_x = (target_x - home_x) / x_span
     target_qpos_y = target_y
     target_qpos_z = target_z - 1.2

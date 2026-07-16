@@ -2660,8 +2660,16 @@ class TestWallBallRallyStyleSemantics:
         finally:
             env.close()
 
-    def test_calibrated_baseline_serve_is_physically_solvable(self):
-        """An observation-only controller closes a legal cycle on real serves."""
+    @staticmethod
+    def _baseline_serve_env_and_oracle(recovery_reset_probability=0.0):
+        """WallBallBaseline env + matched oracle fn.
+
+        ``recovery_reset_probability`` defaults to zero so serve tests
+        exercise the calibrated serve itself -- with the recipe value
+        (0.6) most seeds would start from synthetic recovery fragments
+        and a serve test would not prove what its name claims. Pass 1.0
+        to force every reset onto a fragment instead.
+        """
         from courtside_dynamics.recipes import RECIPES
         from courtside_dynamics.scripted_policies import (
             wall_ball_baseline_oracle_action,
@@ -2669,13 +2677,26 @@ class TestWallBallRallyStyleSemantics:
 
         env_kwargs = dict(RECIPES["WallBallBaseline"].env_kwargs)
         env_kwargs.pop("render_mode", None)
-        env = WallBallEnv(**env_kwargs)
+        env_kwargs["recovery_reset_probability"] = recovery_reset_probability
+        lane = env_kwargs["paddle_x_target_range"]
+        home = env_kwargs["paddle_home_x"]
+
+        def oracle(obs):
+            return wall_ball_baseline_oracle_action(
+                obs, paddle_x_target_range=lane, paddle_home_x=home
+            )
+
+        return WallBallEnv(**env_kwargs), oracle
+
+    def test_calibrated_baseline_serve_is_physically_solvable(self):
+        """An observation-only controller closes a legal cycle on real serves."""
+        env, oracle = self._baseline_serve_env_and_oracle()
         try:
             for seed in range(5):
                 obs, _ = env.reset(seed=seed)
                 for _ in range(env.episode_len):
                     obs, _, terminated, truncated, info = env.step(
-                        wall_ball_baseline_oracle_action(obs)
+                        oracle(obs)
                     )
                     if info["bounce_count"] >= 1:
                         break
@@ -2687,6 +2708,79 @@ class TestWallBallRallyStyleSemantics:
                 assert info["one_bounce_recovery_count"] >= 1
                 assert info["one_bounce_return_count"] >= 1
                 assert info["floor_bounce_total"] >= 1
+        finally:
+            env.close()
+
+    def test_raised_success_bar_is_scriptable_from_standard_serves(self):
+        """The recipe's success threshold (bounce_count >= 2) is provably
+        reachable by an observation-only controller from standard serves.
+
+        Guards against scoring training runs on a bar no policy can hit:
+        the 2026-07-16 calibration sweep measured the oracle at 92%
+        second returns over 500 serves under the (-3.2, -1.6) lane with
+        slide damping 8 (seeds 0-9 reach [4, 2, 3, 4, 2, 2, 1, 3, 2, 2]
+        returns), while at the pre-sweep (-3.2, -2.1)/damping-5 geometry
+        a placement-blind tracker recovered a second exchange in exactly
+        0% of episodes -- the run 20260714_050506 plateau.
+        """
+        env, oracle = self._baseline_serve_env_and_oracle()
+        try:
+            reached_two = 0
+            for seed in range(10):
+                obs, _ = env.reset(seed=seed)
+                info = {}
+                for _ in range(env.episode_len):
+                    obs, _, terminated, truncated, info = env.step(
+                        oracle(obs)
+                    )
+                    if terminated or truncated or info["bounce_count"] >= 2:
+                        break
+                assert info["bounce_count"] >= 1, (
+                    f"seed {seed}: oracle failed even the first return: "
+                    f"{info}"
+                )
+                if info["bounce_count"] >= 2:
+                    reached_two += 1
+            # 9/10 measured; >= 7 tolerates minor cross-platform contact
+            # jitter without letting the bar drift out of reach.
+            assert reached_two >= 7, (
+                f"only {reached_two}/10 seeds completed a second return"
+            )
+        finally:
+            env.close()
+
+    def test_recovery_fragments_remain_solvable_by_the_oracle(self):
+        """Fragment starts must stay closable under the recipe geometry.
+
+        The serve tests above force recovery_reset_probability to zero,
+        so this is the only oracle coverage of the synthetic
+        incoming-wall / post-bounce fragments the training curriculum
+        serves. Measured 2026-07-16: 47/50 fragment starts close a
+        legal cycle at the (-3.2, -1.6)/damping-8 geometry.
+        """
+        env, oracle = self._baseline_serve_env_and_oracle(
+            recovery_reset_probability=1.0
+        )
+        try:
+            closed = 0
+            for seed in range(10):
+                obs, reset_info = env.reset(seed=seed)
+                assert reset_info["reset_mode"] in {
+                    "incoming_wall",
+                    "post_bounce",
+                }
+                info = {}
+                for _ in range(env.episode_len):
+                    obs, _, terminated, truncated, info = env.step(
+                        oracle(obs)
+                    )
+                    if terminated or truncated or info["bounce_count"] >= 1:
+                        break
+                if info["bounce_count"] >= 1:
+                    closed += 1
+            assert closed >= 8, (
+                f"only {closed}/10 fragment starts closed a legal cycle"
+            )
         finally:
             env.close()
 
@@ -2742,6 +2836,137 @@ class TestWallBallRallyStyleSemantics:
             assert info["one_bounce_return_count"] == 0
         finally:
             env.close()
+
+    def test_one_bounce_early_touch_softened_is_fine_not_termination(self):
+        """With ``early_touch_penalty`` set, a pre-bounce paddle touch pays
+        a non-terminal fine, keeps the gate shut, and the rally can still
+        be completed legally afterwards."""
+        env = self._strict_env("one_bounce", early_touch_penalty=0.25)
+        try:
+            env.reset(seed=0)
+            face = env.data.body("paddle_head").xpos.copy()
+            self._place_ball(
+                env,
+                face + np.array([0.5, 0.0, 0.05]),
+                vel=[-3.0, 0.0, 0.0],
+            )
+            _, reward, terminated, truncated, info = self._step_until(
+                env, "event_early_touch"
+            )
+            assert not terminated and not truncated
+            assert reward == pytest.approx(-0.25)
+            assert info["rew_early_touch"] == pytest.approx(-0.25)
+            assert info["early_touch_count"] == 1
+            assert info["event_style_violation"] is False
+            assert info["style_violation_reason"] is None
+            assert info["term_style_violation"] is False
+            # The touch never opens the return gate.
+            assert info["event_legal_paddle_hit"] is False
+            assert info["legal_paddle_hit_count"] == 0
+            assert info["paddle_hit_count"] == 1
+            assert info["rally_phase_name"] == "await_bounce"
+
+            # The rally continues: bounce -> paddle -> wall still pays.
+            self._floor_bounce(env)
+            self._paddle_hit(env)
+            _, _, terminated, truncated, info = self._wall_hit(env)
+            assert not (terminated or truncated)
+            assert info["bounce_count"] == 1
+            assert info["early_touch_count"] == 1
+        finally:
+            env.close()
+
+    def test_early_touch_penalty_is_validated(self):
+        for bad in (-0.1, np.nan, np.inf):
+            with pytest.raises(ValueError, match="early_touch_penalty"):
+                WallBallEnv(rally_style="one_bounce", early_touch_penalty=bad)
+
+    def test_one_bounce_early_touch_does_not_reset_stall_clock(self):
+        """A fined touch is a fault, not rally progress. If it reset the
+        stall window, a periodic tap (0.25 per <=stall_steps) would hold
+        a dead ball to the penalty-free timeout for less than the stall
+        fine -- the catch-and-stall exploit class run 20260712_190054
+        converged to."""
+        env = self._strict_env("one_bounce", early_touch_penalty=0.25)
+        try:
+            env.reset(seed=0)
+            env._steps_since_event = 17
+            face = env.data.body("paddle_head").xpos.copy()
+            self._place_ball(
+                env,
+                face + np.array([0.5, 0.0, 0.05]),
+                vel=[-3.0, 0.0, 0.0],
+            )
+            self._step_until(env, "event_early_touch")
+            # The counter kept accruing through the fined touch instead
+            # of being zeroed by it.
+            assert env._steps_since_event > 17
+        finally:
+            env.close()
+
+    def test_one_bounce_early_touch_disarms_recoverable_bounce(self):
+        """A pre-bounce touch re-aims the rebound, so the placement bonus
+        armed by the preceding legal return must not pay on the
+        paddle-steered trajectory (otherwise a cheap tap converts any
+        armed rebound into a perfectly-placed 'recoverable' bounce)."""
+        env = self._strict_env(
+            "one_bounce",
+            early_touch_penalty=0.25,
+            recoverable_bounce_bonus=1.0,
+            recoverable_bounce_lateral_limit=2.0,
+        )
+        try:
+            env.reset(seed=0)
+            self._floor_bounce(env)
+            self._paddle_hit(env)
+            _, _, _, _, info = self._wall_hit(env)
+            assert info["recoverable_bounce_eligible"] is True
+
+            face = env.data.body("paddle_head").xpos.copy()
+            self._place_ball(
+                env,
+                face + np.array([0.5, 0.0, 0.05]),
+                vel=[-3.0, 0.0, 0.0],
+            )
+            _, _, _, _, info = self._step_until(env, "event_early_touch")
+            assert info["recoverable_bounce_eligible"] is False
+
+            _, _, _, _, info = self._floor_bounce(env)
+            assert info["event_recoverable_bounce"] is False
+            assert info["rew_recoverable_bounce"] == 0.0
+        finally:
+            env.close()
+
+    def test_paddle_joint_damping_overrides_model_per_instance(self):
+        """The kwarg rewrites the compiled model's slide damping; the
+        default None keeps the shared XML calibration (5) so open/volley
+        presets are untouched by a baseline-only physics change."""
+        slide_joints = ("paddle_slide_x", "paddle_slide_y", "paddle_slide_z")
+
+        env = WallBallEnv()
+        try:
+            assert env.paddle_joint_damping is None
+            for joint in slide_joints:
+                dofadr = int(env.model.joint(joint).dofadr[0])
+                assert env.model.dof_damping[dofadr] == pytest.approx(5.0)
+        finally:
+            env.close()
+
+        env = WallBallEnv(paddle_joint_damping=8.0)
+        try:
+            for joint in slide_joints:
+                dofadr = int(env.model.joint(joint).dofadr[0])
+                assert env.model.dof_damping[dofadr] == pytest.approx(8.0)
+            # The ball's free joint keeps its zero flight damping.
+            ball_dofadr = int(env.model.joint("ball_x").dofadr[0])
+            assert env.model.dof_damping[ball_dofadr] == pytest.approx(0.0)
+        finally:
+            env.close()
+
+    def test_paddle_joint_damping_is_validated(self):
+        for bad in (0.0, -1.0, np.nan, np.inf):
+            with pytest.raises(ValueError, match="paddle_joint_damping"):
+                WallBallEnv(paddle_joint_damping=bad)
 
     def test_floor_after_legal_paddle_before_wall_is_terminal_violation(self):
         env = self._strict_env("one_bounce")

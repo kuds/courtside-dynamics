@@ -43,6 +43,14 @@ configurable fraction of normal serves with narrow ``incoming_wall`` or
   Normal serves and synthetic recovery resets never arm it, so curriculum
   state cannot receive credit for a trajectory the policy did not create;
   contact chatter and later bounces cannot pay it twice.
+- In ``one_bounce`` style, touching the ball before its required floor
+  bounce is by default a terminal ``paddle_before_bounce`` style
+  violation. Setting ``early_touch_penalty`` softens it to a
+  non-terminal fine (paid outright per contact edge, never refunded)
+  while the return gate stays shut: punishing an early contact
+  *attempt* exactly as hard as total passivity removes the incentive
+  to approach the ball at all, and it deters the forward positioning
+  a wide paddle lane requires.
 - ``track_shaping_scale`` adds tracking shaping that rewards reductions
   in the paddle→ball distance while a return is in progress. The
   shaping window is opened **on reset** as if a virtual wall hit had
@@ -189,6 +197,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         post_bounce_reset_fraction: float = 0.5,
         recoverable_bounce_bonus: float = 0.0,
         recoverable_bounce_lateral_limit: float = 0.0,
+        early_touch_penalty: float | None = None,
+        paddle_joint_damping: float | None = None,
         **kwargs: Any,
     ) -> None:
         if not isinstance(rally_style, str) or rally_style not in _RALLY_STYLES:
@@ -225,6 +235,18 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             raise ValueError(
                 "recoverable_bounce_lateral_limit must be finite and "
                 "nonnegative"
+            )
+        if early_touch_penalty is not None and (
+            not np.isfinite(early_touch_penalty) or early_touch_penalty < 0.0
+        ):
+            raise ValueError(
+                "early_touch_penalty must be None or finite and nonnegative"
+            )
+        if paddle_joint_damping is not None and (
+            not np.isfinite(paddle_joint_damping) or paddle_joint_damping <= 0.0
+        ):
+            raise ValueError(
+                "paddle_joint_damping must be None or finite and positive"
             )
         resolved_target_range: tuple[float, float] | None = None
         if paddle_x_target_range is not None:
@@ -267,6 +289,16 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             recoverable_bounce_lateral_limit=float(
                 recoverable_bounce_lateral_limit
             ),
+            early_touch_penalty=(
+                None
+                if early_touch_penalty is None
+                else float(early_touch_penalty)
+            ),
+            paddle_joint_damping=(
+                None
+                if paddle_joint_damping is None
+                else float(paddle_joint_damping)
+            ),
             **kwargs,
         )
 
@@ -302,6 +334,28 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.recoverable_bounce_bonus = float(recoverable_bounce_bonus)
         self.recoverable_bounce_lateral_limit = float(
             recoverable_bounce_lateral_limit
+        )
+        # ``None`` keeps the historical rule: a pre-bounce paddle touch in
+        # one_bounce style is a terminal style violation. A float softens
+        # it to a non-terminal fine (see step); the gate stays shut either
+        # way. Softening exists because the terminal rule punished early
+        # ball-contact *attempts* exactly as hard as total passivity --
+        # run 20260714_211111's policy stopped touching the ball entirely
+        # after eval-1 style violations -- and because it deters the
+        # forward positioning a wider paddle lane requires.
+        self.early_touch_penalty = (
+            None if early_touch_penalty is None else float(early_touch_penalty)
+        )
+        # ``None`` keeps the shared XML's slide damping (5, the open/volley
+        # calibration). Presets override per-instance: the servo's kv acts
+        # inside the +/-100 N force clamp, so a pegged actuator's terminal
+        # velocity is 100/damping -- at 5 that allows 20 m/s bang-bang
+        # swings whose fast, flat returns rebound too deep to recover.
+        # WallBallBaseline sets 8 (12.5 m/s cap, ~15% slower returns).
+        self.paddle_joint_damping = (
+            None
+            if paddle_joint_damping is None
+            else float(paddle_joint_damping)
         )
         # Minimum pre-impact downward speed for a ball-floor contact
         # onset to count as a bounce. A settling/rolling ball chatters
@@ -397,6 +451,15 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             obs_dim=23,
             **kwargs,
         )
+
+        if self.paddle_joint_damping is not None:
+            for joint_name in (
+                "paddle_slide_x",
+                "paddle_slide_y",
+                "paddle_slide_z",
+            ):
+                dofadr = int(self.model.joint(joint_name).dofadr[0])
+                self.model.dof_damping[dofadr] = self.paddle_joint_damping
 
         # MuJoCo exposes the position actuators' physical qpos ranges as
         # its default action space. The policy API stays normalized and
@@ -836,6 +899,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         rew_double_bounce = 0.0
         rew_stall = 0.0
         rew_style_violation = 0.0
+        rew_early_touch = 0.0
+        event_early_touch = False
         event_this_step = False
         event_floor_bounce = any(
             event_name == "floor"
@@ -969,8 +1034,34 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                         self.rally_style == "one_bounce"
                         and self._rally_phase == _AWAIT_BOUNCE
                     ):
-                        style_violation_reason = "paddle_before_bounce"
-                        break
+                        if self.early_touch_penalty is None:
+                            style_violation_reason = "paddle_before_bounce"
+                            break
+                        # Softened early touch: fine the contact, keep
+                        # the return gate shut (the required bounce has
+                        # not happened), and let the rally continue.
+                        # Paid outright, not as a refundable advance --
+                        # a fine that could be handed back would be no
+                        # fine at all.
+                        self.early_touch_count += 1
+                        reward -= self.early_touch_penalty
+                        rew_early_touch -= self.early_touch_penalty
+                        event_early_touch = True
+                        # A fined touch is a fault, not rally progress:
+                        # it must not reset the stall clock (a periodic
+                        # tap would otherwise hold a dead ball to the
+                        # penalty-free timeout, undercutting the stall
+                        # fine -- the catch-and-stall exploit class),
+                        # and it disarms the recoverable-bounce bonus
+                        # (the paddle just re-aimed the rebound, so the
+                        # placement is no longer the return's doing).
+                        # The shaping window closes like any other
+                        # paddle contact: the deflection invalidates
+                        # the tracked approach distance.
+                        self._recoverable_bounce_eligible = False
+                        self._returning = False
+                        self._prev_paddle_to_ball = None
+                        continue
                     if self._rally_phase == _AWAIT_PADDLE:
                         accept_paddle_hit()
                     # Repeat contacts while awaiting the wall remain
@@ -1144,11 +1235,13 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "rally_phase": self._rally_phase,
             "rally_phase_name": self.rally_phase_name,
             "style_violation_reason": style_violation_reason,
+            "early_touch_count": self.early_touch_count,
             "event_floor_bounce": bool(event_floor_bounce),
             "event_legal_paddle_hit": bool(event_legal_paddle_hit),
             "event_completed_return": bool(event_completed_return),
             "event_recoverable_bounce": bool(event_recoverable_bounce),
             "event_post_wall_bounce": bool(event_post_wall_bounce),
+            "event_early_touch": bool(event_early_touch),
             "event_style_violation": bool(event_style_violation),
             "recoverable_bounce_score": recoverable_bounce_score,
             "recoverable_bounce_eligible": bool(
@@ -1165,6 +1258,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "rew_double_bounce": rew_double_bounce,
             "rew_stall": rew_stall,
             "rew_style_violation": rew_style_violation,
+            "rew_early_touch": rew_early_touch,
             # Termination-cause flags. Mutually exclusive: at most one is
             # True (exactly one on the terminating step), so per-episode
             # aggregation turns these into a clean OOB / double-bounce /
@@ -1215,11 +1309,13 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "rally_phase": self._rally_phase,
             "rally_phase_name": self.rally_phase_name,
             "style_violation_reason": None,
+            "early_touch_count": self.early_touch_count,
             "event_floor_bounce": False,
             "event_legal_paddle_hit": False,
             "event_completed_return": False,
             "event_recoverable_bounce": False,
             "event_post_wall_bounce": False,
+            "event_early_touch": False,
             "event_style_violation": False,
             "recoverable_bounce_score": 0.0,
             "recoverable_bounce_eligible": bool(
@@ -1235,6 +1331,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "rew_double_bounce": 0.0,
             "rew_stall": 0.0,
             "rew_style_violation": 0.0,
+            "rew_early_touch": 0.0,
             "term_oob": False,
             "term_double_bounce": False,
             "term_stall": False,
@@ -1252,6 +1349,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.legal_paddle_hit_count = 0
         self.one_bounce_recovery_count = 0
         self.one_bounce_return_count = 0
+        self.early_touch_count = 0
         self._rally_phase = (
             _AWAIT_BOUNCE
             if self.rally_style == "one_bounce"

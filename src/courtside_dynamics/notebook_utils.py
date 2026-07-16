@@ -563,6 +563,7 @@ _WALL_BALL_REWARD_COMPONENTS: tuple[str, ...] = (
     "rew_stall",
     "rew_style_violation",
     "rew_recoverable_bounce",
+    "rew_early_touch",
 )
 
 _WALL_BALL_TERMINATION_REASONS: tuple[str, ...] = (
@@ -607,6 +608,10 @@ _LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS: dict[str, Any] = {
     "post_bounce_reset_fraction": 0.5,
     "recoverable_bounce_bonus": 0.0,
     "recoverable_bounce_lateral_limit": 0.0,
+    # Added in 0.10.0: absent from pre-0.10 run configs, whose behavior
+    # matches these defaults exactly (terminal early touch, XML damping).
+    "early_touch_penalty": None,
+    "paddle_joint_damping": None,
 }
 
 

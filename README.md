@@ -112,6 +112,24 @@ policies and `VecNormalize` statistics require a fresh run. The original
 `WallBall` recipe remains the permissive `open` setup; train separate policies
 for the strict volley and baseline recipes.
 
+Package version 0.10.0 recalibrates `WallBallBaseline`'s geometry so the
+second rally exchange is learnable, not just scriptable. The baseline recipe
+raises its paddle slide damping from 5 to 8 (new `paddle_joint_damping` env
+kwarg), capping saturated swings at 12.5 m/s and slowing returns ~15% so
+rebounds land shallower; it widens its lane front from x=-2.1 to x=-1.6; and
+it softens the pre-bounce paddle touch from a terminal style violation to a
+non-terminal `early_touch_penalty` fine (new env kwarg; the default `None`
+keeps the terminal rule). In the calibration sweep a placement-blind
+full-swing tracker recovers a second exchange in 70% of episodes under the
+new geometry versus 0% under the old, while the scripted oracle still returns
+500/500 calibrated serves and completes two or more returns from 92% of them.
+Observation and action shapes are unchanged, but the physics and lane changes
+make 0.9 `WallBallBaseline` policies, `VecNormalize` statistics, and learning
+curves non-comparable; start fresh baseline runs. The open `WallBall` and
+`WallBallVolley` presets keep the shared XML's damping 5 and their existing
+calibration. The recoverable-bounce placement score now projects to the new
+baseline lane front (x=-1.6).
+
 | Ball Balance | Ball Bounce | Wall Ball |
 |:---:|:---:|:---:|
 | ![A trained agent balancing a ball on a tray](Images/sac_ball_balance.gif) | ![A trained agent bouncing a ball on a paddle](Images/sac_ball_bounce.gif) | ![A trained agent rallying a ball against a wall](Images/sac_wall_ball.gif) |

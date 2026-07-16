@@ -267,11 +267,18 @@ class TrainConfig:
         selection: the headline task metric when ``headline_key`` is
         set (see below), otherwise mean eval reward via SB3's
         ``StopTrainingOnNoModelImprovement``. The same count is used
-        as the warm-up (``min_evals``), so a run gets at least 2N
-        evaluations before it can stop. ``None`` (default) trains for
-        the full budget. Motivation: the first real WallBall run kept
-        training for 10+ GPU-hours after its best checkpoint while the
-        policy collapsed; run 20260712_190054 then spent 525k steps
+        as the warm-up (``min_evals``) and warm-up evaluations never
+        count against the patience, so a run gets at least 2N
+        evaluations before it can stop. When ``env_attr_schedules``
+        are configured, the warm-up is extended to cover the longest
+        schedule so the run always trains for a full patience window
+        at the final scheduled distribution (run 20260714_211111's
+        schedule endpoint coincided exactly with its earliest
+        reachable stop, guaranteeing zero time at the target
+        distribution). ``None`` (default) trains for the full budget.
+        Motivation: the first real WallBall run kept training for 10+
+        GPU-hours after its best checkpoint while the policy
+        collapsed; run 20260712_190054 then spent 525k steps
         confirming a reward plateau of a degenerate policy -- both the
         selection and the stop must watch the metric that matters.
     video_length:
@@ -371,6 +378,43 @@ class TrainConfig:
         environment. Each mapping is forwarded to
         ``LinearEnvAttrScheduleCallback`` and is driven by SB3's global
         timestep count. Evaluation environments are never modified.
+    best_metric_keys:
+        Optional override of the lexicographic selection score used when
+        ``headline_key`` owns model selection. ``None`` (default) keeps
+        the historical ``(<headline_key>_ep_mean, success_rate,
+        episode_reward_mean)`` composition. WallBall runs
+        20260714_050506/211111 showed why a recipe may want to drop the
+        reward tie-break: eval reward there was ~88% tracking shaping
+        in one run and pure penalty float-noise in the other, and the
+        noise crowned a best model.
+    best_metric_min_delta:
+        Minimum per-key improvement for the selection score (see
+        ``InfoDictEvalCallback.best_metric_min_delta``). The default
+        ``0.0`` keeps the historical strict-``>`` semantics, which is
+        right for selection keys that include a continuous reward
+        tie-break. Recipes whose keys are all episode means/rates over
+        ``n`` episodes should set roughly half that granularity
+        (``0.5 / n``) so a real one-episode change registers while
+        float noise (run 20260714_211111's 1e-8 reward "improvement")
+        cannot crown a best model or reset the early-stop patience.
+    confirm_best_eval:
+        When ``True``, a candidate best must also win an independent
+        second eval batch before ``best_model.zip`` is overwritten
+        (see ``InfoDictEvalCallback.confirm_best``). Default ``False``.
+    early_stop_degenerate_evals / degenerate_guard_keys /
+    degenerate_min_evals:
+        Enable ``InfoDictEvalCallback``'s degenerate-signal stop: end
+        the run once ``early_stop_degenerate_evals`` consecutive
+        evaluations produce a flat selection score (within
+        ``best_metric_min_delta``) while every
+        ``degenerate_guard_keys`` metric is exactly zero. Kills runs
+        whose eval signal is provably dead (zero task competence, flat
+        score) within a handful of evaluations instead of a full
+        patience window. ``degenerate_min_evals`` warms the guard up;
+        when ``None`` (default) and ``env_attr_schedules`` exist, it
+        is derived to cover the longest schedule's hold phase, where a
+        dead full-difficulty eval is still expected by design.
+        Defaults (0 / empty) disable the guard.
     """
 
     env_fn: Callable
@@ -418,6 +462,12 @@ class TrainConfig:
     env_attr_schedules: Sequence[Mapping[str, Any]] = field(
         default_factory=tuple
     )
+    best_metric_keys: Sequence[str] | None = None
+    best_metric_min_delta: float = 0.0
+    confirm_best_eval: bool = False
+    early_stop_degenerate_evals: int = 0
+    degenerate_guard_keys: Sequence[str] = field(default_factory=tuple)
+    degenerate_min_evals: int | None = None
 
 
 def _offset_seed(seed: int | None, offset: int) -> int | None:
@@ -901,17 +951,49 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 # quantizes bounce_count_ep_mean into sevenths at the
                 # default 30 episodes -- too noisy to pick checkpoints
                 # by), plus the lexicographic best score with reward
-                # as the last tie-break.
+                # as the last tie-break unless the recipe overrides
+                # the keys.
                 info_eval_episodes = cfg.n_eval_episodes
-                best_metric_keys = (
-                    f"{cfg.headline_key}_ep_mean",
-                    *(("success_rate",) if cfg.success_key else ()),
-                    "episode_reward_mean",
-                )
+                if cfg.best_metric_keys:
+                    best_metric_keys = tuple(cfg.best_metric_keys)
+                else:
+                    best_metric_keys = (
+                        f"{cfg.headline_key}_ep_mean",
+                        *(("success_rate",) if cfg.success_key else ()),
+                        "episode_reward_mean",
+                    )
                 selection_kwargs: dict[str, Any] = {
                     "best_metric_keys": best_metric_keys,
                     "best_model_save_path": cfg.log_dir,
+                    "best_metric_min_delta": cfg.best_metric_min_delta,
+                    "confirm_best": cfg.confirm_best_eval,
                 }
+                if cfg.early_stop_degenerate_evals > 0:
+                    selection_kwargs["degenerate_stop_evals"] = (
+                        cfg.early_stop_degenerate_evals
+                    )
+                    selection_kwargs["degenerate_guard_keys"] = tuple(
+                        cfg.degenerate_guard_keys
+                    )
+                    degenerate_min_evals = cfg.degenerate_min_evals
+                    if (
+                        degenerate_min_evals is None
+                        and env_attr_schedule_callbacks
+                    ):
+                        # While a reset curriculum still holds its start
+                        # distribution, a dead full-difficulty eval is
+                        # expected by design -- arm the guard only once
+                        # every schedule has begun tapering.
+                        degenerate_min_evals = math.ceil(
+                            max(
+                                callback.hold_until_timesteps
+                                for callback in env_attr_schedule_callbacks
+                            )
+                            / cfg.eval_freq
+                        )
+                    selection_kwargs["degenerate_min_evals"] = (
+                        degenerate_min_evals or 0
+                    )
                 if (
                     cfg.early_stop_patience is not None
                     and cfg.early_stop_patience > 0
@@ -919,9 +1001,22 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     selection_kwargs["early_stop_patience"] = (
                         cfg.early_stop_patience
                     )
-                    selection_kwargs["early_stop_min_evals"] = (
-                        cfg.early_stop_patience
-                    )
+                    min_evals = cfg.early_stop_patience
+                    if env_attr_schedule_callbacks:
+                        # Guarantee a full patience window of training
+                        # at the final scheduled distribution: without
+                        # this, a schedule ending at the earliest
+                        # reachable stop gets zero post-taper training
+                        # (run 20260714_211111's design flaw).
+                        schedule_end = max(
+                            callback.end_timesteps
+                            for callback in env_attr_schedule_callbacks
+                        )
+                        min_evals = max(
+                            min_evals,
+                            math.ceil(schedule_end / cfg.eval_freq),
+                        )
+                    selection_kwargs["early_stop_min_evals"] = min_evals
             else:
                 # Reporting only: a quarter of the eval budget keeps
                 # the extra rollout pass cheap.

@@ -33,7 +33,7 @@ import csv
 import hashlib
 import json
 import os
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
 
 import numpy as np
@@ -114,6 +114,53 @@ class InfoDictEvalCallback(BaseCallback):
         whether an evaluation is a new best. Empty (the default)
         disables selection entirely. A metric absent from an
         evaluation compares as ``-inf``.
+    best_metric_min_delta:
+        Per-key noise threshold for the lexicographic comparison: a key
+        only counts as better (or worse) than the stored best when it
+        differs by more than this amount, otherwise the comparison
+        falls through to the next key. The default ``0.0`` keeps the
+        historical strict-``>`` behaviour. Run 20260714_211111 crowned
+        its best model (and reset the early-stop patience, extending a
+        dead run by 225k steps) on a ~1e-8 reward difference; a delta
+        of half the metric's granularity (``0.5 / n_eval_episodes`` for
+        episode means and rates) makes a real one-episode change
+        register while float noise never does.
+    confirm_best:
+        When ``True``, a candidate improvement over an existing best is
+        re-evaluated on a second, independent ``n_eval_episodes`` batch
+        and only accepted when the improvement holds there too. Run
+        20260714_050506's best checkpoint beat its plateau by exactly
+        one lucky 2-bounce episode in 30; confirmation makes a
+        single-batch fluke twice as unlikely at the cost of one extra
+        eval pass per candidate best. The first evaluation is always
+        accepted unconfirmed (there is no best to defend yet).
+    degenerate_stop_evals:
+        When ``> 0``, stop training once this many *consecutive*
+        evaluations produced a flat selection score (every key within
+        ``best_metric_min_delta`` of the window's first sample) while
+        every ``degenerate_guard_keys`` metric was exactly zero -- the
+        signature of a run whose eval signal is dead (run
+        20260714_211111 was flat at reward -1.0 with zero paddle
+        contact from its second evaluation, yet burned 750k steps
+        before patience fired). Independent of, and typically much
+        faster than, ``early_stop_patience``; ``0`` (default) disables
+        the guard.
+    degenerate_guard_keys:
+        Metric names that must all be exactly ``0.0`` for the
+        degenerate-signal stop to fire. Pick the lowest rung of the
+        env's competence ladder (e.g. ``paddle_hit_count_ep_mean`` for
+        WallBall: no contact at all means nothing can improve). A key
+        missing from an evaluation blocks the guard -- absence of
+        evidence is not a dead run.
+    degenerate_min_evals:
+        Warm-up for the degenerate-signal stop: evaluations up to this
+        count never enter the guard window, so the stop cannot fire
+        before evaluation ``degenerate_min_evals +
+        degenerate_stop_evals``. Use it to protect the phase where a
+        dead eval signal is expected by design -- e.g. while a reset
+        curriculum still holds its start distribution and the eval env
+        already runs at full difficulty. ``0`` (default) arms the guard
+        from the first evaluation.
     best_model_save_path:
         Directory that receives ``best_model.zip``, the paired
         ``best_vec_normalize.pkl`` (when the model trains under
@@ -125,7 +172,14 @@ class InfoDictEvalCallback(BaseCallback):
         without a new best under ``best_metric_keys`` — the task-metric
         counterpart of SB3's ``StopTrainingOnNoModelImprovement``.
     early_stop_min_evals:
-        Number of evaluations to complete before the stop may fire.
+        Warm-up: evaluations completed before the patience counter
+        starts. Best-model selection still runs during the warm-up, but
+        evaluations without improvement only begin counting against
+        ``early_stop_patience`` afterwards, so the earliest possible
+        stop is evaluation ``early_stop_min_evals +
+        early_stop_patience``. (Run 20260714_211111 predates this
+        contract: its counter accrued during warm-up, allowing a stop
+        at evaluation ``min_evals + 1``.)
     """
 
     def __init__(
@@ -149,6 +203,11 @@ class InfoDictEvalCallback(BaseCallback):
         early_stop_min_evals: int = 0,
         verbose: int = 0,
         episode_survival_thresholds: Mapping[str, Sequence[int]] | None = None,
+        best_metric_min_delta: float = 0.0,
+        confirm_best: bool = False,
+        degenerate_stop_evals: int = 0,
+        degenerate_guard_keys: Sequence[str] = (),
+        degenerate_min_evals: int = 0,
     ) -> None:
         super().__init__(verbose)
         self.eval_env = eval_env
@@ -191,9 +250,42 @@ class InfoDictEvalCallback(BaseCallback):
         self.best_model_save_path = best_model_save_path
         self.early_stop_patience = early_stop_patience
         self.early_stop_min_evals = int(early_stop_min_evals)
+        min_delta = float(best_metric_min_delta)
+        if not np.isfinite(min_delta) or min_delta < 0.0:
+            raise ValueError(
+                "best_metric_min_delta must be finite and nonnegative"
+            )
+        self.best_metric_min_delta = min_delta
+        self.confirm_best = bool(confirm_best)
+        if isinstance(degenerate_stop_evals, bool) or not isinstance(
+            degenerate_stop_evals, int
+        ):
+            raise TypeError("degenerate_stop_evals must be an integer")
+        if degenerate_stop_evals < 0:
+            raise ValueError("degenerate_stop_evals must be nonnegative")
+        self.degenerate_stop_evals = degenerate_stop_evals
+        if isinstance(degenerate_min_evals, bool) or not isinstance(
+            degenerate_min_evals, int
+        ):
+            raise TypeError("degenerate_min_evals must be an integer")
+        if degenerate_min_evals < 0:
+            raise ValueError("degenerate_min_evals must be nonnegative")
+        self.degenerate_min_evals = degenerate_min_evals
+        self.degenerate_guard_keys = tuple(
+            dict.fromkeys(degenerate_guard_keys)
+        )
+        if self.degenerate_stop_evals > 0 and not self.degenerate_guard_keys:
+            raise ValueError(
+                "degenerate_stop_evals requires degenerate_guard_keys"
+            )
         self._best_score: tuple[float, ...] | None = None
         self._evals_since_best = 0
         self._eval_count = 0
+        # (score, guard values) for the most recent evaluations, sized to
+        # the degenerate-signal window.
+        self._recent_signal: deque[
+            tuple[tuple[float, ...], tuple[float, ...]]
+        ] = deque(maxlen=max(1, self.degenerate_stop_evals))
 
     def _on_step(self) -> bool:
         if self.eval_freq <= 0 or self.n_calls % self.eval_freq != 0:
@@ -213,6 +305,24 @@ class InfoDictEvalCallback(BaseCallback):
             except (AttributeError, AssertionError):
                 pass
 
+        metrics = self._collect_metrics()
+
+        logger = self.logger
+        for name, value in metrics.items():
+            logger.record(f"{self.log_prefix}/{name}", value)
+
+        if self.csv_path is not None:
+            self._append_csv(metrics, self.num_timesteps)
+
+        return self._update_best_and_maybe_stop(metrics)
+
+    def _collect_metrics(self) -> dict[str, float]:
+        """Roll out ``n_eval_episodes`` on the eval env and aggregate.
+
+        Pure measurement -- no TensorBoard/CSV logging and no selection
+        side effects -- so ``confirm_best`` can rerun it for an
+        independent second sample.
+        """
         # Per-key accumulators across all eval episodes.
         sums: dict[str, float] = defaultdict(float)
         counts: dict[str, int] = defaultdict(int)
@@ -400,13 +510,6 @@ class InfoDictEvalCallback(BaseCallback):
                 if phase_int not in phase_counts:
                     metrics.setdefault(f"phase_frac_{label}", 0.0)
 
-        logger = self.logger
-        for name, value in metrics.items():
-            logger.record(f"{self.log_prefix}/{name}", value)
-
-        if self.csv_path is not None:
-            self._append_csv(metrics, self.num_timesteps)
-
         if self.verbose:
             print(
                 f"[InfoDictEvalCallback] step={self.num_timesteps} "
@@ -414,7 +517,34 @@ class InfoDictEvalCallback(BaseCallback):
                 f"finals={finals}"
             )
 
-        return self._update_best_and_maybe_stop(metrics)
+        return metrics
+
+    def _score_of(self, metrics: Mapping[str, float]) -> tuple[float, ...]:
+        return tuple(
+            float(metrics.get(key, float("-inf")))
+            for key in self.best_metric_keys
+        )
+
+    def _improves(
+        self, score: tuple[float, ...], best: tuple[float, ...] | None
+    ) -> bool:
+        """Lexicographic improvement with a per-key noise threshold.
+
+        A key only decides the comparison when it differs from the best
+        by more than ``best_metric_min_delta``; within the threshold the
+        comparison falls through to the next key, and a full tie is not
+        an improvement. With the default delta of 0.0 this is exactly
+        the historical strict-``>`` tuple comparison.
+        """
+        if best is None:
+            return True
+        delta = self.best_metric_min_delta
+        for new, old in zip(score, best, strict=True):
+            if new > old + delta:
+                return True
+            if new < old - delta:
+                return False
+        return False
 
     def _update_best_and_maybe_stop(
         self, metrics: Mapping[str, float]
@@ -422,30 +552,57 @@ class InfoDictEvalCallback(BaseCallback):
         """Task-metric best-model selection + patience-based early stop.
 
         Scores are compared lexicographically over ``best_metric_keys``
-        with strict improvement, mirroring ``EvalCallback``'s strict
-        ``>`` on mean reward. Returns ``False`` (stopping training)
-        once ``early_stop_patience`` consecutive evaluations pass
-        without a new best, after ``early_stop_min_evals`` warm-up
-        evaluations.
+        (see :meth:`_improves`). Returns ``False`` (stopping training)
+        once ``early_stop_patience`` consecutive post-warm-up
+        evaluations pass without a new best, or as soon as the
+        degenerate-signal guard trips.
         """
         if not self.best_metric_keys:
             return True
         self._eval_count += 1
-        score = tuple(
-            float(metrics.get(key, float("-inf")))
-            for key in self.best_metric_keys
-        )
-        if self._best_score is None or score > self._best_score:
+        score = self._score_of(metrics)
+        improved = self._improves(score, self._best_score)
+        confirmation: Mapping[str, float] | None = None
+        if improved and self.confirm_best and self._best_score is not None:
+            # One independent second sample before dethroning the best:
+            # with 30-episode evals a single lucky episode moves an
+            # episode-mean by 1/30, enough to win a strict comparison.
+            confirmation = self._collect_metrics()
+            confirm_score = self._score_of(confirmation)
+            if self._improves(confirm_score, self._best_score):
+                # Bank the weaker of the two samples -- under the same
+                # delta-tolerant ordering used everywhere else, not raw
+                # tuple order -- so the stored best stays an estimate a
+                # future genuine improvement can beat, not a lucky
+                # high-water mark.
+                if not self._improves(confirm_score, score):
+                    score = confirm_score
+            else:
+                improved = False
+
+        if improved:
             self._best_score = score
             self._evals_since_best = 0
-            self._save_best(metrics)
-        else:
+            self._save_best(metrics, confirmation=confirmation)
+        elif self._eval_count > self.early_stop_min_evals:
+            # Warm-up evaluations never count against the patience, so
+            # the earliest stop is eval min_evals + patience -- the
+            # documented "at least 2N evaluations" contract when both
+            # are set to N.
             self._evals_since_best += 1
+
+        if self._degenerate_signal(score, metrics):
+            print(
+                f"Stopping training: {'/'.join(self.best_metric_keys)} "
+                f"flat and {'/'.join(self.degenerate_guard_keys)} zero "
+                f"for the last {self.degenerate_stop_evals} evaluations "
+                f"-- the evaluation signal is dead."
+            )
+            return False
 
         if (
             self.early_stop_patience is not None
             and self.early_stop_patience > 0
-            and self._eval_count > self.early_stop_min_evals
             and self._evals_since_best >= self.early_stop_patience
         ):
             # A run-ending decision is always worth one line, verbose
@@ -458,7 +615,50 @@ class InfoDictEvalCallback(BaseCallback):
             return False
         return True
 
-    def _save_best(self, metrics: Mapping[str, float]) -> None:
+    def _degenerate_signal(
+        self, score: tuple[float, ...], metrics: Mapping[str, float]
+    ) -> bool:
+        """True when the eval signal has been provably dead for the window.
+
+        Dead means: the selection score is flat (every key within
+        ``best_metric_min_delta`` of the window's first sample -- so a
+        float-noise key like ``episode_reward_mean`` cannot silently
+        disarm the guard) across the last ``degenerate_stop_evals``
+        evaluations AND every guard key (the lowest rung of the
+        competence ladder) is exactly zero in all of them. Evaluations
+        during the ``degenerate_min_evals`` warm-up never enter the
+        window, so a curriculum run cannot be killed while its schedule
+        still holds the start distribution. A guard key missing from
+        ``metrics`` blocks the guard for that window.
+        """
+        if self.degenerate_stop_evals <= 0:
+            return False
+        if self._eval_count <= self.degenerate_min_evals:
+            return False
+        guard = tuple(
+            float(metrics[key]) if key in metrics else float("nan")
+            for key in self.degenerate_guard_keys
+        )
+        self._recent_signal.append((score, guard))
+        if len(self._recent_signal) < self.degenerate_stop_evals:
+            return False
+        first, _ = self._recent_signal[0]
+        for recorded, _ in self._recent_signal:
+            for value, reference in zip(recorded, first, strict=True):
+                if value == reference:
+                    continue
+                if abs(value - reference) > self.best_metric_min_delta:
+                    return False
+        return all(
+            all(value == 0.0 for value in recorded_guard)
+            for _, recorded_guard in self._recent_signal
+        )
+
+    def _save_best(
+        self,
+        metrics: Mapping[str, float],
+        confirmation: Mapping[str, float] | None = None,
+    ) -> None:
         """Write best_model.zip + paired normalizer stats + meta json."""
         if self.best_model_save_path is None:
             return
@@ -485,6 +685,19 @@ class InfoDictEvalCallback(BaseCallback):
                 for key in self.best_metric_keys
                 if key in metrics
             },
+            # Present only when confirm_best re-sampled the candidate:
+            # the independent second batch that the improvement also won.
+            **(
+                {
+                    "confirmation_values": {
+                        key: float(confirmation[key])
+                        for key in self.best_metric_keys
+                        if key in confirmation
+                    }
+                }
+                if confirmation is not None
+                else {}
+            ),
             # Bind the checkpoint and its observation statistics to this
             # selection event. A same-shape normalizer from another run would
             # otherwise load successfully while silently changing every input.

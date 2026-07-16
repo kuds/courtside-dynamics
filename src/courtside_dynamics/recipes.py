@@ -363,11 +363,37 @@ RECIPES: dict[str, Recipe] = {
             # Calibrated in world space: the lower, slower serve bounces
             # around x=-1.72 before reaching a paddle kept near x=-2.7.
             # The measured bounce -> paddle -> wall sequence succeeded in
-            # 500/500 scripted trials; a parked paddle scored 0/1,000.
+            # 500/500 scripted trials; a parked paddle scored 0/200.
             "paddle_home_x": -2.7,
-            # A calibration sweep found -2.1 to be the safest modest forward
-            # extension: -1.8 created more out-of-bounds and style faults.
-            "paddle_x_target_range": (-3.2, -2.1),
+            # Lane front -1.6 was chosen by the 2026-07-16 damping x lane
+            # sweep (paired with paddle_joint_damping 8 below -- the
+            # two only work together: (-1.6, damping 5) collapses to 51%
+            # oracle second returns from OOB/style faults, and
+            # (-2.1, damping 8) to 49% from a too-slow paddle in a narrow
+            # lane). At (-1.6, damping 8) the scripted oracle completes
+            # >=2 returns from 92% of standard serves (n=500), and --
+            # decisive for learnability -- a placement-blind full-swing
+            # tracker recovers a second exchange in 70% of episodes vs
+            # exactly 0% at the old (-3.2, -2.1)/damping-5 geometry,
+            # which is why run 20260714_050506 plateaued at one return.
+            # NOTE: the recoverable_bounce_score projection plane derives
+            # from this front edge, so widening the lane also moved the
+            # placement target forward from -2.1 to -1.6.
+            "paddle_x_target_range": (-3.2, -1.6),
+            # The serve's first bounce lands at x in [-2.01, -1.50], so
+            # most of it is now inside the widened lane and a forward
+            # paddle can touch the ball pre-bounce. Terminal
+            # paddle_before_bounce made that trap as costly as total
+            # passivity (a naive front-camper faults 39% of episodes at
+            # this lane front); the softened fine keeps the gate shut
+            # but lets the rally -- and learning -- continue.
+            "early_touch_penalty": 0.25,
+            # Cap saturated swings at 100 N / 8 = 12.5 m/s (~2.3x serve
+            # speed) instead of the shared XML's 20 m/s: bang-bang
+            # full-power returns then rebound shallow enough to recover.
+            # Baseline-only -- open/volley keep the XML's damping 5 and
+            # their existing calibration.
+            "paddle_joint_damping": 8.0,
             "serve_speed": 5.5,
             "serve_speed_jitter": 0.5,
             "serve_lob": 0.0,
@@ -397,6 +423,32 @@ RECIPES: dict[str, Recipe] = {
             # cliff and completing a second return.
             "success_threshold": 2.0,
             "headline_key": "bounce_count",
+            # Selection ignores raw eval reward: it was ~88% tracking
+            # shaping in run 20260714_050506 and frozen at the -1.0
+            # penalty in 20260714_211111, where a ~1e-8 reward
+            # difference crowned the best model and reset the early-stop
+            # patience. The survival rate at the success bar breaks ties
+            # between equal exchange means instead.
+            "best_metric_keys": (
+                "bounce_count_ep_mean",
+                "bounce_count_ep_ge_2_rate",
+            ),
+            # Half the granularity of a 30-episode mean/rate: a real
+            # one-episode change (1/30) registers as an improvement,
+            # float noise never does. Both selection keys above are
+            # episode aggregates, so no continuous reward key is blunted
+            # by the threshold.
+            "best_metric_min_delta": 0.5 / 30,
+            # A candidate best must hold on a second, independent eval
+            # batch: run 20260714_050506's best checkpoint beat its
+            # plateau by exactly one lucky 2-bounce episode in 30.
+            "confirm_best_eval": True,
+            # Kill a run whose eval signal is provably dead -- flat
+            # selection score with zero paddle contact. Run
+            # 20260714_211111 spent 750k steps at exactly -1.0 reward
+            # with no ball contact from its second evaluation onward.
+            "early_stop_degenerate_evals": 5,
+            "degenerate_guard_keys": ("paddle_hit_count_ep_mean",),
             "info_eval_distribution_keys": ("bounce_count",),
             "info_eval_survival_thresholds": {
                 "bounce_count": (2, 3, 5),
