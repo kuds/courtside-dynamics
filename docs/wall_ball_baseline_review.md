@@ -400,6 +400,49 @@ Run ≥3 seeds for whichever arm graduates to a "baseline" label, and compare
 on `bounce_count_ep_mean` and the survival ladder — the only metrics
 comparable across these configs.
 
+## Addendum: geometry bundle calibration (2026-07-16)
+
+The geometry bundle (recommendations 3–4) was calibrated with a damping ×
+lane-front sweep (100 seeded standard-serve episodes per config, scripted
+policies, `recovery_reset_probability = 0`) and is implemented on this
+branch. Two results refine the original findings:
+
+**Correction to Finding 2.** The packaged oracle — which retreats before the
+bounce and intercepts at the lane front — already completes ≥ 2 returns from
+**95%** of standard serves at the *old* geometry. The "~73% of second
+exchanges physically unsaveable" measurement applies to *untouched* rebounds
+from fast, flat returns; well-placed returns were always recoverable. The
+real defect is that the old geometry is unforgiving of mediocre play: a
+placement-blind track-then-full-swing policy (the behavioral archetype Run 1
+actually learned) recovers a second exchange in **exactly 0%** of episodes
+under the old geometry — there was nothing for RL to reinforce past exchange
+one.
+
+**Chosen configuration** — lane `(-3.2, -1.6)` + paddle slide damping 8
+(new `paddle_joint_damping` env kwarg, baseline recipe only) +
+`early_touch_penalty 0.25` (new env kwarg softening `paddle_before_bounce`
+to a non-terminal fine):
+
+| Config (front, damping) | Oracle ≥2 | Crude tracker ≥2 |
+|---|---|---|
+| (−2.1, 5) — old | 0.95 | **0.00** |
+| (−1.8, 5) | 0.57 | — |
+| (−2.1, 8) | 0.49 | — |
+| (−1.8, 8) | 0.91 | 0.28 |
+| **(−1.6, 8) — new** | **0.92** | **0.70** |
+| (−1.4, 8) | 0.89 | 0.77 |
+
+The two changes only work together (either alone collapses oracle second
+returns to ~50%). (−1.4, 8) marginally beats (−1.6, 8) for crude play but
+puts the *entire* serve-bounce footprint (x ∈ [−2.01, −1.50]) inside the
+lane — a naive front-camper hits pre-bounce faults in 94% of episodes there
+vs 39% at −1.6 — and drags the recoverable-bounce projection plane furthest
+forward. Verified at the final recipe configuration: oracle 500/500 first
+returns and 92% ≥ 2 (n=500); crude tracker 70.5% ≥ 2 (n=200); parked paddle
+0 contacts and 0 returns (n=200), so the no-op ≤ 0 invariant holds. The
+`bounce_count ≥ 2` success bar is now pinned by a solvability test that runs
+from standard serves.
+
 ## Provenance notes
 
 - Run 1's `config.json` reports v0.8.0 but the run required features merged

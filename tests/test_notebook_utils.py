@@ -289,6 +289,7 @@ def _wall_ball_row(
         "rew_stall",
         "rew_style_violation",
         "rew_recoverable_bounce",
+        "rew_early_touch",
     ):
         row[f"{key}_total"] = reward if key == "rew_wall" else 0.0
     return row
@@ -438,6 +439,7 @@ class _FakeWallBallEnv(Env):
             "rew_stall": 0.0,
             "rew_style_violation": 0.0,
             "rew_recoverable_bounce": 0.0,
+            "rew_early_touch": 0.0,
             "term_oob": False,
             "term_double_bounce": False,
             "term_stall": False,
@@ -503,6 +505,7 @@ def test_rollout_counts_post_floor_bounce_recovery_and_return():
                 "rew_stall": 0.0,
                 "rew_style_violation": 0.0,
                 "rew_recoverable_bounce": 0.0,
+                "rew_early_touch": 0.0,
                 "term_oob": False,
                 "term_double_bounce": False,
                 "term_stall": False,

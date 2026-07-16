@@ -449,7 +449,7 @@ def test_wall_ball_recipe_preserves_original_open_setup():
     ("env_name", "rally_style", "home_x", "target_range"),
     [
         ("WallBallVolley", "volley", -1.7, (-4.7, 0.3)),
-        ("WallBallBaseline", "one_bounce", -2.7, (-3.2, -2.1)),
+        ("WallBallBaseline", "one_bounce", -2.7, (-3.2, -1.6)),
     ],
 )
 def test_wall_ball_style_recipes_record_world_space_paddle_setup(
@@ -459,6 +459,47 @@ def test_wall_ball_style_recipes_record_world_space_paddle_setup(
     assert kwargs["rally_style"] == rally_style
     assert kwargs["paddle_home_x"] == home_x
     assert kwargs["paddle_x_target_range"] == target_range
+
+
+def test_wall_ball_baseline_softens_early_touch():
+    """The widened lane puts most of the serve's bounce footprint inside
+    the paddle's reach, so the baseline recipe must soften the
+    paddle_before_bounce trap into a non-terminal fine."""
+    kwargs = RECIPES["WallBallBaseline"].env_kwargs
+    assert kwargs["early_touch_penalty"] == 0.25
+
+
+def test_wall_ball_baseline_slows_the_paddle():
+    """The widened lane only works with the slower swing cap (and vice
+    versa): the 2026-07-16 sweep measured either change alone collapsing
+    oracle second returns to ~50%. Only the baseline overrides damping;
+    open/volley keep the shared XML calibration."""
+    assert RECIPES["WallBallBaseline"].env_kwargs["paddle_joint_damping"] == 8.0
+    assert "paddle_joint_damping" not in RECIPES["WallBall"].env_kwargs
+    assert "paddle_joint_damping" not in RECIPES["WallBallVolley"].env_kwargs
+
+
+def test_baseline_oracle_defaults_track_recipe_lane():
+    """wall_ball_baseline_oracle_action plans within -- and inverts the
+    action mapping of -- the lane its defaults describe; a recipe lane
+    change that forgets the oracle would silently mis-calibrate every
+    solvability gate."""
+    import inspect
+
+    from courtside_dynamics.scripted_policies import (
+        wall_ball_baseline_oracle_action,
+    )
+
+    signature = inspect.signature(wall_ball_baseline_oracle_action)
+    kwargs = RECIPES["WallBallBaseline"].env_kwargs
+    assert (
+        signature.parameters["paddle_x_target_range"].default
+        == kwargs["paddle_x_target_range"]
+    )
+    assert (
+        signature.parameters["paddle_home_x"].default
+        == kwargs["paddle_home_x"]
+    )
 
 
 def test_wall_ball_baseline_recipe_uses_calibrated_bounce_first_serve():

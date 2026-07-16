@@ -26,6 +26,13 @@
              the ball. The anchor moves 0.3 m forward from the old handle
              origin so qpos=0 and every joint limit preserve the old
              face-centre workspace exactly. -->
+        <!-- Slide damping 5 is the open/volley calibration; the
+             position servo's kv acts inside the +/-100 N force clamp,
+             so a pegged actuator accelerates until passive joint
+             damping balances it (terminal velocity 100/damping).
+             Presets that need slower swings override it per-instance
+             via WallBallEnv's paddle_joint_damping kwarg instead of
+             editing this shared asset. -->
         <body name="paddle_base" pos="-1.7 0 1.2">
             <joint name="paddle_slide_x" type="slide" axis="1 0 0" range="-3 2" damping="5" />
             <joint name="paddle_slide_y" type="slide" axis="0 1 0" range="-3 3" damping="5" />

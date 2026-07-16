@@ -46,7 +46,7 @@ from gymnasium.envs.registration import register
 # recoverable-bounce credit while keeping evaluation on full normal serves.
 # The bonus-eligibility flag grows WallBall observations from 22 to 23 values,
 # so 0.8 WallBall policies and VecNormalize statistics must be retrained.
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.
