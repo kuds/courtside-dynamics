@@ -405,8 +405,11 @@ comparable across these configs.
 - Run 1's `config.json` reports v0.8.0 but the run required features merged
   in `1eec0d4` (2026-07-14 00:03 −0500), after the 0.8.0 bump; Run 2 matches
   `cdb17d4` (v0.9.0). Neither records a git SHA.
-- No fixes postdate the runs: HEAD == `cdb17d4` as of this review
-  (2026-07-16), so every pathology above is live in the repo.
+- No fixes postdated the runs at the time of this review (HEAD ==
+  `cdb17d4`, 2026-07-16). The P0 harness fixes (recommendations 1–2, plus
+  the git-SHA provenance fix from item 12) are implemented on this branch
+  in the commit following this document; the env/reward/geometry changes
+  (items 3–9) and the experiment sequence remain open.
 - Analysis artifacts (decoded eval CSVs, npz, video frames) were regenerated
   from the Drive originals; per-row reward-channel sums reconstruct episode
   returns exactly (max residual ~5e-8) in all seven rollout CSVs, so the

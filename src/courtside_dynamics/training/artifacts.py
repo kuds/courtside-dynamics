@@ -24,9 +24,31 @@ if TYPE_CHECKING:
 
 
 def _git_sha() -> str | None:
+    # Resolve against the package's own location, not the caller's cwd: a
+    # bare ``git rev-parse`` records whatever repository the notebook
+    # happens to run from, and returned null on every Colab run (both
+    # 20260714 WallBall baselines have ``"git_sha": null``). Git discovers
+    # repositories by walking up parent directories, so a site-packages
+    # install nested inside an unrelated checkout (a project venv, a
+    # dotfiles-managed home) would still find *that* repository -- the
+    # ``ls-files`` gate below only accepts a SHA from a repository that
+    # actually tracks this file (i.e. an editable install of the
+    # courtside-dynamics checkout); anything else yields None.
+    this_file = os.path.abspath(__file__)
+    package_dir = os.path.dirname(this_file)
     try:
+        tracked = subprocess.run(
+            ["git", "-C", package_dir, "ls-files", "--error-unmatch",
+             this_file],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if tracked.returncode != 0:
+            return None
         out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "-C", package_dir, "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             timeout=2,
@@ -210,6 +232,16 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "env_attr_schedules": [
                 dict(schedule) for schedule in cfg.env_attr_schedules
             ],
+            "best_metric_keys": (
+                list(cfg.best_metric_keys)
+                if cfg.best_metric_keys is not None
+                else None
+            ),
+            "best_metric_min_delta": cfg.best_metric_min_delta,
+            "confirm_best_eval": cfg.confirm_best_eval,
+            "early_stop_degenerate_evals": cfg.early_stop_degenerate_evals,
+            "degenerate_guard_keys": list(cfg.degenerate_guard_keys),
+            "degenerate_min_evals": cfg.degenerate_min_evals,
         },
     }
     out = os.path.join(log_dir, "config.json")

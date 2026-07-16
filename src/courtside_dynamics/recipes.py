@@ -397,6 +397,32 @@ RECIPES: dict[str, Recipe] = {
             # cliff and completing a second return.
             "success_threshold": 2.0,
             "headline_key": "bounce_count",
+            # Selection ignores raw eval reward: it was ~88% tracking
+            # shaping in run 20260714_050506 and frozen at the -1.0
+            # penalty in 20260714_211111, where a ~1e-8 reward
+            # difference crowned the best model and reset the early-stop
+            # patience. The survival rate at the success bar breaks ties
+            # between equal exchange means instead.
+            "best_metric_keys": (
+                "bounce_count_ep_mean",
+                "bounce_count_ep_ge_2_rate",
+            ),
+            # Half the granularity of a 30-episode mean/rate: a real
+            # one-episode change (1/30) registers as an improvement,
+            # float noise never does. Both selection keys above are
+            # episode aggregates, so no continuous reward key is blunted
+            # by the threshold.
+            "best_metric_min_delta": 0.5 / 30,
+            # A candidate best must hold on a second, independent eval
+            # batch: run 20260714_050506's best checkpoint beat its
+            # plateau by exactly one lucky 2-bounce episode in 30.
+            "confirm_best_eval": True,
+            # Kill a run whose eval signal is provably dead -- flat
+            # selection score with zero paddle contact. Run
+            # 20260714_211111 spent 750k steps at exactly -1.0 reward
+            # with no ball contact from its second evaluation onward.
+            "early_stop_degenerate_evals": 5,
+            "degenerate_guard_keys": ("paddle_hit_count_ep_mean",),
             "info_eval_distribution_keys": ("bounce_count",),
             "info_eval_survival_thresholds": {
                 "bounce_count": (2, 3, 5),

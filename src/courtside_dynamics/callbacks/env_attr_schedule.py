@@ -42,8 +42,13 @@ class LinearEnvAttrScheduleCallback(BaseCallback):
     global environment-transition count and therefore already accounts for
     the number of parallel environments.
 
-    ``VecEnv.set_attr`` applies the value to every worker.  Consequently, each
-    wrapped environment must expose a writable attribute named ``attr_name``.
+    Values are applied to every worker with
+    ``env_method("set_wrapper_attr", ...)``, which walks each worker's
+    wrapper stack to the environment that owns ``attr_name``.  Consequently,
+    each wrapped environment must expose a writable attribute named
+    ``attr_name``.  The applied value is also recorded to the SB3 logger as
+    ``schedule/<attr_name>`` so the realized curriculum is auditable from
+    TensorBoard / ``progress.csv``.
     """
 
     def __init__(
@@ -103,8 +108,29 @@ class LinearEnvAttrScheduleCallback(BaseCallback):
 
     def _apply_current_value(self) -> None:
         value = self.value_at(self.num_timesteps)
-        self.training_env.set_attr(self.attr_name, value)
+        # ``VecEnv.set_attr`` does a plain ``setattr`` on each worker's
+        # outermost wrapper (usually SB3's ``Monitor``), and gymnasium
+        # wrappers do not forward attribute writes -- the value would land
+        # as a shadow attribute on the wrapper and never reach the
+        # scheduled environment (run 20260714_211111 trained its entire
+        # budget at the schedule's start value this way).
+        # ``set_wrapper_attr`` walks the wrapper stack to the attribute's
+        # owner; ``force=False`` makes it report failure instead of
+        # recreating the silent shadow write when no layer owns the
+        # attribute (e.g. a typo'd ``attr_name``).
+        applied = self.training_env.env_method(
+            "set_wrapper_attr", self.attr_name, value, force=False
+        )
+        if not all(applied):
+            raise AttributeError(
+                f"no environment in the training VecEnv exposes attribute "
+                f"'{self.attr_name}' (applied per worker: {applied}); the "
+                f"schedule would silently do nothing"
+            )
         self._last_value = value
+        logger = getattr(self.model, "logger", None)
+        if logger is not None:
+            logger.record(f"schedule/{self.attr_name}", value)
 
     def _on_training_start(self) -> None:
         # A fresh SB3 run starts at timestep zero, so this installs the
