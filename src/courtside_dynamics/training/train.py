@@ -55,6 +55,9 @@ from courtside_dynamics.callbacks.env_attr_schedule import (
     LinearEnvAttrScheduleCallback,
 )
 from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+from courtside_dynamics.callbacks.performance_gate import (
+    PerformanceGatedEnvStagesCallback,
+)
 from courtside_dynamics.callbacks.video_record import (
     InfoRowFn,
     VideoRecordCallback,
@@ -401,6 +404,27 @@ class TrainConfig:
         When ``True``, a candidate best must also win an independent
         second eval batch before ``best_model.zip`` is overwritten
         (see ``InfoDictEvalCallback.confirm_best``). Default ``False``.
+    performance_gate:
+        Optional performance-gated curriculum, a mapping with keys
+        ``stages`` (ordered sequence of {env attribute: value} dicts),
+        ``metric_key``, ``threshold``, and ``sustain_evals``, forwarded
+        to ``PerformanceGatedEnvStagesCallback``. Stage 0 is applied at
+        training start to the training env AND the info-eval env (so
+        selection/guard metrics stay matched to the training stage); the
+        ladder advances one stage each time the metric holds the
+        threshold for the sustained number of consecutive evaluations.
+        Requires ``info_dict_eval``. Unlike ``env_attr_schedules`` this
+        is earned progression, not a timestep clock.
+    final_info_eval:
+        When ``True``, attach a second ``InfoDictEvalCallback`` running
+        on the *unmodified* evaluation env (the recipe's
+        ``eval_env_overrides`` configuration -- for a curriculum, the
+        final stage) under the ``eval_info_final`` prefix and
+        ``eval_info_final.csv``. With a performance gate active, the
+        matched stream drives selection while this stream is the honest
+        final-task progress metric; the gap between them is the
+        transfer deficit, visible per evaluation instead of
+        post-mortem. Requires ``info_dict_eval``.
     early_stop_degenerate_evals / degenerate_guard_keys /
     degenerate_min_evals:
         Enable ``InfoDictEvalCallback``'s degenerate-signal stop: end
@@ -468,6 +492,13 @@ class TrainConfig:
     early_stop_degenerate_evals: int = 0
     degenerate_guard_keys: Sequence[str] = field(default_factory=tuple)
     degenerate_min_evals: int | None = None
+    performance_gate: Mapping[str, Any] | None = None
+    final_info_eval: bool = False
+    # Parsed TOML run-configuration file (courtside_dynamics.run_config
+    # .RunFileConfig), attached by build_train_config(config_file=...)
+    # so artifacts can record its provenance and copy it into the run
+    # directory. ``Any`` to keep this module free of a run_config import.
+    run_config_file: Any = None
 
 
 def _offset_seed(seed: int | None, offset: int) -> int | None:
@@ -1022,24 +1053,85 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 # the extra rollout pass cheap.
                 info_eval_episodes = max(1, cfg.n_eval_episodes // 4)
                 selection_kwargs = {}
-            callbacks.append(
-                InfoDictEvalCallback(
-                    eval_env=info_eval_env,
-                    n_eval_episodes=info_eval_episodes,
-                    eval_freq=_calls(cfg.eval_freq),
-                    phase_key=cfg.phase_key,
-                    phase_labels=cfg.phase_labels,
-                    success_key=cfg.success_key,
-                    success_threshold=cfg.success_threshold,
-                    info_keys=cfg.info_eval_keys,
-                    terminal_info_keys=cfg.info_eval_terminal_keys,
-                    episode_distribution_keys=cfg.info_eval_distribution_keys,
-                    episode_survival_thresholds=(
-                        cfg.info_eval_survival_thresholds
-                    ),
-                    csv_path=os.path.join(cfg.log_dir, "eval_info.csv"),
-                    **selection_kwargs,
+            info_eval_callback = InfoDictEvalCallback(
+                eval_env=info_eval_env,
+                n_eval_episodes=info_eval_episodes,
+                eval_freq=_calls(cfg.eval_freq),
+                phase_key=cfg.phase_key,
+                phase_labels=cfg.phase_labels,
+                success_key=cfg.success_key,
+                success_threshold=cfg.success_threshold,
+                info_keys=cfg.info_eval_keys,
+                terminal_info_keys=cfg.info_eval_terminal_keys,
+                episode_distribution_keys=cfg.info_eval_distribution_keys,
+                episode_survival_thresholds=(
+                    cfg.info_eval_survival_thresholds
+                ),
+                csv_path=os.path.join(cfg.log_dir, "eval_info.csv"),
+                **selection_kwargs,
+            )
+            callbacks.append(info_eval_callback)
+            if cfg.performance_gate is not None:
+                # Ordered after the info-eval callback so a trigger sees
+                # that same trigger's fresh metrics.
+                gate_spec = dict(cfg.performance_gate)
+                callbacks.append(
+                    PerformanceGatedEnvStagesCallback(
+                        stages=gate_spec["stages"],
+                        metric_key=gate_spec["metric_key"],
+                        threshold=gate_spec["threshold"],
+                        sustain_evals=gate_spec["sustain_evals"],
+                        info_eval=info_eval_callback,
+                        verbose=cfg.verbose,
+                    )
                 )
+            if cfg.final_info_eval:
+                # Honest final-task metrics on the recipe's unmodified
+                # eval configuration; deliberately NOT registered with
+                # the performance gate.
+                final_info_env = make_vec_env(
+                    checked_eval_env_fn,
+                    n_envs=1,
+                    seed=_offset_seed(cfg.seed, eval_seed_offset + 3),
+                )
+                opened_envs.append(final_info_env)
+                if use_vec_normalize:
+                    final_info_env = SelectiveVecNormalize(
+                        final_info_env,
+                        norm_obs=cfg.normalize_obs,
+                        norm_reward=False,
+                        clip_obs=cfg.clip_obs,
+                        training=False,
+                        normalize_obs_excluded_indices=(
+                            cfg.normalize_obs_excluded_indices
+                        ),
+                    )
+                callbacks.append(
+                    InfoDictEvalCallback(
+                        eval_env=final_info_env,
+                        n_eval_episodes=max(1, cfg.n_eval_episodes // 2),
+                        eval_freq=_calls(cfg.eval_freq),
+                        log_prefix="eval_info_final",
+                        phase_key=cfg.phase_key,
+                        phase_labels=cfg.phase_labels,
+                        success_key=cfg.success_key,
+                        success_threshold=cfg.success_threshold,
+                        info_keys=cfg.info_eval_keys,
+                        terminal_info_keys=cfg.info_eval_terminal_keys,
+                        episode_distribution_keys=(
+                            cfg.info_eval_distribution_keys
+                        ),
+                        episode_survival_thresholds=(
+                            cfg.info_eval_survival_thresholds
+                        ),
+                        csv_path=os.path.join(
+                            cfg.log_dir, "eval_info_final.csv"
+                        ),
+                    )
+                )
+        elif cfg.performance_gate is not None or cfg.final_info_eval:
+            raise ValueError(
+                "performance_gate and final_info_eval require info_dict_eval"
             )
         callbacks.extend(env_attr_schedule_callbacks)
         callbacks.extend(cfg.extra_callbacks)

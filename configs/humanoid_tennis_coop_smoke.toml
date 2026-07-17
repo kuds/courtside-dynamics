@@ -1,0 +1,15 @@
+# HumanoidTennisCoopSmoke — two-agent cooperative rally smoke test:
+# exists to prove the pipeline end-to-end in minutes, not to train
+# anything useful (SAC, 10k steps).
+# Usage: build_train_config("HumanoidTennisCoopSmoke", log_dir=...,
+#                           config_file=<this file>)
+# Everything here matches the recipe today; edit a value to diverge.
+
+[train]
+total_timesteps = 10_000
+n_envs = 1
+eval_freq = 2_500
+checkpoint_freq = 5_000
+
+[env]
+episode_len = 250

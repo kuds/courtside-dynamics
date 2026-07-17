@@ -1,0 +1,14 @@
+# BallBounce — bounce the ball on the paddle; success = 10 bounces
+# (SAC, 1.5M steps).
+# Usage: build_train_config("BallBounce", log_dir=..., config_file=<this file>)
+# Everything here matches the recipe today; edit a value to diverge.
+
+[train]
+total_timesteps = 1_500_000
+n_envs = 4
+
+[env]
+# Minimum upward contact force for a hit to count as a bounce. Lower it
+# (e.g. 50) if the policy learns dribbling-height taps that never
+# register; raise it to force fuller swings.
+min_force = 100.0

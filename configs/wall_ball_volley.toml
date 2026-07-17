@@ -1,0 +1,17 @@
+# WallBallVolley — volley variant: return the ball before it lands,
+# wide paddle lane near the wall (SAC, 1.5M steps).
+# Usage: build_train_config("WallBallVolley", log_dir=..., config_file=<this file>)
+# Everything here matches the recipe today; edit a value to diverge.
+
+[train]
+total_timesteps = 1_500_000
+n_envs = 4
+
+[env]
+min_force = 20.0
+serve_vy_max = 2.6
+# Where the paddle may set its x target and where it starts each point.
+# Narrow the range toward the home position to reduce camping at the
+# wall; the lane below is the full historical volley lane.
+paddle_x_target_range = [-4.7, 0.3]
+paddle_home_x = -1.7

@@ -1,0 +1,15 @@
+# HumanoidTennisStage1AnchoredReturn — masked curriculum stage 1:
+# return a repeatable feed from an anchored stance (PPO, 1M steps).
+# Usage: build_train_config("HumanoidTennisStage1AnchoredReturn",
+#                           log_dir=..., config_file=<this file>)
+# Everything here matches the recipe today; edit a value to diverge.
+# Do NOT set curriculum_config in [env] — it IS the stage identity.
+
+[train]
+total_timesteps = 1_000_000
+n_envs = 1
+eval_freq = 25_000
+checkpoint_freq = 100_000
+
+[env]
+episode_len = 300

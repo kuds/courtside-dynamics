@@ -143,6 +143,8 @@ def wall_ball_baseline_oracle_action(
     *,
     paddle_x_target_range: tuple[float, float] = (-3.2, -1.6),
     paddle_home_x: float = -2.7,
+    action_mapping_range: tuple[float, float] | None = None,
+    action_mapping_home: float | None = None,
 ) -> np.ndarray:
     """Bounce-aware feasibility controller for ``WallBallBaseline``.
 
@@ -157,6 +159,12 @@ def wall_ball_baseline_oracle_action(
     env's piecewise action mapping, whose spans derive from the same
     values. Defaults track the ``WallBallBaseline`` recipe (pinned
     together by a test); pass the values explicitly for any other lane.
+
+    When the env decouples the action mapping from the reachable region
+    (a full-workspace ``paddle_x_target_range`` plus a ``paddle_x_fence``,
+    as in the depth curriculum), pass the fence as
+    ``paddle_x_target_range`` (the planning lane) and the env's actual
+    mapping as ``action_mapping_range`` / ``action_mapping_home``.
     """
     observation = np.asarray(obs)
     if observation.shape not in {(22,), (23,)}:
@@ -200,11 +208,30 @@ def wall_ball_baseline_oracle_action(
         target_y = float(np.clip(ball_y, -3.0, 3.0))
         target_z = float(np.clip(ball_z, 0.18, 3.1))
 
-    # The baseline preset asymmetrically splits the lane around home:
-    # [back_x, home_x] maps to [-1, 0] and [home_x, front_x] to [0, 1],
-    # mirroring WallBallEnv._action_to_controls.
-    x_span = front_x - home_x if target_x >= home_x else home_x - back_x
-    action_x = (target_x - home_x) / x_span
+    # Invert the env's piecewise x mapping: [map_back, map_home] maps to
+    # [-1, 0] and [map_home, map_front] to [0, 1], mirroring
+    # WallBallEnv._action_to_controls. The mapping equals the planning
+    # lane unless the env decouples them (fence + full-workspace lane).
+    map_back, map_front = (
+        (back_x, front_x)
+        if action_mapping_range is None
+        else (
+            float(action_mapping_range[0]),
+            float(action_mapping_range[1]),
+        )
+    )
+    map_home = home_x if action_mapping_home is None else float(
+        action_mapping_home
+    )
+    if not map_back < map_home < map_front:
+        raise ValueError(
+            "action_mapping_home must lie strictly inside "
+            "action_mapping_range"
+        )
+    x_span = (
+        map_front - map_home if target_x >= map_home else map_home - map_back
+    )
+    action_x = (target_x - map_home) / x_span
     target_qpos_y = target_y
     target_qpos_z = target_z - 1.2
     action_y = target_qpos_y / 3.0

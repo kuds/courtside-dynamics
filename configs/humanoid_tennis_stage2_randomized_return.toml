@@ -1,0 +1,15 @@
+# HumanoidTennisStage2RandomizedReturn — masked curriculum stage 2:
+# return randomized feeds; the longest current stage (PPO, 2M steps).
+# Usage: build_train_config("HumanoidTennisStage2RandomizedReturn",
+#                           log_dir=..., config_file=<this file>)
+# Everything here matches the recipe today; edit a value to diverge.
+# Do NOT set curriculum_config in [env] — it IS the stage identity.
+
+[train]
+total_timesteps = 2_000_000
+n_envs = 1
+eval_freq = 25_000
+checkpoint_freq = 100_000
+
+[env]
+episode_len = 300

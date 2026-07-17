@@ -1,0 +1,15 @@
+# BallBalance — keep the ball balanced on the paddle (SAC, 1M steps).
+# Usage: build_train_config("BallBalance", log_dir=..., config_file=<this file>)
+# Everything here matches the recipe today; edit a value to diverge.
+# (docs/run_config_file_spec.md for merge semantics.)
+
+[train]
+total_timesteps = 1_000_000
+n_envs = 4
+eval_freq = 25_000        # steps per env between eval batches
+
+# The recipe uses SB3 SAC defaults; uncomment to tune (deep-merged, so
+# one key at a time is safe).
+# [train.model_kwargs]
+# gamma = 0.99
+# learning_rate = 3e-4

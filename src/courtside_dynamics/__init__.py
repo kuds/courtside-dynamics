@@ -46,7 +46,16 @@ from gymnasium.envs.registration import register
 # recoverable-bounce credit while keeping evaluation on full normal serves.
 # The bonus-eligibility flag grows WallBall observations from 22 to 23 values,
 # so 0.8 WallBall policies and VecNormalize statistics must be retrained.
-__version__ = "0.10.0"
+# 0.10.0: WallBallBaseline geometry recalibration -- per-preset paddle slide
+# damping (8), lane front widened to x=-1.6, and a softened non-terminal
+# early-touch fine -- so the second exchange is learnable. Shapes unchanged;
+# 0.9 baseline policies and statistics are not comparable.
+# 0.11.0: WallBall bootstrap package -- once-per-episode outright
+# first_hit_bonus, weak_return_penalty fined retries, a performance-gated
+# serve-spread ladder (WallBallBootstrap recipe), and curriculum plumbing
+# (serve_start_x / paddle_start_x / paddle_x_fence / schedulable damping).
+# Existing recipes unchanged; 0.10 artifacts remain comparable.
+__version__ = "0.11.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.

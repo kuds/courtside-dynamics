@@ -2968,6 +2968,154 @@ class TestWallBallRallyStyleSemantics:
             with pytest.raises(ValueError, match="paddle_joint_damping"):
                 WallBallEnv(paddle_joint_damping=bad)
 
+    def test_one_bounce_weak_return_softened_allows_fined_retry(self):
+        """With ``weak_return_penalty`` set, an outgoing shot that drops
+        short is a fined retry, not a termination: the failed cycle's
+        advances claw back, the ball stays live, and the next paddle hit
+        legally reopens the gate."""
+        env = self._strict_env(
+            "one_bounce", weak_return_penalty=0.1, paddle_hit_bonus=0.25
+        )
+        try:
+            env.reset(seed=0)
+            self._floor_bounce(env)
+            self._paddle_hit(env)  # opens the gate, +0.25 pending
+            _, reward, terminated, truncated, info = self._floor_bounce(env)
+            assert not terminated and not truncated
+            # Fine plus the clawed-back pending paddle bonus.
+            assert reward == pytest.approx(-0.1 - 0.25)
+            assert info["rew_weak_return"] == pytest.approx(-0.1)
+            assert info["rew_paddle"] == pytest.approx(-0.25)
+            assert info["event_weak_return"] is True
+            assert info["weak_return_count"] == 1
+            assert info["event_style_violation"] is False
+            assert info["term_style_violation"] is False
+            assert info["rally_phase_name"] == "await_paddle"
+            assert info["floor_bounce_count"] == 1
+
+            # The retry closes a legal cycle.
+            self._paddle_hit(env)
+            _, _, terminated, truncated, info = self._wall_hit(env)
+            assert not (terminated or truncated)
+            assert info["bounce_count"] == 1
+            assert info["weak_return_count"] == 1
+        finally:
+            env.close()
+
+    def test_repeat_paddle_contact_does_not_reset_stall_clock(self):
+        """Only the gate-opening hit is rally progress. A free stall-clock
+        reset on repeat contacts let touch-then-deaden ride a banked
+        outright bonus to the penalty-free truncation with periodic taps
+        (measured +0.25 under the bootstrap recipe)."""
+        env = self._strict_env("one_bounce", first_hit_bonus=0.25)
+        try:
+            env.reset(seed=0)
+            self._floor_bounce(env)
+            self._paddle_hit(env)  # gate opens: this IS progress
+            assert env._steps_since_event == 0
+            assert env.rally_phase_name == "await_wall"
+
+            env._steps_since_event = 17
+            face = env.data.body("paddle_head").xpos.copy()
+            self._place_ball(
+                env,
+                face + np.array([0.5, 0.0, 0.05]),
+                vel=[-3.0, 0.0, 0.0],
+            )
+            before = env.paddle_hit_count
+            for _ in range(120):
+                _, _, terminated, truncated, info = env.step(
+                    self._zero_action(env)
+                )
+                assert not (terminated or truncated)
+                if info["paddle_hit_count"] > before:
+                    break
+            else:
+                pytest.fail("physics never produced a repeat contact")
+            # The repeat contact was tolerated but the stall clock kept
+            # counting through it.
+            assert env._steps_since_event > 17
+        finally:
+            env.close()
+
+    def test_paddle_start_x_may_sit_outside_the_action_mapping(self):
+        """A curriculum start clamps to the physical workspace, not the
+        (possibly narrower) mapping lane."""
+        env = WallBallEnv(
+            rally_style="one_bounce",
+            paddle_home_x=-2.7,
+            paddle_x_target_range=(-3.2, -1.6),
+            paddle_start_x=-0.5,  # far in front of the mapping lane
+        )
+        try:
+            env.reset(seed=0)
+            world_x = float(
+                env.data.joint("paddle_slide_x").qpos[0]
+                + env._paddle_x_origin
+            )
+            assert world_x == pytest.approx(-0.5, abs=0.05)
+        finally:
+            env.close()
+
+    def test_first_hit_bonus_pays_outright_once_per_episode(self):
+        """The first gate-opening hit pays an unconditional bonus exactly
+        once per episode: later cycles' first hits earn only the
+        refundable advance, and a fresh episode pays again."""
+        env = self._strict_env(
+            "one_bounce", first_hit_bonus=0.5, paddle_hit_bonus=0.0
+        )
+        try:
+            env.reset(seed=0)
+            self._floor_bounce(env)
+            _, reward, _, _, info = self._paddle_hit(env)
+            assert reward == pytest.approx(0.5)
+            assert info["rew_first_hit"] == pytest.approx(0.5)
+            self._wall_hit(env)
+
+            # Cycle 2's first hit: no second payment.
+            self._floor_bounce(env)
+            _, _, _, _, info = self._paddle_hit(env)
+            assert info["rew_first_hit"] == pytest.approx(0.0)
+
+            env.reset(seed=1)
+            self._floor_bounce(env)
+            _, _, _, _, info = self._paddle_hit(env)
+            assert info["rew_first_hit"] == pytest.approx(0.5)
+        finally:
+            env.close()
+
+    def test_first_hit_bonus_survives_cycle_failure(self):
+        """Unlike the refundable paddle advance, the first-hit bonus is
+        never clawed back -- that hard separation between touching and
+        never touching is its whole purpose (run 20260717_040824's SAC
+        saw identical -1 returns for both and never learned contact)."""
+        env = self._strict_env(
+            "one_bounce",
+            first_hit_bonus=0.5,
+            paddle_hit_bonus=0.25,
+            style_violation_penalty=1.0,
+        )
+        try:
+            env.reset(seed=0)
+            self._floor_bounce(env)
+            self._paddle_hit(env)
+            # Weak return: terminal here (weak_return_penalty unset). The
+            # pending paddle advance claws back; the outright bonus stays.
+            _, reward, terminated, _, info = self._floor_bounce(env)
+            assert terminated
+            assert info["rew_paddle"] == pytest.approx(-0.25)
+            assert info["rew_first_hit"] == pytest.approx(0.0)
+            assert reward == pytest.approx(-1.0 - 0.25)
+        finally:
+            env.close()
+
+    def test_weak_return_and_first_hit_kwargs_are_validated(self):
+        for bad in (-0.1, np.nan, np.inf):
+            with pytest.raises(ValueError, match="weak_return_penalty"):
+                WallBallEnv(rally_style="one_bounce", weak_return_penalty=bad)
+            with pytest.raises(ValueError, match="first_hit_bonus"):
+                WallBallEnv(rally_style="one_bounce", first_hit_bonus=bad)
+
     def test_floor_after_legal_paddle_before_wall_is_terminal_violation(self):
         env = self._strict_env("one_bounce")
         try:

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from courtside_dynamics.training.train import TrainConfig
 
 
-def _git_sha() -> str | None:
+def _git_sha_from_checkout() -> str | None:
     # Resolve against the package's own location, not the caller's cwd: a
     # bare ``git rev-parse`` records whatever repository the notebook
     # happens to run from, and returned null on every Colab run (both
@@ -59,6 +59,40 @@ def _git_sha() -> str | None:
     if out.returncode != 0:
         return None
     return out.stdout.strip() or None
+
+
+def _git_sha_from_install_metadata() -> str | None:
+    """Commit recorded by pip for a VCS install (PEP 610).
+
+    ``pip install "courtside-dynamics @ git+https://..."`` -- the Colab
+    flow -- leaves no git checkout at runtime, but pip records the
+    resolved commit in the distribution's ``direct_url.json``.
+    """
+    try:
+        from importlib import metadata
+
+        dist = metadata.distribution("courtside-dynamics")
+        raw = dist.read_text("direct_url.json")
+        if not raw:
+            return None
+        commit = (
+            json.loads(raw).get("vcs_info", {}).get("commit_id")
+        )
+        if isinstance(commit, str) and commit.strip():
+            return commit.strip()
+    except Exception:
+        return None
+    return None
+
+
+def _git_sha() -> str | None:
+    # Provenance chain, most authoritative first: an explicit override
+    # (for install flows neither probe can see), the editable-checkout
+    # probe, then pip's recorded VCS commit.
+    override = os.environ.get("COURTSIDE_DYNAMICS_GIT_SHA", "").strip()
+    if override:
+        return override
+    return _git_sha_from_checkout() or _git_sha_from_install_metadata()
 
 
 def _versions() -> dict[str, str]:
@@ -159,12 +193,32 @@ def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
 
 
 def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
-    """Snapshot the resolved cfg + provenance to ``log_dir/config.json``."""
+    """Snapshot the resolved cfg + provenance to ``log_dir/config.json``.
+
+    When the config was built from a TOML run-configuration file, the
+    file's byte-exact content is also copied to
+    ``log_dir/run_config.toml`` so the run directory is self-contained
+    even if the original file is later edited or deleted.
+    """
+    run_file = cfg.run_config_file
+    if run_file is not None:
+        copy_path = os.path.join(log_dir, "run_config.toml")
+        with open(copy_path, "w", encoding="utf-8") as f:
+            f.write(run_file.text)
     payload: dict[str, Any] = {
         "timestamp_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "git_sha": _git_sha(),
         "versions": _versions(),
         "gpu": _gpu_info(),
+        "run_config_file": (
+            {
+                "path": run_file.path,
+                "sha256": run_file.sha256,
+                "content": run_file.raw,
+            }
+            if run_file is not None
+            else None
+        ),
         "recipe_name": cfg.recipe_name,
         "env": _probe_env(cfg),
         # Keep ``env`` as the training profile for backwards compatibility.
@@ -242,6 +296,20 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "early_stop_degenerate_evals": cfg.early_stop_degenerate_evals,
             "degenerate_guard_keys": list(cfg.degenerate_guard_keys),
             "degenerate_min_evals": cfg.degenerate_min_evals,
+            "performance_gate": (
+                {
+                    "metric_key": cfg.performance_gate["metric_key"],
+                    "threshold": cfg.performance_gate["threshold"],
+                    "sustain_evals": cfg.performance_gate["sustain_evals"],
+                    "stages": [
+                        dict(stage)
+                        for stage in cfg.performance_gate["stages"]
+                    ],
+                }
+                if cfg.performance_gate is not None
+                else None
+            ),
+            "final_info_eval": cfg.final_info_eval,
         },
     }
     out = os.path.join(log_dir, "config.json")
@@ -588,6 +656,14 @@ def write_run_summary(
     )
     lines.append(_kv("Status", status))
     lines.append(_kv("Git SHA", short_sha))
+    if cfg.run_config_file is not None:
+        lines.append(
+            _kv(
+                "Run config",
+                f"{os.path.basename(cfg.run_config_file.path)} "
+                f"({cfg.run_config_file.sha256[:12]})",
+            )
+        )
     if steps_trained < cfg.total_timesteps:
         lines.append(
             _kv(
