@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+from pathlib import Path
 
 import pytest
 
@@ -578,3 +580,71 @@ class TestArtifacts:
         out = write_run_config(cfg, str(tmp_path))
         assert json.loads(open(out).read())["run_config_file"] is None
         assert not (tmp_path / "run_config.toml").exists()
+
+
+def _starter_params():
+    configs_dir = Path(__file__).resolve().parent.parent / "configs"
+    prefix_to_recipe = {r.name_prefix: n for n, r in RECIPES.items()}
+    return [
+        pytest.param(path, prefix_to_recipe[path.stem], id=path.stem)
+        for path in sorted(configs_dir.glob("*.toml"))
+        if path.stem in prefix_to_recipe
+    ]
+
+
+class TestStarterConfigs:
+    """The checked-in configs/ starters stay loadable and drift-free.
+
+    configs/README.md promises that running with a starter file is
+    equivalent to running without it -- the file documents the tuning
+    surface, it does not fork the calibration. When a recipe changes,
+    the matching starter must be updated in the same commit.
+    """
+
+    _SKIP_FIELDS = {"env_fn", "eval_env_fn", "run_config_file"}
+
+    def test_every_recipe_has_a_starter(self):
+        configs_dir = Path(__file__).resolve().parent.parent / "configs"
+        stems = {path.stem for path in configs_dir.glob("*.toml")}
+        missing = {
+            name
+            for name, recipe in RECIPES.items()
+            if recipe.name_prefix not in stems
+        }
+        assert not missing, f"recipes without a configs/ starter: {missing}"
+        orphans = stems - {r.name_prefix for r in RECIPES.values()}
+        assert not orphans, f"starters without a recipe: {orphans}"
+
+    @pytest.mark.parametrize("toml_path, recipe_name", _starter_params())
+    def test_starter_matches_its_recipe(
+        self, toml_path, recipe_name, tmp_path
+    ):
+        file_cfg = build_train_config(
+            recipe_name, log_dir=str(tmp_path), config_file=toml_path
+        )
+        plain_cfg = build_train_config(recipe_name, log_dir=str(tmp_path))
+        for field in dataclasses.fields(type(plain_cfg)):
+            if field.name in self._SKIP_FIELDS:
+                continue
+            assert getattr(file_cfg, field.name) == getattr(
+                plain_cfg, field.name
+            ), f"{toml_path.name}: TrainConfig.{field.name} drifted"
+
+        env_keys = load_run_config(toml_path).env
+        if not env_keys:
+            return
+
+        def norm(value):
+            if isinstance(value, (list, tuple)):
+                return tuple(value)
+            return value
+
+        env_file, env_plain = file_cfg.env_fn(), plain_cfg.env_fn()
+        try:
+            for key in env_keys:
+                assert norm(getattr(env_file, key)) == norm(
+                    getattr(env_plain, key)
+                ), f"{toml_path.name}: env.{key} drifted"
+        finally:
+            env_file.close()
+            env_plain.close()

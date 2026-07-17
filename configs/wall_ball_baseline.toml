@@ -1,0 +1,27 @@
+# WallBallBaseline — the calibrated one-bounce rally task from the
+# baseline review: pinned paddle lane, damped paddle, fined (not
+# terminal) early touches, recovery-fragment resets annealed by a
+# schedule (SAC, 1.5M steps).
+# Usage: build_train_config("WallBallBaseline", log_dir=..., config_file=<this file>)
+# Everything here matches the recipe today; edit a value to diverge.
+# (The recipe also pins eval recovery_reset_probability = 0.0 and the
+# fragment-anneal schedule in code — no need to restate them here.)
+
+[train]
+total_timesteps = 1_500_000
+n_envs = 4
+
+[env]
+# Serve difficulty. The review calibrated 2.0/0.5; widen only after
+# eval bounce_count_ep_mean clears ~1.3 sustained.
+serve_vy_max = 2.0
+serve_speed_jitter = 0.5
+serve_speed = 5.5
+# Geometry/handling calibration (v0.10.0): lane in front of the serve
+# landing zone, heavier paddle joint so swings don't ring.
+paddle_x_target_range = [-3.2, -1.6]
+paddle_home_x = -2.7
+paddle_joint_damping = 8.0
+# Fine (per event) for touching the ball before its floor bounce;
+# "none" restores the legacy instant-termination rule.
+early_touch_penalty = 0.25

@@ -1,0 +1,16 @@
+# WallBall (classic) — serve, bounce, paddle hit, wall on the full
+# (SAC, 1.5M steps). NOTE: for new WallBall work prefer
+# wall_ball_bootstrap.toml (curriculum + bootstrap rewards) or
+# wall_ball_baseline.toml (calibrated geometry); this classic preset
+# predates that calibration and is kept for comparison runs.
+# Usage: build_train_config("WallBall", log_dir=..., config_file=<this file>)
+
+[train]
+total_timesteps = 1_500_000
+n_envs = 4
+
+[env]
+min_force = 20.0
+# Lateral serve spread. 2.6 is the historical (hard) value; the
+# baseline-review calibration found 2.0 more learnable.
+serve_vy_max = 2.6
