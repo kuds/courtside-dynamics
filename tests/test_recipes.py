@@ -479,6 +479,59 @@ def test_wall_ball_baseline_slows_the_paddle():
     assert "paddle_joint_damping" not in RECIPES["WallBallVolley"].env_kwargs
 
 
+def test_wall_ball_bootstrap_recipe_gates_nested_serve_distributions():
+    """The bootstrap ladder must be nested (each stage a subset of the
+    final serve distribution), start at the constructor's stage-0 values,
+    end exactly at the canonical eval serve, and never touch the no-op
+    invariant's serve_vy_min."""
+    recipe = RECIPES["WallBallBootstrap"]
+    gate = recipe.extra_cfg["performance_gate"]
+    stages = gate["stages"]
+
+    vy = [stage["serve_vy_max"] for stage in stages]
+    jitter = [stage["serve_speed_jitter"] for stage in stages]
+    assert vy == sorted(vy) and jitter == sorted(jitter)
+    assert stages[0]["serve_vy_max"] == recipe.env_kwargs["serve_vy_max"]
+    assert (
+        stages[0]["serve_speed_jitter"]
+        == recipe.env_kwargs["serve_speed_jitter"]
+    )
+    assert stages[-1]["serve_vy_max"] == (
+        recipe.eval_env_overrides["serve_vy_max"]
+    )
+    assert stages[-1]["serve_speed_jitter"] == (
+        recipe.eval_env_overrides["serve_speed_jitter"]
+    )
+    assert all("serve_vy_min" not in stage for stage in stages)
+    assert recipe.env_kwargs["serve_vy_min"] == 0.8
+
+    # Bootstrap reward package + whole-task resets.
+    assert recipe.env_kwargs["first_hit_bonus"] == 0.25
+    assert recipe.env_kwargs["weak_return_penalty"] == 0.1
+    assert recipe.env_kwargs["early_touch_penalty"] == 0.25
+    assert recipe.env_kwargs["recovery_reset_probability"] == 0.0
+    assert recipe.extra_cfg["final_info_eval"] is True
+    assert recipe.extra_cfg["model_kwargs"]["ent_coef"] == "auto_0.02"
+
+
+def test_wall_ball_bootstrap_config_builds_and_records_gate(tmp_path):
+    cfg = build_train_config("WallBallBootstrap", log_dir=str(tmp_path))
+    assert cfg.performance_gate is not None
+    assert cfg.performance_gate["metric_key"] == "bounce_count_ep_mean"
+    assert cfg.final_info_eval is True
+    env = cfg.env_fn()
+    try:
+        assert env.serve_vy_max == 1.1
+        assert env.first_hit_bonus == 0.25
+    finally:
+        env.close()
+    eval_env = cfg.eval_env_fn()
+    try:
+        assert eval_env.serve_vy_max == 2.0
+    finally:
+        eval_env.close()
+
+
 def test_baseline_oracle_defaults_track_recipe_lane():
     """wall_ball_baseline_oracle_action plans within -- and inverts the
     action mapping of -- the lane its defaults describe; a recipe lane

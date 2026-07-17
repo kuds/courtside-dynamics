@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from courtside_dynamics.training.train import TrainConfig
 
 
-def _git_sha() -> str | None:
+def _git_sha_from_checkout() -> str | None:
     # Resolve against the package's own location, not the caller's cwd: a
     # bare ``git rev-parse`` records whatever repository the notebook
     # happens to run from, and returned null on every Colab run (both
@@ -59,6 +59,40 @@ def _git_sha() -> str | None:
     if out.returncode != 0:
         return None
     return out.stdout.strip() or None
+
+
+def _git_sha_from_install_metadata() -> str | None:
+    """Commit recorded by pip for a VCS install (PEP 610).
+
+    ``pip install "courtside-dynamics @ git+https://..."`` -- the Colab
+    flow -- leaves no git checkout at runtime, but pip records the
+    resolved commit in the distribution's ``direct_url.json``.
+    """
+    try:
+        from importlib import metadata
+
+        dist = metadata.distribution("courtside-dynamics")
+        raw = dist.read_text("direct_url.json")
+        if not raw:
+            return None
+        commit = (
+            json.loads(raw).get("vcs_info", {}).get("commit_id")
+        )
+        if isinstance(commit, str) and commit.strip():
+            return commit.strip()
+    except Exception:
+        return None
+    return None
+
+
+def _git_sha() -> str | None:
+    # Provenance chain, most authoritative first: an explicit override
+    # (for install flows neither probe can see), the editable-checkout
+    # probe, then pip's recorded VCS commit.
+    override = os.environ.get("COURTSIDE_DYNAMICS_GIT_SHA", "").strip()
+    if override:
+        return override
+    return _git_sha_from_checkout() or _git_sha_from_install_metadata()
 
 
 def _versions() -> dict[str, str]:
@@ -242,6 +276,20 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "early_stop_degenerate_evals": cfg.early_stop_degenerate_evals,
             "degenerate_guard_keys": list(cfg.degenerate_guard_keys),
             "degenerate_min_evals": cfg.degenerate_min_evals,
+            "performance_gate": (
+                {
+                    "metric_key": cfg.performance_gate["metric_key"],
+                    "threshold": cfg.performance_gate["threshold"],
+                    "sustain_evals": cfg.performance_gate["sustain_evals"],
+                    "stages": [
+                        dict(stage)
+                        for stage in cfg.performance_gate["stages"]
+                    ],
+                }
+                if cfg.performance_gate is not None
+                else None
+            ),
+            "final_info_eval": cfg.final_info_eval,
         },
     }
     out = os.path.join(log_dir, "config.json")

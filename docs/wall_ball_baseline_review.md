@@ -443,6 +443,57 @@ returns and 92% ≥ 2 (n=500); crude tracker 70.5% ≥ 2 (n=200); parked paddle
 `bounce_count ≥ 2` success bar is now pinned by a solvability test that runs
 from standard serves.
 
+## Addendum 2: the bootstrap failure and the 2026-07-17 package
+
+Two further runs on the fixed harness sharpened the diagnosis:
+
+- **Run 20260717_025611** (v0.10.0, fragments 0.6 tapering): reproduced Run
+  2's split — training reward rose on fragment mastery while the from-serve
+  eval policy never touched the ball; the late-training failure rate matched
+  the standard-serve reset share. Fragment skill does not transfer to serve
+  receipt.
+- **Run 20260717_040824 ("Arm B", fragments off)**: total bootstrap failure —
+  zero paddle contact in *training* (reward −1.000 ± 0.000), killed by the
+  degenerate guard at 125k steps in 22 minutes.
+
+Calibration probes then rejected both intuitive curricula and found the real
+barrier:
+
+- **Depth ladder rejected**: difficulty in distance-to-wall is U-shaped.
+  Close-court play collapses to ~50% oracle second returns (short-range
+  returns hit the wall hot and rebound out of the court), and mid-court to
+  baseline is flat.
+- **Serve-pace ladder rejected**: return power rides on incoming momentum,
+  so slow serves *underpower* returns (oracle first returns fall from 100%
+  at speed 5.5 to 12% at 3.5).
+- **The actual barrier**: a scripted y-tracker contacts 100% of serves but
+  died 120/120 by terminal `floor_before_wall` at exactly the passivity
+  return (−1) — and with every refundable advance clawed back on failure,
+  *all* pre-scoring behaviors tie at −1. The track → touch → swing learning
+  path crossed a dead-flat valley; SAC had no episode-return gradient toward
+  contact at any point.
+
+The 0.11.0 bootstrap package (implemented, `WallBallBootstrap` recipe) makes
+the competence ladder strictly monotone at episode level for the first time
+— stage-0 serve, n=120: parked −1.00 < weak-swing tracker −0.85 <
+placement-blind full swing +7.63 < oracle +12.07 — via a once-per-episode
+outright `first_hit_bonus` (0.25), a `weak_return_penalty` (0.1) fined retry
+(with a fresh shaping window) replacing the terminal weak-return fault, the
+already-shipped early-touch softening, a performance-gated serve-spread
+ladder (`serve_vy_max` 1.1 → 2.0, nested distributions, gate:
+`bounce_count_ep_mean ≥ 1.3` sustained 2 evals) with matched-stage selection
+plus a canonical-serve `eval_info_final.csv` stream, and the never-tried
+exploration configuration (`ent_coef="auto_0.02"`, `target_entropy=-1.5`,
+`learning_starts=10k`, 500k buffer). The adversarial review of the bundle
+caught and closed two high-severity holes before commit: repeat paddle taps
+no longer reset the stall clock (touch-then-deaden possession measured a
+risk-free +0.25 ride to truncation; it now nets −0.85), and a curriculum
+stage advance resets the evaluator's best-model selection state (an
+easy-stage score otherwise permanently bars better final-stage policies —
+measured ~0.6–0.7 metric inflation between the narrowest and full serve).
+Success metrics and the no-op invariant are unchanged (parked paddle still
+scores 0 contacts and −1).
+
 ## Provenance notes
 
 - Run 1's `config.json` reports v0.8.0 but the run required features merged

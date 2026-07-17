@@ -474,6 +474,115 @@ RECIPES: dict[str, Recipe] = {
             "tapered post-wall recovery practice and normal-serve evaluation."
         ),
     ),
+    "WallBallBootstrap": Recipe(
+        env_cls=WallBallEnv,
+        env_kwargs={
+            "render_mode": "rgb_array",
+            "min_force": 20.0,
+            "rally_style": "one_bounce",
+            "paddle_home_x": -2.7,
+            "paddle_x_target_range": (-3.2, -1.6),
+            "serve_speed": 5.5,
+            "serve_lob": 0.0,
+            "serve_vy_min": 0.8,
+            # Stage-0 serve shape: a narrow lateral corridor and reduced
+            # speed jitter shrink the tracking burden that run
+            # 20260717_040824's SAC never crossed (zero ball contact in
+            # 125k steps while a scripted y-tracker contacts 100% of
+            # serves). The performance gate widens both back to the
+            # baseline serve distribution as competence is demonstrated;
+            # every stage is a subset of the final distribution, so the
+            # skill transfers upward by construction. serve_vy_min stays
+            # 0.8 at every stage -- the no-op invariant (a parked paddle
+            # can never be hit by the serve) is not a curriculum knob.
+            "serve_vy_max": 1.1,
+            "serve_speed_jitter": 0.2,
+            # Bootstrap reward package, calibrated 2026-07-17: it makes
+            # the competence ladder strictly monotone at episode level
+            # for the first time (stage-0 serve, n=120: parked -1.00 <
+            # weak-swing tracker -0.85 < placement-blind full swing
+            # +7.63 < oracle +12.07; touch-then-deaden possession also
+            # measures -0.85 -- repeat paddle taps no longer reset the
+            # stall clock, so held-ball rides to truncation are dead).
+            # Depth and serve-pace ladders were swept and REJECTED:
+            # close-court play collapses to ~50% oracle second returns
+            # (wall rebounds fly out) and slow serves underpower returns
+            # (oracle first returns drop from 100% to 12% at speed 3.5).
+            "early_touch_penalty": 0.25,
+            "weak_return_penalty": 0.1,
+            "first_hit_bonus": 0.25,
+            "paddle_joint_damping": 8.0,
+            # Whole-task episodes only: runs 20260714_211111 and
+            # 20260717_025611 showed fragment-heavy training masters the
+            # fragments and never learns the serve.
+            "recovery_reset_probability": 0.0,
+            "recoverable_bounce_bonus": 0.25,
+            "recoverable_bounce_lateral_limit": 2.0,
+        },
+        eval_env_overrides={
+            # Canonical evaluation: the full baseline serve distribution.
+            "serve_vy_max": 2.0,
+            "serve_speed_jitter": 0.5,
+        },
+        default_total_timesteps=1_500_000,
+        name_prefix="wall_ball_bootstrap",
+        extra_cfg={
+            "success_key": "bounce_count",
+            "success_threshold": 2.0,
+            "headline_key": "bounce_count",
+            "best_metric_keys": (
+                "bounce_count_ep_mean",
+                "bounce_count_ep_ge_2_rate",
+            ),
+            "best_metric_min_delta": 0.5 / 30,
+            "confirm_best_eval": True,
+            "early_stop_degenerate_evals": 5,
+            "degenerate_guard_keys": ("paddle_hit_count_ep_mean",),
+            "info_eval_distribution_keys": ("bounce_count",),
+            "info_eval_survival_thresholds": {
+                "bounce_count": (2, 3, 5),
+            },
+            # Earned progression through nested serve distributions; the
+            # matched (training-stage) eval drives the gate and model
+            # selection, eval_info_final.csv tracks the canonical serve.
+            "performance_gate": {
+                "metric_key": "bounce_count_ep_mean",
+                "threshold": 1.3,
+                "sustain_evals": 2,
+                "stages": (
+                    {"serve_vy_max": 1.1, "serve_speed_jitter": 0.2},
+                    {"serve_vy_max": 1.4, "serve_speed_jitter": 0.3},
+                    {"serve_vy_max": 1.7, "serve_speed_jitter": 0.4},
+                    {"serve_vy_max": 2.0, "serve_speed_jitter": 0.5},
+                ),
+            },
+            "final_info_eval": True,
+            # Exploration package the failed runs never tried: entropy
+            # auto-tuning from a safe floor (the historical collapse to
+            # 0.0005 was measured on the legacy 5-action env), real
+            # warm-up before gradient steps, and a buffer small enough
+            # to evict stale early data within a stage's lifetime.
+            "model_kwargs": {
+                "ent_coef": "auto_0.02",
+                "target_entropy": -1.5,
+                "learning_starts": 10_000,
+                "buffer_size": 500_000,
+                "gamma": 0.995,
+            },
+            "phase_key": "rally_phase",
+            "phase_labels": {
+                0: "await_bounce",
+                1: "await_paddle",
+                2: "await_wall",
+            },
+        },
+        description=(
+            "Bootstrap-focused one-bounce baseline: monotone contact "
+            "rewards, fined retries instead of terminal weak-return "
+            "faults, and a performance-gated serve-spread ladder from a "
+            "narrow corridor to the full baseline serve."
+        ),
+    ),
     "HumanoidTennisStage0Intercept": Recipe(
         env_cls=HumanoidTennisCoopEnv,
         env_kwargs={

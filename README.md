@@ -130,6 +130,24 @@ curves non-comparable; start fresh baseline runs. The open `WallBall` and
 calibration. The recoverable-bounce placement score now projects to the new
 baseline lane front (x=-1.6).
 
+Package version 0.11.0 targets the WallBall bootstrap failure (three runs in
+which SAC never touched the ball while a scripted tracker contacts 100% of
+serves). New `WallBallBootstrap` recipe: a `first_hit_bonus` paid outright
+once per episode makes touching the ball strictly out-earn passivity for the
+first time; `weak_return_penalty` softens the terminal `floor_before_wall`
+fault into a fined retry so feeble early swings stop scoring identically to
+doing nothing; a performance-gated ladder (new
+`PerformanceGatedEnvStagesCallback`) widens the serve's lateral corridor
+from `serve_vy_max` 1.1 to the full 2.0 as competence is demonstrated, with
+matched-stage evaluation driving selection and `eval_info_final.csv`
+tracking the canonical serve. Depth and serve-pace ladders were swept and
+rejected (close-court rebounds fly out; slow serves underpower returns).
+WallBallEnv also gains `serve_start_x`, `paddle_start_x`, `paddle_x_fence`,
+and a schedulable `paddle_joint_damping` for future curricula, and run
+provenance now records the installed git commit on Colab (pip VCS installs)
+and honors a `COURTSIDE_DYNAMICS_GIT_SHA` override. Existing recipes are
+unchanged and 0.10 artifacts remain comparable.
+
 | Ball Balance | Ball Bounce | Wall Ball |
 |:---:|:---:|:---:|
 | ![A trained agent balancing a ball on a tray](Images/sac_ball_balance.gif) | ![A trained agent bouncing a ball on a paddle](Images/sac_ball_bounce.gif) | ![A trained agent rallying a ball against a wall](Images/sac_wall_ball.gif) |

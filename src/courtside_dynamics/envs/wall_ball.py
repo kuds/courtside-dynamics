@@ -51,6 +51,20 @@ configurable fraction of normal serves with narrow ``incoming_wall`` or
   *attempt* exactly as hard as total passivity removes the incentive
   to approach the ball at all, and it deters the forward positioning
   a wide paddle lane requires.
+- Likewise, an outgoing shot that drops short of the wall is by default
+  a terminal ``floor_before_wall`` violation. Setting
+  ``weak_return_penalty`` softens it into a fined retry: the failed
+  cycle's advances are clawed back as usual, but the bounced ball stays
+  live and the next paddle hit is legal. A tracker whose first swings
+  are feeble otherwise dies at the same -1 as total passivity on every
+  episode -- the wall in the track -> touch -> swing learning path.
+- ``first_hit_bonus`` pays outright, once per episode, on the first
+  gate-opening paddle hit and is never clawed back. With every
+  refundable advance reversed on failure, all pre-scoring behaviors
+  otherwise tie at the failure-penalty floor and episode returns carry
+  no gradient toward ball contact. Once per episode so a
+  drop-and-retry dribble cannot farm it; the amount should stay well
+  below a completed cycle's ~+2 so rallying still dominates.
 - ``track_shaping_scale`` adds tracking shaping that rewards reductions
   in the paddle→ball distance while a return is in progress. The
   shaping window is opened **on reset** as if a virtual wall hit had
@@ -173,6 +187,10 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         "paddle_target_z",
     )
 
+    # Reset-scoped episode flag (assigned in reset_model, read by step's
+    # accept_paddle_hit closure, which mypy visits first).
+    _first_hit_paid: bool
+
     def __init__(
         self,
         episode_len: int = 750,
@@ -198,7 +216,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         recoverable_bounce_bonus: float = 0.0,
         recoverable_bounce_lateral_limit: float = 0.0,
         early_touch_penalty: float | None = None,
+        weak_return_penalty: float | None = None,
+        first_hit_bonus: float = 0.0,
         paddle_joint_damping: float | None = None,
+        serve_start_x: float = 1.0,
+        paddle_start_x: float | None = None,
+        paddle_x_fence: tuple[float, float] | None = None,
         **kwargs: Any,
     ) -> None:
         if not isinstance(rally_style, str) or rally_style not in _RALLY_STYLES:
@@ -242,12 +265,38 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             raise ValueError(
                 "early_touch_penalty must be None or finite and nonnegative"
             )
+        if weak_return_penalty is not None and (
+            not np.isfinite(weak_return_penalty) or weak_return_penalty < 0.0
+        ):
+            raise ValueError(
+                "weak_return_penalty must be None or finite and nonnegative"
+            )
+        if not np.isfinite(first_hit_bonus) or first_hit_bonus < 0.0:
+            raise ValueError(
+                "first_hit_bonus must be finite and nonnegative"
+            )
         if paddle_joint_damping is not None and (
             not np.isfinite(paddle_joint_damping) or paddle_joint_damping <= 0.0
         ):
             raise ValueError(
                 "paddle_joint_damping must be None or finite and positive"
             )
+        if not np.isfinite(serve_start_x):
+            raise ValueError("serve_start_x must be finite")
+        if paddle_start_x is not None and not np.isfinite(paddle_start_x):
+            raise ValueError("paddle_start_x must be finite")
+        resolved_fence: tuple[float, float] | None = None
+        if paddle_x_fence is not None:
+            if len(paddle_x_fence) != 2:
+                raise ValueError("paddle_x_fence must contain two values")
+            resolved_fence = (
+                float(paddle_x_fence[0]),
+                float(paddle_x_fence[1]),
+            )
+            if not np.isfinite(resolved_fence).all():
+                raise ValueError("paddle_x_fence must be finite")
+            if resolved_fence[0] >= resolved_fence[1]:
+                raise ValueError("paddle_x_fence must be strictly increasing")
         resolved_target_range: tuple[float, float] | None = None
         if paddle_x_target_range is not None:
             if len(paddle_x_target_range) != 2:
@@ -294,11 +343,22 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 if early_touch_penalty is None
                 else float(early_touch_penalty)
             ),
+            weak_return_penalty=(
+                None
+                if weak_return_penalty is None
+                else float(weak_return_penalty)
+            ),
+            first_hit_bonus=float(first_hit_bonus),
             paddle_joint_damping=(
                 None
                 if paddle_joint_damping is None
                 else float(paddle_joint_damping)
             ),
+            serve_start_x=float(serve_start_x),
+            paddle_start_x=(
+                None if paddle_start_x is None else float(paddle_start_x)
+            ),
+            paddle_x_fence=resolved_fence,
             **kwargs,
         )
 
@@ -346,17 +406,49 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.early_touch_penalty = (
             None if early_touch_penalty is None else float(early_touch_penalty)
         )
+        # ``None`` keeps the historical rule: an outgoing shot that hits
+        # the floor before the wall is a terminal style violation. A float
+        # softens it into a fined retry (see step): the 2026-07-17
+        # calibration probe showed a y-tracking policy that touches every
+        # serve but swings weakly dying 120/120 by this rule at exactly
+        # the passivity return (-1), which walls off the natural
+        # track -> touch -> swing learning path.
+        self.weak_return_penalty = (
+            None if weak_return_penalty is None else float(weak_return_penalty)
+        )
+        # Paid outright on the episode's FIRST gate-opening paddle hit and
+        # never clawed back: with every refundable advance reversed on
+        # failure, all pre-scoring behaviors tie at the -1 penalty floor
+        # and SAC gets no episode-return gradient toward ball contact
+        # (run 20260717_040824 never touched the ball in 125k steps).
+        # Once per episode -- a per-cycle payment would let a
+        # drop-and-retry dribble farm it.
+        self.first_hit_bonus = float(first_hit_bonus)
         # ``None`` keeps the shared XML's slide damping (5, the open/volley
         # calibration). Presets override per-instance: the servo's kv acts
         # inside the +/-100 N force clamp, so a pegged actuator's terminal
         # velocity is 100/damping -- at 5 that allows 20 m/s bang-bang
         # swings whose fast, flat returns rebound too deep to recover.
         # WallBallBaseline sets 8 (12.5 m/s cap, ~15% slower returns).
-        self.paddle_joint_damping = (
-            None
-            if paddle_joint_damping is None
-            else float(paddle_joint_damping)
+        # A property so a curriculum can reschedule it mid-run; before the
+        # model exists this only records the value.
+        self.paddle_joint_damping = paddle_joint_damping
+        # Serve origin and paddle start position, world-space. The depth
+        # curriculum co-moves them (serve_start_x - paddle_start_x fixed)
+        # so serve-receipt geometry is identical at every stage while the
+        # distance to the wall anneals. Both only affect future resets.
+        self.serve_start_x = float(serve_start_x)
+        self.paddle_start_x = (
+            None if paddle_start_x is None else float(paddle_start_x)
         )
+        # World-space clamp on the x position target, decoupled from the
+        # action mapping: the mapping (paddle_x_target_range) stays fixed
+        # for a whole run so action semantics never drift, while the fence
+        # confines where targets may land -- without it a policy receives
+        # the deep serve, then sprints forward and rallies front-court,
+        # and an annealed depth would only ever govern the first exchange.
+        # Range-validated against the physical workspace after model load.
+        self._paddle_x_fence = resolved_fence
         # Minimum pre-impact downward speed for a ball-floor contact
         # onset to count as a bounce. A settling/rolling ball chatters
         # through many near-zero-energy contact onsets that must not
@@ -452,14 +544,23 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             **kwargs,
         )
 
-        if self.paddle_joint_damping is not None:
+        # Capture the XML's compiled damping before any override so a
+        # later ``paddle_joint_damping = None`` can restore it exactly.
+        self._xml_paddle_damping = {
+            joint_name: float(
+                self.model.dof_damping[
+                    int(self.model.joint(joint_name).dofadr[0])
+                ]
+            )
             for joint_name in (
                 "paddle_slide_x",
                 "paddle_slide_y",
                 "paddle_slide_z",
-            ):
-                dofadr = int(self.model.joint(joint_name).dofadr[0])
-                self.model.dof_damping[dofadr] = self.paddle_joint_damping
+            )
+        }
+        # Re-assign through the property now that the model exists: this
+        # writes the override (or the XML default) into dof_damping.
+        self.paddle_joint_damping = self.paddle_joint_damping
 
         # MuJoCo exposes the position actuators' physical qpos ranges as
         # its default action space. The policy API stays normalized and
@@ -525,6 +626,21 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._control_high[0] = target_world_range[1] - self._paddle_x_origin
         self._control_home[0] = self.paddle_home_x - self._paddle_x_origin
         self.paddle_x_target_range = target_world_range
+        # Fence and paddle start are validated against the *physical*
+        # workspace (not the possibly narrower mapping range): the fence
+        # deliberately confines a full-workspace mapping, and a curriculum
+        # start position may sit anywhere the paddle can physically be.
+        self._paddle_x_world_range = physical_world_range
+        self.paddle_x_fence = self._paddle_x_fence
+        if self.paddle_start_x is not None and not (
+            physical_world_range[0] - tolerance
+            <= self.paddle_start_x
+            <= physical_world_range[1] + tolerance
+        ):
+            raise ValueError(
+                "paddle_start_x must lie inside the physical world-space "
+                f"range {physical_world_range}, got {self.paddle_start_x}"
+            )
 
         # Cache the ball's DOF offset so serve velocities don't depend on
         # a hard-coded index into qvel.
@@ -569,6 +685,62 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
     def reset_mode(self) -> str:
         """Reset fragment selected for the current episode."""
         return _RESET_MODE_NAMES[self._reset_mode]
+
+    @property
+    def paddle_joint_damping(self) -> float | None:
+        """Per-instance paddle slide damping; ``None`` keeps the XML value."""
+        return self._paddle_joint_damping
+
+    @paddle_joint_damping.setter
+    def paddle_joint_damping(self, value: float | None) -> None:
+        if value is not None and (
+            not np.isfinite(value) or float(value) <= 0.0
+        ):
+            raise ValueError(
+                "paddle_joint_damping must be None or finite and positive"
+            )
+        self._paddle_joint_damping = None if value is None else float(value)
+        model = getattr(self, "model", None)
+        if model is None:
+            # Constructor path: the value is applied once the model exists.
+            return
+        for joint_name, xml_default in self._xml_paddle_damping.items():
+            dofadr = int(model.joint(joint_name).dofadr[0])
+            model.dof_damping[dofadr] = (
+                xml_default
+                if self._paddle_joint_damping is None
+                else self._paddle_joint_damping
+            )
+
+    @property
+    def paddle_x_fence(self) -> tuple[float, float] | None:
+        """World-space clamp on the x position target; ``None`` disables."""
+        return self._paddle_x_fence
+
+    @paddle_x_fence.setter
+    def paddle_x_fence(self, value: tuple[float, float] | None) -> None:
+        if value is None:
+            self._paddle_x_fence = None
+            return
+        if len(value) != 2:
+            raise ValueError("paddle_x_fence must contain two values")
+        fence = (float(value[0]), float(value[1]))
+        if not np.isfinite(fence).all():
+            raise ValueError("paddle_x_fence must be finite")
+        if fence[0] >= fence[1]:
+            raise ValueError("paddle_x_fence must be strictly increasing")
+        world_range = getattr(self, "_paddle_x_world_range", None)
+        if world_range is not None:
+            tolerance = 1e-9
+            if (
+                fence[0] < world_range[0] - tolerance
+                or fence[1] > world_range[1] + tolerance
+            ):
+                raise ValueError(
+                    "paddle_x_fence must stay within the physical "
+                    f"world-space range {world_range}, got {fence}"
+                )
+        self._paddle_x_fence = fence
 
     @property
     def recovery_reset_probability(self) -> float:
@@ -708,6 +880,11 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # paddle lane (the ball is travelling toward decreasing x).
         back_x = float(self._paddle_x_origin + self._control_low[0])
         front_x = float(self._paddle_x_origin + self._control_high[0])
+        if self._paddle_x_fence is not None:
+            # The reachable region -- and therefore the placement target
+            # this score projects to -- is the fence, not the mapping.
+            back_x = max(back_x, self._paddle_x_fence[0])
+            front_x = min(front_x, self._paddle_x_fence[1])
         ball_x = float(position[0])
         if ball_x < back_x:
             return 0.0
@@ -737,11 +914,21 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         normalized = np.clip(normalized, -1.0, 1.0)
         positive_span = self._control_high - self._control_home
         negative_span = self._control_home - self._control_low
-        return np.where(
+        targets = np.where(
             normalized >= 0.0,
             self._control_home + normalized * positive_span,
             self._control_home + normalized * negative_span,
         )
+        if self._paddle_x_fence is not None:
+            # The fence clamps the *target*, not the mapping: in-window
+            # actions mean exactly the same thing at every curriculum
+            # stage, and only where out-of-window targets saturate moves.
+            targets[0] = np.clip(
+                targets[0],
+                self._paddle_x_fence[0] - self._paddle_x_origin,
+                self._paddle_x_fence[1] - self._paddle_x_origin,
+            )
+        return targets
 
     def _step_mujoco_simulation(self, ctrl, n_frames):
         """Step the physics one substep at a time, tracking contact events.
@@ -900,7 +1087,10 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         rew_stall = 0.0
         rew_style_violation = 0.0
         rew_early_touch = 0.0
+        rew_weak_return = 0.0
+        rew_first_hit = 0.0
         event_early_touch = False
+        event_weak_return = False
         event_this_step = False
         event_floor_bounce = any(
             event_name == "floor"
@@ -917,7 +1107,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
 
         def accept_paddle_hit() -> None:
             """Open the gated return and pay its refundable first-hit bonus."""
-            nonlocal reward, rew_paddle, event_legal_paddle_hit
+            nonlocal reward, rew_paddle, rew_first_hit
+            nonlocal event_legal_paddle_hit
             first_hit = not self._paddle_hit_since_last_wall
             if first_hit:
                 self.legal_paddle_hit_count += 1
@@ -925,6 +1116,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 rew_paddle += self.paddle_hit_bonus
                 self._pending_bonus += self.paddle_hit_bonus
                 event_legal_paddle_hit = True
+                if self.first_hit_bonus > 0.0 and not self._first_hit_paid:
+                    # Outright and unconditional from here on: the
+                    # episode has proven ball contact once.
+                    self._first_hit_paid = True
+                    reward += self.first_hit_bonus
+                    rew_first_hit += self.first_hit_bonus
                 if self.rally_style == "one_bounce":
                     self.one_bounce_recovery_count += 1
             self._paddle_hit_since_last_wall = True
@@ -1026,8 +1223,38 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                         # flight from consuming the whole stall budget.
                         event_this_step = True
                     elif self._rally_phase == _AWAIT_WALL:
-                        style_violation_reason = "floor_before_wall"
-                        break
+                        if self.weak_return_penalty is None:
+                            style_violation_reason = "floor_before_wall"
+                            break
+                        # Softened weak return: the outgoing shot dropped
+                        # short of the wall. Terminating here priced a
+                        # tracker's first feeble swings exactly like
+                        # total passivity (-1 either way), walling off
+                        # the track -> touch -> swing learning path; the
+                        # softened rule fines the drop, claws back the
+                        # failed cycle's advances like a wall->wall
+                        # failure, and leaves the bounced ball live so
+                        # the next paddle hit is a legal retry. A second
+                        # bounce before that retry still ends the episode
+                        # via the double-bounce rule.
+                        self.weak_return_count += 1
+                        reward -= self.weak_return_penalty
+                        rew_weak_return -= self.weak_return_penalty
+                        event_weak_return = True
+                        reward -= self._pending_shaping + self._pending_bonus
+                        rew_shaping -= self._pending_shaping
+                        rew_paddle -= self._pending_bonus
+                        self._pending_shaping = 0.0
+                        self._pending_bonus = 0.0
+                        self._paddle_hit_since_last_wall = False
+                        self._recoverable_bounce_eligible = False
+                        self._rally_phase = _AWAIT_PADDLE
+                        # Open a fresh shaping window, mirroring the
+                        # wall->wall failure path: the retry is exactly
+                        # where the dense approach signal is needed.
+                        self._returning = True
+                        self._prev_paddle_to_ball = None
+                        event_this_step = True
                 elif contact_event == "paddle":
                     self.paddle_hit_count += 1
                     if (
@@ -1064,12 +1291,19 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                         continue
                     if self._rally_phase == _AWAIT_PADDLE:
                         accept_paddle_hit()
+                        # Only the gate-opening hit is rally progress.
+                        event_this_step = True
                     # Repeat contacts while awaiting the wall remain
-                    # tolerated, but never pay another bonus.
+                    # tolerated, but never pay another bonus -- and never
+                    # reset the stall clock. A free clock reset let
+                    # touch-then-deaden ride a banked outright bonus to
+                    # the penalty-free truncation with periodic taps
+                    # (measured +0.25 under the bootstrap recipe, above
+                    # the weak-swing tracker rung); without it, held-ball
+                    # possession stalls out at -1 like any dead rally.
                     self.floor_bounce_count = 0
                     self._returning = False
                     self._prev_paddle_to_ball = None
-                    event_this_step = True
                 elif contact_event == "wall":
                     accept_wall_contact()
                     event_this_step = True
@@ -1236,12 +1470,14 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "rally_phase_name": self.rally_phase_name,
             "style_violation_reason": style_violation_reason,
             "early_touch_count": self.early_touch_count,
+            "weak_return_count": self.weak_return_count,
             "event_floor_bounce": bool(event_floor_bounce),
             "event_legal_paddle_hit": bool(event_legal_paddle_hit),
             "event_completed_return": bool(event_completed_return),
             "event_recoverable_bounce": bool(event_recoverable_bounce),
             "event_post_wall_bounce": bool(event_post_wall_bounce),
             "event_early_touch": bool(event_early_touch),
+            "event_weak_return": bool(event_weak_return),
             "event_style_violation": bool(event_style_violation),
             "recoverable_bounce_score": recoverable_bounce_score,
             "recoverable_bounce_eligible": bool(
@@ -1259,6 +1495,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "rew_stall": rew_stall,
             "rew_style_violation": rew_style_violation,
             "rew_early_touch": rew_early_touch,
+            "rew_weak_return": rew_weak_return,
+            "rew_first_hit": rew_first_hit,
             # Termination-cause flags. Mutually exclusive: at most one is
             # True (exactly one on the terminating step), so per-episode
             # aggregation turns these into a clean OOB / double-bounce /
@@ -1310,12 +1548,14 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "rally_phase_name": self.rally_phase_name,
             "style_violation_reason": None,
             "early_touch_count": self.early_touch_count,
+            "weak_return_count": self.weak_return_count,
             "event_floor_bounce": False,
             "event_legal_paddle_hit": False,
             "event_completed_return": False,
             "event_recoverable_bounce": False,
             "event_post_wall_bounce": False,
             "event_early_touch": False,
+            "event_weak_return": False,
             "event_style_violation": False,
             "recoverable_bounce_score": 0.0,
             "recoverable_bounce_eligible": bool(
@@ -1332,6 +1572,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "rew_stall": 0.0,
             "rew_style_violation": 0.0,
             "rew_early_touch": 0.0,
+            "rew_weak_return": 0.0,
+            "rew_first_hit": 0.0,
             "term_oob": False,
             "term_double_bounce": False,
             "term_stall": False,
@@ -1350,6 +1592,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.one_bounce_recovery_count = 0
         self.one_bounce_return_count = 0
         self.early_touch_count = 0
+        self.weak_return_count = 0
+        self._first_hit_paid = False
         self._rally_phase = (
             _AWAIT_BOUNCE
             if self.rally_style == "one_bounce"
@@ -1397,24 +1641,53 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 self._reset_mode = _RESET_INCOMING_WALL
 
         qpos, qvel = self._noisy_init_state()
-        # Move the *actual* reset pose to the configured home, retaining the
-        # same small randomized offset used by every other joint. Merely
+        # Move the *actual* reset pose to the configured start (the mapping
+        # home unless a curriculum sets paddle_start_x), retaining the same
+        # small randomized offset used by every other joint. Merely
         # remapping action zero would leave the baseline paddle at the old
         # front-court XML pose for its first control frame.
         x_noise = (
             qpos[self._paddle_x_qposadr]
             - self.init_qpos[self._paddle_x_qposadr]
         )
+        if self.paddle_start_x is None:
+            start_qpos = self._control_home[0]
+            start_low = self._control_low[0]
+            start_high = self._control_high[0]
+        else:
+            # An explicit start is validated against -- and clamps to --
+            # the *physical* workspace, not the possibly narrower action
+            # mapping: a curriculum may deliberately start the paddle
+            # outside the mapping's lane.
+            start_qpos = self.paddle_start_x - self._paddle_x_origin
+            start_low = self._paddle_x_world_range[0] - self._paddle_x_origin
+            start_high = self._paddle_x_world_range[1] - self._paddle_x_origin
+        if self._paddle_x_fence is not None:
+            start_low = max(
+                start_low, self._paddle_x_fence[0] - self._paddle_x_origin
+            )
+            start_high = min(
+                start_high, self._paddle_x_fence[1] - self._paddle_x_origin
+            )
         qpos[self._paddle_x_qposadr] = np.clip(
-            self._control_home[0] + x_noise,
-            self._control_low[0],
-            self._control_high[0],
+            start_qpos + x_noise, start_low, start_high
         )
 
         if self._reset_mode == _RESET_NORMAL:
             # Serve: throw the ball *toward* the paddle (negative x) with a
             # small upward lob and lateral jitter so the agent can't
-            # memorize a single trajectory.
+            # memorize a single trajectory. The origin follows
+            # serve_start_x (curriculum stages translate it with the
+            # paddle start), keeping the same pose noise as the XML serve.
+            # Skipped entirely at the XML origin: the add/subtract round
+            # trip is not bit-exact, and it would silently break same-seed
+            # reproducibility for every preset that never moves the serve.
+            if self.serve_start_x != self.init_qpos[self._ball_qposadr]:
+                qpos[self._ball_qposadr] = (
+                    self.serve_start_x
+                    + qpos[self._ball_qposadr]
+                    - self.init_qpos[self._ball_qposadr]
+                )
             vx = -(
                 self.serve_speed
                 + self.np_random.uniform(

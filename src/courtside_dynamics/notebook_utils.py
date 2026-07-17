@@ -564,6 +564,8 @@ _WALL_BALL_REWARD_COMPONENTS: tuple[str, ...] = (
     "rew_style_violation",
     "rew_recoverable_bounce",
     "rew_early_touch",
+    "rew_weak_return",
+    "rew_first_hit",
 )
 
 _WALL_BALL_TERMINATION_REASONS: tuple[str, ...] = (
@@ -612,6 +614,11 @@ _LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS: dict[str, Any] = {
     # matches these defaults exactly (terminal early touch, XML damping).
     "early_touch_penalty": None,
     "paddle_joint_damping": None,
+    "weak_return_penalty": None,
+    "first_hit_bonus": 0.0,
+    "serve_start_x": 1.0,
+    "paddle_start_x": None,
+    "paddle_x_fence": None,
 }
 
 

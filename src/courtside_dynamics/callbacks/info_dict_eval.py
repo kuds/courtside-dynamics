@@ -281,6 +281,11 @@ class InfoDictEvalCallback(BaseCallback):
         self._best_score: tuple[float, ...] | None = None
         self._evals_since_best = 0
         self._eval_count = 0
+        # Most recent evaluation's aggregated metrics and a monotonically
+        # increasing completion counter, for consumers that react to
+        # evaluations (e.g. performance-gated curriculum callbacks).
+        self.last_metrics: dict[str, float] | None = None
+        self.completed_evals = 0
         # (score, guard values) for the most recent evaluations, sized to
         # the degenerate-signal window.
         self._recent_signal: deque[
@@ -306,6 +311,8 @@ class InfoDictEvalCallback(BaseCallback):
                 pass
 
         metrics = self._collect_metrics()
+        self.last_metrics = dict(metrics)
+        self.completed_evals += 1
 
         logger = self.logger
         for name, value in metrics.items():
@@ -518,6 +525,21 @@ class InfoDictEvalCallback(BaseCallback):
             )
 
         return metrics
+
+    def reset_selection_state(self) -> None:
+        """Forget the best score, patience, and degenerate-signal window.
+
+        For callers that change the evaluation distribution mid-run (a
+        performance-gated curriculum advancing a stage): scores from
+        different distributions are not comparable, so a best banked on
+        an easier stage must not bar a genuinely better later policy --
+        nor should flatness or patience accrued across the boundary
+        count. Saved best artifacts stay on disk until a post-reset
+        evaluation produces a new best and overwrites them.
+        """
+        self._best_score = None
+        self._evals_since_best = 0
+        self._recent_signal.clear()
 
     def _score_of(self, metrics: Mapping[str, float]) -> tuple[float, ...]:
         return tuple(
