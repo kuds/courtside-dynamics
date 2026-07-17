@@ -115,3 +115,15 @@ check_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 files = ["src/courtside_dynamics"]
+
+[[tool.mypy.overrides]]
+# glfw >= 2.10.1 ships a stub written with PEP 695 `type` aliases,
+# which mypy rejects under python_version = "3.11" and aborts the whole
+# run ("errors prevented further checking"). We never import glfw
+# directly — it is a mujoco transitive dependency — so don't follow
+# into it.
+module = ["glfw", "glfw.*"]
+follow_imports = "skip"
+# follow_imports normally only governs .py files; without this, mypy
+# still parses the broken .pyi stub.
+follow_imports_for_stubs = true
