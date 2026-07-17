@@ -1,6 +1,8 @@
 # Spec: TOML run-configuration files
 
-Status: proposed (not yet implemented)
+Status: implemented (v1). Decisions: `warm_start` deferred to v2; the
+config path is always explicit (never auto-discovered); one file per
+experiment.
 
 ## Motivation
 
@@ -47,15 +49,31 @@ serve_vy_max = 1.1
                              # eval_env_overrides (this layer wins)
 ```
 
-- `[train]` keys must be `TrainConfig` field names. Callable-valued and
-  runtime-only fields are **rejected**: `env_fn`, `eval_env_fn`,
-  `extra_callbacks`, `info_row_fn`, `warm_start` (v1; see Open questions).
+- `[train]` keys must be `TrainConfig` field names. Callable-valued,
+  runtime-only, and builder-owned fields are **rejected**: `env_fn`,
+  `eval_env_fn`, `extra_callbacks`, `info_row_fn`, `warm_start` (v1; see
+  Open questions), `run_config_file`, and `algo` / `log_dir` /
+  `recipe_name` (written into the kwargs before the file merges, so a
+  file value would silently invert the "file < explicit arguments"
+  precedence and falsify provenance — pass them to
+  `build_train_config` instead).
 - `[env]` / `[eval_env]` keys are environment constructor kwargs. TOML has
   no `None`: a kwarg whose meaning requires `None` (e.g.
   `early_touch_penalty = None` for the legacy terminal rule) uses the
-  sentinel string `"none"`, which the loader converts. TOML arrays map to
-  Python lists; env constructors already accept sequences where tuples are
-  documented.
+  sentinel string `"none"`, which the loader converts **recursively**
+  through nested tables (with two exceptions: `phase_labels` values are
+  display text and stay verbatim — and must be strings — and any
+  `[train]` key whose `TrainConfig` field is not Optional (`n_envs`,
+  `model_kwargs`, `record_video`, ...) rejects the sentinel outright —
+  the smuggled `None` would only crash mid-`train()` or silently
+  disable a falsy-checked feature; Optional fields like `phase_labels`,
+  `performance_gate`, `normalize_reward`, and `early_stop_patience`
+  do accept `"none"` as a disable). The quoted strings
+  `"true"`/`"false"` are rejected recursively everywhere except
+  phase-label values — as Python strings both are truthy, silently
+  enabling exactly what the file tried to disable. TOML arrays map to
+  Python lists; env constructors already accept sequences where tuples
+  are documented.
 - Nested tables under `[train]` (e.g. `performance_gate`) follow the merge
   rules below.
 
@@ -85,7 +103,7 @@ The layer-vs-layer footgun is *replacement*; the file layer fixes it:
 | Scalars, strings, arrays | Replace |
 | Mapping-valued `TrainConfig` fields (`model_kwargs`, `phase_labels`, `info_eval_survival_thresholds`) | **Deep-merge, one level**: file keys override recipe keys, unmentioned recipe keys survive |
 | `performance_gate` | Replace **wholesale** — stage ladders are ordered lists whose element-wise merging would be ambiguous; a file that touches the gate must state the whole gate |
-| `[env]` / `[eval_env]` tables | Key-wise merge into the recipe's kwargs (same as today's `env_overrides`) |
+| `[env]` / `[eval_env]` tables | `[env]` merges into the kwargs of **both** the training and evaluation environments (a physics tweak must not silently split the two); the recipe's `eval_env_overrides` then re-assert the canonical evaluation setup, and `[eval_env]` wins last for evaluation |
 
 Explicit keyword arguments keep today's replace-wholesale semantics (no
 behavior change for existing code); the file is the recommended layer for
@@ -98,11 +116,23 @@ curriculum, shadow attributes, inert `clip_reward`). The config loader
 therefore fails loudly on everything:
 
 - Missing file → `FileNotFoundError` (never silently skipped).
-- Malformed TOML → the `tomllib` error, wrapped with the file path.
+- Malformed TOML → a `ValueError` naming the file, chaining the
+  `tomllib` error (whose constructor signature varies across Python
+  versions).
 - Unknown `[train]` key → `ValueError` naming the key and closest valid
   field names (`difflib.get_close_matches`).
 - A rejected field (`env_fn`, ...) → `ValueError` explaining why.
 - Unknown top-level table → `ValueError` (only `train`, `env`, `eval_env`).
+- `[train.performance_gate]` is validated structurally at load: the four
+  keys `train()` reads (`metric_key`, `threshold`, `sustain_evals`,
+  `stages`) must all be present with sane types, any other key is
+  rejected (it would be silently ignored downstream), and `stages` must
+  be a non-empty array of non-empty tables. Deeper semantics stay with
+  `PerformanceGatedEnvStagesCallback`.
+- `phase_labels` keys must be strict decimal strings (`"1_0"`, `"+2"`,
+  and whitespace variants are rejected rather than silently relabeling a
+  different phase), and colliding spellings of the same id (`"1"`/`"01"`)
+  are rejected.
 - `[env]`/`[eval_env]` keys are validated by the environment constructor:
   when a config file is supplied, `build_train_config` eagerly constructs
   and closes one probe env (and one eval env) so a typo'd env kwarg fails
@@ -121,7 +151,10 @@ therefore fails loudly on everything:
 }
 ```
 
-(`null` when no file was used.) The resolved winning values continue to be
+(`null` when no file was used.) The file's byte-exact text is also
+copied to `log_dir/run_config.toml` at run start, so the run directory
+is self-contained even if the original is later edited or deleted.
+The resolved winning values continue to be
 recorded where they always were (`train_config`, `env.constructor_kwargs`),
 so an audit can answer both "what did the file say" and "what actually
 won". `stage_summary.txt` adds a one-line `Run config: <basename>
@@ -145,6 +178,7 @@ New module `courtside_dynamics/run_config.py`:
 class RunFileConfig:
     path: str
     sha256: str
+    text: str          # byte-exact file content, for the run-dir copy
     train: dict[str, Any]
     env: dict[str, Any]
     eval_env: dict[str, Any]

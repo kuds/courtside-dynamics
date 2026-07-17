@@ -193,12 +193,32 @@ def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
 
 
 def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
-    """Snapshot the resolved cfg + provenance to ``log_dir/config.json``."""
+    """Snapshot the resolved cfg + provenance to ``log_dir/config.json``.
+
+    When the config was built from a TOML run-configuration file, the
+    file's byte-exact content is also copied to
+    ``log_dir/run_config.toml`` so the run directory is self-contained
+    even if the original file is later edited or deleted.
+    """
+    run_file = cfg.run_config_file
+    if run_file is not None:
+        copy_path = os.path.join(log_dir, "run_config.toml")
+        with open(copy_path, "w", encoding="utf-8") as f:
+            f.write(run_file.text)
     payload: dict[str, Any] = {
         "timestamp_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "git_sha": _git_sha(),
         "versions": _versions(),
         "gpu": _gpu_info(),
+        "run_config_file": (
+            {
+                "path": run_file.path,
+                "sha256": run_file.sha256,
+                "content": run_file.raw,
+            }
+            if run_file is not None
+            else None
+        ),
         "recipe_name": cfg.recipe_name,
         "env": _probe_env(cfg),
         # Keep ``env`` as the training profile for backwards compatibility.
@@ -636,6 +656,14 @@ def write_run_summary(
     )
     lines.append(_kv("Status", status))
     lines.append(_kv("Git SHA", short_sha))
+    if cfg.run_config_file is not None:
+        lines.append(
+            _kv(
+                "Run config",
+                f"{os.path.basename(cfg.run_config_file.path)} "
+                f"({cfg.run_config_file.sha256[:12]})",
+            )
+        )
     if steps_trained < cfg.total_timesteps:
         lines.append(
             _kv(

@@ -130,6 +130,14 @@ curves non-comparable; start fresh baseline runs. The open `WallBall` and
 calibration. The recoverable-bounce placement score now projects to the new
 baseline lane front (x=-1.6).
 
+Run hyperparameters can be kept in a per-experiment TOML file passed as
+`build_train_config(..., config_file=...)`: its `[train.model_kwargs]`
+table deep-merges onto a recipe's calibrated bundle instead of replacing it,
+every unknown key fails loudly with a suggestion, and each run copies the
+file to `LOG_DIR/run_config.toml` and records its path, sha256, and content
+in `config.json`. See `docs/run_config_file_spec.md` for the format and
+precedence rules.
+
 Package version 0.11.0 targets the WallBall bootstrap failure (three runs in
 which SAC never touched the ball while a scripted tracker contacts 100% of
 serves). New `WallBallBootstrap` recipe: a `first_hit_bonus` paid outright

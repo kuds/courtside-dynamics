@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from courtside_dynamics.envs import (
@@ -714,6 +715,7 @@ def make_eval_env_fn(
     env_name: str,
     *,
     env_overrides: Mapping[str, Any] | None = None,
+    base_env_overrides: Mapping[str, Any] | None = None,
 ):
     """Return the canonical evaluation factory for ``env_name``.
 
@@ -722,9 +724,18 @@ def make_eval_env_fn(
     applied last. This keeps checkpoint selection and post-training audits on
     standard full episodes even when the training factory samples curriculum
     reset states.
+
+    ``base_env_overrides`` sit *below* the recipe's evaluation overrides:
+    a run-config file's ``[env]`` table lands there, so it reaches both
+    the training and evaluation environments (a physics tweak must not
+    silently split the two) while the recipe's canonical evaluation
+    settings -- and then the file's ``[eval_env]`` table via
+    ``env_overrides`` -- still win for evaluation.
     """
     recipe = RECIPES[env_name]
     kwargs = dict(recipe.env_kwargs)
+    if base_env_overrides:
+        kwargs.update(base_env_overrides)
     kwargs.update(recipe.eval_env_overrides)
     if env_overrides:
         kwargs.update(env_overrides)
@@ -742,6 +753,7 @@ def build_train_config(
     log_dir: str,
     total_timesteps: int | None = None,
     quick_test: bool = False,
+    config_file: str | Path | None = None,
     **overrides: Any,
 ) -> TrainConfig:
     """Materialize a :class:`TrainConfig` from a registered recipe.
@@ -763,20 +775,63 @@ def build_train_config(
         Apply :data:`_QUICK_TEST_OVERRIDES` so the whole pipeline runs
         end-to-end in a couple of minutes -- handy for smoke-testing on
         a new Colab runtime.
+    config_file:
+        Optional path to a TOML run-configuration file
+        (docs/run_config_file_spec.md). Its ``[train]`` table sits
+        between the recipe and the ``quick_test`` presets (mapping
+        fields like ``model_kwargs`` deep-merge one level; everything
+        else replaces); its ``[env]`` table reaches both the training
+        and evaluation environments below the recipe's evaluation
+        overrides; its ``[eval_env]`` table wins last for evaluation.
+        Always explicit -- nothing is auto-discovered -- and the parsed
+        file (path, sha256, content) rides on the returned config so
+        the training artifacts can record and copy it. Supplying a file
+        also eagerly constructs and closes one training and one
+        evaluation environment so a typo'd env kwarg fails here, in
+        seconds, instead of mid-``train()``.
     **overrides:
         Any other ``TrainConfig`` field (``eval_freq``, ``n_envs``,
-        ``model_kwargs``, ...).
+        ``model_kwargs``, ...). Explicit overrides replace wholesale
+        and win over every other layer.
     """
     if env_name not in RECIPES:
         raise KeyError(
             f"Unknown env '{env_name}'. Choose one of {sorted(RECIPES)}."
         )
+    if "run_config_file" in overrides:
+        raise ValueError(
+            "run_config_file is set by build_train_config itself and "
+            "records provenance; pass config_file=<path> instead"
+        )
+    if config_file is not None:
+        clashing = sorted({"env_fn", "eval_env_fn"} & set(overrides))
+        if clashing:
+            raise ValueError(
+                f"config_file cannot be combined with explicit "
+                f"{clashing} overrides: the factories would silently "
+                f"discard the file's [env]/[eval_env] tables while "
+                f"config.json records the file as applied. Drop the "
+                f"factory override or the config_file."
+            )
     recipe = RECIPES[env_name]
     resolved_algo = recipe.default_algo if algo is None else algo
 
+    file_config = None
+    if config_file is not None:
+        from courtside_dynamics.run_config import load_run_config
+
+        file_config = load_run_config(config_file)
+
     cfg_kwargs: dict[str, Any] = {
-        "env_fn": make_env_fn(env_name),
-        "eval_env_fn": make_eval_env_fn(env_name),
+        "env_fn": make_env_fn(
+            env_name,
+            env_overrides=(file_config.env if file_config else None),
+        ),
+        "eval_env_fn": make_eval_env_fn(
+            env_name,
+            base_env_overrides=(file_config.env if file_config else None),
+            env_overrides=(file_config.eval_env if file_config else None),
+        ),
         "recipe_name": env_name,
         "algo": resolved_algo,
         "log_dir": log_dir,
@@ -785,15 +840,29 @@ def build_train_config(
     }
     cfg_kwargs.update(recipe.extra_cfg)
 
+    if file_config is not None:
+        from courtside_dynamics.run_config import merge_train_overrides
+
+        cfg_kwargs = merge_train_overrides(cfg_kwargs, file_config.train)
+        cfg_kwargs["run_config_file"] = file_config
+
     if quick_test:
         cfg_kwargs.update(_QUICK_TEST_OVERRIDES)
 
     # Explicit caller choices are applied last so they always win --
-    # including over the quick-test presets. (``total_timesteps`` used to
-    # be silently discarded under ``quick_test=True``, unlike every other
-    # override, which made "quick test but a bit longer" impossible.)
+    # including over the quick-test presets and a config file.
+    # (``total_timesteps`` used to be silently discarded under
+    # ``quick_test=True``, unlike every other override, which made
+    # "quick test but a bit longer" impossible.)
     if total_timesteps is not None:
         cfg_kwargs["total_timesteps"] = total_timesteps
     cfg_kwargs.update(overrides)
 
-    return TrainConfig(**cfg_kwargs)
+    cfg = TrainConfig(**cfg_kwargs)
+    if file_config is not None:
+        # Fail on a typo'd [env]/[eval_env] kwarg now, in seconds,
+        # rather than mid-train() after loggers and callbacks spin up.
+        for factory in (cfg.env_fn, cfg.eval_env_fn):
+            if factory is not None:
+                factory().close()
+    return cfg

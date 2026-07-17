@@ -494,6 +494,11 @@ class TrainConfig:
     degenerate_min_evals: int | None = None
     performance_gate: Mapping[str, Any] | None = None
     final_info_eval: bool = False
+    # Parsed TOML run-configuration file (courtside_dynamics.run_config
+    # .RunFileConfig), attached by build_train_config(config_file=...)
+    # so artifacts can record its provenance and copy it into the run
+    # directory. ``Any`` to keep this module free of a run_config import.
+    run_config_file: Any = None
 
 
 def _offset_seed(seed: int | None, offset: int) -> int | None:
