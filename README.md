@@ -156,6 +156,17 @@ provenance now records the installed git commit on Colab (pip VCS installs)
 and honors a `COURTSIDE_DYNAMICS_GIT_SHA` override. Existing recipes are
 unchanged and 0.10 artifacts remain comparable.
 
+Version 0.11.1 adds render-only court markings to WallBall so videos show
+where on the court the action is: bold white lines at the wall base
+(x = 3.9) and the deepest paddle reach ("baseline", x = −4.7), faint 1 m
+coordinate ticks, a cyan strip marking the preset's paddle lane with a
+yellow paddle-home line, orange fence lines (visible only when a
+`paddle_x_fence` is set), and a warm line at the serve drop x. The
+markers are MuJoCo sites — they cannot collide — and the
+preset-dependent ones are repositioned every reset, so curriculum
+changes made between episodes stay visible. No physics, observation, or
+reward change.
+
 | Ball Balance | Ball Bounce | Wall Ball |
 |:---:|:---:|:---:|
 | ![A trained agent balancing a ball on a tray](Images/sac_ball_balance.gif) | ![A trained agent bouncing a ball on a paddle](Images/sac_ball_bounce.gif) | ![A trained agent rallying a ball against a wall](Images/sac_wall_ball.gif) |

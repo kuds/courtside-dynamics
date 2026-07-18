@@ -55,7 +55,11 @@ from gymnasium.envs.registration import register
 # serve-spread ladder (WallBallBootstrap recipe), and curriculum plumbing
 # (serve_start_x / paddle_start_x / paddle_x_fence / schedulable damping).
 # Existing recipes unchanged; 0.10 artifacts remain comparable.
-__version__ = "0.11.0"
+# 0.11.1: WallBall court markings -- render-only floor sites for the wall
+# base, baseline, metre ticks, and the preset's lane/home/fence/serve
+# lines (repositioned each reset). No physics, observation, or reward
+# change; all 0.11 artifacts remain comparable.
+__version__ = "0.11.1"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.

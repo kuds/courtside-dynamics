@@ -3173,3 +3173,88 @@ class TestWallBallRallyStyleSemantics:
             ) == ["floor", "paddle", "wall"]
         finally:
             env.close()
+
+
+class TestWallBallCourtMarkers:
+    """Render-only court markings track the resolved preset kwargs."""
+
+    def _site_x(self, env, name):
+        return float(env.model.site_pos[int(env.model.site(name).id)][0])
+
+    def _site_alpha(self, env, name):
+        return float(env.model.site_rgba[int(env.model.site(name).id)][3])
+
+    def test_markers_follow_preset_lane_home_and_serve(self):
+        env = WallBallEnv(
+            paddle_x_target_range=(-3.2, -1.6),
+            paddle_home_x=-2.7,
+            serve_start_x=0.8,
+        )
+        try:
+            assert self._site_x(env, "court_line_lane_min") == -3.2
+            assert self._site_x(env, "court_line_lane_max") == -1.6
+            assert self._site_x(env, "court_line_home") == -2.7
+            assert self._site_x(env, "court_line_serve") == 0.8
+            strip_id = int(env.model.site("court_lane_strip").id)
+            assert env.model.site_pos[strip_id][0] == pytest.approx(-2.4)
+            assert env.model.site_size[strip_id][0] == pytest.approx(0.8)
+            # Static geography stays authored in the XML.
+            assert self._site_x(env, "court_line_wall_base") == 3.9
+            assert self._site_x(env, "court_line_baseline") == -4.7
+        finally:
+            env.close()
+
+    def test_default_lane_markers_span_the_physical_workspace(self):
+        env = WallBallEnv()
+        try:
+            assert self._site_x(env, "court_line_lane_min") == pytest.approx(
+                env.paddle_x_target_range[0]
+            )
+            assert self._site_x(env, "court_line_lane_max") == pytest.approx(
+                env.paddle_x_target_range[1]
+            )
+        finally:
+            env.close()
+
+    def test_fence_markers_hidden_until_set_and_track_runtime_changes(self):
+        env = WallBallEnv(paddle_x_target_range=(-3.2, -1.6))
+        try:
+            assert self._site_alpha(env, "court_line_fence_min") == 0.0
+            assert self._site_alpha(env, "court_line_fence_max") == 0.0
+            # A curriculum sets the fence between episodes via
+            # set_wrapper_attr; markers refresh on the next reset.
+            env.paddle_x_fence = (-3.0, -2.0)
+            env.serve_start_x = 1.4
+            env.reset(seed=0)
+            assert self._site_x(env, "court_line_fence_min") == -3.0
+            assert self._site_x(env, "court_line_fence_max") == -2.0
+            assert self._site_alpha(env, "court_line_fence_min") > 0.0
+            assert self._site_x(env, "court_line_serve") == 1.4
+            # Clearing the fence hides the lines again.
+            env.paddle_x_fence = None
+            env.reset(seed=1)
+            assert self._site_alpha(env, "court_line_fence_min") == 0.0
+        finally:
+            env.close()
+
+    def test_markers_are_sites_only_and_leave_dynamics_unchanged(self):
+        # Sites never generate contacts in MuJoCo, so the markings are
+        # provably render-only as long as no marker is a geom.
+        env = WallBallEnv()
+        try:
+            geom_names = {
+                env.model.geom(i).name for i in range(env.model.ngeom)
+            }
+            assert not any(name.startswith("court_") for name in geom_names)
+            # And the serve trajectory is bit-identical across resets
+            # regardless of marker repositioning between them.
+            env.reset(seed=7)
+            first = [env.step(np.zeros(3))[0].copy() for _ in range(5)]
+            env.paddle_x_fence = (-3.0, -2.0)
+            env.paddle_x_fence = None
+            env.reset(seed=7)
+            second = [env.step(np.zeros(3))[0].copy() for _ in range(5)]
+            for a, b in zip(first, second, strict=True):
+                np.testing.assert_array_equal(a, b)
+        finally:
+            env.close()

@@ -642,6 +642,15 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 f"range {physical_world_range}, got {self.paddle_start_x}"
             )
 
+        # Court markings are render-only sites (sites never generate
+        # contacts); capture their XML alphas so hidden markers (the
+        # fence lines when no fence is set) can be restored exactly.
+        self._court_marker_alpha = {
+            name: float(self.model.site(name).rgba[3])
+            for name in self._COURT_MARKER_SITES
+        }
+        self._refresh_court_markers()
+
         # Cache the ball's DOF offset so serve velocities don't depend on
         # a hard-coded index into qvel.
         self._ball_qposadr = int(self.model.joint("ball_x").qposadr[0])
@@ -741,6 +750,60 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                     f"world-space range {world_range}, got {fence}"
                 )
         self._paddle_x_fence = fence
+
+    # Preset-dependent court markings (see assets/wall_ball.xml). The
+    # static geography (wall base, baseline, metre ticks) is authored in
+    # the XML; these placeholder sites are rewritten from the resolved
+    # kwargs so videos show where the active lane, home, fence, and
+    # serve drop actually are for THIS preset.
+    _COURT_MARKER_SITES = (
+        "court_lane_strip",
+        "court_line_lane_min",
+        "court_line_lane_max",
+        "court_line_home",
+        "court_line_fence_min",
+        "court_line_fence_max",
+        "court_line_serve",
+    )
+
+    def _refresh_court_markers(self) -> None:
+        """Reposition the preset-dependent markings from current kwargs.
+
+        Called at construction and every reset so curriculum changes
+        applied between episodes (``paddle_x_fence``, ``serve_start_x``
+        via ``set_wrapper_attr``) stay visible in rendered videos.
+        Sites are render-only, so this cannot affect physics,
+        observations, or rewards.
+        """
+
+        def _place(name: str, x: float, *, visible: bool = True) -> None:
+            site_id = int(self.model.site(name).id)
+            self.model.site_pos[site_id][0] = float(x)
+            self.model.site_rgba[site_id][3] = (
+                self._court_marker_alpha[name] if visible else 0.0
+            )
+
+        lane = self.paddle_x_target_range
+        # Resolved to the physical range in __init__ before the first
+        # call; only the pre-resolution annotation admits None.
+        assert lane is not None
+        lane_low, lane_high = lane
+        _place("court_line_lane_min", lane_low)
+        _place("court_line_lane_max", lane_high)
+        _place("court_line_home", self.paddle_home_x)
+        strip_id = int(self.model.site("court_lane_strip").id)
+        self.model.site_pos[strip_id][0] = (lane_low + lane_high) / 2.0
+        self.model.site_size[strip_id][0] = max(
+            (lane_high - lane_low) / 2.0, 1e-6
+        )
+        _place("court_line_serve", self.serve_start_x)
+        fence = self.paddle_x_fence
+        if fence is None:
+            _place("court_line_fence_min", 0.0, visible=False)
+            _place("court_line_fence_max", 0.0, visible=False)
+        else:
+            _place("court_line_fence_min", fence[0])
+            _place("court_line_fence_max", fence[1])
 
     @property
     def recovery_reset_probability(self) -> float:
@@ -1584,6 +1647,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         return obs, reward, True, False, info
 
     def reset_model(self):
+        self._refresh_court_markers()
         self.step_number = 0
         self.bounce_count = 0
         self.wall_contact_count = 0
