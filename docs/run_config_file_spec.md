@@ -1,8 +1,14 @@
 # Spec: TOML run-configuration files
 
-Status: implemented (v1). Decisions: `warm_start` deferred to v2; the
-config path is always explicit (never auto-discovered); one file per
-experiment.
+Status: implemented (v1.1). Decisions: `warm_start` deferred to v2; one
+file per experiment. v1 required the config path to always be explicit
+(never auto-discovered); v1.1 (0.13.0) softens this to
+*assisted-explicit* for the notebook only: `CONFIG_FILE = "auto"` calls
+`notebook_utils.resolve_run_config_file`, which materializes the
+recipe's packaged starter into the Drive `configs/` root on first use,
+reuses the user's edited copy afterwards, and prints the resolved path +
+sha256 every run. `build_train_config` itself still never discovers
+anything -- it only receives the path the notebook visibly resolved.
 
 ## Motivation
 

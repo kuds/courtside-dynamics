@@ -87,6 +87,72 @@ def resolve_run_dir(
     return path
 
 
+def resolve_run_config_file(
+    env_name: str,
+    *,
+    use_drive: bool = False,
+    drive_subdir: str = "courtside-dynamics",
+    local_root: str = "./configs",
+) -> Path | None:
+    """Return the experiment TOML for ``env_name``, creating it on first use.
+
+    Root: ``<MyDrive>/Finding Theta/<drive_subdir>/configs/`` when
+    ``use_drive=True`` and Drive is mounted (the same root convention as
+    :func:`resolve_run_dir`), else ``local_root``. An existing
+    ``<root>/<name_prefix>.toml`` is returned untouched -- the user's
+    edits between runs are the whole point -- otherwise the packaged
+    starter is copied there via
+    :func:`courtside_dynamics.run_config.copy_starter_config`.
+
+    Always prints the resolved path, its sha256, and whether it was
+    created or reused, so the choice stays visible; the run additionally
+    records both in ``config.json`` and copies the file into the run
+    directory. Returns None (with a printed reason) for recipes without
+    a packaged starter, so a default-config run is never blocked.
+    """
+    from courtside_dynamics.run_config import (
+        available_run_configs,
+        copy_starter_config,
+    )
+
+    if use_drive:
+        my_drive = "/content/drive/MyDrive"
+        if os.path.isdir(my_drive):
+            root = os.path.join(
+                my_drive, "Finding Theta", drive_subdir, "configs"
+            )
+        else:
+            print(
+                "[notebook_utils] use_drive=True but /content/drive/MyDrive "
+                "is not mounted; resolving the run config under "
+                f"{local_root} (ephemeral -- edits will not survive this "
+                "runtime)."
+            )
+            root = local_root
+    else:
+        root = local_root
+
+    catalog = available_run_configs()
+    if env_name not in catalog:
+        print(
+            f"[notebook_utils] no packaged starter run config for "
+            f"{env_name!r}; continuing without a config file."
+        )
+        return None
+
+    destination = Path(root) / catalog[env_name].name
+    created = not destination.exists()
+    if created:
+        destination = copy_starter_config(env_name, root)
+    digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+    print(
+        f"[notebook_utils] run config: {destination} "
+        f"({'created from packaged starter' if created else 'reusing existing copy'}, "
+        f"sha256 {digest[:12]})"
+    )
+    return destination
+
+
 def disconnect_runtime(delay_seconds: int = 5) -> None:
     """Free the Colab GPU by tearing down the runtime. No-op locally.
 
@@ -619,6 +685,9 @@ _LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS: dict[str, Any] = {
     "serve_start_x": 1.0,
     "paddle_start_x": None,
     "paddle_x_fence": None,
+    # Added in 0.13.0: render-only floor styling; any value is
+    # physics-identical to the pre-0.13 default.
+    "court_style": "diagnostic",
 }
 
 

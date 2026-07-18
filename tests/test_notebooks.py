@@ -194,7 +194,12 @@ def test_sb3_notebook_uses_run_config_files_not_pinned_model_kwargs() -> None:
     # default to recipe/SB3 behavior and route tweaks through TOML files.
     assert "MODEL_KWARGS = None" in source
     assert 'MODEL_KWARGS = {"ent_coef": 0.02' not in source
-    assert "CONFIG_FILE = None" in source
+    # CONFIG_FILE is a mode switch: "auto" resolves the recipe's TOML
+    # (created from the packaged starter on first use) after the Drive
+    # mount; None and explicit paths remain available.
+    assert 'CONFIG_FILE = "auto"' in source
+    assert 'if CONFIG_FILE == "auto":' in source
+    assert "resolve_run_config_file(ENV, use_drive=USE_DRIVE)" in source
     assert "config_file=CONFIG_FILE" in source
     # Notebook variables are layered: only explicitly-set values are
     # passed, so a TOML's [train] table is not silently overridden.
@@ -215,3 +220,18 @@ def test_sb3_notebook_uses_run_config_files_not_pinned_model_kwargs() -> None:
     assert "copy_starter_config" in source
     assert "WallBallBootstrap" in source
     assert "cfg.run_config_file" in source
+
+
+def test_sb3_notebook_replay_uses_tennis_court_style() -> None:
+    source = "\n".join(
+        _source(cell) for cell in _load_sb3_notebook()["cells"]
+    )
+    assert 'REPLAY_COURT_STYLE = "tennis"' in source
+    # The replay env derives from the run's own factory (so a TOML's
+    # [env]/[eval_env] overrides survive), with only the render-only
+    # style applied on top -- and only for wall-ball recipes.
+    assert "replay_env_fn = cfg.eval_env_fn or cfg.env_fn" in source
+    assert "env.court_style = REPLAY_COURT_STYLE" in source
+    assert "if is_wall_ball_recipe:" in source
+    # Metrics paths must not restyle their envs.
+    assert "court_style" not in source.split("REPLAY_COURT_STYLE")[0]

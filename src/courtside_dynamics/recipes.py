@@ -403,6 +403,12 @@ RECIPES: dict[str, Recipe] = {
             # this lane front); the softened fine keeps the gate shut
             # but lets the rally -- and learning -- continue.
             "early_touch_penalty": 0.25,
+            # 12-16% of best-model episodes in runs 20260717_165358 /
+            # 20260718_023737 still died as terminal floor_before_wall
+            # weak returns; the v0.11.0-calibrated fined retry converts
+            # them into practice reps. Evaluation re-asserts the strict
+            # terminal rule below so scores stay comparable across runs.
+            "weak_return_penalty": 0.1,
             # Cap saturated swings at 100 N / 8 = 12.5 m/s (~2.3x serve
             # speed) instead of the shared XML's 20 m/s: bang-bang
             # full-power returns then rebound shallow enough to recover.
@@ -428,12 +434,23 @@ RECIPES: dict[str, Recipe] = {
             # Evaluation must never sample recovery-curriculum starts: every
             # score represents a complete baseline episode from the serve.
             "recovery_reset_probability": 0.0,
+            # Training's weak-return retry must not leak into scoring:
+            # strict terminal floor_before_wall keeps bounce_count_ep_mean
+            # comparable with every earlier baseline run.
+            "weak_return_penalty": None,
         },
         default_total_timesteps=1_500_000,
         name_prefix="wall_ball_baseline",
         extra_cfg={
             "n_envs": 8,
             "early_stop_patience": 20,
+            # Credit horizon ~200 steps (> one full exchange at ~130
+            # steps): targets the dominant 54% double-bounce failure of
+            # run 20260718_023737 -- committing to recover the NEXT
+            # exchange. Auto-entropy is deliberately untouched: the
+            # 20260717 A/B (run 025611 vs 165358) showed fixed ent_coef
+            # was the harmful half of the old pinned bundle, not gamma.
+            "model_kwargs": {"gamma": 0.995},
             "success_key": "bounce_count",
             # One return was solved by every held-out seed in the first
             # baseline run; success now means surviving the actual skill
@@ -448,7 +465,11 @@ RECIPES: dict[str, Recipe] = {
             # between equal exchange means instead.
             "best_metric_keys": (
                 "bounce_count_ep_mean",
-                "bounce_count_ep_ge_2_rate",
+                # ge_2 saturated at ~100% in runs 20260717_165358 and
+                # 20260718_023737 (a dead tiebreaker); ge_5 is the tail
+                # that actually improved (8% -> 22% long-horizon) while
+                # the 750-step eval cap compresses the mean.
+                "bounce_count_ep_ge_5_rate",
             ),
             # Half the granularity of a 30-episode mean/rate: a real
             # one-episode change (1/30) registers as an improvement,

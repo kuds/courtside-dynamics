@@ -222,6 +222,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         serve_start_x: float = 1.0,
         paddle_start_x: float | None = None,
         paddle_x_fence: tuple[float, float] | None = None,
+        court_style: str = "diagnostic",
         **kwargs: Any,
     ) -> None:
         if not isinstance(rally_style, str) or rally_style not in _RALLY_STYLES:
@@ -441,6 +442,9 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.paddle_start_x = (
             None if paddle_start_x is None else float(paddle_start_x)
         )
+        # Floor-marking presentation (render-only; see
+        # _refresh_court_markers). Validated via the property setter.
+        self.court_style = court_style
         # World-space clamp on the x position target, decoupled from the
         # action mapping: the mapping (paddle_x_target_range) stays fixed
         # for a whole run so action semantics never drift, while the fence
@@ -643,11 +647,16 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             )
 
         # Court markings are render-only sites (sites never generate
-        # contacts); capture their XML alphas so hidden markers (the
-        # fence lines when no fence is set) can be restored exactly.
+        # contacts); capture their XML alphas so markers hidden by a
+        # style (or the fence lines when no fence is set) can be
+        # restored exactly.
         self._court_marker_alpha = {
             name: float(self.model.site(name).rgba[3])
-            for name in self._COURT_MARKER_SITES
+            for name in (
+                self._COURT_MARKER_SITES
+                + self._COURT_STATIC_SITES
+                + self._COURT_TENNIS_SITES
+            )
         }
         self._refresh_court_markers()
 
@@ -751,11 +760,11 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 )
         self._paddle_x_fence = fence
 
-    # Preset-dependent court markings (see assets/wall_ball.xml). The
-    # static geography (wall base, baseline, metre ticks) is authored in
-    # the XML; these placeholder sites are rewritten from the resolved
-    # kwargs so videos show where the active lane, home, fence, and
-    # serve drop actually are for THIS preset.
+    # Court markings (see assets/wall_ball.xml), all render-only sites.
+    # The preset-dependent diagnostic markers are rewritten from the
+    # resolved kwargs so videos show where the active lane, home, fence,
+    # and serve drop actually are for THIS preset; the static diagnostic
+    # geography and the tennis-court set only toggle visibility.
     _COURT_MARKER_SITES = (
         "court_lane_strip",
         "court_line_lane_min",
@@ -765,23 +774,76 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         "court_line_fence_max",
         "court_line_serve",
     )
+    _COURT_STATIC_SITES = (
+        "court_line_wall_base",
+        "court_line_baseline",
+        "court_tick_xm4",
+        "court_tick_xm3",
+        "court_tick_xm2",
+        "court_tick_xm1",
+        "court_tick_x0",
+        "court_tick_xp1",
+        "court_tick_xp2",
+        "court_tick_xp3",
+    )
+    _COURT_TENNIS_SITES = (
+        "court_tennis_apron",
+        "court_tennis_surface",
+        "court_tennis_baseline",
+        "court_tennis_service_line",
+        "court_tennis_singles_left",
+        "court_tennis_singles_right",
+        "court_tennis_doubles_left",
+        "court_tennis_doubles_right",
+        "court_tennis_center_service",
+        "court_tennis_center_mark",
+    )
+    _COURT_STYLES = ("diagnostic", "tennis", "none")
+
+    @property
+    def court_style(self) -> str:
+        """Floor-marking presentation: diagnostic overlays (default), a
+        to-size tennis half-court with the wall as the net, or a bare
+        floor. Render-only; takes effect at the next reset when changed
+        between episodes."""
+        return self._court_style
+
+    @court_style.setter
+    def court_style(self, value: str) -> None:
+        if value not in self._COURT_STYLES:
+            raise ValueError(
+                f"court_style must be one of {self._COURT_STYLES}, "
+                f"got {value!r}"
+            )
+        self._court_style = value
 
     def _refresh_court_markers(self) -> None:
-        """Reposition the preset-dependent markings from current kwargs.
+        """Apply the court style and preset-dependent marker positions.
 
         Called at construction and every reset so curriculum changes
-        applied between episodes (``paddle_x_fence``, ``serve_start_x``
-        via ``set_wrapper_attr``) stay visible in rendered videos.
-        Sites are render-only, so this cannot affect physics,
-        observations, or rewards.
+        applied between episodes (``paddle_x_fence``, ``serve_start_x``,
+        ``court_style`` via ``set_wrapper_attr``) stay visible in
+        rendered videos. Sites are render-only, so this cannot affect
+        physics, observations, or rewards.
         """
+        diagnostic = self._court_style == "diagnostic"
+        tennis = self._court_style == "tennis"
+
+        def _show(name: str, visible: bool) -> None:
+            site_id = int(self.model.site(name).id)
+            self.model.site_rgba[site_id][3] = (
+                self._court_marker_alpha[name] if visible else 0.0
+            )
+
+        for name in self._COURT_STATIC_SITES:
+            _show(name, diagnostic)
+        for name in self._COURT_TENNIS_SITES:
+            _show(name, tennis)
 
         def _place(name: str, x: float, *, visible: bool = True) -> None:
             site_id = int(self.model.site(name).id)
             self.model.site_pos[site_id][0] = float(x)
-            self.model.site_rgba[site_id][3] = (
-                self._court_marker_alpha[name] if visible else 0.0
-            )
+            _show(name, visible and diagnostic)
 
         lane = self.paddle_x_target_range
         # Resolved to the physical range in __init__ before the first
@@ -796,6 +858,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.model.site_size[strip_id][0] = max(
             (lane_high - lane_low) / 2.0, 1e-6
         )
+        _show("court_lane_strip", diagnostic)
         _place("court_line_serve", self.serve_start_x)
         fence = self.paddle_x_fence
         if fence is None:
