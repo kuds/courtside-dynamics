@@ -1,0 +1,374 @@
+# Decisions & Lessons Learned
+
+A running journal of the non-obvious engineering decisions, bugs, and dead ends
+behind Courtside Dynamics — the institutional memory that would otherwise be
+scattered across review docs, commit messages, and version notes. When a design
+choice, a calibration value, or a "we tried X and it failed" finding is worth
+remembering, it goes here.
+
+**How to use this file**
+
+- Newest entries first, within each themed section.
+- Each entry names the **decision or lesson**, the **evidence** behind it (with
+  the concrete numbers that make it actionable), and a **Status**:
+  *implemented* (shipped, with the version), *open* (recommended but not done),
+  or *characteristic* (a property to be aware of, not a bug).
+- The deep source material lives in the review snapshots under `docs/` (see
+  [`docs/README.md`](README.md)); this file distills their durable conclusions.
+  Per-release migration notes live in the root [`CHANGELOG.md`](../CHANGELOG.md).
+- **Status caveat:** WallBall entries were tracked through implementation
+  (0.9.0 → 0.13.0) and their statuses are current. The humanoid-tennis entries
+  are from the v0.7.0 review; spot-checks against the current tree are noted
+  inline, but they have **not** been fully re-audited — treat "open" there as
+  "open as of 0.7.0, not since disproven."
+
+---
+
+## Cardinal rules
+
+The meta-lessons that keep recurring across the project. Most specific entries
+below are an instance of one of these.
+
+1. **Fail loud, never silent.** This repo's history is a catalog of silent
+   no-ops: a `VecEnv.set_attr` that wrote a shadow attribute instead of the real
+   one (a whole training run at the wrong curriculum value), silent normalizer
+   fallbacks that record garbage videos of a competent policy, an inert
+   `clip_reward`, `git_sha` quietly `null`. Every config loader, callback, and
+   schedule should raise or log its applied value, not swallow the failure. The
+   run-config system ([spec](run_config_file_spec.md)) was built on this
+   principle.
+
+2. **Keep the reward ladder strictly monotone at the episode level.** The single
+   most expensive failure mode here: every pre-scoring behavior — do nothing,
+   touch and miss, weak return — netting *exactly* `-1.0` after claw-backs, so
+   SAC saw a dead-flat valley with no episode-return gradient toward contact.
+   Before launching a run, verify `parked < weak-swing < full-swing < oracle` as
+   distinct returns (the 0.11.0 bootstrap package measures exactly this ladder).
+
+3. **Prove solvability with a scripted oracle before scoring against a bar.**
+   A `bounce_count >= 2` success threshold was treated as a skill gap for
+   thousands of steps when part of it was geometry. Gate any new success bar on
+   an oracle demonstrating it is reachable *from the evaluation distribution*
+   (standard serve, `recovery_reset_probability = 0`).
+
+4. **Make model-selection and early-stopping noise-proof.** A "best" checkpoint
+   was once crowned on ~1e-8 of floating-point telescoping residue, which reset
+   the patience counter and kept a provably-dead run alive for 500k extra steps.
+   Quantize selection keys to `1/n_eval_episodes`, require improvement `> ε`,
+   drop `episode_reward_mean` from the selection keys, and add a degenerate-signal
+   guard (zero variance + zero paddle contacts ⇒ stop).
+
+5. **Don't carry hyperparameters across an action-space or physics change.** The
+   fixed `ent_coef` that "worked" was tuned on the legacy 5-action WallBall; on
+   the 3-action env it disabled auto-entropy and helped block learning entirely.
+   Re-validate exploration/entropy config whenever the action space changes.
+
+6. **Match curriculum fragments to the distribution the policy actually
+   creates/faces.** 60% of one run trained on synthetic "recovery" balls
+   (bounce x ≈ −0.6, centered y) the policy almost never faces, while the balls
+   it *does* create (bounce x ≈ 2.1, |y| up to 3.7) were barely practiced.
+   Fragment skill did not transfer to serve receipt at all.
+
+7. **Isolate side-effectful callbacks so they cannot kill a run.** A missing
+   headless-GL backend made the first scheduled video recording raise
+   `mujoco.FatalError` out of `model.learn()`, losing `final_model.zip`, the
+   final eval, and `stage_summary.txt` ~45 min in. Recording (and any optional
+   diagnostic) must be try/except log-and-continue.
+
+8. **Change one variable at a time, and run ≥3 seeds before calling something a
+   baseline.** One regression changed five things at once (success threshold,
+   obs dim, reward channel, reset distribution, lane front) on a single seed —
+   nothing about it was attributable.
+
+---
+
+## WallBall — reward, curriculum & geometry
+
+Source: [`wall_ball_baseline_review.md`](wall_ball_baseline_review.md) (runs from
+2026-07-14, reviewed at `cdb17d4`/v0.9.0, with addenda through the 0.11.0
+package). See also `CHANGELOG.md` 0.9.0 → 0.13.0.
+
+### The 0.11.0 bootstrap package — a strictly monotone competence ladder — *implemented (0.11.0)*
+The fix for the flat `-1` valley. On the stage-0 serve (n=120) the ladder now
+reads **parked −1.00 < weak-swing tracker −0.85 < placement-blind full swing
++7.63 < oracle +12.07**. Mechanisms: a once-per-episode outright
+`first_hit_bonus` (0.25); a `weak_return_penalty` (0.1) fined retry replacing the
+terminal weak-return fault; early-touch softening; a performance-gated serve
+ladder (`serve_vy_max` 1.1 → 2.0, gate `bounce_count_ep_mean ≥ 1.3` sustained
+2 evals) with matched-stage selection; and the previously-untried exploration
+config (`ent_coef="auto_0.02"`, `target_entropy=-1.5`, `learning_starts=10k`,
+buffer 500k). Adversarial review closed two high-severity exploits before
+commit: repeat paddle taps no longer reset the stall clock (touch-then-deaden
+possession was a risk-free +0.25 ride to truncation), and a stage advance now
+resets best-model selection state (an easy-stage score otherwise permanently
+barred better final-stage policies, ~0.6–0.7 metric inflation). The no-op
+invariant holds: a parked paddle still scores 0 contacts and −1.
+
+### Geometry: the old lane was unforgiving, not unsolvable — *implemented (0.10.0)*
+The chosen bundle: baseline lane `(-3.2, -1.6)` + paddle slide damping `8`
+(new `paddle_joint_damping`, baseline recipe only) + `early_touch_penalty 0.25`
+(non-terminal fine replacing the terminal `paddle_before_bounce` fault). The two
+geometry changes only work *together* — either alone collapses oracle second
+returns to ~50%. Calibration sweep (config → oracle ≥2 / crude-tracker ≥2):
+old `(-2.1, damping 5)` → **0.95 / 0.00**; chosen `(-1.6, damping 8)` →
+**0.92 / 0.70**. `(-1.4, 8)` scored marginally better for crude play but put the
+whole serve-bounce footprint inside the lane (94% pre-bounce faults for a naive
+front-camper vs 39% at −1.6). The earlier "~73% physically unsaveable" framing
+was a *correction target*: that figure is for untouched rebounds from fast/flat
+returns; a retreating oracle always recovered ≥2 from 95% of standard serves.
+**Lesson:** distinguish "unsolvable" from "unforgiving of mediocre play" — the
+crude-tracker column, not the oracle column, is what RL has to climb.
+
+### Difficulty ladders that were swept and rejected — *rejected*
+- **Depth ladder:** difficulty vs distance-to-wall is U-shaped, not monotone.
+  Close-court returns hit the wall hot and rebound out (oracle ≥2 collapses to
+  ~50%); mid-court to baseline is flat. Moving the paddle closer does not ease
+  the task.
+- **Serve-pace ladder:** return power rides on incoming momentum, so *slower*
+  serves underpower returns (oracle first-returns fall from 100% at serve speed
+  5.5 to 12% at 3.5). Slowing the serve makes it harder, not easier.
+
+### The recovery-schedule bug: forward attr writes through the wrapper stack — *implemented (P0)*
+`LinearEnvAttrScheduleCallback` called `training_env.set_attr(...)`, which under
+SB3 2.9.0 / gymnasium 1.3.0 `setattr`s the outer `Monitor` wrapper — a shadow
+attribute the `WallBallEnv` property setter never sees. One run trained at
+`recovery_reset_probability = 0.6` for all 750k steps instead of tapering to
+0.15, and `get_attr` read the shadow copy so probes were masked too. Fix:
+`env_method("set_wrapper_attr", name, value)` (walks the stack), log the applied
+value each eval, and integration-test *through* `make_vec_env` + `Monitor`, not a
+fake recording VecEnv. **General rule:** never `set_attr` a semantic env
+attribute on a VecEnv; go through `set_wrapper_attr`/`unwrapped`.
+
+### Reward channels must actually pay out on the real distribution — *open (P1)*
+`recoverable_bounce_bonus` graded the bottleneck skill (return placement) with a
+hard `clip(1 − |proj_y|/2.0, 0, 1)` — but real rebounds run to |y| = 3.7 against
+the 2.0 clip, so it paid **exactly zero in 76%** of completed returns (~0.2% of
+per-cycle reward, zero slope where it mattered). Recommended: smooth kernel
+(`exp(−|proj_y|/limit)`), raise the lateral limit 2.0 → 3.0, raise the bonus
+0.25 → ~0.75 to be commensurate with the +1.0 wall bonus.
+
+### Keep `ent_coef` adaptive; exclude binary/counter obs dims from normalization — *implemented (0.11.0)*
+Fixed `ent_coef = 0.02` disables SAC auto-entropy (the recorded
+`target_entropy = -3.0` is inert for a float coefficient) and was carried over
+from the legacy 5-action env. `learning_starts` was never raised off the SB3
+default of 100 (batch-256 updates began after ~104 transitions, VecNormalize
+fit on <2 episodes), and WallBall normalized binary flags/counters (obs dims
+12, 13, 20, 21, 22) whose base rates drift with the curriculum, even though
+`SelectiveVecNormalize` already supports `normalize_obs_excluded_indices`.
+Shipped in the bootstrap package as `auto_0.02` / `target_entropy=-1.5` /
+`learning_starts=10k` / buffer 500k.
+
+### Make each additional exchange worth strictly more than the last — *open (P1)*
+In the "one-and-done" run, kept shaping was +1.74 = **87.9%** of net return; the
+−1.0 double-bounce penalty was simply priced in against ~+3.0 of one-cycle
+income, so a second exchange was never worth visiting (max training return in
+1,152 episodes: 2.04). Recommended: cut `track_shaping_scale` 0.5 → 0.2 and make
+the wall reward escalate per exchange (`1.0 + 0.5*(bounce_count − 1)`, capped
+~3.0).
+
+### The "one-and-done" degenerate policy — *diagnosed; remediated by the bundle above*
+Signature to recognize: converges by ~225k steps to exactly one legal hit, one
+wall return, then lets the ball double-bounce; rollout CSVs at 250k/500k/750k/1M
+are behaviorally identical (froze at 250k); 50/50 long-horizon episodes show
+exactly one return. It is not one bug — it is the confluence of rules 2, 3, and
+"each exchange must pay more" above.
+
+---
+
+## Training harness & instrumentation
+
+### Instrument for post-hoc attribution — *mostly open (P2)*
+Recurring pain: Monitor CSVs persisted only `r,l,t` (no `info_keywords`), so
+training-time terminations couldn't be attributed after the fact; `*_ep_mean`
+eval aggregates are means of *final-step* values (instantaneous flags read as
+nonsense); `one_bounce_recovery_count` incremented on every first paddle hit
+(reads ~1.0 with zero rallies); rollout/video used a single fixed seed
+(n = 1 behavioral record per checkpoint). Recommended: pass
+`info_keywords=("term_*","rew_*","bounce_count","reset_mode_id")` to Monitor,
+add per-episode *sum* aggregates for `rew_*`, and vary the video/rollout seed.
+
+### Provenance: record the git SHA correctly and bump the version on behavior changes — *partially implemented*
+`artifacts.py` ran `git rev-parse HEAD` without `-C <repo>`, so `git_sha` was
+`null` unless launched from the repo CWD (the SHA-capture fix landed on the
+post-review branch). Worse for reproducibility: one run's `config.json` reported
+`v0.8.0` while running features merged *after* the 0.8.0 bump (commit `1eec0d4`)
+— so its "0.8.0 vs 0.9.0" comparison framing is wrong. **Rule:** bump the
+package version on any behavior-changing merge, and never trust a version string
+that isn't backed by a recorded SHA.
+
+### Cut the redundant eval pass; add a curriculum-matched eval stream — *open (P1/P2)*
+When headline selection is active, `EvalCallback` is reporting-only yet still
+runs 30 deterministic episodes every 25k steps (~15% of run env-steps).
+Recommended: cut it to ~5, raise the *selection* stream toward 50, and add an
+eval stream on the *current training reset distribution* — the gap to the
+canonical from-serve eval is the transfer deficit, visible within 1–2 evals. A
+`deterministic=False` arm would also separate "mean policy degenerate" from
+"competence lives in action noise."
+
+---
+
+## Humanoid tennis environment
+
+Source: [`humanoid_env_review.md`](humanoid_env_review.md) (main @ `0d294f2`,
+v0.7.0, 2026-07-13). Environment correctness, determinism, and physics rated
+strong (trajectories bitwise-reproducible; Stages 0–1 proven solvable by
+scripted oracles); **learning feasibility was blocked as configured**. Statuses
+below reflect the 0.7.0 review; the three core items were spot-checked as still
+present in the current tree.
+
+### Update `geom_rbound`/AABB when resizing a MuJoCo geom at runtime — *open (critical)*
+The stringbed enlargement for "early contact forgiveness" writes `geom_size` and
+calls `mj_setConst`, which does **not** recompute the broadphase bounding sphere
+(`geom_rbound`) or midphase AABB. MuJoCo culls contact pairs on the stale
+bounds, so the enlarged outer band never generates contacts — the forgiveness is
+essentially inert at the racket tip and the recorded `racket_contact_scale`
+metadata is misleading. Videos show the ball passing through the visibly-enlarged
+racket. Fix: recompute `geom_rbound`/AABB after scaling, or compile the scale
+per-stage via `mujoco.MjSpec`; add a regression test firing a ball at the
+enlarged-only zone. *(Still on `mj_setConst` with no bound recompute in the
+current tree — `humanoid_tennis.py:467`.)*
+
+### Sparse reward + iid per-step Gaussian exploration at 100 Hz = zero gradient — *open (critical)*
+0 valid hits / 0 nonzero rewards in 264 random episodes; the end-to-end 25k run
+scored 1 success in 177 episodes, all evals `0.000 ± 0.000`. The tell: a
+*constant* random action held for a whole episode succeeds ~15% of the time —
+iid noise averages to a near-still arm, so the failure is exploration structure,
+not task difficulty. Recommended (several together): `use_sde=True` or action
+repeat; enable escrowed `valid_hit_shaping` by default; add distance-to-ball
+shaping; extend `episode_len` past the miss-fault so a miss pays −1, not an
+indistinguishable 0. *(No `use_sde` in recipes; `valid_hit_shaping` still
+defaults `0.0`.)*
+
+### A flat −1 for all Stage 1–2 outcomes gives no aim gradient — *open (major)*
+Under `VALID_TARGET_RETURN`, a whiff, a hit landing out, and a net fault all pay
+exactly −1, and valid hits pay 0 (`valid_hit_shaping` defaults 0.0). The Stage 1
+oracle under Stage 2 randomization got 12/20 *hits* but 0/20 *target returns* —
+hit-vs-aim is the entire Stage 1→2 task and it is unrewarded. (Same shape as
+WallBall's flat-valley problem, Cardinal Rule 2.)
+
+### The zero-action "PD standing hold" only holds welded robots — *open (major)*
+The documented "zero action = two-player standing-reference PD hold" is
+anchored-only. Free-standing (Stage 6), zero actions collapse both G1s from
+pelvis z = 0.78 m to ~0.11 m within ~1.2 s, and no fall fault fires. Free-standing
+training begins every episode with an unrewarded, unterminated balance problem —
+the Stage 2 → 6 gap is larger than the missing Stages 3–5 imply. Fix: fall
+detection + termination and/or an upright-alive reward; treat a standing
+controller as the true Stage 3 prerequisite.
+
+### Clamp Wilson-interval bounds into `[0, rate]` / `[rate, 1]` — *partially addressed*
+`_wilson_interval(0, 50)` returned a lower bound of ~6.9e-18, violating
+`0 <= low <= success_rate` and crashing the promotion gate exactly at the
+0%/100%-on-a-side extremes an early curriculum run produces most. The current
+function clamps to `[0, 1]` (`max(0.0, …), min(1.0, …)`) but not to the
+per-side rate — add gate tests for 0-success and all-success at
+n ∈ {25, 30, 50, 100}.
+
+### Isolate the video callback (and fix its render defaults) — *partially implemented*
+At 0.7.0 the callback had no error isolation, so a missing GL backend lost the
+run's artifacts (Cardinal Rule 7); the current callback has gained try/except
+around normalizer sync and the rollout. Bundle the still-worth-doing render
+fixes: encode at `env.metadata["render_fps"]` (100), not 60 (replays were 0.6×
+slow-mo); pass `camera_name="sideline"` (the default free camera renders the ball
+invisible); and drop the duplicate `rec_env.render()` that doubles the OSMesa
+cost.
+
+### Surface the task metric in `stage_summary`; un-pin `n_envs`; observe world-frame spin — *open (major)*
+- `stage_summary.txt` renders `<key>_final` (the last eval *episode's* terminal
+  value) and humanoid recipes set no `headline_key`, so the configured task
+  metric (`stage_success`) never appears — the first file a human reads shows
+  single-episode noise. Render `success_rate`/`*_ep_mean` and set `headline_key`.
+- Fixed-stage recipes pin `n_envs = 1`; Stage 0 trains 2 live action dims among
+  56 inactive (96.6% dead weight), and the 0.5M/1M/2M budgets are ≈
+  3.6h/7.3h/14.6h on 4-core CPU (undocumented). Un-pin `n_envs` for PPO
+  (callback cadences are already `n_envs`-independent) for ~4–8× wall-clock.
+- Observed ball "spin" is free-joint `qvel[3:6]`, a body-*local* frame rotated by
+  the unobserved orientation quaternion — topspin and sidespin can read
+  identically. Only magnitude is reliable today (bounded because all launches use
+  zero spin). Expose world-frame angular velocity under the existing obs names.
+
+### Don't re-litigate these (verified correct) — *characteristic*
+Shaping escrow has no double-pay path and is net-zero on Stage 0 success;
+selective normalization (indices 0–192 normalized, bounded rally/contact/mask
+tail 193–298 raw) is the right design for cross-stage normalizer transfer; the
+warm-start path correctly transfers policy + obs_rms while resetting reward
+normalization and the optimizer; SIGINT salvage works; replay-from-info is
+bit-exact. The many remaining minor findings (rules-engine edge cases, logging
+hygiene, CSV column gaps) live in the review doc's §2.3.
+
+### Environment gotcha: a broken CUDA `triton` wheel segfaults the suite on CPU boxes — *characteristic*
+A suite segfault at ~90% traced to the container's `triton` wheel (pulled in by
+CUDA torch on a CPU-only box), not repo code; uninstalling `triton` gave a clean
+run (422 passed, 81 s). Don't chase phantom repo bugs on CPU-only environments.
+`MUJOCO_GL=osmesa` works headless (`egl` works but emits cosmetic teardown errors
+without a GPU).
+
+---
+
+## Physics reference values
+
+Measured characteristics of the ball/court model (not bugs — reference points for
+anyone tuning spin or bounce play). Source: `humanoid_env_review.md` §3.
+
+| Quantity | Measured | Real-world reference |
+|---|---|---|
+| Court restitution (6 m/s drop) | 0.763 | hard court 0.73–0.76 |
+| Vertical COR (fast oblique) | 0.795 | decreases with speed |
+| Horizontal speed retained (10 m/s skid) | 83% | hard court ~60–80% |
+| Topspin from a 10 m/s skid | 70.6 rad/s (rolling ≈ 242) | — |
+| Drag deceleration @ 16 m/s | 5.45 m/s² (env Cd 0.55 → 5.27) | — |
+
+Oblique-bounce friction is low, so spin-based play is only weakly supported today;
+raising ball/court friction (including rolling/torsional) is the lever if spin
+tactics matter later.
+
+---
+
+## Run-configuration system
+
+Source: [`run_config_file_spec.md`](run_config_file_spec.md) (v1.1, implemented
+in 0.13.0) and [`design_court_and_config_updates.md`](design_court_and_config_updates.md).
+
+### One editable TOML per experiment, deep-merged, loud on error — *implemented (0.13.0)*
+Motivated directly by Cardinal Rule 1: the `WallBallBootstrap` recipe made the
+notebook's `model_kwargs=MODEL_KWARGS` cell a live footgun — an explicit kwarg
+*replaces* the recipe's whole exploration package (auto-entropy, `learning_starts`,
+buffer) silently. The TOML layer sits between recipe defaults and `quick_test`
+(precedence: `recipe < file < quick_test < explicit kwargs`) and **deep-merges**
+mapping-valued fields so "tweak one hyperparameter" cannot discard a calibrated
+bundle. `performance_gate` replaces wholesale (ordered stage ladders can't merge
+element-wise). The loader fails loudly on every class of mistake (unknown key
+with a `difflib` suggestion, rejected builder-owned field, typo'd env kwarg
+caught by an eager probe env), and `config.json` records the file path, sha256,
+and full content.
+
+### Guard against invisible configuration; TOML has no `None` — *implemented (0.13.0, spec v1.1)*
+v1 required the config path to always be explicit — an implicitly-discovered
+config that silently changes a run is exactly the failure mode this repo keeps
+paying for. v1.1 softens this to *assisted-explicit* for the notebook only
+(`CONFIG_FILE = "auto"` materializes the packaged starter into Drive on first
+use and prints path + sha256 every run); `build_train_config` itself still never
+discovers anything. TOML gotcha worth remembering: there is no `None`, so a kwarg
+that needs `None` (e.g. `early_touch_penalty` for the legacy terminal rule) uses
+the sentinel string `"none"`, converted recursively — and `"true"`/`"false"` are
+*rejected* because both are truthy Python strings that would silently enable what
+the file tried to disable.
+
+### `weak_return_penalty` in training, strict rule in eval — *implemented (0.13.0)*
+So training gets practice reps out of near-misses (12–16% of best-model episodes)
+while evaluation keeps the exact task every prior run was measured on
+(`bounce_count_ep_mean` stays comparable with the 165358/023737 runs). Paired
+with `gamma = 0.995` (credit horizon ~200 steps > one ~130-step exchange,
+targeting the now-dominant 54% double-bounce failure), and best-model tie-break
+moved from the saturated `ge_2_rate` to the `ge_5_rate` the long run actually
+improved (8% → 22%). This is why *learning curves* across 0.12 → 0.13 baseline
+runs are not comparable but *eval metrics* still are.
+
+### Court markings are render-only MuJoCo sites — *implemented (0.11.1 / 0.13.0)*
+The `court_style` kwarg (`diagnostic` / `tennis` / `none`) and all lane/serve
+markers are MuJoCo *sites* — they cannot collide, so they have provably zero
+physics/observation/reward impact and are safe to reposition every reset. The
+`tennis` style fits a to-size ITF half-court onto the existing 16 m × 12 m floor
+with no scaling (wall face = net at x = 3.9, baseline at x = −7.985); the service
+line lands at x = −2.50, *inside* the paddle lane — a happy accident worth
+keeping. Metrics-producing paths always keep the default style; only the recorded
+video differs.

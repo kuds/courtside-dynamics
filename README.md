@@ -307,6 +307,9 @@ also smoke-tested when a display or virtual framebuffer is available.
 ```text
 courtside-dynamics/
 ├── pyproject.toml
+├── CHANGELOG.md                 # Per-release changes and migration notes
+├── docs/                        # Specs, design docs, reviews, and the
+│                                #   decisions/lessons journal (see docs/README.md)
 ├── src/courtside_dynamics/
 │   ├── assets/                  # MJCF, court, racket, and robot assets
 │   ├── envs/                    # Gymnasium tasks and curriculum contracts
@@ -318,6 +321,11 @@ courtside-dynamics/
 ├── notebooks/
 └── tests/
 ```
+
+For the engineering rationale behind the current design — the bugs, dead ends,
+and calibration decisions worth remembering — see
+[`docs/DECISIONS.md`](docs/DECISIONS.md); [`docs/README.md`](docs/README.md)
+indexes all supplementary documentation.
 
 ## Attribution and related work
 
