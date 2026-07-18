@@ -24,3 +24,6 @@ wandb/
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
+
+# Local run-config copies materialized by resolve_run_config_file
+/configs/

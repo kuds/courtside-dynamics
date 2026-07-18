@@ -155,7 +155,12 @@ def test_sb3_notebook_runs_long_horizon_eval_after_training() -> None:
     assert "issubclass(RECIPES[ENV].env_cls, WallBallEnv)" in source
     assert "if is_wall_ball_recipe and RUN_LONG_HORIZON_EVAL:" in source
     assert 'if ENV == "WallBall" and RUN_LONG_HORIZON_EVAL:' not in source
-    assert 'env_overrides={"episode_len": long_episode_len}' in source
+    # The audit env layers the run config's [env]/[eval_env] tables so
+    # an edited Drive TOML does not make the recorded-vs-audited
+    # constructor-profile check raise on the default workflow.
+    assert "base_env_overrides=(file_cfg.env if file_cfg else None)" in source
+    assert "**(file_cfg.eval_env if file_cfg else {})," in source
+    assert '"episode_len": long_episode_len,' in source
     assert "make_eval_env_fn(" in source
     assert '"return_survival_curve": long_eval["return_survival_curve"]' in source
     assert "cfg.eval_env_fn or cfg.env_fn" in source

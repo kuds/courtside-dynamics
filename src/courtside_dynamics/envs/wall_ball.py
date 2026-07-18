@@ -360,6 +360,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 None if paddle_start_x is None else float(paddle_start_x)
             ),
             paddle_x_fence=resolved_fence,
+            court_style=court_style,
             **kwargs,
         )
 
@@ -656,6 +657,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 self._COURT_MARKER_SITES
                 + self._COURT_STATIC_SITES
                 + self._COURT_TENNIS_SITES
+                + self._SENSOR_TINT_SITES
             )
         }
         self._refresh_court_markers()
@@ -798,6 +800,10 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         "court_tennis_center_service",
         "court_tennis_center_mark",
     )
+    # Debug tints hidden in tennis presentation footage. Alpha affects
+    # rendering only; the touch sensors attached to these sites keep
+    # working (pinned by the cross-style observation-equality test).
+    _SENSOR_TINT_SITES = ("wall_sensor", "paddle_sensor")
     _COURT_STYLES = ("diagnostic", "tennis", "none")
 
     @property
@@ -809,7 +815,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         return self._court_style
 
     @court_style.setter
-    def court_style(self, value: str) -> None:
+    def court_style(self, value: str | None) -> None:
+        # A TOML run config writes court_style = "none", which the
+        # loader's None-sentinel converts to None before the env sees
+        # it; treat None as the "none" style rather than rejecting it.
+        if value is None:
+            value = "none"
         if value not in self._COURT_STYLES:
             raise ValueError(
                 f"court_style must be one of {self._COURT_STYLES}, "
@@ -839,6 +850,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             _show(name, diagnostic)
         for name in self._COURT_TENNIS_SITES:
             _show(name, tennis)
+        for name in self._SENSOR_TINT_SITES:
+            _show(name, not tennis)
 
         def _place(name: str, x: float, *, visible: bool = True) -> None:
             site_id = int(self.model.site(name).id)

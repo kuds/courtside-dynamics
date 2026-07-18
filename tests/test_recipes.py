@@ -622,3 +622,25 @@ def test_wall_ball_baseline_gamma_keeps_auto_entropy():
     here may pin the entropy coefficient."""
     model_kwargs = RECIPES["WallBallBaseline"].extra_cfg["model_kwargs"]
     assert model_kwargs == {"gamma": 0.995}
+
+
+def test_selection_survival_keys_are_backed_by_thresholds():
+    """A best_metric_keys entry like bounce_count_ep_ge_5_rate only
+    exists because 5 is in info_eval_survival_thresholds; if the two
+    ever decouple, InfoDictEvalCallback scores the missing key as -inf
+    and the tiebreaker silently dies. Enforce the coupling for every
+    recipe."""
+    import re
+
+    for name, recipe in RECIPES.items():
+        keys = recipe.extra_cfg.get("best_metric_keys", ())
+        thresholds = recipe.extra_cfg.get("info_eval_survival_thresholds", {})
+        for key in keys:
+            match = re.fullmatch(r"(.+)_ep_ge_(\d+)_rate", key)
+            if match is None:
+                continue
+            base, bar = match.group(1), int(match.group(2))
+            assert bar in tuple(thresholds.get(base, ())), (
+                f"{name}: selection key {key!r} needs {bar} in "
+                f"info_eval_survival_thresholds[{base!r}]"
+            )

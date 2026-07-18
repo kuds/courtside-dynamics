@@ -50,7 +50,7 @@
         <site name="court_line_serve" type="box" pos="1.0 0 0.006" size="0.02 5 0.002" rgba="1 0.4 0.45 0.6" />
         <!-- Tennis-court presentation mode (court_style="tennis"):
              a to-size ITF half-court with the wall face (x=3.9) playing
-             the net. Baseline 11.885 m out (x=-7.985), service line
+             the net. Baseline 11.885 m to its outer edge (x=-7.985), service line
              6.40 m out (x=-2.50, inside the paddle lane), singles
              sidelines +/-4.115, doubles +/-5.485; 5 cm lines (10 cm
              baseline). The service line spans the singles width; the
@@ -61,14 +61,14 @@
              the default diagnostic style these stay hidden. -->
         <site name="court_tennis_apron" type="box" pos="-2.05 0 0.001" size="5.95 6 0.0005" rgba="0.24 0.42 0.27 1" />
         <site name="court_tennis_surface" type="box" pos="-2.0425 0 0.002" size="5.9425 5.485 0.0005" rgba="0.13 0.31 0.55 1" />
-        <site name="court_tennis_baseline" type="box" pos="-7.985 0 0.006" size="0.05 5.485 0.001" rgba="1 1 1 1" />
+        <site name="court_tennis_baseline" type="box" pos="-7.935 0 0.006" size="0.05 5.485 0.001" rgba="1 1 1 1" />
         <site name="court_tennis_service_line" type="box" pos="-2.5 0 0.006" size="0.025 4.115 0.001" rgba="1 1 1 1" />
         <site name="court_tennis_singles_left" type="box" pos="-2.0425 -4.115 0.006" size="5.9425 0.025 0.001" rgba="1 1 1 1" />
         <site name="court_tennis_singles_right" type="box" pos="-2.0425 4.115 0.006" size="5.9425 0.025 0.001" rgba="1 1 1 1" />
         <site name="court_tennis_doubles_left" type="box" pos="-2.0425 -5.485 0.006" size="5.9425 0.025 0.001" rgba="1 1 1 1" />
         <site name="court_tennis_doubles_right" type="box" pos="-2.0425 5.485 0.006" size="5.9425 0.025 0.001" rgba="1 1 1 1" />
         <site name="court_tennis_center_service" type="box" pos="0.7 0 0.006" size="3.2 0.025 0.001" rgba="1 1 1 1" />
-        <site name="court_tennis_center_mark" type="box" pos="-7.935 0 0.01" size="0.05 0.025 0.001" rgba="1 1 1 1" />
+        <site name="court_tennis_center_mark" type="box" pos="-7.835 0 0.01" size="0.05 0.025 0.001" rgba="1 1 1 1" />
 
         <body name="wall" pos="4 0 1.5">
             <site name="wall_sensor" pos="-0.06 0 0" size="0.05 5 1.5" type="box" rgba="1 0 0 0.15" />

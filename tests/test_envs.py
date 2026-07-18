@@ -3278,20 +3278,60 @@ class TestWallBallCourtStyle:
         ):
             env = WallBallEnv(court_style=style)
             try:
-                assert (self._alpha(env, "court_line_wall_base") > 0) == (
-                    diag_visible
-                )
-                assert (self._alpha(env, "court_lane_strip") > 0) == (
-                    diag_visible
-                )
-                assert (self._alpha(env, "court_tennis_surface") > 0) == (
-                    tennis_visible
-                )
-                assert (self._alpha(env, "court_tennis_baseline") > 0) == (
-                    tennis_visible
-                )
+                for name in (
+                    WallBallEnv._COURT_STATIC_SITES
+                    + WallBallEnv._COURT_MARKER_SITES
+                ):
+                    if name.startswith("court_line_fence"):
+                        continue  # fence lines also need a fence set
+                    assert (self._alpha(env, name) > 0) == diag_visible, (
+                        f"{name} in {style}"
+                    )
+                for name in WallBallEnv._COURT_TENNIS_SITES:
+                    assert (self._alpha(env, name) > 0) == tennis_visible, (
+                        f"{name} in {style}"
+                    )
+                # Sensor-debug tints are hidden only in presentation
+                # (tennis) footage.
+                for name in WallBallEnv._SENSOR_TINT_SITES:
+                    assert (self._alpha(env, name) > 0) == (
+                        style != "tennis"
+                    ), f"{name} in {style}"
             finally:
                 env.close()
+
+    def test_fence_lines_stay_hidden_in_tennis_even_with_a_fence(self):
+        env = WallBallEnv(
+            court_style="tennis", paddle_x_fence=(-3.0, -2.0)
+        )
+        try:
+            assert self._alpha(env, "court_line_fence_min") == 0.0
+            env.court_style = "diagnostic"
+            env.reset(seed=0)
+            assert self._alpha(env, "court_line_fence_min") > 0
+        finally:
+            env.close()
+
+    def test_none_alias_and_ezpickle_round_trip(self):
+        import pickle
+
+        # The TOML sentinel hands the env None for court_style = "none".
+        env = WallBallEnv(court_style=None)
+        try:
+            assert env.court_style == "none"
+        finally:
+            env.close()
+        env = WallBallEnv(court_style="tennis")
+        try:
+            clone = pickle.loads(pickle.dumps(env))
+            try:
+                # EzPickle must capture the style: a SubprocVecEnv or
+                # deepcopy clone may not silently revert to diagnostic.
+                assert clone.court_style == "tennis"
+            finally:
+                clone.close()
+        finally:
+            env.close()
 
     def test_invalid_style_rejected(self):
         with pytest.raises(ValueError, match="court_style"):
@@ -3319,8 +3359,17 @@ class TestWallBallCourtStyle:
         try:
             wall_x = 3.9  # wall face plane == the net
             pos, size = self._pos_size(env, "court_tennis_baseline")
-            assert wall_x - pos[0] == pytest.approx(11.885)
+            # ITF measures the 11.885 m half-length to the OUTER edge of
+            # the baseline, which must not overhang the floor (x=-8).
+            assert wall_x - (pos[0] - size[0]) == pytest.approx(11.885)
+            assert pos[0] - size[0] >= -8.0
             assert size[1] == pytest.approx(5.485)  # doubles half-width
+            mark_pos, mark_size = self._pos_size(env, "court_tennis_center_mark")
+            # The 10 cm center-mark stub extends into the court from the
+            # baseline's inner edge.
+            assert mark_pos[0] - mark_size[0] == pytest.approx(
+                pos[0] + size[0]
+            )
             pos, size = self._pos_size(env, "court_tennis_service_line")
             assert wall_x - pos[0] == pytest.approx(6.40)
             assert size[1] == pytest.approx(4.115)  # singles half-width

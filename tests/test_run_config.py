@@ -635,24 +635,42 @@ class TestStarterConfigs:
                 getattr(plain_cfg, field.name)
             ), f"{toml_path.name}: TrainConfig.{field.name} drifted"
 
-        env_keys = load_run_config(toml_path).env
-        if not env_keys:
-            return
+        parsed = load_run_config(toml_path)
 
         def norm(value):
             if isinstance(value, (list, tuple)):
                 return tuple(value)
             return value
 
-        env_file, env_plain = file_cfg.env_fn(), plain_cfg.env_fn()
-        try:
-            for key in env_keys:
-                assert norm(getattr(env_file, key)) == norm(
-                    getattr(env_plain, key)
-                ), f"{toml_path.name}: env.{key} drifted"
-        finally:
-            env_file.close()
-            env_plain.close()
+        if parsed.env:
+            env_file, env_plain = file_cfg.env_fn(), plain_cfg.env_fn()
+            try:
+                for key in parsed.env:
+                    assert norm(getattr(env_file, key)) == norm(
+                        getattr(env_plain, key)
+                    ), f"{toml_path.name}: env.{key} drifted"
+            finally:
+                env_file.close()
+                env_plain.close()
+
+        # The [eval_env] table guards scoring strictness (e.g. the
+        # baseline's weak_return_penalty = "none"); compare the built
+        # eval envs over every key either layer touches so a drifted
+        # starter cannot silently change what evaluation measures.
+        eval_keys = set(parsed.env) | set(parsed.eval_env) | set(
+            RECIPES[recipe_name].eval_env_overrides
+        )
+        if eval_keys and plain_cfg.eval_env_fn is not None:
+            eval_file = file_cfg.eval_env_fn()
+            eval_plain = plain_cfg.eval_env_fn()
+            try:
+                for key in sorted(eval_keys):
+                    assert norm(getattr(eval_file, key)) == norm(
+                        getattr(eval_plain, key)
+                    ), f"{toml_path.name}: eval_env.{key} drifted"
+            finally:
+                eval_file.close()
+                eval_plain.close()
 
 
 class TestStarterHelpers:
@@ -712,3 +730,18 @@ class TestStarterHelpers:
         (tmp_path / "wall_ball_bootstrap.toml").mkdir()
         with pytest.raises(IsADirectoryError, match="is a directory"):
             copy_starter_config("WallBallBootstrap", tmp_path)
+
+
+    def test_court_style_none_sentinel_builds(self, tmp_path):
+        # [env] court_style = "none" becomes None via the sentinel; the
+        # env accepts it as the "none" style (bare floor).
+        path = tmp_path / "style.toml"
+        path.write_text('[env]\ncourt_style = "none"\n', encoding="utf-8")
+        cfg = build_train_config(
+            "WallBallBaseline", log_dir=str(tmp_path), config_file=path
+        )
+        env = cfg.env_fn()
+        try:
+            assert env.court_style == "none"
+        finally:
+            env.close()
