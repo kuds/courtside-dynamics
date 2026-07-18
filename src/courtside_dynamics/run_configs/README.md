@@ -29,8 +29,9 @@ Conventions for these starters:
   drift-free against the recipes.
 - **One file per experiment.** For a new experiment, copy the starter
   (`copy_starter_config` puts it e.g. in your Drive `configs/` for
-  Colab — it refuses to clobber an edited copy), rename it, and edit
-  the copy — don't accumulate variants in one file.
+  Colab — rerun-safe while unedited, refusing to clobber an edited
+  copy), rename it, and edit the copy — don't accumulate variants in
+  one file.
 - `[train.model_kwargs]` deep-merges onto the recipe's bundle, so
   tweaking one key never discards the rest. `performance_gate`
   replaces wholesale. `[env]` reaches both the training and eval envs.

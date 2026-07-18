@@ -201,6 +201,13 @@ def test_sb3_notebook_uses_run_config_files_not_pinned_model_kwargs() -> None:
     assert 'if MODEL_KWARGS is not None:' in source
     assert 'if N_ENVS is not None:' in source
     assert 'if EARLY_STOP_PATIENCE is not None:' in source
+    # Recipes carry the calibrated patience; the notebook defers.
+    assert "EARLY_STOP_PATIENCE = None" in source
+    assert "EARLY_STOP_PATIENCE = 20" not in source
+    # Overriding a recipe's default algorithm re-applies the per-algo
+    # worker-count suggestion (a recipe's n_envs is calibrated for its
+    # default algo only).
+    assert 'ALGO.upper() != RECIPES[ENV].default_algo.upper()' in source
     assert "model_kwargs=MODEL_KWARGS" not in source
     # Discovery cell: recipes and packaged starters are listable, and
     # starters are copied (never edited in site-packages).

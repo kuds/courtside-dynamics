@@ -203,6 +203,7 @@ def _tennis_curriculum_extra_cfg(*, video_length: int) -> dict[str, Any]:
     """Shared fixed-stage recording/evaluation contract for Stages 0–2."""
     return {
         "n_envs": 1,
+        "early_stop_patience": 20,
         "normalize_obs_excluded_indices": (
             _HUMANOID_TENNIS_NORMALIZATION_EXCLUSIONS
         ),
@@ -247,6 +248,7 @@ RECIPES: dict[str, Recipe] = {
             # n_envs table): off-policy, so 8 rollout workers keep
             # the replay buffer fed without starving the ~8 vCPUs.
             "n_envs": 8,
+            "early_stop_patience": 20,
         },
         description="Keep a ball on a 6-DOF tray.",
     ),
@@ -257,6 +259,7 @@ RECIPES: dict[str, Recipe] = {
         name_prefix="ball_bounce",
         extra_cfg={
             "n_envs": 8,
+            "early_stop_patience": 20,
             "csv_header": _BALL_BOUNCE_CSV_HEADER,
             "info_row_fn": _ball_bounce_info_row,
             # A single passive contact is not sustained juggling. The
@@ -300,6 +303,7 @@ RECIPES: dict[str, Recipe] = {
         name_prefix="wall_ball",
         extra_cfg={
             "n_envs": 8,
+            "early_stop_patience": 20,
             # An eval episode "succeeds" once it completes a full rally
             # cycle (a gated wall hit). Surfaces eval_info/success_rate.
             "success_key": "bounce_count",
@@ -348,6 +352,7 @@ RECIPES: dict[str, Recipe] = {
         name_prefix="wall_ball_volley",
         extra_cfg={
             "n_envs": 8,
+            "early_stop_patience": 20,
             "success_key": "bounce_count",
             "success_threshold": 1.0,
             "headline_key": "bounce_count",
@@ -428,6 +433,7 @@ RECIPES: dict[str, Recipe] = {
         name_prefix="wall_ball_baseline",
         extra_cfg={
             "n_envs": 8,
+            "early_stop_patience": 20,
             "success_key": "bounce_count",
             # One return was solved by every held-out seed in the first
             # baseline run; success now means surviving the actual skill
@@ -539,6 +545,7 @@ RECIPES: dict[str, Recipe] = {
         name_prefix="wall_ball_bootstrap",
         extra_cfg={
             "n_envs": 8,
+            "early_stop_patience": 20,
             "success_key": "bounce_count",
             "success_threshold": 2.0,
             "headline_key": "bounce_count",
@@ -654,6 +661,7 @@ RECIPES: dict[str, Recipe] = {
         name_prefix="humanoid_tennis_coop_smoke",
         extra_cfg={
             "n_envs": 1,
+            "early_stop_patience": 20,
             "normalize_obs_excluded_indices": (
                 _HUMANOID_TENNIS_NORMALIZATION_EXCLUSIONS
             ),

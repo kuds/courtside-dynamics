@@ -65,6 +65,9 @@ _REJECTED_TRAIN_KEYS = {
     "warm_start": "not file-configurable until v2 grows a from-mapping "
     "constructor",
     "run_config_file": "set by the loader itself",
+    "seed": "the notebook/caller owns the seed and always passes it "
+    "explicitly, which would silently beat a file value; set SEED at "
+    "the call site instead",
     "algo": "pass algo= to build_train_config; the recipe's name_prefix "
     "derives from it before the file merges",
     "log_dir": "pass log_dir= to build_train_config; a file must not "
@@ -420,10 +423,12 @@ def copy_starter_config(
     """Copy a recipe's packaged starter TOML into ``dest_dir``.
 
     Returns the destination path (``<dest_dir>/<name_prefix>.toml``),
-    creating the directory if needed. Refuses to clobber an existing
-    file unless ``overwrite=True`` -- the copy is meant to be edited,
-    and silently resetting those edits is exactly the kind of quiet
-    config loss this module exists to prevent.
+    creating the directory if needed. Rerun-safe: an existing copy that
+    is still byte-identical to the packaged starter is simply returned
+    (so a restarted Colab session can re-run every cell), but an
+    *edited* copy is never clobbered unless ``overwrite=True`` --
+    silently resetting those edits is exactly the kind of quiet config
+    loss this module exists to prevent.
     """
     catalog = available_run_configs()
     if env_name not in catalog:
@@ -432,15 +437,28 @@ def copy_starter_config(
             f"{sorted(catalog)}"
         )
     source = catalog[env_name]
-    destination = Path(dest_dir) / source.name
-    if destination.exists() and not overwrite:
-        raise FileExistsError(
-            f"{destination} already exists; edit it in place, point "
-            f"config_file= at it, or pass overwrite=True to reset it "
-            f"to the packaged starter"
+    root = Path(dest_dir)
+    if root.exists() and not root.is_dir():
+        raise NotADirectoryError(
+            f"dest_dir {root} exists but is not a directory"
         )
+    destination = root / source.name
+    if destination.is_dir():
+        raise IsADirectoryError(
+            f"{destination} is a directory; expected a TOML file path"
+        )
+    payload = source.read_bytes()
+    if destination.exists():
+        if destination.read_bytes() == payload:
+            return destination
+        if not overwrite:
+            raise FileExistsError(
+                f"{destination} already exists with local edits; edit "
+                f"it in place, point config_file= at it, or pass "
+                f"overwrite=True to reset it to the packaged starter"
+            )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(source.read_bytes())
+    destination.write_bytes(payload)
     return destination
 
 

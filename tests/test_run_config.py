@@ -62,7 +62,7 @@ class TestLoader:
             load_run_config(path)
 
     def test_code_only_train_keys_are_rejected(self, tmp_path):
-        for key in ("env_fn", "extra_callbacks", "warm_start"):
+        for key in ("env_fn", "extra_callbacks", "warm_start", "seed"):
             path = _write(tmp_path, f"[train]\n{key} = 1\n", f"{key}.toml")
             with pytest.raises(ValueError, match=key):
                 load_run_config(path)
@@ -591,9 +591,9 @@ def _starter_params():
 
 
 class TestStarterConfigs:
-    """The checked-in configs/ starters stay loadable and drift-free.
+    """The packaged starters stay loadable and drift-free.
 
-    configs/README.md promises that running with a starter file is
+    courtside_dynamics/run_configs/README.md promises that running with a starter file is
     equivalent to running without it -- the file documents the tuning
     surface, it does not fork the calibration. When a recipe changes,
     the matching starter must be updated in the same commit.
@@ -666,6 +666,13 @@ class TestStarterHelpers:
         )
         assert cfg.run_config_file is not None
 
+        # Re-running the copy cell after a runtime restart is a no-op
+        # while the copy is unedited (byte-identical short-circuit).
+        assert (
+            copy_starter_config("WallBallBootstrap", tmp_path / "cfgs")
+            == dest
+        )
+
         # User edits must never be silently reset...
         dest.write_text("[train]\nn_envs = 2\n", encoding="utf-8")
         with pytest.raises(FileExistsError, match="overwrite=True"):
@@ -682,3 +689,18 @@ class TestStarterHelpers:
 
         with pytest.raises(KeyError, match="WallBallBootstrap"):
             copy_starter_config("NoSuchEnv", tmp_path)
+
+
+    def test_copy_starter_config_rejects_bad_destination_shapes(
+        self, tmp_path
+    ):
+        from courtside_dynamics.run_config import copy_starter_config
+
+        not_a_dir = tmp_path / "iamafile"
+        not_a_dir.write_text("x", encoding="utf-8")
+        with pytest.raises(NotADirectoryError, match="not a directory"):
+            copy_starter_config("WallBallBootstrap", not_a_dir)
+
+        (tmp_path / "wall_ball_bootstrap.toml").mkdir()
+        with pytest.raises(IsADirectoryError, match="is a directory"):
+            copy_starter_config("WallBallBootstrap", tmp_path)

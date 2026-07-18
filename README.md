@@ -176,7 +176,9 @@ ship inside the package and the SAC recipes carry their calibrated
 `n_envs = 8`, so the training notebook no longer pins `MODEL_KWARGS`
 (the 20260717 A/B showed the old pinned entropy bundle prevents
 WallBall from learning at all) and only passes variables you explicitly
-set — a TOML's `[train]` table is never silently overridden. Physics
+set — a TOML's `[train]` table is not silently overridden (`seed` stays
+notebook-owned: the loader rejects it in files, loudly). Recipes now
+also carry the calibrated `early_stop_patience = 20`. Physics
 unchanged; 0.11 artifacts remain comparable.
 
 | Ball Balance | Ball Bounce | Wall Ball |
