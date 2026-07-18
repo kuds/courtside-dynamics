@@ -196,14 +196,20 @@ factories (never mutating the recipe registry), and stashes the
 ### Colab usage
 
 ```python
-CONFIG_FILE = os.path.join(DRIVE_ROOT, "configs", "wall_ball_bootstrap.toml")
+from courtside_dynamics.run_config import copy_starter_config
+
+CONFIG_FILE = copy_starter_config(ENV, os.path.join(DRIVE_ROOT, "configs"))
 ```
 
-The file lives in Drive next to the runs: editable from the Drive UI
-without touching a notebook cell, survives runtime restarts, and each run
-records which file (and which content hash) produced it. The notebook's
-`MODEL_KWARGS` cell is deleted for recipes with calibrated bundles; ad-hoc
-sweeps edit the TOML.
+A starter TOML per recipe ships as package data
+(`courtside_dynamics/run_configs/`), so a pip-installed Colab session can
+bootstrap a config without cloning the repo: `available_run_configs()`
+lists them, `copy_starter_config` copies one next to the runs (and
+refuses to clobber an edited copy unless `overwrite=True`). The copy
+lives in Drive: editable from the Drive UI without touching a notebook
+cell, survives runtime restarts, and each run records which file (and
+which content hash) produced it. The notebook's `MODEL_KWARGS` variable
+defaults to `None` (pass-nothing); ad-hoc sweeps edit the TOML.
 
 ## Testing plan
 

@@ -183,3 +183,28 @@ def test_sb3_notebook_is_clean_and_code_cells_compile() -> None:
         if any(line.lstrip().startswith(("!", "%")) for line in source.splitlines()):
             continue
         compile(source, f"{SB3_NOTEBOOK}:{cell.get('id', 'unknown')}", "exec")
+
+
+def test_sb3_notebook_uses_run_config_files_not_pinned_model_kwargs() -> None:
+    source = "\n".join(
+        _source(cell) for cell in _load_sb3_notebook()["cells"]
+    )
+    # The 20260717 A/B (run 025611 vs 165358) showed the old pinned
+    # bundle prevents WallBall from learning at all; the notebook must
+    # default to recipe/SB3 behavior and route tweaks through TOML files.
+    assert "MODEL_KWARGS = None" in source
+    assert 'MODEL_KWARGS = {"ent_coef": 0.02' not in source
+    assert "CONFIG_FILE = None" in source
+    assert "config_file=CONFIG_FILE" in source
+    # Notebook variables are layered: only explicitly-set values are
+    # passed, so a TOML's [train] table is not silently overridden.
+    assert 'if MODEL_KWARGS is not None:' in source
+    assert 'if N_ENVS is not None:' in source
+    assert 'if EARLY_STOP_PATIENCE is not None:' in source
+    assert "model_kwargs=MODEL_KWARGS" not in source
+    # Discovery cell: recipes and packaged starters are listable, and
+    # starters are copied (never edited in site-packages).
+    assert "available_run_configs" in source
+    assert "copy_starter_config" in source
+    assert "WallBallBootstrap" in source
+    assert "cfg.run_config_file" in source

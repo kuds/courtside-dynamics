@@ -5,7 +5,7 @@
 
 [train]
 total_timesteps = 1_000_000
-n_envs = 4
+n_envs = 8
 eval_freq = 25_000        # steps per env between eval batches
 
 # The recipe uses SB3 SAC defaults; uncomment to tune (deep-merged, so

@@ -9,7 +9,7 @@
 
 [train]
 total_timesteps = 1_500_000
-n_envs = 4
+n_envs = 8
 
 [env]
 # Serve difficulty. The review calibrated 2.0/0.5; widen only after

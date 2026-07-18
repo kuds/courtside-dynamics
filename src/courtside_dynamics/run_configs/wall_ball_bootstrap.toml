@@ -9,7 +9,7 @@
 
 [train]
 total_timesteps = 1_500_000
-n_envs = 4
+n_envs = 8
 
 [train.model_kwargs]
 # Deep-merged onto the recipe's calibrated exploration bundle

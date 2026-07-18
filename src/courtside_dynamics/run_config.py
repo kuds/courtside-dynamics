@@ -392,6 +392,58 @@ def load_run_config(path: str | Path) -> RunFileConfig:
     )
 
 
+def available_run_configs() -> dict[str, Path]:
+    """Packaged starter run-config files, keyed by recipe name.
+
+    One starter ships per registered recipe
+    (``courtside_dynamics/run_configs/<name_prefix>.toml``); each pins
+    the recipe's calibrated values and documents the knobs worth
+    turning. Copy one next to your runs (:func:`copy_starter_config`),
+    edit the copy, and pass it as ``config_file=``.
+    """
+    from importlib.resources import files
+
+    from courtside_dynamics.recipes import RECIPES
+
+    root = files("courtside_dynamics") / "run_configs"
+    catalog: dict[str, Path] = {}
+    for name, recipe in RECIPES.items():
+        candidate = root / f"{recipe.name_prefix}.toml"
+        if candidate.is_file():
+            catalog[name] = Path(str(candidate))
+    return catalog
+
+
+def copy_starter_config(
+    env_name: str, dest_dir: str | Path, *, overwrite: bool = False
+) -> Path:
+    """Copy a recipe's packaged starter TOML into ``dest_dir``.
+
+    Returns the destination path (``<dest_dir>/<name_prefix>.toml``),
+    creating the directory if needed. Refuses to clobber an existing
+    file unless ``overwrite=True`` -- the copy is meant to be edited,
+    and silently resetting those edits is exactly the kind of quiet
+    config loss this module exists to prevent.
+    """
+    catalog = available_run_configs()
+    if env_name not in catalog:
+        raise KeyError(
+            f"No packaged starter config for {env_name!r}; available: "
+            f"{sorted(catalog)}"
+        )
+    source = catalog[env_name]
+    destination = Path(dest_dir) / source.name
+    if destination.exists() and not overwrite:
+        raise FileExistsError(
+            f"{destination} already exists; edit it in place, point "
+            f"config_file= at it, or pass overwrite=True to reset it "
+            f"to the packaged starter"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(source.read_bytes())
+    return destination
+
+
 def merge_train_overrides(
     base: dict[str, Any], file_train: dict[str, Any]
 ) -> dict[str, Any]:

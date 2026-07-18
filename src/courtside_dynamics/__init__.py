@@ -59,7 +59,13 @@ from gymnasium.envs.registration import register
 # base, baseline, metre ticks, and the preset's lane/home/fence/serve
 # lines (repositioned each reset). No physics, observation, or reward
 # change; all 0.11 artifacts remain comparable.
-__version__ = "0.11.1"
+# 0.12.0: starter run-configs ship as package data
+# (courtside_dynamics/run_configs/, discover via
+# run_config.available_run_configs / copy_starter_config) and the SAC
+# recipes carry their Colab-calibrated n_envs=8 so the worker count
+# layers correctly under TOML files. Physics unchanged; 0.11 artifacts
+# remain comparable.
+__version__ = "0.12.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.

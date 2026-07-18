@@ -136,7 +136,11 @@ table deep-merges onto a recipe's calibrated bundle instead of replacing it,
 every unknown key fails loudly with a suggestion, and each run copies the
 file to `LOG_DIR/run_config.toml` and records its path, sha256, and content
 in `config.json`. See `docs/run_config_file_spec.md` for the format and
-precedence rules.
+precedence rules. A starter TOML per recipe ships inside the package
+(`courtside_dynamics/run_configs/`, see its README): discover them with
+`run_config.available_run_configs()` and copy one for editing with
+`run_config.copy_starter_config(env_name, dest_dir)` — so Colab's
+pip-installed sessions can bootstrap a config without cloning the repo.
 
 Package version 0.11.0 targets the WallBall bootstrap failure (three runs in
 which SAC never touched the ball while a scripted tracker contacts 100% of
@@ -166,6 +170,14 @@ markers are MuJoCo sites — they cannot collide — and the
 preset-dependent ones are repositioned every reset, so curriculum
 changes made between episodes stay visible. No physics, observation, or
 reward change.
+
+Version 0.12.0 makes run configuration Colab-native: the starter TOMLs
+ship inside the package and the SAC recipes carry their calibrated
+`n_envs = 8`, so the training notebook no longer pins `MODEL_KWARGS`
+(the 20260717 A/B showed the old pinned entropy bundle prevents
+WallBall from learning at all) and only passes variables you explicitly
+set — a TOML's `[train]` table is never silently overridden. Physics
+unchanged; 0.11 artifacts remain comparable.
 
 | Ball Balance | Ball Bounce | Wall Ball |
 |:---:|:---:|:---:|
