@@ -594,3 +594,31 @@ def test_wall_ball_baseline_combines_recovery_curriculum_and_reward():
     assert kwargs["post_bounce_reset_fraction"] == 0.5
     assert kwargs["recoverable_bounce_bonus"] == 0.25
     assert kwargs["recoverable_bounce_lateral_limit"] == 2.0
+
+
+def test_wall_ball_baseline_weak_return_retry_stays_out_of_eval():
+    """Training fines weak returns (retry reps); scoring must stay on
+    the strict terminal rule every earlier baseline run was measured on,
+    so bounce_count_ep_mean remains comparable across runs."""
+    recipe = RECIPES["WallBallBaseline"]
+    assert recipe.env_kwargs["weak_return_penalty"] == 0.1
+    assert recipe.eval_env_overrides["weak_return_penalty"] is None
+
+    train_env = make_env_fn("WallBallBaseline")()
+    try:
+        assert train_env.weak_return_penalty == 0.1
+    finally:
+        train_env.close()
+    eval_env = make_eval_env_fn("WallBallBaseline")()
+    try:
+        assert eval_env.weak_return_penalty is None
+    finally:
+        eval_env.close()
+
+
+def test_wall_ball_baseline_gamma_keeps_auto_entropy():
+    """gamma 0.995 rides alone in model_kwargs: the 20260717 A/B showed
+    the old bundle's fixed ent_coef was the harmful part, so nothing
+    here may pin the entropy coefficient."""
+    model_kwargs = RECIPES["WallBallBaseline"].extra_cfg["model_kwargs"]
+    assert model_kwargs == {"gamma": 0.995}

@@ -705,3 +705,49 @@ def test_evaluate_best_wall_ball_rejects_hash_mismatched_pair(tmp_path):
         assert "SHA-256" in str(exc)
     else:
         raise AssertionError("hash-mismatched model/normalizer pair did not fail")
+
+
+class TestResolveRunConfigFile:
+    def test_creates_from_starter_then_reuses_edits(self, tmp_path, capsys):
+        from courtside_dynamics.notebook_utils import resolve_run_config_file
+
+        root = tmp_path / "configs"
+        path = resolve_run_config_file(
+            "WallBallBaseline", local_root=str(root)
+        )
+        assert path == root / "wall_ball_baseline.toml"
+        assert path.exists()
+        assert "created from packaged starter" in capsys.readouterr().out
+
+        # A second resolution returns the same file untouched -- even
+        # after the user edits it (their experiment file wins).
+        path.write_text("[train]\nn_envs = 2\n", encoding="utf-8")
+        again = resolve_run_config_file(
+            "WallBallBaseline", local_root=str(root)
+        )
+        assert again == path
+        assert path.read_text(encoding="utf-8") == "[train]\nn_envs = 2\n"
+        out = capsys.readouterr().out
+        assert "reusing existing copy" in out
+        assert "sha256" in out
+
+    def test_unknown_recipe_returns_none_with_reason(self, tmp_path, capsys):
+        from courtside_dynamics.notebook_utils import resolve_run_config_file
+
+        assert (
+            resolve_run_config_file("NoSuchEnv", local_root=str(tmp_path))
+            is None
+        )
+        assert "no packaged starter" in capsys.readouterr().out
+
+    def test_drive_requested_but_unmounted_falls_back(self, tmp_path, capsys):
+        from courtside_dynamics.notebook_utils import resolve_run_config_file
+
+        # No /content/drive in test environments: must fall back loudly.
+        path = resolve_run_config_file(
+            "WallBallBaseline",
+            use_drive=True,
+            local_root=str(tmp_path / "cfg"),
+        )
+        assert path is not None and path.exists()
+        assert "not mounted" in capsys.readouterr().out

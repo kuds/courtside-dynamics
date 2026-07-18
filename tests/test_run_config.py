@@ -620,11 +620,19 @@ class TestStarterConfigs:
             recipe_name, log_dir=str(tmp_path), config_file=toml_path
         )
         plain_cfg = build_train_config(recipe_name, log_dir=str(tmp_path))
+
+        def norm_cfg(value):
+            # TOML arrays parse as lists where recipes pin tuples;
+            # train() only iterates these, so the shapes are equivalent.
+            if isinstance(value, (list, tuple)):
+                return tuple(value)
+            return value
+
         for field in dataclasses.fields(type(plain_cfg)):
             if field.name in self._SKIP_FIELDS:
                 continue
-            assert getattr(file_cfg, field.name) == getattr(
-                plain_cfg, field.name
+            assert norm_cfg(getattr(file_cfg, field.name)) == norm_cfg(
+                getattr(plain_cfg, field.name)
             ), f"{toml_path.name}: TrainConfig.{field.name} drifted"
 
         env_keys = load_run_config(toml_path).env

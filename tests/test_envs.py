@@ -3258,3 +3258,101 @@ class TestWallBallCourtMarkers:
                 np.testing.assert_array_equal(a, b)
         finally:
             env.close()
+
+
+class TestWallBallCourtStyle:
+    """court_style toggles render-only marking sets; tennis is to-size."""
+
+    def _alpha(self, env, name):
+        return float(env.model.site_rgba[int(env.model.site(name).id)][3])
+
+    def _pos_size(self, env, name):
+        sid = int(env.model.site(name).id)
+        return env.model.site_pos[sid].copy(), env.model.site_size[sid].copy()
+
+    def test_style_visibility_matrix(self):
+        for style, diag_visible, tennis_visible in (
+            ("diagnostic", True, False),
+            ("tennis", False, True),
+            ("none", False, False),
+        ):
+            env = WallBallEnv(court_style=style)
+            try:
+                assert (self._alpha(env, "court_line_wall_base") > 0) == (
+                    diag_visible
+                )
+                assert (self._alpha(env, "court_lane_strip") > 0) == (
+                    diag_visible
+                )
+                assert (self._alpha(env, "court_tennis_surface") > 0) == (
+                    tennis_visible
+                )
+                assert (self._alpha(env, "court_tennis_baseline") > 0) == (
+                    tennis_visible
+                )
+            finally:
+                env.close()
+
+    def test_invalid_style_rejected(self):
+        with pytest.raises(ValueError, match="court_style"):
+            WallBallEnv(court_style="grass")
+
+    def test_runtime_style_switch_applies_at_reset(self):
+        env = WallBallEnv()
+        try:
+            assert self._alpha(env, "court_tennis_surface") == 0.0
+            # The curriculum path: set_wrapper_attr between episodes,
+            # visible after the next reset.
+            env.court_style = "tennis"
+            env.reset(seed=0)
+            assert self._alpha(env, "court_tennis_surface") > 0
+            assert self._alpha(env, "court_line_wall_base") == 0.0
+            env.court_style = "none"
+            env.reset(seed=1)
+            assert self._alpha(env, "court_tennis_surface") == 0.0
+            assert self._alpha(env, "court_line_wall_base") == 0.0
+        finally:
+            env.close()
+
+    def test_tennis_court_is_to_itf_size(self):
+        env = WallBallEnv(court_style="tennis")
+        try:
+            wall_x = 3.9  # wall face plane == the net
+            pos, size = self._pos_size(env, "court_tennis_baseline")
+            assert wall_x - pos[0] == pytest.approx(11.885)
+            assert size[1] == pytest.approx(5.485)  # doubles half-width
+            pos, size = self._pos_size(env, "court_tennis_service_line")
+            assert wall_x - pos[0] == pytest.approx(6.40)
+            assert size[1] == pytest.approx(4.115)  # singles half-width
+            for name, y in (
+                ("court_tennis_singles_right", 4.115),
+                ("court_tennis_doubles_right", 5.485),
+            ):
+                pos, size = self._pos_size(env, name)
+                assert pos[1] == pytest.approx(y)
+                # Sidelines span net to baseline.
+                assert pos[0] + size[0] == pytest.approx(wall_x)
+                assert pos[0] - size[0] == pytest.approx(wall_x - 11.885)
+            pos, size = self._pos_size(env, "court_tennis_center_service")
+            assert pos[0] + size[0] == pytest.approx(wall_x)
+            assert pos[0] - size[0] == pytest.approx(wall_x - 6.40)
+        finally:
+            env.close()
+
+    def test_court_style_is_render_only(self):
+        obs_by_style = {}
+        for style in ("diagnostic", "tennis", "none"):
+            env = WallBallEnv(court_style=style)
+            try:
+                env.reset(seed=11)
+                for _ in range(5):
+                    obs, *_ = env.step(np.zeros(3))
+                obs_by_style[style] = obs.copy()
+            finally:
+                env.close()
+        np.testing.assert_array_equal(
+            obs_by_style["diagnostic"], obs_by_style["tennis"]
+        )
+        np.testing.assert_array_equal(
+            obs_by_style["diagnostic"], obs_by_style["none"]
+        )

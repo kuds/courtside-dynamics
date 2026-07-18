@@ -1,6 +1,6 @@
 # Design: baseline recalibration, auto-resolved run configs, tennis-court replay
 
-Status: proposed (awaiting review). Three changes motivated by runs
+Status: implemented in 0.13.0 (design approved 2026-07-18). Three changes motivated by runs
 `20260717_165358` and `20260718_023737` (two independent samples of the
 same config agreeing on a ~3.2–3.3 eval-bounce ceiling, with the
 long-horizon tail — not the mean — showing the real remaining headroom).

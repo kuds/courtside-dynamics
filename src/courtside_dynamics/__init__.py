@@ -65,7 +65,14 @@ from gymnasium.envs.registration import register
 # recipes carry their Colab-calibrated n_envs=8 so the worker count
 # layers correctly under TOML files. Physics unchanged; 0.11 artifacts
 # remain comparable.
-__version__ = "0.12.0"
+# 0.13.0: WallBallBaseline recalibration from runs 20260717_165358 /
+# 20260718_023737 (weak_return_penalty 0.1 fined retries in training
+# with strict eval, gamma 0.995, ge_5 selection tiebreak); WallBall
+# court_style kwarg ("diagnostic" | "tennis" | "none", render-only
+# to-size ITF half-court with the wall as the net); notebook resolves
+# the recipe's run config automatically (resolve_run_config_file).
+# Eval task unchanged -- eval metrics remain comparable with 0.10+.
+__version__ = "0.13.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.

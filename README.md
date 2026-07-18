@@ -181,6 +181,22 @@ notebook-owned: the loader rejects it in files, loudly). Recipes now
 also carry the calibrated `early_stop_patience = 20`. Physics
 unchanged; 0.11 artifacts remain comparable.
 
+Version 0.13.0 recalibrates `WallBallBaseline` from the first two runs
+that learned the full task (20260717_165358, 20260718_023737): training
+fines weak returns (`weak_return_penalty = 0.1` retries) while
+evaluation re-asserts the strict terminal rule so scores stay
+comparable, the critic's horizon doubles (`gamma = 0.995`, auto-entropy
+untouched), and best-model selection tie-breaks on the ≥5-bounce rate
+the 023737 run actually improved instead of the saturated ≥2 rate.
+WallBall also gains a render-only `court_style` kwarg — `"tennis"`
+draws a to-size ITF half-court (baseline 11.885 m from the wall-as-net,
+service line at 6.40 m, singles/doubles sidelines) for replay footage,
+which the notebook now records by default — and the notebook resolves
+the recipe's run config automatically (`CONFIG_FILE = "auto"` creates
+your editable Drive copy from the packaged starter on first use).
+Training-side reward semantics changed, so 0.12 baseline *learning
+curves* are not comparable; eval metrics remain comparable with 0.10+.
+
 | Ball Balance | Ball Bounce | Wall Ball |
 |:---:|:---:|:---:|
 | ![A trained agent balancing a ball on a tray](Images/sac_ball_balance.gif) | ![A trained agent bouncing a ball on a paddle](Images/sac_ball_bounce.gif) | ![A trained agent rallying a ball against a wall](Images/sac_wall_ball.gif) |
