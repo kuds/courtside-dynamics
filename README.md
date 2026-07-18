@@ -136,7 +136,11 @@ table deep-merges onto a recipe's calibrated bundle instead of replacing it,
 every unknown key fails loudly with a suggestion, and each run copies the
 file to `LOG_DIR/run_config.toml` and records its path, sha256, and content
 in `config.json`. See `docs/run_config_file_spec.md` for the format and
-precedence rules.
+precedence rules. A starter TOML per recipe ships inside the package
+(`courtside_dynamics/run_configs/`, see its README): discover them with
+`run_config.available_run_configs()` and copy one for editing with
+`run_config.copy_starter_config(env_name, dest_dir)` — so Colab's
+pip-installed sessions can bootstrap a config without cloning the repo.
 
 Package version 0.11.0 targets the WallBall bootstrap failure (three runs in
 which SAC never touched the ball while a scripted tracker contacts 100% of
@@ -155,6 +159,27 @@ and a schedulable `paddle_joint_damping` for future curricula, and run
 provenance now records the installed git commit on Colab (pip VCS installs)
 and honors a `COURTSIDE_DYNAMICS_GIT_SHA` override. Existing recipes are
 unchanged and 0.10 artifacts remain comparable.
+
+Version 0.11.1 adds render-only court markings to WallBall so videos show
+where on the court the action is: bold white lines at the wall base
+(x = 3.9) and the deepest paddle reach ("baseline", x = −4.7), faint 1 m
+coordinate ticks, a cyan strip marking the preset's paddle lane with a
+yellow paddle-home line, orange fence lines (visible only when a
+`paddle_x_fence` is set), and a warm line at the serve drop x. The
+markers are MuJoCo sites — they cannot collide — and the
+preset-dependent ones are repositioned every reset, so curriculum
+changes made between episodes stay visible. No physics, observation, or
+reward change.
+
+Version 0.12.0 makes run configuration Colab-native: the starter TOMLs
+ship inside the package and the SAC recipes carry their calibrated
+`n_envs = 8`, so the training notebook no longer pins `MODEL_KWARGS`
+(the 20260717 A/B showed the old pinned entropy bundle prevents
+WallBall from learning at all) and only passes variables you explicitly
+set — a TOML's `[train]` table is not silently overridden (`seed` stays
+notebook-owned: the loader rejects it in files, loudly). Recipes now
+also carry the calibrated `early_stop_patience = 20`. Physics
+unchanged; 0.11 artifacts remain comparable.
 
 | Ball Balance | Ball Bounce | Wall Ball |
 |:---:|:---:|:---:|

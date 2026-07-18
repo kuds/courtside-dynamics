@@ -7,7 +7,8 @@
 
 [train]
 total_timesteps = 1_500_000
-n_envs = 4
+n_envs = 8
+early_stop_patience = 20  # evals without a new best before stopping
 
 [env]
 min_force = 20.0

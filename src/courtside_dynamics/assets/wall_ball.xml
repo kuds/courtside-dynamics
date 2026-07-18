@@ -15,6 +15,40 @@
         <camera name="side" pos="0 -8 3" xyaxes="1 0 0 0 1 2" />
         <geom name="floor" pos="0 0 0" size="8 6 0.1" type="plane" material="grid" />
 
+        <!-- Court markings. Sites only: MuJoCo sites never generate
+             contacts, so these are render-only and cannot perturb
+             physics, observations, or rewards. Static geography lives
+             here; the preset-dependent markers (paddle lane, home,
+             fence, serve drop line) are placeholders whose x position,
+             width, and visibility WallBallEnv rewrites from its
+             resolved kwargs at reset (_refresh_court_markers). Line
+             heights are staggered slightly above the floor to avoid
+             z-fighting. -->
+        <!-- Fixed geography: bold white lines at the wall base
+             (x=3.9) and the deepest paddle reach ("baseline",
+             x=-4.7); faint 1 m coordinate ticks between them. -->
+        <site name="court_line_wall_base" type="box" pos="3.9 0 0.006" size="0.03 5 0.002" rgba="1 1 1 0.8" />
+        <site name="court_line_baseline" type="box" pos="-4.7 0 0.006" size="0.03 5 0.002" rgba="1 1 1 0.8" />
+        <site name="court_tick_xm4" type="box" pos="-4 0 0.004" size="0.01 5 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xm3" type="box" pos="-3 0 0.004" size="0.01 5 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xm2" type="box" pos="-2 0 0.004" size="0.01 5 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xm1" type="box" pos="-1 0 0.004" size="0.01 5 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_x0" type="box" pos="0 0 0.004" size="0.01 5 0.002" rgba="1 1 1 0.35" />
+        <site name="court_tick_xp1" type="box" pos="1 0 0.004" size="0.01 5 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xp2" type="box" pos="2 0 0.004" size="0.01 5 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xp3" type="box" pos="3 0 0.004" size="0.01 5 0.002" rgba="1 1 1 0.22" />
+        <!-- Preset-dependent markers (positions rewritten by the env):
+             cyan strip + edge lines = paddle action lane, yellow line =
+             paddle home, orange lines = paddle fence (hidden unless a
+             fence is set), warm line = serve drop x. -->
+        <site name="court_lane_strip" type="box" pos="-1.7 0 0.002" size="2.5 5 0.001" rgba="0.2 0.8 0.9 0.15" />
+        <site name="court_line_lane_min" type="box" pos="-4.7 0 0.008" size="0.02 5 0.002" rgba="0.25 0.9 1 0.7" />
+        <site name="court_line_lane_max" type="box" pos="0.3 0 0.008" size="0.02 5 0.002" rgba="0.25 0.9 1 0.7" />
+        <site name="court_line_home" type="box" pos="-1.7 0 0.01" size="0.02 5 0.002" rgba="0.95 0.85 0.2 0.85" />
+        <site name="court_line_fence_min" type="box" pos="-4.7 0 0.012" size="0.02 5 0.002" rgba="1 0.55 0.15 0.85" />
+        <site name="court_line_fence_max" type="box" pos="0.3 0 0.012" size="0.02 5 0.002" rgba="1 0.55 0.15 0.85" />
+        <site name="court_line_serve" type="box" pos="1.0 0 0.006" size="0.02 5 0.002" rgba="1 0.4 0.45 0.6" />
+
         <body name="wall" pos="4 0 1.5">
             <site name="wall_sensor" pos="-0.06 0 0" size="0.05 5 1.5" type="box" rgba="1 0 0 0.15" />
             <geom name="wall_geom" size="0.1 5 1.5" type="box" rgba="0.7 0.7 0.9 1" />

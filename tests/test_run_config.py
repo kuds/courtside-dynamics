@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from pathlib import Path
 
 import pytest
 
@@ -63,7 +62,7 @@ class TestLoader:
             load_run_config(path)
 
     def test_code_only_train_keys_are_rejected(self, tmp_path):
-        for key in ("env_fn", "extra_callbacks", "warm_start"):
+        for key in ("env_fn", "extra_callbacks", "warm_start", "seed"):
             path = _write(tmp_path, f"[train]\n{key} = 1\n", f"{key}.toml")
             with pytest.raises(ValueError, match=key):
                 load_run_config(path)
@@ -583,19 +582,18 @@ class TestArtifacts:
 
 
 def _starter_params():
-    configs_dir = Path(__file__).resolve().parent.parent / "configs"
-    prefix_to_recipe = {r.name_prefix: n for n, r in RECIPES.items()}
+    from courtside_dynamics.run_config import available_run_configs
+
     return [
-        pytest.param(path, prefix_to_recipe[path.stem], id=path.stem)
-        for path in sorted(configs_dir.glob("*.toml"))
-        if path.stem in prefix_to_recipe
+        pytest.param(path, name, id=path.stem)
+        for name, path in sorted(available_run_configs().items())
     ]
 
 
 class TestStarterConfigs:
-    """The checked-in configs/ starters stay loadable and drift-free.
+    """The packaged starters stay loadable and drift-free.
 
-    configs/README.md promises that running with a starter file is
+    courtside_dynamics/run_configs/README.md promises that running with a starter file is
     equivalent to running without it -- the file documents the tuning
     surface, it does not fork the calibration. When a recipe changes,
     the matching starter must be updated in the same commit.
@@ -604,14 +602,13 @@ class TestStarterConfigs:
     _SKIP_FIELDS = {"env_fn", "eval_env_fn", "run_config_file"}
 
     def test_every_recipe_has_a_starter(self):
-        configs_dir = Path(__file__).resolve().parent.parent / "configs"
-        stems = {path.stem for path in configs_dir.glob("*.toml")}
-        missing = {
-            name
-            for name, recipe in RECIPES.items()
-            if recipe.name_prefix not in stems
-        }
-        assert not missing, f"recipes without a configs/ starter: {missing}"
+        from courtside_dynamics.run_config import available_run_configs
+
+        catalog = available_run_configs()
+        assert set(catalog) == set(RECIPES)
+        # And no orphan TOMLs ship without a recipe to consume them.
+        package_dir = next(iter(catalog.values())).parent
+        stems = {path.stem for path in package_dir.glob("*.toml")}
         orphans = stems - {r.name_prefix for r in RECIPES.values()}
         assert not orphans, f"starters without a recipe: {orphans}"
 
@@ -648,3 +645,62 @@ class TestStarterConfigs:
         finally:
             env_file.close()
             env_plain.close()
+
+
+class TestStarterHelpers:
+    def test_copy_starter_config_copies_and_refuses_clobber(self, tmp_path):
+        from courtside_dynamics.run_config import (
+            available_run_configs,
+            copy_starter_config,
+        )
+
+        dest = copy_starter_config("WallBallBootstrap", tmp_path / "cfgs")
+        assert dest == tmp_path / "cfgs" / "wall_ball_bootstrap.toml"
+        assert (
+            dest.read_bytes()
+            == available_run_configs()["WallBallBootstrap"].read_bytes()
+        )
+        # The copy is loadable and buildable as-is.
+        cfg = build_train_config(
+            "WallBallBootstrap", log_dir=str(tmp_path), config_file=dest
+        )
+        assert cfg.run_config_file is not None
+
+        # Re-running the copy cell after a runtime restart is a no-op
+        # while the copy is unedited (byte-identical short-circuit).
+        assert (
+            copy_starter_config("WallBallBootstrap", tmp_path / "cfgs")
+            == dest
+        )
+
+        # User edits must never be silently reset...
+        dest.write_text("[train]\nn_envs = 2\n", encoding="utf-8")
+        with pytest.raises(FileExistsError, match="overwrite=True"):
+            copy_starter_config("WallBallBootstrap", tmp_path / "cfgs")
+        assert dest.read_text(encoding="utf-8") == "[train]\nn_envs = 2\n"
+        # ...unless explicitly requested.
+        copy_starter_config(
+            "WallBallBootstrap", tmp_path / "cfgs", overwrite=True
+        )
+        assert b"n_envs = 8" in dest.read_bytes()
+
+    def test_copy_starter_config_unknown_recipe(self, tmp_path):
+        from courtside_dynamics.run_config import copy_starter_config
+
+        with pytest.raises(KeyError, match="WallBallBootstrap"):
+            copy_starter_config("NoSuchEnv", tmp_path)
+
+
+    def test_copy_starter_config_rejects_bad_destination_shapes(
+        self, tmp_path
+    ):
+        from courtside_dynamics.run_config import copy_starter_config
+
+        not_a_dir = tmp_path / "iamafile"
+        not_a_dir.write_text("x", encoding="utf-8")
+        with pytest.raises(NotADirectoryError, match="not a directory"):
+            copy_starter_config("WallBallBootstrap", not_a_dir)
+
+        (tmp_path / "wall_ball_bootstrap.toml").mkdir()
+        with pytest.raises(IsADirectoryError, match="is a directory"):
+            copy_starter_config("WallBallBootstrap", tmp_path)

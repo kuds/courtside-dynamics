@@ -65,6 +65,9 @@ _REJECTED_TRAIN_KEYS = {
     "warm_start": "not file-configurable until v2 grows a from-mapping "
     "constructor",
     "run_config_file": "set by the loader itself",
+    "seed": "the notebook/caller owns the seed and always passes it "
+    "explicitly, which would silently beat a file value; set SEED at "
+    "the call site instead",
     "algo": "pass algo= to build_train_config; the recipe's name_prefix "
     "derives from it before the file merges",
     "log_dir": "pass log_dir= to build_train_config; a file must not "
@@ -390,6 +393,73 @@ def load_run_config(path: str | Path) -> RunFileConfig:
         eval_env=eval_env,
         raw=raw,
     )
+
+
+def available_run_configs() -> dict[str, Path]:
+    """Packaged starter run-config files, keyed by recipe name.
+
+    One starter ships per registered recipe
+    (``courtside_dynamics/run_configs/<name_prefix>.toml``); each pins
+    the recipe's calibrated values and documents the knobs worth
+    turning. Copy one next to your runs (:func:`copy_starter_config`),
+    edit the copy, and pass it as ``config_file=``.
+    """
+    from importlib.resources import files
+
+    from courtside_dynamics.recipes import RECIPES
+
+    root = files("courtside_dynamics") / "run_configs"
+    catalog: dict[str, Path] = {}
+    for name, recipe in RECIPES.items():
+        candidate = root / f"{recipe.name_prefix}.toml"
+        if candidate.is_file():
+            catalog[name] = Path(str(candidate))
+    return catalog
+
+
+def copy_starter_config(
+    env_name: str, dest_dir: str | Path, *, overwrite: bool = False
+) -> Path:
+    """Copy a recipe's packaged starter TOML into ``dest_dir``.
+
+    Returns the destination path (``<dest_dir>/<name_prefix>.toml``),
+    creating the directory if needed. Rerun-safe: an existing copy that
+    is still byte-identical to the packaged starter is simply returned
+    (so a restarted Colab session can re-run every cell), but an
+    *edited* copy is never clobbered unless ``overwrite=True`` --
+    silently resetting those edits is exactly the kind of quiet config
+    loss this module exists to prevent.
+    """
+    catalog = available_run_configs()
+    if env_name not in catalog:
+        raise KeyError(
+            f"No packaged starter config for {env_name!r}; available: "
+            f"{sorted(catalog)}"
+        )
+    source = catalog[env_name]
+    root = Path(dest_dir)
+    if root.exists() and not root.is_dir():
+        raise NotADirectoryError(
+            f"dest_dir {root} exists but is not a directory"
+        )
+    destination = root / source.name
+    if destination.is_dir():
+        raise IsADirectoryError(
+            f"{destination} is a directory; expected a TOML file path"
+        )
+    payload = source.read_bytes()
+    if destination.exists():
+        if destination.read_bytes() == payload:
+            return destination
+        if not overwrite:
+            raise FileExistsError(
+                f"{destination} already exists with local edits; edit "
+                f"it in place, point config_file= at it, or pass "
+                f"overwrite=True to reset it to the packaged starter"
+            )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(payload)
+    return destination
 
 
 def merge_train_overrides(

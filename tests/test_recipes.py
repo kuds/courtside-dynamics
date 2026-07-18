@@ -397,7 +397,12 @@ def test_training_notebook_preserves_curriculum_recipe_defaults():
     assert 'REPO_REF = "main"' in source
     assert "github.com/kuds/courtside-dynamics@{REPO_REF}" in source
     assert 'ALGO = ALGO or RECIPES[ENV].default_algo' in source
-    assert 'recipe_n_envs = RECIPES[ENV].extra_cfg.get("n_envs")' in source
+    # 0.12.0 moved worker-count resolution into the recipes: the
+    # notebook must not hand-resolve n_envs (that explicit kwarg would
+    # silently beat a TOML config file's [train] table).
+    assert "recipe_n_envs" not in source
+    assert "if N_ENVS is not None:" in source
+    assert "config_file=CONFIG_FILE" in source
     assert "cfg.checkpoint_freq =" not in source
     assert "cfg.video_freq =" not in source
     assert "HumanoidTennisStage0Intercept" in source

@@ -74,6 +74,7 @@ where = ["src"]
 version = { attr = "courtside_dynamics.__version__" }
 
 [tool.setuptools.package-data]
+"courtside_dynamics.run_configs" = ["*.toml", "*.md"]
 "courtside_dynamics.assets" = [
     "*.xml",
     "*.md",
