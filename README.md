@@ -84,6 +84,18 @@ policies and statistics stay comparable across versions — see
 [`CHANGELOG.md`](CHANGELOG.md) for the per-version details and migration
 notes.
 
+Version 0.14.0 reverts the 0.13.0 recalibration: run `20260718_213222`
+falsified it (1.33 vs 3.23 eval bounces — the asymmetric weak-return
+retry taught soft, unchainable returns; see `docs/lessons_learned.md`),
+so `WallBallBaseline` returns to the configuration both reference runs
+learned with, keeping only the ≥5-rate selection tiebreak. A new
+`wall_reward_increment` kwarg pays the n-th completed return
+`1 + (n−1)×increment` (ladder-calibrated at 0.5, ships dark — the
+baseline starter documents the two-line enable). Run directories are
+reorganized (`model/`, `metrics/`, `reports/`, `media/`; readers fall
+back to the legacy flat layout so old runs keep working) and the
+unreadable `eval_info.png` grid is split into four themed pages.
+
 | Ball Balance | Ball Bounce | Wall Ball |
 |:---:|:---:|:---:|
 | ![A trained agent balancing a ball on a tray](Images/sac_ball_balance.gif) | ![A trained agent bouncing a ball on a paddle](Images/sac_ball_bounce.gif) | ![A trained agent rallying a ball against a wall](Images/sac_wall_ball.gif) |

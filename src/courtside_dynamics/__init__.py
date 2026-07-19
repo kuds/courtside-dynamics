@@ -72,7 +72,14 @@ from gymnasium.envs.registration import register
 # to-size ITF half-court with the wall as the net); notebook resolves
 # the recipe's run config automatically (resolve_run_config_file).
 # Eval task unchanged -- eval metrics remain comparable with 0.10+.
-__version__ = "0.13.0"
+# 0.14.0: WallBallBaseline recalibration reverted (run 20260718_213222
+# falsified the weak-return retry: asymmetric penalties taught soft,
+# unchainable returns; ge_5 tiebreak kept); new wall_reward_increment
+# env kwarg (n-th return banks 1 + (n-1)*increment; 0.0 default is
+# bit-identical, ships dark, ladder-calibrated at 0.5); run directories
+# restructured (model/ metrics/ reports/ media/; readers fall back to
+# the legacy flat layout) and eval_info.png split into themed pages.
+__version__ = "0.14.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.

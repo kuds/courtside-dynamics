@@ -223,12 +223,17 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         paddle_start_x: float | None = None,
         paddle_x_fence: tuple[float, float] | None = None,
         court_style: str = "diagnostic",
+        wall_reward_increment: float = 0.0,
         **kwargs: Any,
     ) -> None:
         if not isinstance(rally_style, str) or rally_style not in _RALLY_STYLES:
             raise ValueError(
                 f"rally_style must be one of {sorted(_RALLY_STYLES)}, "
                 f"got {rally_style!r}"
+            )
+        if not np.isfinite(wall_reward_increment) or wall_reward_increment < 0:
+            raise ValueError(
+                "wall_reward_increment must be finite and non-negative"
             )
         if not np.isfinite(paddle_home_x):
             raise ValueError("paddle_home_x must be finite")
@@ -360,6 +365,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 None if paddle_start_x is None else float(paddle_start_x)
             ),
             paddle_x_fence=resolved_fence,
+            court_style=court_style,
+            wall_reward_increment=float(wall_reward_increment),
             **kwargs,
         )
 
@@ -445,6 +452,13 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # Floor-marking presentation (render-only; see
         # _refresh_court_markers). Validated via the property setter.
         self.court_style = court_style
+        # Escalating rally payment: the n-th completed return of an
+        # episode banks 1 + (n - 1) * increment, so chaining exchanges
+        # out-earns restarting them. 0.0 reproduces the flat +1
+        # bit-for-bit. Banked outright like the base wall reward (never
+        # pending, never clawed back); counters reset with the episode,
+        # so recovery fragments cannot farm the escalator.
+        self.wall_reward_increment = float(wall_reward_increment)
         # World-space clamp on the x position target, decoupled from the
         # action mapping: the mapping (paddle_x_target_range) stays fixed
         # for a whole run so action semantics never drift, while the fence
@@ -656,6 +670,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 self._COURT_MARKER_SITES
                 + self._COURT_STATIC_SITES
                 + self._COURT_TENNIS_SITES
+                + self._SENSOR_TINT_SITES
             )
         }
         self._refresh_court_markers()
@@ -798,6 +813,10 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         "court_tennis_center_service",
         "court_tennis_center_mark",
     )
+    # Debug tints hidden in tennis presentation footage. Alpha affects
+    # rendering only; the touch sensors attached to these sites keep
+    # working (pinned by the cross-style observation-equality test).
+    _SENSOR_TINT_SITES = ("wall_sensor", "paddle_sensor")
     _COURT_STYLES = ("diagnostic", "tennis", "none")
 
     @property
@@ -809,7 +828,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         return self._court_style
 
     @court_style.setter
-    def court_style(self, value: str) -> None:
+    def court_style(self, value: str | None) -> None:
+        # A TOML run config writes court_style = "none", which the
+        # loader's None-sentinel converts to None before the env sees
+        # it; treat None as the "none" style rather than rejecting it.
+        if value is None:
+            value = "none"
         if value not in self._COURT_STYLES:
             raise ValueError(
                 f"court_style must be one of {self._COURT_STYLES}, "
@@ -839,6 +863,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             _show(name, diagnostic)
         for name in self._COURT_TENNIS_SITES:
             _show(name, tennis)
+        for name in self._SENSOR_TINT_SITES:
+            _show(name, not tennis)
 
         def _place(name: str, x: float, *, visible: bool = True) -> None:
             site_id = int(self.model.site(name).id)
@@ -1274,8 +1300,13 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 if self.rally_style == "one_bounce":
                     self.one_bounce_return_count += 1
                     self._recoverable_bounce_eligible = True
-                reward += 1.0
-                rew_wall += 1.0
+                # bounce_count was just incremented: this is the n-th
+                # completed return, worth 1 + (n-1)*increment.
+                payment = 1.0 + (
+                    (self.bounce_count - 1) * self.wall_reward_increment
+                )
+                reward += payment
+                rew_wall += payment
                 self._pending_shaping = 0.0
                 self._pending_bonus = 0.0
                 event_completed_return = True

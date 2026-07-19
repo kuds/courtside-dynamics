@@ -237,8 +237,13 @@ def test_csv_logger_survives_learn(tmp_path):
         model_kwargs={"learning_starts": 16, "buffer_size": 500},
     )
     train(cfg)
-    assert os.path.exists(os.path.join(str(tmp_path), "tensorboard", "progress.csv")), (
+    # progress.csv lives directly in metrics/ (pandas-readable metrics,
+    # not TB event data), NOT inside the tensorboard folder.
+    assert os.path.exists(os.path.join(str(tmp_path), "metrics", "progress.csv")), (
         "CSV logger was reset by learn(); progress.csv not written"
+    )
+    assert not os.path.exists(
+        os.path.join(str(tmp_path), "metrics", "tensorboard", "progress.csv")
     )
 
 
@@ -450,6 +455,36 @@ def test_train_warm_starts_policy_only_and_records_provenance(tmp_path):
     for filename in ("best_model.zip", "best_vec_normalize.pkl", "config.json"):
         expected = hashlib.sha256((source_dir / filename).read_bytes()).hexdigest()
         assert initialization["source_artifacts"][filename]["sha256"] == expected
+
+
+def test_prepare_warm_start_resolves_new_layout_source(tmp_path):
+    """A 0.14-layout source run (model/best_model.zip) must warm-start
+    exactly like a legacy flat run -- the loader resolves both through
+    ``locate_artifact``."""
+    source_dir, env_fn, _source_state = _make_ppo_warm_start_source(tmp_path)
+    model_subdir = source_dir / "model"
+    model_subdir.mkdir()
+    (source_dir / "best_model.zip").rename(model_subdir / "best_model.zip")
+    (source_dir / "best_vec_normalize.pkl").rename(
+        model_subdir / "best_vec_normalize.pkl"
+    )
+
+    cfg = TrainConfig(
+        env_fn=env_fn,
+        algo="PPO",
+        log_dir=str(tmp_path / "target"),
+        normalize_obs=True,
+        normalize_reward=True,
+        normalize_obs_excluded_indices=(0,),
+        warm_start=WarmStartConfig(source_dir),
+    )
+    artifacts = _prepare_warm_start(cfg)
+    assert artifacts is not None
+    assert artifacts.model_path == (model_subdir / "best_model.zip").resolve()
+    assert artifacts.normalizer_path == (
+        model_subdir / "best_vec_normalize.pkl"
+    ).resolve()
+    assert artifacts.config_path == (source_dir / "config.json").resolve()
 
 
 def test_warm_start_rejects_invalid_source_before_writing_target(tmp_path):

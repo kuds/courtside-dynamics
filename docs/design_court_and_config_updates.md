@@ -1,6 +1,12 @@
 # Design: baseline recalibration, auto-resolved run configs, tennis-court replay
 
-Status: implemented in 0.13.0 (design approved 2026-07-18). Three changes motivated by runs
+Status: implemented in 0.13.0; **item A falsified by run
+`20260718_213222`** and reverted in 0.14.0 (see
+`design_revert_and_run_layout.md` and `lessons_learned.md` lesson 1):
+the weak-return retry's asymmetry (undershoot −0.1 non-terminal vs
+overshoot −1 terminal) taught soft, unchainable returns — 1.33 vs 3.23
+eval bounces, 82% double-bounce / 8% OOB. The `ge_5` selection tiebreak
+survives; items B and C remain in place. Three changes motivated by runs
 `20260717_165358` and `20260718_023737` (two independent samples of the
 same config agreeing on a ~3.2–3.3 eval-bounce ceiling, with the
 long-horizon tail — not the mean — showing the real remaining headroom).

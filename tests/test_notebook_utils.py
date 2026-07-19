@@ -25,7 +25,7 @@ from courtside_dynamics.notebook_utils import (
     evaluate_best_wall_ball,
     print_stage_summary,
 )
-from courtside_dynamics.training.artifacts import EXPECTED_ARTIFACTS
+from courtside_dynamics.training.artifacts import EXPECTED_ARTIFACTS, RUN_LAYOUT
 
 
 def test_print_stage_summary_prints_report(tmp_path, capsys):
@@ -52,6 +52,9 @@ def test_check_run_artifacts_empty_dir_reports_all_missing(tmp_path, capsys):
 
 
 def test_check_run_artifacts_detects_files_and_dirs(tmp_path, capsys):
+    # A legacy flat-layout run: best_model.zip and monitor/ at the run
+    # root. The audit must resolve them through the locate_artifact
+    # fallback while reporting missing entries at their new locations.
     (tmp_path / "config.json").write_text("{}")
     (tmp_path / "best_model.zip").write_bytes(b"x" * 2048)
     monitor = tmp_path / "monitor"
@@ -59,10 +62,10 @@ def test_check_run_artifacts_detects_files_and_dirs(tmp_path, capsys):
     (monitor / "0.monitor.csv").write_text("#header\n")
 
     missing = check_run_artifacts(tmp_path)
-    assert "config.json" not in missing
-    assert "best_model.zip" not in missing
-    assert "monitor" not in missing
-    assert "final_model.zip" in missing
+    assert RUN_LAYOUT["config"] not in missing
+    assert RUN_LAYOUT["best_model"] not in missing
+    assert RUN_LAYOUT["monitor_dir"] not in missing
+    assert RUN_LAYOUT["final_model"] in missing
 
     out = capsys.readouterr().out
     assert "2.0 KB" in out  # file size rendered human-readably
@@ -72,7 +75,8 @@ def test_check_run_artifacts_detects_files_and_dirs(tmp_path, capsys):
 def test_check_run_artifacts_all_present(tmp_path, capsys):
     for _, rel in EXPECTED_ARTIFACTS:
         full = tmp_path / rel
-        if rel in ("monitor", "checkpoints", "videos"):
+        # RUN_LAYOUT entries without a file extension are directories.
+        if not full.suffix:
             full.mkdir(parents=True)
         else:
             full.parent.mkdir(parents=True, exist_ok=True)
@@ -662,8 +666,9 @@ def test_evaluate_best_wall_ball_writes_drive_ready_metrics(tmp_path, monkeypatc
     assert any(instance.reset_seeds == [101, 102] for instance in instances)
     assert all(instance.closed for instance in instances)
 
-    summary_path = tmp_path / "best_model_long_horizon_eval.json"
-    episodes_path = tmp_path / "best_model_long_horizon_episodes.csv"
+    # The registry places the long-horizon outputs under reports/.
+    summary_path = tmp_path / RUN_LAYOUT["best_long_eval"]
+    episodes_path = tmp_path / RUN_LAYOUT["best_long_eval_episodes"]
     assert json.loads(summary_path.read_text()) == payload
     with episodes_path.open(newline="") as handle:
         rows = list(csv.DictReader(handle))
@@ -751,3 +756,123 @@ class TestResolveRunConfigFile:
         )
         assert path is not None and path.exists()
         assert "not mounted" in capsys.readouterr().out
+
+
+def _write_synthetic_eval_info(csv_path, stems, timesteps=(25_000, 50_000, 75_000)):
+    """Long-format eval_info.csv with a ``_mean`` series per stem."""
+    lines = ["timestep,metric,value"]
+    for step_index, timestep in enumerate(timesteps):
+        for stem_index, stem in enumerate(stems):
+            lines.append(f"{timestep},{stem}_mean,{stem_index + 0.1 * step_index}")
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_path.write_text("\n".join(lines) + "\n")
+
+
+def test_plot_eval_info_writes_four_bounded_pages(tmp_path):
+    """The mega-plot is split into four themed pages, each capped at 24
+    panels with numbered continuation pages, and every file stays small
+    enough to casually download (the old single grid weighed 1.6-2.4 MB)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from courtside_dynamics.notebook_utils import plot_eval_info
+
+    stems = [
+        # eval_headline: task counters + reward/length context.
+        "bounce_count",
+        "bounce_count_ep_ge_2_rate",
+        "episode_reward",
+        "episode_length_hist",
+        "paddle_hit_count",
+        "legal_paddle_hit_count",
+        "return_count",
+        # eval_terminations: term_* rates and the shared phase panel.
+        "term_oob",
+        "term_double_bounce",
+        "term_stall",
+        "phase_frac_rally",
+        "phase_frac_serve",
+        # eval_rewards: reward components.
+        "rew_wall",
+        "rew_paddle",
+        "rew_shaping",
+        # eval_diagnostics: everything else -- enough stems to spill
+        # past the 24-panel cap onto a continuation page.
+        *(f"sensor_{index:02d}" for index in range(30)),
+    ]
+    # Legacy flat location on purpose: the reader must resolve it via
+    # the locate_artifact fallback.
+    _write_synthetic_eval_info(tmp_path / "eval_info.csv", stems)
+
+    figures = plot_eval_info(
+        tmp_path,
+        save_path=str(tmp_path / "reports" / "eval_headline.png"),
+        show=False,
+    )
+    assert figures is not None
+    try:
+        # 24-panel cap on every page (axes include blank grid slots).
+        assert all(len(figure.axes) <= 24 for figure in figures)
+        # headline + terminations + rewards + diagnostics x2.
+        assert len(figures) == 5
+    finally:
+        for figure in figures:
+            plt.close(figure)
+
+    reports = tmp_path / "reports"
+    for page in (
+        "eval_headline",
+        "eval_terminations",
+        "eval_rewards",
+        "eval_diagnostics",
+    ):
+        assert (reports / f"{page}.png").is_file(), page
+    # 30 diagnostics stems -> 24 on the first page, 6 spill over.
+    assert (reports / "eval_diagnostics_2.png").is_file()
+    assert not (reports / "eval_diagnostics_3.png").exists()
+    assert not (reports / "eval_info.png").exists()
+    for png in reports.glob("*.png"):
+        assert png.stat().st_size < 600_000, (
+            f"{png.name} is {png.stat().st_size} bytes -- pages must stay "
+            "casually downloadable"
+        )
+
+
+def test_plot_eval_info_groups_phase_and_term_metrics_together(tmp_path):
+    """``term_*`` and ``phase_frac_*`` land on the terminations page and
+    the ``phase_frac_<label>`` series still share one panel."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from courtside_dynamics.notebook_utils import plot_eval_info
+
+    _write_synthetic_eval_info(
+        tmp_path / "metrics" / "eval_info.csv",
+        ["bounce_count", "term_oob", "phase_frac_rally", "phase_frac_serve"],
+    )
+    figures = plot_eval_info(tmp_path, save_path=str(tmp_path / "reports"), show=False)
+    assert figures is not None
+    try:
+        # Always the four-page contract; empty groups render placeholders.
+        assert len(figures) == 4
+        terminations = figures[1]
+        titles = {
+            axis.get_title()
+            for axis in terminations.axes
+            if axis.get_title()
+        }
+        assert titles == {"term_oob", "phase_frac"}
+    finally:
+        for figure in figures:
+            plt.close(figure)
+    for page in (
+        "eval_headline",
+        "eval_terminations",
+        "eval_rewards",
+        "eval_diagnostics",
+    ):
+        assert (tmp_path / "reports" / f"{page}.png").is_file(), page

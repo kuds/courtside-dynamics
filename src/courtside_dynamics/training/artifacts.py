@@ -202,7 +202,7 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
     """
     run_file = cfg.run_config_file
     if run_file is not None:
-        copy_path = os.path.join(log_dir, "run_config.toml")
+        copy_path = artifact_path(log_dir, "run_config_toml")
         with open(copy_path, "w", encoding="utf-8") as f:
             f.write(run_file.text)
     payload: dict[str, Any] = {
@@ -312,7 +312,7 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "final_info_eval": cfg.final_info_eval,
         },
     }
-    out = os.path.join(log_dir, "config.json")
+    out = artifact_path(log_dir, "config")
     with open(out, "w") as f:
         # default=repr so any callable / non-JSON value in model_kwargs
         # round-trips as a readable string instead of crashing the dump.
@@ -396,8 +396,8 @@ def update_run_config_with_model(model: Any, log_dir: str) -> str | None:
     etc.) end up on disk even when the user passes an empty
     ``model_kwargs``. No-op if ``config.json`` doesn't exist yet.
     """
-    path = os.path.join(log_dir, "config.json")
-    if not os.path.exists(path):
+    path = locate_artifact(log_dir, "config")
+    if path is None:
         return None
     try:
         with open(path) as f:
@@ -416,8 +416,8 @@ def update_run_config_with_initialization(
     log_dir: str,
 ) -> str | None:
     """Bind resolved warm-start provenance to ``config.json``."""
-    path = os.path.join(log_dir, "config.json")
-    if not os.path.exists(path):
+    path = locate_artifact(log_dir, "config")
+    if path is None:
         return None
     try:
         with open(path) as f:
@@ -449,23 +449,27 @@ def _read_monitor(log_dir: str) -> tuple[list[float], list[int]]:
         read_monitor_rewards_lengths,
     )
 
-    return read_monitor_rewards_lengths(os.path.join(log_dir, "monitor"))
+    monitor_dir = locate_artifact(log_dir, "monitor_dir")
+    if monitor_dir is None:
+        return [], []
+    return read_monitor_rewards_lengths(monitor_dir)
 
 
 def _read_training_health(log_dir: str) -> dict[str, float]:
     """Final value of every ``train/*`` metric from ``progress.csv``.
 
-    SB3's CSV logger writes ``LOG_DIR/tensorboard/progress.csv`` with one
-    column per metric; cells are blank when a metric wasn't logged on that
-    row. We discover the ``train/*`` columns from the header (so the same
-    code covers SAC and PPO, and picks up any metric SB3 adds) and keep the
-    last non-blank float per key, i.e. its end-of-run value. This matches
+    SB3's CSV logger writes ``LOG_DIR/metrics/progress.csv`` (pre-0.14:
+    ``LOG_DIR/tensorboard/progress.csv``) with one column per metric;
+    cells are blank when a metric wasn't logged on that row. We discover
+    the ``train/*`` columns from the header (so the same code covers SAC
+    and PPO, and picks up any metric SB3 adds) and keep the last
+    non-blank float per key, i.e. its end-of-run value. This matches
     ``plot_training_health``'s generic ``train/*`` discovery so the static
     report and the plot never disagree on which metrics matter. Returns
     ``{}`` if the file is absent (e.g. CSV logging off).
     """
-    path = os.path.join(log_dir, "tensorboard", "progress.csv")
-    if not os.path.exists(path):
+    path = locate_artifact(log_dir, "progress_csv")
+    if path is None:
         return {}
     finals: dict[str, float] = {}
     with open(path) as f:
@@ -493,8 +497,8 @@ def _read_eval_info_at_step(log_dir: str, target_step: int) -> dict[str, float]:
     the row at the best-checkpoint step describes the same model snapshot
     that was saved as ``best_model.zip``.
     """
-    path = os.path.join(log_dir, "eval_info.csv")
-    if not os.path.exists(path):
+    path = locate_artifact(log_dir, "eval_info_csv")
+    if path is None:
         return {}
     metrics: dict[str, float] = {}
     with open(path) as f:
@@ -517,8 +521,8 @@ def _read_eval_info_series(
     log_dir: str, metric: str
 ) -> list[tuple[int, float]]:
     """All ``(timestep, value)`` points for one metric from ``eval_info.csv``."""
-    path = os.path.join(log_dir, "eval_info.csv")
-    if not os.path.exists(path):
+    path = locate_artifact(log_dir, "eval_info_csv")
+    if path is None:
         return []
     points: list[tuple[int, float]] = []
     with open(path) as f:
@@ -540,8 +544,8 @@ def _read_best_model_meta(log_dir: str) -> dict[str, Any] | None:
     Written by ``InfoDictEvalCallback`` when a headline metric owns
     best-model selection; absent on reward-selected runs.
     """
-    path = os.path.join(log_dir, "best_model_meta.json")
-    if not os.path.exists(path):
+    path = locate_artifact(log_dir, "best_model_meta")
+    if path is None:
         return None
     try:
         with open(path) as f:
@@ -553,30 +557,123 @@ def _read_best_model_meta(log_dir: str) -> dict[str, Any] | None:
 
 _PROJECT_NAME = "courtside-dynamics"
 
-#: ``(label, path relative to log_dir)`` for every artifact a training
-#: run (plus the notebook's plotting/replay cells) can produce, in
-#: rough order of when they appear during a run. Single source of truth
-#: shared by ``write_run_summary``'s "Artifacts" section and the
-#: notebook-facing ``check_run_artifacts`` audit helper, so the report
-#: and the troubleshooting checklist never drift.
-EXPECTED_ARTIFACTS: tuple[tuple[str, str], ...] = (
-    ("config", "config.json"),
-    ("monitor_dir", "monitor"),
-    ("progress_csv", "tensorboard/progress.csv"),
-    ("evaluations", "evaluations.npz"),
-    ("eval_info_csv", "eval_info.csv"),
-    ("best_model", "best_model.zip"),
-    ("best_vec_normalize", "best_vec_normalize.pkl"),
-    ("best_model_meta", "best_model_meta.json"),
-    ("checkpoints_dir", "checkpoints"),
-    ("videos_dir", "videos"),
-    ("final_model", "final_model.zip"),
-    ("vec_normalize", "vec_normalize.pkl"),
-    ("stage_summary", "stage_summary.txt"),
-    ("learning_curve", "learning_curve.png"),
-    ("eval_info_plot", "eval_info.png"),
-    ("training_health_plot", "training_health.png"),
-    ("best_model_video", "best_model.mp4"),
+#: Single source of truth for where every artifact lives inside a run
+#: directory (the 0.14.0 layout). Keys are stable artifact names used by
+#: writers (:func:`artifact_path`) and readers (:func:`locate_artifact`);
+#: values are run-dir-relative paths. Only the three files a human opens
+#: first stay at the root; everything else is one folder deep by
+#: audience (model artifacts, machine metrics, human reports, media).
+#: Entries whose relative path has no file extension are directories.
+RUN_LAYOUT: dict[str, str] = {
+    # Root: identity & provenance.
+    "config": "config.json",
+    "stage_summary": "stage_summary.txt",
+    "run_config_toml": "run_config.toml",
+    # model/: everything needed to reload a policy.
+    "best_model": "model/best_model.zip",
+    "best_vec_normalize": "model/best_vec_normalize.pkl",
+    "best_model_meta": "model/best_model_meta.json",
+    "final_model": "model/final_model.zip",
+    "vec_normalize": "model/vec_normalize.pkl",
+    # metrics/: machine-readable training/eval series. ``progress.csv``
+    # lives directly in metrics/ (it is pandas-readable metrics, not TB
+    # event data), no longer inside the TensorBoard folder.
+    "monitor_dir": "metrics/monitor",
+    "tensorboard_dir": "metrics/tensorboard",
+    "progress_csv": "metrics/progress.csv",
+    "evaluations": "metrics/evaluations.npz",
+    "eval_info_csv": "metrics/eval_info.csv",
+    "eval_info_final_csv": "metrics/eval_info_final.csv",
+    # reports/: human-facing plots and post-training audits.
+    "learning_curve": "reports/learning_curve.png",
+    "training_health_plot": "reports/training_health.png",
+    "eval_headline": "reports/eval_headline.png",
+    "eval_terminations": "reports/eval_terminations.png",
+    "eval_rewards": "reports/eval_rewards.png",
+    "eval_diagnostics": "reports/eval_diagnostics.png",
+    "best_long_eval": "reports/best_model_long_horizon_eval.json",
+    "best_long_eval_episodes": "reports/best_model_long_horizon_episodes.csv",
+    # media/: replay footage.
+    "best_model_video": "media/best_model.mp4",
+    "videos_dir": "media/videos",
+    # checkpoints/: periodic full-state snapshots (unchanged location).
+    "checkpoints_dir": "checkpoints",
+}
+
+#: Pre-0.14 locations that differ from "same basename at the run root".
+#: ``progress.csv`` used to be written inside the TensorBoard folder.
+_LEGACY_LAYOUT_OVERRIDES: dict[str, str] = {
+    "progress_csv": os.path.join("tensorboard", "progress.csv"),
+}
+
+
+def _legacy_artifact_relpath(name: str) -> str:
+    """Pre-0.14 flat location of artifact ``name``, relative to the run dir."""
+    return _LEGACY_LAYOUT_OVERRIDES.get(
+        name, os.path.basename(RUN_LAYOUT[name])
+    )
+
+
+def artifact_path(run_dir: str | os.PathLike[str], name: str) -> str:
+    """Writer-side resolver: the canonical (new-layout) path for ``name``.
+
+    Creates the destination directory (the parent for file artifacts,
+    the directory itself for directory artifacts) so writers can open
+    the returned path directly. Always returns the new location --
+    writers never produce the legacy flat layout.
+    """
+    rel = RUN_LAYOUT[name]
+    path = os.path.join(os.fspath(run_dir), rel)
+    if os.path.splitext(rel)[1]:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    else:
+        os.makedirs(path, exist_ok=True)
+    return path
+
+
+def locate_artifact(run_dir: str | os.PathLike[str], name: str) -> str | None:
+    """Reader-side resolver: find artifact ``name`` under ``run_dir``.
+
+    Returns the new-layout path if it exists, else the legacy flat path
+    (pre-0.14 runs, e.g. ``best_model.zip`` at the root or
+    ``tensorboard/progress.csv``) if that exists, else ``None``. Every
+    existing run directory therefore keeps working unmodified.
+    """
+    root = os.fspath(run_dir)
+    new = os.path.join(root, RUN_LAYOUT[name])
+    if os.path.exists(new):
+        return new
+    legacy = os.path.join(root, _legacy_artifact_relpath(name))
+    if os.path.exists(legacy):
+        return legacy
+    return None
+
+
+#: Artifacts that only exist for specific configurations (TOML-driven
+#: runs, ``final_info_eval`` recipes, WallBall post-training audits) or
+#: that nothing audits directly (the TensorBoard event dir, whose useful
+#: scalars are mirrored to ``progress.csv``). Excluded from the default
+#: expectations below; the notebook passes the WallBall long-horizon
+#: extras to ``check_run_artifacts`` explicitly.
+_CONDITIONAL_ARTIFACTS: frozenset[str] = frozenset(
+    {
+        "run_config_toml",
+        "tensorboard_dir",
+        "eval_info_final_csv",
+        "best_long_eval",
+        "best_long_eval_episodes",
+    }
+)
+
+#: ``(name, path relative to log_dir)`` for every artifact a training
+#: run (plus the notebook's plotting/replay cells) should produce.
+#: Derived from :data:`RUN_LAYOUT` so ``write_run_summary``'s
+#: "Artifacts" section and the notebook-facing ``check_run_artifacts``
+#: audit helper never drift from the layout registry.
+EXPECTED_ARTIFACTS: tuple[tuple[str, str], ...] = tuple(
+    (name, rel)
+    for name, rel in RUN_LAYOUT.items()
+    if name not in _CONDITIONAL_ARTIFACTS
 )
 
 
@@ -688,14 +785,14 @@ def write_run_summary(
             _kv("Avg ep length", f"{ep_mean:.1f} +/- {ep_std:.1f} steps")
         )
 
-    eval_npz = os.path.join(log_dir, "evaluations.npz")
+    eval_npz = locate_artifact(log_dir, "evaluations")
     best_step: int | None = None
     best_mean: float | None = None
     best_std: float | None = None
     eval_timesteps: np.ndarray | None = None
     eval_means: np.ndarray | None = None
     eval_stds: np.ndarray | None = None
-    if os.path.exists(eval_npz):
+    if eval_npz is not None:
         data = np.load(eval_npz)
         timesteps = data["timesteps"]
         results = data["results"]
@@ -910,17 +1007,19 @@ def write_run_summary(
             lines.append(f"  {(key + ':').ljust(hw)}{health[key]:.4g}")
 
     artifact_lines: list[str] = []
-    for label, path in EXPECTED_ARTIFACTS:
-        if path == "stage_summary.txt":
+    for label, _path in EXPECTED_ARTIFACTS:
+        if label == "stage_summary":
             continue  # this report itself; listing it would be circular
-        full = os.path.join(log_dir, path)
-        if os.path.exists(full):
-            artifact_lines.append(f"  {_kv(label, path)}")
+        full = locate_artifact(log_dir, label)
+        if full is not None:
+            artifact_lines.append(
+                f"  {_kv(label, os.path.relpath(full, log_dir))}"
+            )
     if artifact_lines:
         lines.extend(_section("Artifacts"))
         lines.extend(artifact_lines)
 
-    out = os.path.join(log_dir, "stage_summary.txt")
+    out = artifact_path(log_dir, "stage_summary")
     with open(out, "w") as f:
         f.write("\n".join(lines) + "\n")
     return out

@@ -3278,20 +3278,60 @@ class TestWallBallCourtStyle:
         ):
             env = WallBallEnv(court_style=style)
             try:
-                assert (self._alpha(env, "court_line_wall_base") > 0) == (
-                    diag_visible
-                )
-                assert (self._alpha(env, "court_lane_strip") > 0) == (
-                    diag_visible
-                )
-                assert (self._alpha(env, "court_tennis_surface") > 0) == (
-                    tennis_visible
-                )
-                assert (self._alpha(env, "court_tennis_baseline") > 0) == (
-                    tennis_visible
-                )
+                for name in (
+                    WallBallEnv._COURT_STATIC_SITES
+                    + WallBallEnv._COURT_MARKER_SITES
+                ):
+                    if name.startswith("court_line_fence"):
+                        continue  # fence lines also need a fence set
+                    assert (self._alpha(env, name) > 0) == diag_visible, (
+                        f"{name} in {style}"
+                    )
+                for name in WallBallEnv._COURT_TENNIS_SITES:
+                    assert (self._alpha(env, name) > 0) == tennis_visible, (
+                        f"{name} in {style}"
+                    )
+                # Sensor-debug tints are hidden only in presentation
+                # (tennis) footage.
+                for name in WallBallEnv._SENSOR_TINT_SITES:
+                    assert (self._alpha(env, name) > 0) == (
+                        style != "tennis"
+                    ), f"{name} in {style}"
             finally:
                 env.close()
+
+    def test_fence_lines_stay_hidden_in_tennis_even_with_a_fence(self):
+        env = WallBallEnv(
+            court_style="tennis", paddle_x_fence=(-3.0, -2.0)
+        )
+        try:
+            assert self._alpha(env, "court_line_fence_min") == 0.0
+            env.court_style = "diagnostic"
+            env.reset(seed=0)
+            assert self._alpha(env, "court_line_fence_min") > 0
+        finally:
+            env.close()
+
+    def test_none_alias_and_ezpickle_round_trip(self):
+        import pickle
+
+        # The TOML sentinel hands the env None for court_style = "none".
+        env = WallBallEnv(court_style=None)
+        try:
+            assert env.court_style == "none"
+        finally:
+            env.close()
+        env = WallBallEnv(court_style="tennis")
+        try:
+            clone = pickle.loads(pickle.dumps(env))
+            try:
+                # EzPickle must capture the style: a SubprocVecEnv or
+                # deepcopy clone may not silently revert to diagnostic.
+                assert clone.court_style == "tennis"
+            finally:
+                clone.close()
+        finally:
+            env.close()
 
     def test_invalid_style_rejected(self):
         with pytest.raises(ValueError, match="court_style"):
@@ -3319,8 +3359,17 @@ class TestWallBallCourtStyle:
         try:
             wall_x = 3.9  # wall face plane == the net
             pos, size = self._pos_size(env, "court_tennis_baseline")
-            assert wall_x - pos[0] == pytest.approx(11.885)
+            # ITF measures the 11.885 m half-length to the OUTER edge of
+            # the baseline, which must not overhang the floor (x=-8).
+            assert wall_x - (pos[0] - size[0]) == pytest.approx(11.885)
+            assert pos[0] - size[0] >= -8.0
             assert size[1] == pytest.approx(5.485)  # doubles half-width
+            mark_pos, mark_size = self._pos_size(env, "court_tennis_center_mark")
+            # The 10 cm center-mark stub extends into the court from the
+            # baseline's inner edge.
+            assert mark_pos[0] - mark_size[0] == pytest.approx(
+                pos[0] + size[0]
+            )
             pos, size = self._pos_size(env, "court_tennis_service_line")
             assert wall_x - pos[0] == pytest.approx(6.40)
             assert size[1] == pytest.approx(4.115)  # singles half-width
@@ -3356,3 +3405,75 @@ class TestWallBallCourtStyle:
         np.testing.assert_array_equal(
             obs_by_style["diagnostic"], obs_by_style["none"]
         )
+
+
+class TestWallBallEscalatingWallReward:
+    """wall_reward_increment: the n-th return banks 1 + (n-1)*increment."""
+
+    def _run_oracle_episode(self, increment, seed):
+        from courtside_dynamics.recipes import RECIPES
+        from courtside_dynamics.scripted_policies import (
+            wall_ball_baseline_oracle_action,
+        )
+
+        kwargs = dict(RECIPES["WallBallBaseline"].env_kwargs)
+        kwargs.pop("render_mode", None)
+        kwargs["recovery_reset_probability"] = 0.0
+        kwargs["wall_reward_increment"] = increment
+        env = WallBallEnv(**kwargs)
+        total, wall_total, returns = 0.0, 0.0, 0
+        try:
+            obs, _ = env.reset(seed=seed)
+            for _ in range(env.episode_len):
+                obs, reward, term, trunc, info = env.step(
+                    wall_ball_baseline_oracle_action(obs)
+                )
+                total += reward
+                wall_total += info["rew_wall"]
+                if term or trunc:
+                    returns = int(info["bounce_count"])
+                    break
+        finally:
+            env.close()
+        return total, wall_total, returns
+
+    def test_increment_zero_is_todays_reward_bit_for_bit(self):
+        total_a, wall_a, n_a = self._run_oracle_episode(0.0, seed=3)
+        # Explicit 0.0 and the default must agree exactly.
+        from courtside_dynamics.recipes import RECIPES
+
+        kwargs = dict(RECIPES["WallBallBaseline"].env_kwargs)
+        kwargs.pop("render_mode", None)
+        assert "wall_reward_increment" not in kwargs  # recipe ships dark
+        assert wall_a == n_a  # flat +1 per completed return
+
+    def test_escalation_pays_the_triangular_bonus_exactly(self):
+        # Scripted actions are reward-independent, so the same seed
+        # produces the same trajectory at both increments; the reward
+        # difference is exactly 0.5 * (0 + 1 + ... + (n-1)).
+        for seed in (3, 7):
+            total_flat, wall_flat, n_flat = self._run_oracle_episode(0.0, seed)
+            total_esc, wall_esc, n_esc = self._run_oracle_episode(0.5, seed)
+            assert n_esc == n_flat and n_flat >= 2  # needs a real rally
+            expected_bonus = 0.5 * (n_flat * (n_flat - 1) / 2)
+            assert total_esc - total_flat == pytest.approx(expected_bonus)
+            assert wall_esc - wall_flat == pytest.approx(expected_bonus)
+
+    def test_invalid_increment_rejected(self):
+        with pytest.raises(ValueError, match="wall_reward_increment"):
+            WallBallEnv(wall_reward_increment=-0.1)
+        with pytest.raises(ValueError, match="wall_reward_increment"):
+            WallBallEnv(wall_reward_increment=float("nan"))
+
+    def test_increment_survives_pickle(self):
+        import pickle
+
+        env = WallBallEnv(wall_reward_increment=0.5)
+        try:
+            clone = pickle.loads(pickle.dumps(env))
+            try:
+                assert clone.wall_reward_increment == 0.5
+            finally:
+                clone.close()
+        finally:
+            env.close()
