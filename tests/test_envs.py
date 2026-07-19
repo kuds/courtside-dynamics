@@ -3405,3 +3405,75 @@ class TestWallBallCourtStyle:
         np.testing.assert_array_equal(
             obs_by_style["diagnostic"], obs_by_style["none"]
         )
+
+
+class TestWallBallEscalatingWallReward:
+    """wall_reward_increment: the n-th return banks 1 + (n-1)*increment."""
+
+    def _run_oracle_episode(self, increment, seed):
+        from courtside_dynamics.recipes import RECIPES
+        from courtside_dynamics.scripted_policies import (
+            wall_ball_baseline_oracle_action,
+        )
+
+        kwargs = dict(RECIPES["WallBallBaseline"].env_kwargs)
+        kwargs.pop("render_mode", None)
+        kwargs["recovery_reset_probability"] = 0.0
+        kwargs["wall_reward_increment"] = increment
+        env = WallBallEnv(**kwargs)
+        total, wall_total, returns = 0.0, 0.0, 0
+        try:
+            obs, _ = env.reset(seed=seed)
+            for _ in range(env.episode_len):
+                obs, reward, term, trunc, info = env.step(
+                    wall_ball_baseline_oracle_action(obs)
+                )
+                total += reward
+                wall_total += info["rew_wall"]
+                if term or trunc:
+                    returns = int(info["bounce_count"])
+                    break
+        finally:
+            env.close()
+        return total, wall_total, returns
+
+    def test_increment_zero_is_todays_reward_bit_for_bit(self):
+        total_a, wall_a, n_a = self._run_oracle_episode(0.0, seed=3)
+        # Explicit 0.0 and the default must agree exactly.
+        from courtside_dynamics.recipes import RECIPES
+
+        kwargs = dict(RECIPES["WallBallBaseline"].env_kwargs)
+        kwargs.pop("render_mode", None)
+        assert "wall_reward_increment" not in kwargs  # recipe ships dark
+        assert wall_a == n_a  # flat +1 per completed return
+
+    def test_escalation_pays_the_triangular_bonus_exactly(self):
+        # Scripted actions are reward-independent, so the same seed
+        # produces the same trajectory at both increments; the reward
+        # difference is exactly 0.5 * (0 + 1 + ... + (n-1)).
+        for seed in (3, 7):
+            total_flat, wall_flat, n_flat = self._run_oracle_episode(0.0, seed)
+            total_esc, wall_esc, n_esc = self._run_oracle_episode(0.5, seed)
+            assert n_esc == n_flat and n_flat >= 2  # needs a real rally
+            expected_bonus = 0.5 * (n_flat * (n_flat - 1) / 2)
+            assert total_esc - total_flat == pytest.approx(expected_bonus)
+            assert wall_esc - wall_flat == pytest.approx(expected_bonus)
+
+    def test_invalid_increment_rejected(self):
+        with pytest.raises(ValueError, match="wall_reward_increment"):
+            WallBallEnv(wall_reward_increment=-0.1)
+        with pytest.raises(ValueError, match="wall_reward_increment"):
+            WallBallEnv(wall_reward_increment=float("nan"))
+
+    def test_increment_survives_pickle(self):
+        import pickle
+
+        env = WallBallEnv(wall_reward_increment=0.5)
+        try:
+            clone = pickle.loads(pickle.dumps(env))
+            try:
+                assert clone.wall_reward_increment == 0.5
+            finally:
+                clone.close()
+        finally:
+            env.close()

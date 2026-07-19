@@ -1,7 +1,7 @@
 # WallBallBaseline — the calibrated one-bounce rally task from the
 # baseline review: pinned paddle lane, damped paddle, fined (not
-# terminal) early touches and weak returns, recovery-fragment resets
-# annealed by a schedule (SAC, 1.5M steps).
+# terminal) early touches, recovery-fragment resets annealed by a
+# schedule (SAC, 1.5M steps).
 # Usage: build_train_config("WallBallBaseline", log_dir=..., config_file=<this file>)
 # Everything here matches the recipe today; edit a value to diverge.
 # (The recipe also pins eval recovery_reset_probability = 0.0 and the
@@ -14,13 +14,6 @@ early_stop_patience = 20  # evals without a new best before stopping
 # Selection: exchange mean, tie-broken by the deep-rally tail (ge_2
 # saturated at ~100% in runs 165358/023737 and stopped discriminating).
 best_metric_keys = ["bounce_count_ep_mean", "bounce_count_ep_ge_5_rate"]
-
-[train.model_kwargs]
-# Deep-merged onto the recipe's bundle. gamma 0.995 gives the critic a
-# ~200-step credit horizon (more than one full exchange), targeting the
-# dominant double-bounce failure of run 023737. Auto-entropy stays: the
-# 20260717 A/B showed fixed ent_coef was the poison, not gamma.
-gamma = 0.995
 
 [env]
 # Serve difficulty. The review calibrated 2.0/0.5; widen only after
@@ -36,11 +29,18 @@ paddle_joint_damping = 8.0
 # Fine (per event) for touching the ball before its floor bounce;
 # "none" restores the legacy instant-termination rule.
 early_touch_penalty = 0.25
-# Weak returns (floor before wall) are a fined retry during training,
-# converting the 12-16% terminal weak-return episodes of runs
-# 165358/023737 into practice reps; "none" restores the terminal rule.
-weak_return_penalty = 0.1
+# weak_return_penalty deliberately unset: the 0.13.0 fined retry was
+# falsified by run 20260718_213222 (soft, unchainable returns -- see
+# docs/lessons_learned.md lesson 1). Terminal weak returns stay
+# symmetric with the out-of-bounds penalty.
 
-[eval_env]
-# Scoring stays on the strict task every earlier run was measured on.
-weak_return_penalty = "none"
+# NEXT LEVER (calibrated, ships dark): pay the n-th completed return
+# 1 + (n-1)*0.5 so chaining exchanges out-earns restarting them.
+# The scripted ladder stays monotone at 0.5 and the crude->oracle gap
+# widens 20%. Uncomment BOTH lines to run the escalation experiment:
+# training gets the escalator, scoring stays on the flat +1 so
+# episode_reward remains comparable across runs.
+# wall_reward_increment = 0.5
+
+# [eval_env]
+# wall_reward_increment = 0.0

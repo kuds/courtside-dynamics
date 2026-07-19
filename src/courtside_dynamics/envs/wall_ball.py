@@ -223,12 +223,17 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         paddle_start_x: float | None = None,
         paddle_x_fence: tuple[float, float] | None = None,
         court_style: str = "diagnostic",
+        wall_reward_increment: float = 0.0,
         **kwargs: Any,
     ) -> None:
         if not isinstance(rally_style, str) or rally_style not in _RALLY_STYLES:
             raise ValueError(
                 f"rally_style must be one of {sorted(_RALLY_STYLES)}, "
                 f"got {rally_style!r}"
+            )
+        if not np.isfinite(wall_reward_increment) or wall_reward_increment < 0:
+            raise ValueError(
+                "wall_reward_increment must be finite and non-negative"
             )
         if not np.isfinite(paddle_home_x):
             raise ValueError("paddle_home_x must be finite")
@@ -361,6 +366,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             ),
             paddle_x_fence=resolved_fence,
             court_style=court_style,
+            wall_reward_increment=float(wall_reward_increment),
             **kwargs,
         )
 
@@ -446,6 +452,13 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # Floor-marking presentation (render-only; see
         # _refresh_court_markers). Validated via the property setter.
         self.court_style = court_style
+        # Escalating rally payment: the n-th completed return of an
+        # episode banks 1 + (n - 1) * increment, so chaining exchanges
+        # out-earns restarting them. 0.0 reproduces the flat +1
+        # bit-for-bit. Banked outright like the base wall reward (never
+        # pending, never clawed back); counters reset with the episode,
+        # so recovery fragments cannot farm the escalator.
+        self.wall_reward_increment = float(wall_reward_increment)
         # World-space clamp on the x position target, decoupled from the
         # action mapping: the mapping (paddle_x_target_range) stays fixed
         # for a whole run so action semantics never drift, while the fence
@@ -1287,8 +1300,13 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 if self.rally_style == "one_bounce":
                     self.one_bounce_return_count += 1
                     self._recoverable_bounce_eligible = True
-                reward += 1.0
-                rew_wall += 1.0
+                # bounce_count was just incremented: this is the n-th
+                # completed return, worth 1 + (n-1)*increment.
+                payment = 1.0 + (
+                    (self.bounce_count - 1) * self.wall_reward_increment
+                )
+                reward += payment
+                rew_wall += payment
                 self._pending_shaping = 0.0
                 self._pending_bonus = 0.0
                 event_completed_return = True

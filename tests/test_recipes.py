@@ -596,32 +596,28 @@ def test_wall_ball_baseline_combines_recovery_curriculum_and_reward():
     assert kwargs["recoverable_bounce_lateral_limit"] == 2.0
 
 
-def test_wall_ball_baseline_weak_return_retry_stays_out_of_eval():
-    """Training fines weak returns (retry reps); scoring must stay on
-    the strict terminal rule every earlier baseline run was measured on,
-    so bounce_count_ep_mean remains comparable across runs."""
+def test_wall_ball_baseline_reverted_to_proven_configuration():
+    """Run 20260718_213222 falsified the 0.13.0 bundle: the asymmetric
+    weak-return retry taught soft, unchainable returns (1.33 vs 3.23
+    bounces). The recipe pins the configuration both reference runs
+    learned with -- terminal weak returns (symmetric with OOB) and SB3
+    default gamma -- keeping only the ge_5 selection tiebreak."""
     recipe = RECIPES["WallBallBaseline"]
-    assert recipe.env_kwargs["weak_return_penalty"] == 0.1
-    assert recipe.eval_env_overrides["weak_return_penalty"] is None
+    assert "weak_return_penalty" not in recipe.env_kwargs
+    assert "weak_return_penalty" not in recipe.eval_env_overrides
+    assert "model_kwargs" not in recipe.extra_cfg
+    assert recipe.extra_cfg["best_metric_keys"] == (
+        "bounce_count_ep_mean",
+        "bounce_count_ep_ge_5_rate",
+    )
 
-    train_env = make_env_fn("WallBallBaseline")()
-    try:
-        assert train_env.weak_return_penalty == 0.1
-    finally:
-        train_env.close()
-    eval_env = make_eval_env_fn("WallBallBaseline")()
-    try:
-        assert eval_env.weak_return_penalty is None
-    finally:
-        eval_env.close()
-
-
-def test_wall_ball_baseline_gamma_keeps_auto_entropy():
-    """gamma 0.995 rides alone in model_kwargs: the 20260717 A/B showed
-    the old bundle's fixed ent_coef was the harmful part, so nothing
-    here may pin the entropy coefficient."""
-    model_kwargs = RECIPES["WallBallBaseline"].extra_cfg["model_kwargs"]
-    assert model_kwargs == {"gamma": 0.995}
+    for factory in (make_env_fn("WallBallBaseline"),
+                    make_eval_env_fn("WallBallBaseline")):
+        env = factory()
+        try:
+            assert env.weak_return_penalty is None
+        finally:
+            env.close()
 
 
 def test_selection_survival_keys_are_backed_by_thresholds():

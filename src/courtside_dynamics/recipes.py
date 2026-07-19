@@ -403,12 +403,17 @@ RECIPES: dict[str, Recipe] = {
             # this lane front); the softened fine keeps the gate shut
             # but lets the rally -- and learning -- continue.
             "early_touch_penalty": 0.25,
-            # 12-16% of best-model episodes in runs 20260717_165358 /
-            # 20260718_023737 still died as terminal floor_before_wall
-            # weak returns; the v0.11.0-calibrated fined retry converts
-            # them into practice reps. Evaluation re-asserts the strict
-            # terminal rule below so scores stay comparable across runs.
-            "weak_return_penalty": 0.1,
+            # weak_return_penalty deliberately UNSET (terminal rule).
+            # The 0.13.0 fined retry (0.1) was falsified by run
+            # 20260718_213222: terminal weak returns and terminal OOB
+            # are symmetric (-1 each) and push the policy toward
+            # committed swings; the retry made undershooting 10x
+            # cheaper than overshooting and kept the episode alive, so
+            # SAC converged to soft, unchainable returns (82% double
+            # bounce, OOB ~0, recoverable_bounce_score peak 0.44 vs
+            # ~0.99, plateau at one exchange, 1.33 vs 3.23 bounces).
+            # Any future retry must keep the fine near-symmetric with
+            # out_of_bounds_penalty.
             # Cap saturated swings at 100 N / 8 = 12.5 m/s (~2.3x serve
             # speed) instead of the shared XML's 20 m/s: bang-bang
             # full-power returns then rebound shallow enough to recover.
@@ -434,23 +439,18 @@ RECIPES: dict[str, Recipe] = {
             # Evaluation must never sample recovery-curriculum starts: every
             # score represents a complete baseline episode from the serve.
             "recovery_reset_probability": 0.0,
-            # Training's weak-return retry must not leak into scoring:
-            # strict terminal floor_before_wall keeps bounce_count_ep_mean
-            # comparable with every earlier baseline run.
-            "weak_return_penalty": None,
         },
         default_total_timesteps=1_500_000,
         name_prefix="wall_ball_baseline",
         extra_cfg={
             "n_envs": 8,
             "early_stop_patience": 20,
-            # Credit horizon ~200 steps (> one full exchange at ~130
-            # steps): targets the dominant 54% double-bounce failure of
-            # run 20260718_023737 -- committing to recover the NEXT
-            # exchange. Auto-entropy is deliberately untouched: the
-            # 20260717 A/B (run 025611 vs 165358) showed fixed ent_coef
-            # was the harmful half of the old pinned bundle, not gamma.
-            "model_kwargs": {"gamma": 0.995},
+            # model_kwargs deliberately empty: SB3 defaults (auto
+            # entropy, gamma 0.99) are the configuration both reference
+            # runs (20260717_165358, 20260718_023737) learned with. The
+            # 0.13.0 gamma 0.995 shipped bundled with the weak-return
+            # retry and regressed (run 20260718_213222); it has not
+            # been exonerated in isolation and stays out until it is.
             "success_key": "bounce_count",
             # One return was solved by every held-out seed in the first
             # baseline run; success now means surviving the actual skill
