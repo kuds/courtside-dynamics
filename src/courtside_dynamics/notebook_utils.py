@@ -28,6 +28,17 @@ from numpy.typing import ArrayLike
 # Single source of truth for the Colab check (also used by colab_setup).
 from courtside_dynamics.colab_setup import _in_colab
 
+# Shared run-directory layout registry: writers resolve output paths via
+# ``artifact_path`` (always the new layout), readers via
+# ``locate_artifact`` (new layout first, legacy flat root as fallback),
+# so every pre-0.14 run in Drive keeps working unmodified.
+from courtside_dynamics.training.artifacts import (
+    EXPECTED_ARTIFACTS,
+    RUN_LAYOUT,
+    artifact_path,
+    locate_artifact,
+)
+
 
 def mount_drive(mount_point: str = "/content/drive") -> str:
     """Mount Google Drive in Colab; no-op (returns ``""``) elsewhere.
@@ -194,19 +205,21 @@ def plot_learning_curve(
 ):
     """Four-panel learning curve from the artifacts written by ``train``.
 
-    Top row: per-episode training returns and episode lengths from
-    ``log_dir/monitor/*.monitor.csv`` with a rolling-mean overlay.
-    Bottom row: deterministic eval returns and episode lengths (mean
-    +/- std) from ``log_dir/evaluations.npz`` (written by SB3's
-    ``EvalCallback``).
+    Top row: per-episode training returns and episode lengths from the
+    run's ``metrics/monitor/*.monitor.csv`` files with a rolling-mean
+    overlay. Bottom row: deterministic eval returns and episode lengths
+    (mean +/- std) from ``metrics/evaluations.npz`` (written by SB3's
+    ``EvalCallback``). Both are resolved through ``locate_artifact`` so
+    legacy flat-layout runs plot identically.
     """
     import matplotlib.pyplot as plt
 
     log_dir = str(log_dir)
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    train_rewards, train_lengths = _read_monitor_logs(
-        os.path.join(log_dir, "monitor")
+    monitor_dir = locate_artifact(log_dir, "monitor_dir") or os.path.join(
+        log_dir, RUN_LAYOUT["monitor_dir"]
     )
+    train_rewards, train_lengths = _read_monitor_logs(monitor_dir)
 
     def _plot_train(ax, series, title, ylabel):
         if series.size:
@@ -234,8 +247,8 @@ def plot_learning_curve(
         "Steps",
     )
 
-    eval_npz = os.path.join(log_dir, "evaluations.npz")
-    eval_data = np.load(eval_npz) if os.path.exists(eval_npz) else None
+    eval_npz = locate_artifact(log_dir, "evaluations")
+    eval_data = np.load(eval_npz) if eval_npz is not None else None
 
     # Best-checkpoint step (what EvalCallback saved as best_model.zip).
     # Marked on the eval panels so a post-best collapse -- curve falling
@@ -294,7 +307,9 @@ def print_stage_summary(log_dir: str | Path) -> None:
     place to look when a run underperforms. ``train()`` writes it even for
     interrupted runs (marked ``status: interrupted``).
     """
-    path = os.path.join(str(log_dir), "stage_summary.txt")
+    path = locate_artifact(log_dir, "stage_summary") or os.path.join(
+        str(log_dir), RUN_LAYOUT["stage_summary"]
+    )
     try:
         with open(path) as f:
             print(f.read())
@@ -307,26 +322,30 @@ def print_stage_summary(log_dir: str | Path) -> None:
 
 
 #: Most common cause for each artifact being absent, shown by
-#: ``check_run_artifacts`` next to MISSING entries.
+#: ``check_run_artifacts`` next to MISSING entries. Keyed by the
+#: RUN_LAYOUT (new-layout) relative path.
 _ARTIFACT_HINTS: dict[str, str] = {
-    "config.json": "written at the very start of train(); absent means train() never ran on this dir",
-    "monitor": "monitor CSVs appear once training starts; rows once the first episodes finish",
-    "tensorboard/progress.csv": "written by the CSV logger train() wires up; appears after SB3's first metric dump",
-    "evaluations.npz": "written by EvalCallback; check eval_freq <= total_timesteps",
-    "eval_info.csv": "written by InfoDictEvalCallback each eval; requires info_dict_eval=True",
-    "best_model.zip": "saved by EvalCallback on its first completed evaluation",
-    "best_vec_normalize.pkl": "needs VecNormalize enabled plus at least one new-best eval",
-    "checkpoints": "requires checkpoint_freq > 0 and a run long enough to reach the first checkpoint",
-    "videos": "requires record_video=True, video_freq > 0, and moviepy installed",
-    "final_model.zip": "written when learn() finishes or is interrupted; absent means the run crashed",
-    "vec_normalize.pkl": "only written when VecNormalize is enabled (normalize_obs / normalize_reward)",
-    "stage_summary.txt": "written by train()'s epilogue; absent means the run crashed before it",
-    "learning_curve.png": "saved by the plot_learning_curve cell -- did it run with save_path set?",
-    "eval_info.png": "saved by the plot_eval_info cell -- did it run with save_path set?",
-    "training_health.png": "saved by the plot_training_health cell -- did it run with save_path set?",
-    "best_model.mp4": "saved by record_best_model_video -- needs best_model.zip and rgb_array rendering",
-    "best_model_long_horizon_eval.json": "saved by the WallBall long-horizon best-model evaluation cell",
-    "best_model_long_horizon_episodes.csv": "saved with one row per held-out WallBall evaluation seed",
+    RUN_LAYOUT["config"]: "written at the very start of train(); absent means train() never ran on this dir",
+    RUN_LAYOUT["monitor_dir"]: "monitor CSVs appear once training starts; rows once the first episodes finish",
+    RUN_LAYOUT["progress_csv"]: "written by the CSV logger train() wires up; appears after SB3's first metric dump",
+    RUN_LAYOUT["evaluations"]: "written by EvalCallback; check eval_freq <= total_timesteps",
+    RUN_LAYOUT["eval_info_csv"]: "written by InfoDictEvalCallback each eval; requires info_dict_eval=True",
+    RUN_LAYOUT["best_model"]: "saved by EvalCallback on its first completed evaluation",
+    RUN_LAYOUT["best_vec_normalize"]: "needs VecNormalize enabled plus at least one new-best eval",
+    RUN_LAYOUT["checkpoints_dir"]: "requires checkpoint_freq > 0 and a run long enough to reach the first checkpoint",
+    RUN_LAYOUT["videos_dir"]: "requires record_video=True, video_freq > 0, and moviepy installed",
+    RUN_LAYOUT["final_model"]: "written when learn() finishes or is interrupted; absent means the run crashed",
+    RUN_LAYOUT["vec_normalize"]: "only written when VecNormalize is enabled (normalize_obs / normalize_reward)",
+    RUN_LAYOUT["stage_summary"]: "written by train()'s epilogue; absent means the run crashed before it",
+    RUN_LAYOUT["learning_curve"]: "saved by the plot_learning_curve cell -- did it run with save_path set?",
+    RUN_LAYOUT["eval_headline"]: "saved by the plot_eval_info cell -- did it run with save_path set?",
+    RUN_LAYOUT["eval_terminations"]: "saved by the plot_eval_info cell -- did it run with save_path set?",
+    RUN_LAYOUT["eval_rewards"]: "saved by the plot_eval_info cell -- did it run with save_path set?",
+    RUN_LAYOUT["eval_diagnostics"]: "saved by the plot_eval_info cell -- did it run with save_path set?",
+    RUN_LAYOUT["training_health_plot"]: "saved by the plot_training_health cell -- did it run with save_path set?",
+    RUN_LAYOUT["best_model_video"]: "saved by record_best_model_video -- needs best_model.zip and rgb_array rendering",
+    RUN_LAYOUT["best_long_eval"]: "saved by the WallBall long-horizon best-model evaluation cell",
+    RUN_LAYOUT["best_long_eval_episodes"]: "saved with one row per held-out WallBall evaluation seed",
 }
 
 
@@ -349,20 +368,27 @@ def check_run_artifacts(
 
     Prints one line per artifact -- present ones with their size (file
     count for directories), missing ones with the most common cause --
-    and returns the missing relative paths. Run it at the end of a
-    notebook session, after the plotting and replay cells: it catches
-    silently-skipped outputs (no video because moviepy failed, no
-    best_model because eval never fired) while the Colab runtime still
-    exists to do something about it.
+    and returns the missing relative paths (as recorded in
+    ``RUN_LAYOUT``). Run it at the end of a notebook session, after the
+    plotting and replay cells: it catches silently-skipped outputs (no
+    video because moviepy failed, no best_model because eval never
+    fired) while the Colab runtime still exists to do something about
+    it. Artifacts whose label matches a ``RUN_LAYOUT`` name (all of
+    ``EXPECTED_ARTIFACTS``, plus registry-named extras such as
+    ``WALL_BALL_LONG_HORIZON_ARTIFACTS``) are resolved through
+    ``locate_artifact``, so legacy flat-layout runs audit clean too.
     """
-    from courtside_dynamics.training.artifacts import EXPECTED_ARTIFACTS
-
     log_dir = str(log_dir)
     artifacts = (*EXPECTED_ARTIFACTS, *extra_artifacts)
     missing: list[str] = []
     label_width = max(len(label) for label, _ in artifacts) + 2
     for label, rel in artifacts:
-        full = os.path.join(log_dir, rel)
+        if label in RUN_LAYOUT:
+            full = locate_artifact(log_dir, label) or os.path.join(
+                log_dir, RUN_LAYOUT[label]
+            )
+        else:
+            full = os.path.join(log_dir, rel)
         if os.path.isdir(full):
             n_files = 0
             total = 0
@@ -402,30 +428,79 @@ def _split_eval_metric(name: str) -> tuple[str, str]:
     return name, ""
 
 
+#: Metric-stem prefixes that make up the ``eval_headline.png`` page:
+#: the counters runs are compared on plus reward/length context.
+_EVAL_HEADLINE_STEM_PREFIXES: tuple[str, ...] = (
+    "bounce_count",
+    "episode_reward",
+    "episode_length",
+    "paddle_hit",
+    "return_count",
+    "legal_paddle",
+)
+
+#: Themed pages of the eval-info report, in render order. Values are the
+#: RUN_LAYOUT names of the pages (``reports/<page>.png``).
+_EVAL_INFO_PAGES: tuple[str, ...] = (
+    "eval_headline",
+    "eval_terminations",
+    "eval_rewards",
+    "eval_diagnostics",
+)
+
+
+def _eval_info_page_for_stem(stem: str) -> str:
+    """Assign one metric stem to its themed ``plot_eval_info`` page."""
+    if any(stem.startswith(prefix) for prefix in _EVAL_HEADLINE_STEM_PREFIXES):
+        return "eval_headline"
+    if stem.startswith("term_") or stem == "phase_frac":
+        return "eval_terminations"
+    if stem.startswith("rew_"):
+        return "eval_rewards"
+    return "eval_diagnostics"
+
+
 def plot_eval_info(
     log_dir: str | Path,
     *,
     save_path: str | None = None,
     show: bool = True,
     max_cols: int = 3,
+    max_panels_per_page: int = 24,
 ):
-    """Per-metric time-series grid from ``log_dir/eval_info.csv``.
+    """Themed per-metric time-series pages from the run's ``eval_info.csv``.
 
     The CSV is written by ``InfoDictEvalCallback`` in long format
-    ``(timestep, metric, value)``. This function pivots it into a grid
+    ``(timestep, metric, value)``. This function pivots it into panels
     with one panel per metric stem (e.g. ``rally_count``); ``_mean``,
-    ``_final``, and ``_max`` variants are overlaid as separate lines
-    on the same axes. ``phase_frac_<label>`` metrics share one panel.
+    ``_final``, and ``_max`` variants are overlaid as separate lines on
+    the same axes. ``phase_frac_<label>`` metrics share one panel.
 
-    Returns ``None`` if the CSV is missing or empty.
+    Instead of one ~170-panel mega-grid, panels are grouped into four
+    themed pages -- ``eval_headline`` (task counters, reward, length),
+    ``eval_terminations`` (``term_*`` rates + phase fractions),
+    ``eval_rewards`` (``rew_*`` components), and ``eval_diagnostics``
+    (everything else). Each page holds at most ``max_panels_per_page``
+    panels; spillover flows to numbered continuation pages
+    (``eval_diagnostics_2.png``, ...), keeping every file readable and
+    small. A page whose metric group is empty for this env still renders
+    (with a note saying so), so ``check_run_artifacts`` audits the same
+    four pages for every recipe.
+
+    ``save_path`` (optional) enables saving: a directory is used as the
+    pages' target directory; a file path (e.g. the historical
+    ``.../eval_info.png``, or ``artifact_path(log_dir,
+    "eval_headline")``) saves the pages next to it under the standard
+    page names. Returns the list of page figures, or ``None`` if the
+    CSV is missing or empty.
     """
     import csv as _csv
 
     import matplotlib.pyplot as plt
 
-    csv_path = os.path.join(str(log_dir), "eval_info.csv")
-    if not os.path.exists(csv_path):
-        print(f"[notebook_utils] no eval_info.csv at {csv_path}")
+    csv_path = locate_artifact(log_dir, "eval_info_csv")
+    if csv_path is None:
+        print(f"[notebook_utils] no eval_info.csv under {log_dir}")
         return None
 
     series: dict[str, dict[str, tuple[list[float], list[float]]]] = {}
@@ -447,11 +522,11 @@ def plot_eval_info(
         return None
 
     # The recipe's headline metric (config.json: train_config.headline_key)
-    # leads the grid, so the panel that answers "is the task improving?"
+    # leads its page, so the panel that answers "is the task improving?"
     # is the first thing on screen.
     headline_stem = None
-    config_path = os.path.join(str(log_dir), "config.json")
-    if os.path.exists(config_path):
+    config_path = locate_artifact(log_dir, "config")
+    if config_path is not None:
         import json as _json
 
         try:
@@ -462,39 +537,85 @@ def plot_eval_info(
         except (OSError, ValueError):
             headline_stem = None
 
-    stems = sorted(series)
-    if headline_stem in series:
-        stems.remove(headline_stem)
-        stems.insert(0, headline_stem)
-    n = len(stems)
-    cols = min(max_cols, n)
-    rows = (n + cols - 1) // cols
-    fig, axes = plt.subplots(
-        rows, cols, figsize=(5 * cols, 3.5 * rows), squeeze=False
-    )
+    page_stems: dict[str, list[str]] = {page: [] for page in _EVAL_INFO_PAGES}
+    for stem in sorted(series):
+        page_stems[_eval_info_page_for_stem(stem)].append(stem)
+    for stems in page_stems.values():
+        if headline_stem in stems:
+            stems.remove(headline_stem)
+            stems.insert(0, headline_stem)
 
-    for i, stem in enumerate(stems):
-        ax = axes[i // cols][i % cols]
-        for variant in sorted(series[stem]):
-            xs, ys = series[stem][variant]
-            ax.plot(xs, ys, marker=".", markersize=3, label=variant or "value")
-        if stem == headline_stem:
-            ax.set_title(f"{stem} (headline)", fontweight="bold")
-        else:
-            ax.set_title(stem)
-        ax.set_xlabel("Timestep")
-        if any(v for v in series[stem]):
-            ax.legend(fontsize=8)
-
-    for j in range(n, rows * cols):
-        axes[j // cols][j % cols].axis("off")
-
-    fig.tight_layout()
+    pages_dir: str | None = None
     if save_path:
-        fig.savefig(save_path, dpi=120)
+        save_path = str(save_path)
+        if os.path.splitext(save_path)[1]:
+            pages_dir = os.path.dirname(save_path) or "."
+        else:
+            pages_dir = save_path
+        os.makedirs(pages_dir, exist_ok=True)
+
+    figures = []
+    for page in _EVAL_INFO_PAGES:
+        stems = page_stems[page]
+        if not stems:
+            # Keep the four-page contract even when this env logs no
+            # metrics in the group, so the artifact audit stays uniform.
+            fig = plt.figure(figsize=(5, 3.5))
+            fig.text(
+                0.5,
+                0.5,
+                f"no {page} metrics in eval_info.csv",
+                ha="center",
+                va="center",
+            )
+            if pages_dir is not None:
+                fig.savefig(os.path.join(pages_dir, f"{page}.png"), dpi=90)
+            figures.append(fig)
+            continue
+        for chunk_index in range(0, len(stems), max_panels_per_page):
+            chunk = stems[chunk_index : chunk_index + max_panels_per_page]
+            n = len(chunk)
+            cols = min(max_cols, n)
+            rows = (n + cols - 1) // cols
+            fig, axes = plt.subplots(
+                rows, cols, figsize=(4 * cols, 2.8 * rows), squeeze=False
+            )
+
+            for i, stem in enumerate(chunk):
+                ax = axes[i // cols][i % cols]
+                for variant in sorted(series[stem]):
+                    xs, ys = series[stem][variant]
+                    ax.plot(
+                        xs, ys, marker=".", markersize=3,
+                        label=variant or "value",
+                    )
+                if stem == headline_stem:
+                    ax.set_title(f"{stem} (headline)", fontweight="bold")
+                else:
+                    ax.set_title(stem)
+                ax.set_xlabel("Timestep")
+                if any(v for v in series[stem]):
+                    ax.legend(fontsize=8)
+
+            for j in range(n, rows * cols):
+                axes[j // cols][j % cols].axis("off")
+
+            fig.tight_layout()
+            if pages_dir is not None:
+                page_number = chunk_index // max_panels_per_page + 1
+                filename = (
+                    f"{page}.png"
+                    if page_number == 1
+                    else f"{page}_{page_number}.png"
+                )
+                # dpi tuned so a full 24-panel page stays well under
+                # ~400 KB -- readable and casually downloadable.
+                fig.savefig(os.path.join(pages_dir, filename), dpi=90)
+            figures.append(fig)
+
     if show:
         plt.show()
-    return fig
+    return figures
 
 
 def plot_training_health(
@@ -506,13 +627,14 @@ def plot_training_health(
 ):
     """Per-metric grid of SB3's ``train/*`` diagnostics over training.
 
-    Reads ``LOG_DIR/tensorboard/progress.csv`` (written by the CSV logger
-    wired up in ``train``). One panel per ``train/*`` column -- for SAC
-    that's ``ent_coef`` (the entropy temperature), ``actor_loss``,
-    ``critic_loss``, ``ent_coef_loss``; for PPO ``explained_variance``,
-    ``approx_kl``, ``clip_fraction``, etc. A collapsing ``ent_coef`` or a
-    diverging ``critic_loss`` explains a stalled SAC run that the reward
-    curve alone won't.
+    Reads the run's ``metrics/progress.csv`` (written by the CSV logger
+    wired up in ``train``; legacy runs keep it under ``tensorboard/``,
+    which ``locate_artifact`` resolves transparently). One panel per
+    ``train/*`` column -- for SAC that's ``ent_coef`` (the entropy
+    temperature), ``actor_loss``, ``critic_loss``, ``ent_coef_loss``;
+    for PPO ``explained_variance``, ``approx_kl``, ``clip_fraction``,
+    etc. A collapsing ``ent_coef`` or a diverging ``critic_loss``
+    explains a stalled SAC run that the reward curve alone won't.
 
     Returns ``None`` if ``progress.csv`` is missing or has no ``train/``
     columns yet.
@@ -520,9 +642,9 @@ def plot_training_health(
     import matplotlib.pyplot as plt
     import pandas as pd
 
-    csv_path = os.path.join(str(log_dir), "tensorboard", "progress.csv")
-    if not os.path.exists(csv_path):
-        print(f"[notebook_utils] no progress.csv at {csv_path}")
+    csv_path = locate_artifact(log_dir, "progress_csv")
+    if csv_path is None:
+        print(f"[notebook_utils] no progress.csv under {log_dir}")
         return None
     df = pd.read_csv(csv_path)
     metric_cols = sorted(c for c in df.columns if c.startswith("train/"))
@@ -539,7 +661,7 @@ def plot_training_health(
     cols = min(max_cols, n)
     rows = (n + cols - 1) // cols
     fig, axes = plt.subplots(
-        rows, cols, figsize=(5 * cols, 3.5 * rows), squeeze=False
+        rows, cols, figsize=(4 * cols, 2.8 * rows), squeeze=False
     )
 
     for i, col in enumerate(metric_cols):
@@ -570,8 +692,9 @@ def _load_best_model(log_dir: str, algo: str):
     from courtside_dynamics.training.algos import resolve_algo
 
     cls = resolve_algo(algo)
-    candidate = os.path.join(log_dir, "best_model.zip")
-    if not os.path.exists(candidate):
+    candidate = locate_artifact(log_dir, "best_model")
+    if candidate is None:
+        # Ancient runs saved SB3's extension-less "best_model" stem.
         candidate = os.path.join(log_dir, "best_model")
     return cls.load(candidate)
 
@@ -586,10 +709,10 @@ def _load_obs_normalizer(log_dir: str, env_fn: Callable):
     throwaway ``DummyVecEnv`` only because ``VecNormalize.load`` requires
     a venv; we never step it.
     """
-    path = os.path.join(log_dir, "best_vec_normalize.pkl")
-    if not os.path.exists(path):
-        path = os.path.join(log_dir, "vec_normalize.pkl")
-    if not os.path.exists(path):
+    path = locate_artifact(log_dir, "best_vec_normalize") or locate_artifact(
+        log_dir, "vec_normalize"
+    )
+    if path is None:
         return lambda obs: obs
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
@@ -608,9 +731,12 @@ def _load_obs_normalizer(log_dir: str, env_fn: Callable):
     return vec_norm.normalize_obs
 
 
+#: Labels double as RUN_LAYOUT names so ``check_run_artifacts`` resolves
+#: these extras through ``locate_artifact`` (new reports/ location with
+#: the legacy flat-root fallback).
 WALL_BALL_LONG_HORIZON_ARTIFACTS: tuple[tuple[str, str], ...] = (
-    ("best_long_eval", "best_model_long_horizon_eval.json"),
-    ("best_long_eval_episodes", "best_model_long_horizon_episodes.csv"),
+    ("best_long_eval", RUN_LAYOUT["best_long_eval"]),
+    ("best_long_eval_episodes", RUN_LAYOUT["best_long_eval_episodes"]),
 )
 
 # Always report the practical rally gates, including explicit zeroes above
@@ -688,6 +814,8 @@ _LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS: dict[str, Any] = {
     # Added in 0.13.0: render-only floor styling; any value is
     # physics-identical to the pre-0.13 default.
     "court_style": "diagnostic",
+    # Added in 0.14.0: 0.0 reproduces the flat +1 wall reward exactly.
+    "wall_reward_increment": 0.0,
 }
 
 
@@ -1136,10 +1264,16 @@ def evaluate_best_wall_ball(
     if len(set(resolved_seeds)) != len(resolved_seeds):
         raise ValueError("seeds must be unique non-negative integers")
 
-    config_path = os.path.join(log_dir, "config.json")
-    meta_path = os.path.join(log_dir, "best_model_meta.json")
-    model_path = os.path.join(log_dir, "best_model.zip")
-    normalizer_path = os.path.join(log_dir, "best_vec_normalize.pkl")
+    def _required_artifact(name: str) -> str:
+        # New layout first, legacy flat root as fallback; when neither
+        # exists, report the canonical new path so the error is concrete.
+        located = locate_artifact(log_dir, name)
+        return located or os.path.join(log_dir, RUN_LAYOUT[name])
+
+    config_path = _required_artifact("config")
+    meta_path = _required_artifact("best_model_meta")
+    model_path = _required_artifact("best_model")
+    normalizer_path = _required_artifact("best_vec_normalize")
     for path in (config_path, meta_path, model_path, normalizer_path):
         if not os.path.isfile(path):
             raise FileNotFoundError(
@@ -1332,20 +1466,29 @@ def evaluate_best_wall_ball(
         )
     )
     summary = _summarize_wall_ball_episodes(rows, survival_steps=survival_steps)
-    summary_path = summary_path or os.path.join(
-        log_dir, "best_model_long_horizon_eval.json"
-    )
-    episodes_path = episodes_path or os.path.join(
-        log_dir, "best_model_long_horizon_episodes.csv"
+    summary_path = summary_path or artifact_path(log_dir, "best_long_eval")
+    episodes_path = episodes_path or artifact_path(
+        log_dir, "best_long_eval_episodes"
     )
     log_dir_real = os.path.realpath(os.path.abspath(log_dir))
+    # The reports/ folder of the run (where the registry places the
+    # long-horizon outputs); the run root remains accepted for callers
+    # that pass explicit legacy-layout paths.
+    reports_dir_real = os.path.realpath(
+        os.path.dirname(
+            os.path.join(log_dir_real, RUN_LAYOUT["best_long_eval"])
+        )
+    )
     summary_path = os.path.realpath(os.path.abspath(summary_path))
     episodes_path = os.path.realpath(os.path.abspath(episodes_path))
     if summary_path == episodes_path:
         raise ValueError("summary_path and episodes_path must be different files")
     for output_path in (summary_path, episodes_path):
-        if os.path.dirname(output_path) != log_dir_real:
-            raise ValueError("long-horizon outputs must be direct children of log_dir")
+        if os.path.dirname(output_path) not in (log_dir_real, reports_dir_real):
+            raise ValueError(
+                "long-horizon outputs must live in log_dir or its "
+                "reports/ folder"
+            )
 
     evaluation_id = uuid4().hex
     _atomic_write_csv(episodes_path, rows, evaluation_id=evaluation_id)
@@ -1459,7 +1602,7 @@ def record_best_model_video(
             "so frames can be captured."
         )
 
-    out_path = out_path or os.path.join(str(log_dir), "best_model.mp4")
+    out_path = out_path or artifact_path(log_dir, "best_model_video")
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
     frames: list[ArrayLike] = []

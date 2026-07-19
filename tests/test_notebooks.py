@@ -92,11 +92,18 @@ def test_humanoid_notebook_warm_starts_only_after_canonical_promotion() -> None:
         _source(cell) for cell in _load_humanoid_notebook()["cells"]
     )
     assert "for stage in STAGES_TO_RUN:" in notebook_source
-    assert 'best_model_path = stage_dir / "best_model.zip"' in notebook_source
+    # Best-model artifacts resolve through the shared layout registry so
+    # both new (model/best_model.zip) and legacy flat stage dirs work.
     assert (
-        'best_normalizer_path = stage_dir / "best_vec_normalize.pkl"'
+        'located_model = locate_artifact(stage_dir, "best_model")'
         in notebook_source
     )
+    assert (
+        'located_normalizer = locate_artifact(stage_dir, "best_vec_normalize")'
+        in notebook_source
+    )
+    assert "best_model_path = Path(located_model)" in notebook_source
+    assert "best_normalizer_path = Path(located_normalizer)" in notebook_source
     assert "resolve_algo(cfg.algo).load" in notebook_source
     assert "for eval_stage in range(stage + 1)" in notebook_source
     assert "evaluate_curriculum_stage(" in notebook_source

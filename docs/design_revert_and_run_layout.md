@@ -1,6 +1,6 @@
 # Design: recalibration revert, escalating wall reward, run-directory layout
 
-Status: proposed (awaiting review). Motivated by run `20260718_213222`,
+Status: implemented in 0.14.0 (approved 2026-07-19; Phase 2 ships dark with the enable block documented in the baseline starter). Motivated by run `20260718_213222`,
 which falsified the 0.13.0 recalibration bundle (best
 `bounce_count_ep_mean` 1.33 vs 3.23 for both references at identical
 budget/seed/eval; long-horizon completed returns 1.26 vs 2.98/3.42;

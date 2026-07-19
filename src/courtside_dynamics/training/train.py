@@ -42,7 +42,7 @@ from stable_baselines3.common.callbacks import (
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.evaluation import evaluate_policy
-from stable_baselines3.common.logger import configure as configure_logger
+from stable_baselines3.common.logger import Logger, make_output_format
 from stable_baselines3.common.running_mean_std import RunningMeanStd
 from stable_baselines3.common.utils import check_for_correct_spaces
 from stable_baselines3.common.vec_env import (
@@ -69,6 +69,9 @@ from courtside_dynamics.training.algos import (
     resolve_algo as _resolve_algo,
 )
 from courtside_dynamics.training.artifacts import (
+    RUN_LAYOUT,
+    artifact_path,
+    locate_artifact,
     update_run_config_with_initialization,
     update_run_config_with_model,
     write_run_config,
@@ -291,8 +294,9 @@ class TrainConfig:
     normalize_obs:
         When ``True`` (default), wrap envs in ``VecNormalize`` with a
         running observation mean/std so the policy sees inputs on a
-        consistent scale. Stats are saved to ``LOG_DIR/vec_normalize.pkl``
-        and alongside each ``CheckpointCallback`` snapshot.
+        consistent scale. Stats are saved to
+        ``LOG_DIR/model/vec_normalize.pkl`` and alongside each
+        ``CheckpointCallback`` snapshot.
     normalize_reward:
         Tri-state. ``True`` / ``False`` force VecNormalize's return
         normalization on/off. ``None`` (default) picks the per-algo
@@ -553,7 +557,7 @@ def _build_algo(
     return cls(
         policy,
         env,
-        tensorboard_log=os.path.join(log_dir, "tensorboard"),
+        tensorboard_log=artifact_path(log_dir, "tensorboard_dir"),
         **model_kwargs,
     )
 
@@ -615,9 +619,17 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
     if not source_dir.is_dir():
         raise ValueError(f"warm-start source run does not exist: {source_dir}")
 
-    model_path = source_dir / "best_model.zip"
-    normalizer_path = source_dir / "best_vec_normalize.pkl"
-    config_path = source_dir / "config.json"
+    # ``locate_artifact`` resolves the 0.14.0 layout (``model/best_model.zip``)
+    # with a fallback to the legacy flat root, so a warm start can source
+    # both old and new run directories. When neither location exists, fall
+    # back to the canonical new path so the error names a concrete file.
+    def _source_artifact(name: str) -> Path:
+        located = locate_artifact(source_dir, name)
+        return Path(located) if located else source_dir / RUN_LAYOUT[name]
+
+    model_path = _source_artifact("best_model")
+    normalizer_path = _source_artifact("best_vec_normalize")
+    config_path = _source_artifact("config")
     for label, path in (
         ("best model", model_path),
         ("best VecNormalize", normalizer_path),
@@ -843,7 +855,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             checked_train_env_fn,
             n_envs=cfg.n_envs,
             seed=cfg.seed,
-            monitor_dir=os.path.join(cfg.log_dir, "monitor"),
+            monitor_dir=artifact_path(cfg.log_dir, "monitor_dir"),
         )
         opened_envs.append(train_env)
         eval_env = make_vec_env(
@@ -904,7 +916,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         on_new_best: BaseCallback | None = None
         if use_vec_normalize and not headline_selection:
             on_new_best = _SaveVecNormalizeOnNewBest(
-                os.path.join(cfg.log_dir, "best_vec_normalize.pkl")
+                artifact_path(cfg.log_dir, "best_vec_normalize")
             )
 
         after_eval: BaseCallback | None = None
@@ -923,12 +935,17 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 verbose=1,
             )
 
+        # SB3's EvalCallback/InfoDictEvalCallback join ``best_model.zip``
+        # onto their save directory themselves, so both are pointed at the
+        # layout's model/ folder; EvalCallback likewise writes
+        # ``evaluations.npz`` inside ``log_path``, i.e. metrics/.
+        best_model_dir = os.path.dirname(artifact_path(cfg.log_dir, "best_model"))
         eval_callback = EvalCallback(
             eval_env,
             best_model_save_path=(
-                None if headline_selection else cfg.log_dir
+                None if headline_selection else best_model_dir
             ),
-            log_path=cfg.log_dir,
+            log_path=os.path.dirname(artifact_path(cfg.log_dir, "evaluations")),
             render=False,
             deterministic=True,
             n_eval_episodes=cfg.n_eval_episodes,
@@ -942,7 +959,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             callbacks.append(
                 CheckpointCallback(
                     save_freq=_calls(cfg.checkpoint_freq),
-                    save_path=os.path.join(cfg.log_dir, "checkpoints"),
+                    save_path=artifact_path(cfg.log_dir, "checkpoints_dir"),
                     name_prefix=cfg.name_prefix,
                     save_vecnormalize=use_vec_normalize,
                 )
@@ -951,7 +968,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             callbacks.append(
                 VideoRecordCallback(
                     env_fn=resolved_eval_env_fn,
-                    save_path=os.path.join(cfg.log_dir, "videos"),
+                    save_path=artifact_path(cfg.log_dir, "videos_dir"),
                     video_length=cfg.video_length,
                     save_freq=_calls(cfg.video_freq),
                     name_prefix=cfg.name_prefix,
@@ -995,7 +1012,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     )
                 selection_kwargs: dict[str, Any] = {
                     "best_metric_keys": best_metric_keys,
-                    "best_model_save_path": cfg.log_dir,
+                    "best_model_save_path": best_model_dir,
                     "best_metric_min_delta": cfg.best_metric_min_delta,
                     "confirm_best": cfg.confirm_best_eval,
                 }
@@ -1067,7 +1084,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 episode_survival_thresholds=(
                     cfg.info_eval_survival_thresholds
                 ),
-                csv_path=os.path.join(cfg.log_dir, "eval_info.csv"),
+                csv_path=artifact_path(cfg.log_dir, "eval_info_csv"),
                 **selection_kwargs,
             )
             callbacks.append(info_eval_callback)
@@ -1124,8 +1141,8 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                         episode_survival_thresholds=(
                             cfg.info_eval_survival_thresholds
                         ),
-                        csv_path=os.path.join(
-                            cfg.log_dir, "eval_info_final.csv"
+                        csv_path=artifact_path(
+                            cfg.log_dir, "eval_info_final_csv"
                         ),
                     )
                 )
@@ -1184,10 +1201,19 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 "source_run_dir": str(warm_start_artifacts.source_run_dir),
                 "source_artifacts": {
                     name: {
-                        "path": str(warm_start_artifacts.source_run_dir / name),
-                        "sha256": digest,
+                        # The located path: model/ for new-layout sources,
+                        # the flat root for legacy runs.
+                        "path": str(path),
+                        "sha256": warm_start_artifacts.source_hashes[name],
                     }
-                    for name, digest in warm_start_artifacts.source_hashes.items()
+                    for name, path in (
+                        ("best_model.zip", warm_start_artifacts.model_path),
+                        (
+                            "best_vec_normalize.pkl",
+                            warm_start_artifacts.normalizer_path,
+                        ),
+                        ("config.json", warm_start_artifacts.config_path),
+                    )
                 },
                 "source": {
                     "algo": "PPO",
@@ -1236,14 +1262,24 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         # Route SB3's own diagnostics (SAC ent_coef/actor/critic losses, PPO
         # explained_variance/approx_kl, ...) to a CSV alongside TensorBoard so
         # the run directory is self-diagnosing after the Colab runtime is gone.
-        # ``progress.csv`` is read back by stage_summary + plot_training_health.
+        # ``progress.csv`` is read back by stage_summary + plot_training_health;
+        # it lives directly in metrics/ (pandas-readable metrics, not TB event
+        # data) while the event files go to metrics/tensorboard, so the two
+        # formats get their own directories instead of SB3's shared folder.
         # set_logger marks the logger custom, so SB3's learn() leaves it intact
         # instead of resetting to its default (TensorBoard-only) configuration.
-        log_formats = ["csv", "tensorboard"]
+        tensorboard_dir = artifact_path(cfg.log_dir, "tensorboard_dir")
+        output_formats = [
+            make_output_format(
+                "csv",
+                os.path.dirname(artifact_path(cfg.log_dir, "progress_csv")),
+            ),
+            make_output_format("tensorboard", tensorboard_dir),
+        ]
         if effective_verbose:
-            log_formats.append("stdout")
+            output_formats.append(make_output_format("stdout", tensorboard_dir))
         model.set_logger(
-            configure_logger(os.path.join(cfg.log_dir, "tensorboard"), log_formats)
+            Logger(folder=tensorboard_dir, output_formats=output_formats)
         )
         update_run_config_with_model(model, cfg.log_dir)
 
@@ -1266,10 +1302,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     "Training interrupted -- saving final_model and summary "
                     "for the partial run."
                 )
-            model.save(os.path.join(cfg.log_dir, "final_model"))
+            model.save(artifact_path(cfg.log_dir, "final_model"))
             if use_vec_normalize:
                 assert isinstance(train_env, VecNormalize)
-                train_env.save(os.path.join(cfg.log_dir, "vec_normalize.pkl"))
+                train_env.save(artifact_path(cfg.log_dir, "vec_normalize"))
                 # EvalCallback last synced eval_env's running stats up to
                 # eval_freq steps ago; re-sync so the final eval normalizes
                 # observations with the end-of-training statistics.
