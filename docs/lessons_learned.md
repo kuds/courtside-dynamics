@@ -1,7 +1,7 @@
 # Lessons learned: WallBall training campaign (v0.9 – v0.14)
 
-Distilled from nine training runs (`20260714_050506` through
-`20260719_223139`), the baseline review (`wall_ball_baseline_review.md`),
+Distilled from ten training runs (`20260714_050506` through
+`20260720_124628`), the baseline review (`wall_ball_baseline_review.md`),
 and the engineering work around them. Each lesson records the evidence
 and the operational rule this repo now follows because of it.
 
@@ -181,3 +181,11 @@ changes only redistribute the failure taxonomy without raising the
 ceiling, stop tuning rewards — the binding constraint is capability
 (capacity, observations, actions, or task geometry), and the failure
 mix becomes a style knob to revisit only after capability moves.*
+
+**Confirmed by the capacity probe** (run `124628`: net_arch 400×300,
+1.8× parameters, 3M budget): eval curve statistically indistinguishable
+from the flat reference, long-horizon 2.66 returns / ≥5 survival 12%,
+failure mix unchanged. Network size was not the constraint either.
+Budget, incentives, and capacity are now all exhausted as levers; what
+remains is what the policy can *see* and *where it plays* —
+observations, actions, and task geometry (the depth campaign).
