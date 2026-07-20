@@ -1,7 +1,7 @@
-# Lessons learned: WallBall training campaign (v0.9 – v0.13)
+# Lessons learned: WallBall training campaign (v0.9 – v0.14)
 
-Distilled from seven training runs (`20260714_050506` through
-`20260718_213222`), the baseline review (`wall_ball_baseline_review.md`),
+Distilled from nine training runs (`20260714_050506` through
+`20260719_223139`), the baseline review (`wall_ball_baseline_review.md`),
 and the engineering work around them. Each lesson records the evidence
 and the operational rule this repo now follows because of it.
 
@@ -41,8 +41,9 @@ job.**
 Even in the best run, tracking shaping was ~75% of the episode return;
 returns pay +1 regardless of whether they set up the next exchange.
 The double-bounce ceiling is the policy optimizing what it is actually
-paid for. *Rule (pending, Phase 2): pay rally continuation directly
-(escalating wall reward) rather than paying approach ever more.*
+paid for. *Rule: pay the target behavior directly rather than paying
+approach ever more — but see lesson 19 for what that did and did not
+buy when tried (run `223139`).*
 
 ## Exploration and hyperparameters
 
@@ -162,3 +163,21 @@ and the falsification is recorded in the same design doc that proposed
 it. *Rule: designs carry a Status line that is updated with the
 outcome, including failure; a falsified idea documented is worth more
 than a quiet revert.*
+
+## Addendum (v0.14, escalation experiment)
+
+**19. Reward magnitude steers failure *style*; only capability moves
+the ceiling.**
+The escalating wall reward (run `223139`: n-th return pays
+1 + (n−1)×0.5, scoring unchanged) worked exactly as calibrated and
+changed the policy's character — double-bounce failures fell to 30%
+(best on record; the policy commits to the next exchange) while
+out-of-bounds rose to 58% (it now overhits) — yet the long-horizon
+tail did not improve (2.80 completed returns, survival ≥5 at 10%, vs
+the flat reference's 3.42 and 22%). Five healthy runs now bracket the
+same ~3.2–3.4 eval-bounce ceiling across budgets (1.5M/3M) and
+return-reward magnitudes. *Rule: when correctly-aimed incentive
+changes only redistribute the failure taxonomy without raising the
+ceiling, stop tuning rewards — the binding constraint is capability
+(capacity, observations, actions, or task geometry), and the failure
+mix becomes a style knob to revisit only after capability moves.*

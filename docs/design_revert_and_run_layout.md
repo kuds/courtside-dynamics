@@ -34,6 +34,16 @@ version 0.13.1. The best model on record remains run `20260718_023737`.
 
 ## Phase 2 — Escalating wall reward (the next training lever)
 
+> **Outcome (run `20260719_223139`, increment 0.5, 3M budget):** the
+> escalator worked mechanically — double-bounce failures fell to 30%
+> while out-of-bounds rose to 58% (the policy swings harder and
+> commits to the next exchange) — but the ceiling did not move:
+> long-horizon 2.80 completed returns / ≥5 survival 10% vs the flat
+> reference's 3.42 / 22%, eval best 3.43 vs 3.33 (within sampling
+> noise). Not promoted; `wall_reward_increment` stays dark. See
+> `lessons_learned.md` lesson 19 — the binding constraint is
+> capability, not incentives.
+
 The double-bounce ceiling (~54% of failures in the best reference run)
 means the policy is not paid enough for *chaining* returns: every
 return is worth +1 whether or not it sets up the next one. Proposal:
