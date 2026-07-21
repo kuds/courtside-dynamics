@@ -207,6 +207,18 @@ Sweep verdict at 200 episodes/cell (per stage 0→4):
 
 All four blocking criteria hold: strict parked < crude < oracle at
 every stage, oracle feasibility ≥ 90%, crude learnability far above
-zero, and no cross-stage difficulty inversion (oracle bounce means
-2.57 / 2.54 / 2.35 / 2.42 / 2.68). Failure taxonomies stay committed
+zero, and no stage dramatically easier than its predecessor (the
+enforced form of the inversion criterion: an oracle bounce-mean jump
+> 1.5× over the previous stage fails the sweep, checked for every
+adjacent pair). Stated honestly rather than as a blanket "no
+inversion": the oracle bounce means 2.57 / 2.54 / 2.35 / 2.42 / 2.68
+do dip shallowly at stage 2 and end mildly *above* stage 0, and both
+probes' rewards rise with depth (crude 5.66 → 7.30) — serve energy
+co-moves with depth, and a hotter incoming ball pays back more rebound
+energy per swing, so the deepest stages are somewhat friendlier to a
+committed swinger than mid-ladder. Nothing approaches the dramatic
+U-shape that killed the one-bounce depth ladder (worst adjacent rise:
+1.11×), and the gate's bar is absolute (3.0 exchanges), so a mild
+ease-off at depth cannot stall progression — at worst the mid-ladder
+stage 2 is the campaign's real test. Failure taxonomies stay committed
 (OOB-heavy, not double-bounce-heavy) for both probe policies at depth.

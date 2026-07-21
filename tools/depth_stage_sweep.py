@@ -9,7 +9,10 @@ Pass criteria (all blocking):
 1. Within-stage monotonicity: parked < crude < oracle mean reward.
 2. Feasibility: oracle >=2 returns from >=90% of serves per stage.
 3. Learnability: crude completes a second exchange in >0% of episodes.
-4. No cross-stage difficulty inversion for the oracle bounce mean.
+4. No stage dramatically easier than its predecessor: the oracle
+   bounce mean must not exceed the previous stage's by more than 1.5x
+   (the U-shape detector that killed the one-bounce depth ladder;
+   mild dips and rises inside that band are tolerated and reported).
 
 Run: python tools/depth_stage_sweep.py [episodes-per-cell]
 """
@@ -173,7 +176,7 @@ def _job(args):
             if info["paddle_hit_count"] > 0:
                 contact_eps += 1
             for key in ("term_oob", "term_double_bounce", "term_stall",
-                        "term_timeout"):
+                        "term_timeout", "term_nonfinite"):
                 if info.get(key):
                     causes[key.removeprefix("term_")] += 1
     finally:
@@ -191,6 +194,8 @@ def _job(args):
 
 def main() -> int:
     episodes = int(sys.argv[1]) if len(sys.argv) > 1 else 100
+    if episodes < 1:
+        raise SystemExit("episodes-per-cell must be a positive integer")
     jobs = [(i, p, episodes) for i in range(len(STAGES))
             for p in ("parked", "crude", "oracle")]
     with Pool(min(8, len(jobs))) as pool:
@@ -220,9 +225,10 @@ def main() -> int:
         if crude["ge2"] <= 0.0:
             failures.append(f"stage {i}: crude never completes a 2nd "
                             f"exchange")
-        if prev_oracle is not None and i >= 2:
-            # No inversion: a stage must not be dramatically easier than
-            # its predecessor for the oracle (U-shape detector).
+        if prev_oracle is not None:
+            # A stage must not be dramatically easier than its
+            # predecessor for the oracle (U-shape detector); checked
+            # for every adjacent pair including stage 0 -> 1.
             if oracle["mean"] > prev_oracle * 1.5:
                 failures.append(f"stage {i}: oracle bounces jumped "
                                 f"{prev_oracle:.2f} -> {oracle['mean']:.2f} "
