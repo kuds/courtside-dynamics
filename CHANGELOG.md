@@ -5,6 +5,11 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## 0.16.1
+
+Version bump only; no physics, observation, action, or recipe changes.
+All 0.16.0 artifacts and learning curves remain comparable.
+
 ## 0.16.0
 
 Humanoid-tennis stage overhaul: the curriculum's racket forgiveness now

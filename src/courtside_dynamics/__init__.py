@@ -95,7 +95,9 @@ from gymnasium.envs.registration import register
 # and rewards changed, so prior tennis-stage artifacts are not
 # comparable. Eager algo/model_kwargs validation in
 # build_train_config. WallBall recipes unchanged.
-__version__ = "0.16.0"
+# 0.16.1: version bump only; no physics, observation, action, or
+# recipe changes -- 0.16.0 artifacts remain comparable.
+__version__ = "0.16.1"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.
