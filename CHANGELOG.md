@@ -5,6 +5,45 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## 0.15.0
+
+Adds `WallBallDepthCurriculum` — the campaign's answer to the falsified
+cheap levers (budget, incentives, capacity; see `docs/lessons_learned.md`
+lesson 19): curricularize *position* instead. The recipe runs the env's
+`open` rally style (any paddle hit opens the gate, volleys are legal paid
+returns, no early-touch fine) with a performance-gated five-stage depth
+ladder that walks `paddle_x_fence` / `paddle_start_x` from volley range
+(−2.7, 0.3) back to the workspace baseline (−4.7, −1.2) while serve speed
+co-moves 5.2 → 7.0, each stage earned by sustaining ≥3 eval exchanges.
+The action mapping stays pinned to the full workspace so action semantics
+never drift. Every stage was calibrated by the new
+`tools/depth_stage_sweep.py` scripted ladder (parked < crude full-swing <
+charge-and-lead oracle strictly monotone; oracle ≥2 returns from 93–97%
+of serves; crude second exchanges 66–83%; 200 episodes/cell).
+`WallBallBootstrap` is marked historical/superseded (its cold-start
+problem was solved by auto-entropy before it ever ran, and its reward
+package bundles the falsified weak-return retry). Depth-ladder metrics
+are a new era — not comparable to fixed-lane baseline runs, whose
+reference remains `20260718_023737`. No physics or observation changes;
+existing recipes untouched.
+
+## 0.14.0
+
+Reverts the falsified 0.13.0 `WallBallBaseline` recalibration: run
+`20260718_213222` showed the asymmetric weak-return retry teaches soft,
+unchainable returns (1.33 vs 3.23 eval bounces; 82% double-bounce), so
+terminal weak returns and SB3-default gamma are restored, keeping only
+the ≥5-rate selection tiebreak. Adds `wall_reward_increment` (the n-th
+completed return banks `1 + (n−1)×increment`; default 0.0 is
+bit-identical and it ships dark, ladder-calibrated at 0.5 — run
+`20260719_223139` later showed it redistributes failure style without
+moving the ceiling). Run directories are reorganized into `model/`,
+`metrics/`, `reports/`, `media/`, `checkpoints/` via a shared registry
+with legacy-flat fallback for existing runs, and the unreadable
+`eval_info.png` grid is split into four themed, size-bounded pages.
+Training-side reward semantics return to 0.12 behavior; eval metrics
+remain comparable with 0.10+.
+
 ## 0.13.0
 
 Recalibrates `WallBallBaseline` from the first two runs that learned the full

@@ -1,6 +1,9 @@
 # Design: WallBallDepthCurriculum — earn your way back to the baseline
 
-Status: proposed (awaiting review).
+Status: implemented in 0.15.0 (calibration sweep passed 2026-07-20; see
+the outcome addendum at the end for the final stage table and sweep
+numbers — the candidate table below is kept as proposed for the record).
+Awaiting its first training run.
 
 ## Motivation
 
@@ -154,3 +157,56 @@ for the record.
   time-in-stage) rather than raw bounce means — reaching stage 3+ with
   sustained 3-rallies already exceeds everything the fixed-lane era
   achieved at equivalent depth.
+
+## Outcome addendum: calibration sweep (2026-07-20)
+
+The blocking sweep (`tools/depth_stage_sweep.py`) passed after seven
+iterations. The shipped ladder differs from the candidate table above
+in three sweep-forced ways:
+
+1. **All serves are flat** (`serve_lob = 0`). Lofted serves arc over
+   the fixed-height paddle face — the candidate's lob taper was
+   unplayable at every stage (iteration 1: oracle near 0%).
+2. **Serve speed rises with depth** (5.2 → 7.0) instead of falling.
+   Slow serves die mid-court and never reach a deep paddle; faster
+   serves land deeper (5.5 lands ≈ −1.5..−2.0; 7.0 ≈ −2.6) and carry
+   the energy a deep return needs. The pure-volley stage 0 was dropped
+   for the same reason — with flat serves, volley-range play emerges at
+   the shallow fence without a dedicated stage.
+3. **Five stages, generous fence fronts** (width 2.6–3.5 m). Narrow
+   deep fences strand the paddle behind unreachable mid-court rebounds
+   (the 0.10.0 lesson, re-confirmed here).
+
+Final ladder (each stage: fence, start, serve speed): (−2.7, 0.3) /
+−1.6 / 5.2 → (−3.2, −0.6) / −2.1 / 5.5 → (−3.7, −1.0) / −2.7 / 6.0 →
+(−4.2, −1.2) / −3.3 / 6.5 → (−4.7, −1.2) / −3.9 / 7.0. Damping 8.0 and
+`serve_start_x` 1.0 throughout.
+
+Probe notes: the fence-projected `wall_ball_baseline_oracle_action`
+fails at wide fences (its ≤0.9 m commit gate starts the charge too
+late; double-bounce dominated) — the sweep ships its own
+*charge-and-lead* oracle (commit the full charge at the bounce,
+ballistic y/z lead at the closing-speed intercept, ready position a
+calibrated run-up behind the predicted landing point: 1.1 m shallow,
+1.4 m deep). A timed pre-bounce charge variant was tried and rejected
+(it launches at serve time and arrives stationary — weak volley
+blocks). The crude full-swing rung is the learnability bar, per lesson
+9; a pure y-tracker recovers 0% here (fixed-depth face sits in the flat
+serve's dead zone) and was the wrong rung, as it was for the 0.10.0
+baseline calibration.
+
+Sweep verdict at 200 episodes/cell (per stage 0→4):
+
+| Measure | s0 | s1 | s2 | s3 | s4 |
+|---|---|---|---|---|---|
+| parked reward | −1.00 | −1.00 | −1.00 | −1.00 | −1.00 |
+| crude reward | 5.66 | 5.87 | 5.98 | 6.38 | 7.30 |
+| oracle reward | 8.23 | 8.77 | 8.51 | 9.54 | 11.57 |
+| oracle ≥2 returns | 94% | 93% | 94% | 94% | 97% |
+| crude ≥2 returns | 83% | 73% | 70% | 66% | 74% |
+
+All four blocking criteria hold: strict parked < crude < oracle at
+every stage, oracle feasibility ≥ 90%, crude learnability far above
+zero, and no cross-stage difficulty inversion (oracle bounce means
+2.57 / 2.54 / 2.35 / 2.42 / 2.68). Failure taxonomies stay committed
+(OOB-heavy, not double-bounce-heavy) for both probe policies at depth.

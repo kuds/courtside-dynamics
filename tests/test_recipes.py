@@ -161,7 +161,13 @@ def test_wall_ball_baseline_run_config_records_curriculum_schedule(tmp_path):
 
 @pytest.mark.parametrize(
     "env_name",
-    ["BallBounce", "WallBall", "WallBallVolley", "WallBallBaseline"],
+    [
+        "BallBounce",
+        "WallBall",
+        "WallBallVolley",
+        "WallBallBaseline",
+        "WallBallDepthCurriculum",
+    ],
 )
 def test_contact_envs_wire_a_success_metric(env_name, tmp_path):
     """Both contact-driven envs define ``success_key`` so eval runs log
@@ -410,7 +416,13 @@ def test_training_notebook_preserves_curriculum_recipe_defaults():
 
 
 @pytest.mark.parametrize(
-    "env_name", ["WallBall", "WallBallVolley", "WallBallBaseline"]
+    "env_name",
+    [
+        "WallBall",
+        "WallBallVolley",
+        "WallBallBaseline",
+        "WallBallDepthCurriculum",
+    ],
 )
 def test_wall_ball_headline_metric_is_rally_count(env_name, tmp_path):
     """WallBall names ``bounce_count`` as its headline metric:
@@ -428,7 +440,13 @@ def test_wall_ball_headline_metric_is_rally_count(env_name, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "env_name", ["WallBall", "WallBallVolley", "WallBallBaseline"]
+    "env_name",
+    [
+        "WallBall",
+        "WallBallVolley",
+        "WallBallBaseline",
+        "WallBallDepthCurriculum",
+    ],
 )
 def test_wall_ball_recipe_uses_simplified_paddle_interface(env_name, tmp_path):
     cfg = build_train_config(env_name, log_dir=str(tmp_path))
@@ -455,6 +473,7 @@ def test_wall_ball_recipe_preserves_original_open_setup():
     [
         ("WallBallVolley", "volley", -1.7, (-4.7, 0.3)),
         ("WallBallBaseline", "one_bounce", -2.7, (-3.2, -1.6)),
+        ("WallBallDepthCurriculum", "open", -1.7, (-4.7, 0.3)),
     ],
 )
 def test_wall_ball_style_recipes_record_world_space_paddle_setup(
@@ -640,3 +659,106 @@ def test_selection_survival_keys_are_backed_by_thresholds():
                 f"{name}: selection key {key!r} needs {bar} in "
                 f"info_eval_survival_thresholds[{base!r}]"
             )
+
+
+def test_wall_ball_depth_curriculum_walks_the_fence_back():
+    """The depth ladder must walk monotonically deeper with serve energy
+    co-moving, start at the constructor's stage-0 geometry, keep every
+    fence generous (deep-narrow fences die on unreachable mid-court
+    rebounds), and end at the physical workspace limit -- all under a
+    pinned full-workspace action mapping so action semantics never
+    drift. Stage values were calibrated by tools/depth_stage_sweep.py;
+    edits here must re-run that sweep."""
+    recipe = RECIPES["WallBallDepthCurriculum"]
+    gate = recipe.extra_cfg["performance_gate"]
+    stages = gate["stages"]
+
+    assert len(stages) == 5
+    for key, value in stages[0].items():
+        assert recipe.env_kwargs[key] == value
+
+    backs = [stage["paddle_x_fence"][0] for stage in stages]
+    fronts = [stage["paddle_x_fence"][1] for stage in stages]
+    starts = [stage["paddle_start_x"] for stage in stages]
+    speeds = [stage["serve_speed"] for stage in stages]
+    assert backs == sorted(backs, reverse=True)
+    assert fronts == sorted(fronts, reverse=True)
+    assert starts == sorted(starts, reverse=True)
+    assert speeds == sorted(speeds)
+    assert all(
+        front - back >= 2.5
+        for back, front in zip(backs, fronts, strict=True)
+    )
+    for stage in stages:
+        back, front = stage["paddle_x_fence"]
+        assert back <= stage["paddle_start_x"] <= front
+
+    mapping = recipe.env_kwargs["paddle_x_target_range"]
+    assert mapping == (-4.7, 0.3)
+    assert stages[-1]["paddle_x_fence"][0] == mapping[0]
+
+    assert gate["metric_key"] == "bounce_count_ep_mean"
+    assert gate["threshold"] == 3.0
+    assert gate["sustain_evals"] == 2
+    assert recipe.extra_cfg["final_info_eval"] is True
+
+
+def test_wall_ball_depth_curriculum_uses_open_scoring_and_defaults():
+    """Open scoring, emergent style: no one_bounce fault taxonomy or
+    bootstrap shaping may leak in, and model_kwargs stays empty (SB3
+    auto entropy -- lesson 5; capacity and reward probes were null)."""
+    recipe = RECIPES["WallBallDepthCurriculum"]
+    kwargs = recipe.env_kwargs
+
+    assert kwargs["rally_style"] == "open"
+    for banned in (
+        "early_touch_penalty",
+        "weak_return_penalty",
+        "first_hit_bonus",
+        "recovery_reset_probability",
+        "recoverable_bounce_bonus",
+        "recoverable_bounce_lateral_limit",
+        "wall_reward_increment",
+    ):
+        assert banned not in kwargs, banned
+    assert "model_kwargs" not in recipe.extra_cfg
+    assert recipe.eval_env_overrides == {}
+    assert recipe.extra_cfg["success_threshold"] == 3.0
+    assert recipe.extra_cfg["best_metric_keys"] == (
+        "bounce_count_ep_mean",
+        "bounce_count_ep_ge_5_rate",
+    )
+
+
+def test_wall_ball_depth_curriculum_config_builds_and_stages_apply(tmp_path):
+    """The gate's stage dicts must be reachable, settable env attributes
+    (a typo'd stage key would otherwise die mid-run), and the built
+    config must carry the gate and the 3M budget."""
+    cfg = build_train_config("WallBallDepthCurriculum", log_dir=str(tmp_path))
+    assert cfg.performance_gate is not None
+    assert cfg.performance_gate["metric_key"] == "bounce_count_ep_mean"
+    assert cfg.total_timesteps == 3_000_000
+    assert cfg.final_info_eval is True
+
+    env = cfg.env_fn()
+    try:
+        assert env.rally_style == "open"
+        assert env.paddle_x_fence == (-2.7, 0.3)
+        assert env.serve_speed == 5.2
+        for stage in cfg.performance_gate["stages"]:
+            for key, value in stage.items():
+                assert hasattr(env, key)
+                setattr(env, key, value)
+        env.reset(seed=0)
+        assert env.paddle_x_fence == (-4.7, -1.2)
+    finally:
+        env.close()
+
+
+def test_wall_ball_bootstrap_is_marked_historical():
+    """Bootstrap is kept for the record but must say so: its cold-start
+    problem was solved by auto-entropy before it ever ran, and its
+    reward package bundles the falsified weak-return retry."""
+    description = RECIPES["WallBallBootstrap"].description
+    assert "HISTORICAL" in description
+    assert "WallBallDepthCurriculum" in description
