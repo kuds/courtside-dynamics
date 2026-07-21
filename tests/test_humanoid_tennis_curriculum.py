@@ -426,6 +426,68 @@ def test_racket_forgiveness_changes_only_stringbed_reach_not_rigid_mass() -> Non
         stage0.close()
 
 
+def _ball_touches_stringbed(env, offset: float) -> bool:
+    """Teleport the ball ``offset`` along the stringbed's long in-plane
+    axis (on the stringbed plane) and report whether a ball/stringbed
+    contact is generated."""
+    import mujoco
+
+    stringbed_id = env._racket_stringbed_geom_ids[CourtSide.A]
+    ball_geom_id = int(env.model.geom("ball_geom").id)
+    center = env.data.geom_xpos[stringbed_id]
+    frame = env.data.geom_xmat[stringbed_id].reshape(3, 3)
+    qposadr = env._ball_qposadr
+    env.data.qpos[qposadr : qposadr + 3] = center + frame[:, 2] * offset
+    env.data.qvel[env._ball_dofadr : env._ball_dofadr + 6] = 0.0
+    mujoco.mj_forward(env.model, env.data)
+    pairs = {
+        frozenset((int(contact.geom1), int(contact.geom2)))
+        for contact in env.data.contact[: env.data.ncon]
+    }
+    return frozenset((stringbed_id, ball_geom_id)) in pairs
+
+
+def test_racket_forgiveness_band_generates_contacts() -> None:
+    """The enlarged stringbed annulus must physically collide with the ball.
+
+    Writing ``geom_size`` and calling ``mj_setConst`` leaves the
+    compile-time broadphase bounds (``geom_rbound`` / ``geom_aabb``)
+    stale, and MuJoCo culls candidate contact pairs on those bounds --
+    the regression pinned here is the ball passing straight through the
+    visibly enlarged outer band, making the forgiveness inert.
+    """
+    stage0 = HumanoidTennisCoopEnv(curriculum_config=0)
+    try:
+        stage0.reset(seed=0)
+        stringbed_id = stage0._racket_stringbed_geom_ids[CourtSide.A]
+        nominal = stage0._nominal_stringbed_sizes[CourtSide.A]
+        scaled = stage0.model.geom_size[stringbed_id]
+        assert scaled[2] > nominal[2]
+        # The collision bounds must track the enlarged semi-axes.
+        assert stage0.model.geom_rbound[stringbed_id] == pytest.approx(
+            float(np.max(scaled))
+        )
+        assert stage0.model.geom_aabb[stringbed_id, 3:6] == pytest.approx(
+            scaled
+        )
+        # Midpoint of the enlarged-only annulus: inside the scaled
+        # ellipsoid, but clear of the nominal one by more than the ball
+        # radius plus contact margins.
+        offset = float(nominal[2] + scaled[2]) / 2.0
+        assert _ball_touches_stringbed(stage0, offset)
+    finally:
+        stage0.close()
+
+    default = HumanoidTennisCoopEnv()
+    try:
+        default.reset(seed=0)
+        # Same absolute offset misses the nominal stringbed: the band is
+        # genuinely enlarged-only, not a nominal-geometry artifact.
+        assert not _ball_touches_stringbed(default, offset)
+    finally:
+        default.close()
+
+
 @pytest.mark.parametrize("serving_side", [CourtSide.A, CourtSide.B])
 def test_physical_stage0_oracle_succeeds_for_both_mirrored_sides(
     serving_side: CourtSide,
@@ -483,7 +545,7 @@ def test_physical_stage1_oracle_lands_a_mirrored_target_return(
             serving_side=serving_side,
             max_steps=300,
         )
-        assert result.steps == 117
+        assert result.steps == 129
         assert result.stage_success is True
         assert result.rally_count == 1
         assert result.total_reward == pytest.approx(1.0)

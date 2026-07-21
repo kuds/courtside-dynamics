@@ -86,7 +86,16 @@ from gymnasium.envs.registration import register
 # WallBallBootstrap marked historical. A new metric era: depth-ladder
 # numbers are not comparable to fixed-lane baseline runs (reference:
 # 20260718_023737).
-__version__ = "0.15.1"
+# 0.16.0: humanoid-tennis stringbed collision bounds fixed (the
+# racket_contact_scale enlargement now physically collides; stage-1
+# oracle recalibrated) and the three tennis stage recipes gain
+# task-metric selection, gSDE exploration, escrowed hit shaping
+# (stages 1-2), normalize_reward=False, and per-stage early-stop
+# patience. A new metric era for the tennis stages: contact behavior
+# and rewards changed, so prior tennis-stage artifacts are not
+# comparable. Eager algo/model_kwargs validation in
+# build_train_config. WallBall recipes unchanged.
+__version__ = "0.16.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.

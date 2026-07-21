@@ -294,11 +294,18 @@ def test_humanoid_tennis_smoke_recipe_has_compact_recording_schema(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("recipe_name", "stage", "active_count", "episode_len"),
+    (
+        "recipe_name",
+        "stage",
+        "active_count",
+        "episode_len",
+        "patience",
+        "hit_shaping",
+    ),
     [
-        ("HumanoidTennisStage0Intercept", 0, 2, 150),
-        ("HumanoidTennisStage1AnchoredReturn", 1, 7, 300),
-        ("HumanoidTennisStage2RandomizedReturn", 2, 7, 300),
+        ("HumanoidTennisStage0Intercept", 0, 2, 150, 8, 0.0),
+        ("HumanoidTennisStage1AnchoredReturn", 1, 7, 300, 12, 0.25),
+        ("HumanoidTennisStage2RandomizedReturn", 2, 7, 300, 20, 0.25),
     ],
 )
 def test_humanoid_tennis_curriculum_recipes_are_fixed_stage_and_recordable(
@@ -306,6 +313,8 @@ def test_humanoid_tennis_curriculum_recipes_are_fixed_stage_and_recordable(
     stage,
     active_count,
     episode_len,
+    patience,
+    hit_shaping,
     tmp_path,
 ):
     import numpy as np
@@ -318,6 +327,16 @@ def test_humanoid_tennis_curriculum_recipes_are_fixed_stage_and_recordable(
     assert cfg.algo == "PPO"
     assert cfg.success_key == "stage_success"
     assert cfg.normalize_obs_excluded_indices == tuple(range(193, 299))
+    # Task-metric selection, no return normalization on the sparse
+    # hand-scaled reward, gSDE exploration with a small entropy floor,
+    # and per-stage patience scaled to each eval budget (earliest stop
+    # is eval 2 * patience).
+    assert cfg.headline_key == "stage_success"
+    assert cfg.confirm_best_eval is True
+    assert cfg.reward_eval_episodes == 5
+    assert cfg.normalize_reward is False
+    assert cfg.model_kwargs == {"use_sde": True, "ent_coef": 0.01}
+    assert cfg.early_stop_patience == patience
     assert "experimental" in recipe.description.lower()
     assert "convergence is not claimed" in recipe.description.lower()
     assert cfg.csv_header is not None and cfg.info_row_fn is not None
@@ -326,6 +345,9 @@ def test_humanoid_tennis_curriculum_recipes_are_fixed_stage_and_recordable(
     try:
         _, reset_info = env.reset(seed=0)
         assert env.episode_len == episode_len
+        assert env.reward_config.valid_hit_shaping == pytest.approx(
+            hit_shaping
+        )
         assert reset_info["curriculum_stage"] == stage
         assert reset_info["active_action_count"] == active_count
         _, reward, terminated, truncated, info = env.step(
@@ -358,6 +380,42 @@ def test_curriculum_recipe_allows_explicit_sac_despite_ppo_default(tmp_path):
     )
     assert cfg.algo == "SAC"
     assert cfg.name_prefix.endswith("_sac")
+
+
+def test_build_train_config_rejects_unknown_algo_before_env_work(tmp_path):
+    with pytest.raises(ValueError, match="Unknown algo"):
+        build_train_config("BallBalance", algo="PPPO", log_dir=str(tmp_path))
+
+
+def test_build_train_config_rejects_cross_algo_model_kwargs(tmp_path):
+    # WallBallBootstrap's recipe bundle carries SAC-only keys
+    # (learning_starts, buffer_size, target_entropy); flipping the algo
+    # must fail here, not inside train() after the env fleet is built.
+    with pytest.raises(ValueError, match="not accepted by PPO"):
+        build_train_config(
+            "WallBallBootstrap", algo="PPO", log_dir=str(tmp_path)
+        )
+
+
+def test_build_train_config_rejects_string_ent_coef_for_ppo(tmp_path):
+    # A string ent_coef survives PPO *construction* and only crashes at
+    # the first gradient update, a full rollout into the run.
+    with pytest.raises(ValueError, match="numeric ent_coef"):
+        build_train_config(
+            "BallBalance",
+            algo="PPO",
+            log_dir=str(tmp_path),
+            model_kwargs={"ent_coef": "auto_0.02"},
+        )
+
+
+def test_build_train_config_model_kwargs_error_suggests_close_match(tmp_path):
+    with pytest.raises(ValueError, match="did you mean 'learning_rate'"):
+        build_train_config(
+            "BallBalance",
+            log_dir=str(tmp_path),
+            model_kwargs={"learning_rte": 3e-4},
+        )
 
 
 def test_curriculum_recipe_writes_stage_provenance(tmp_path):

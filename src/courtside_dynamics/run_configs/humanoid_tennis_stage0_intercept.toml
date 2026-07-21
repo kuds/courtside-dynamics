@@ -8,8 +8,16 @@
 
 [train]
 total_timesteps = 500_000
-n_envs = 1              # the humanoid env is heavy; PPO batches locally
-early_stop_patience = 20  # evals without a new best before stopping
+# Trained on a single-process DummyVecEnv; raising n_envs alone batches
+# policy inference but adds no multi-core physics stepping.
+n_envs = 1
+# Earliest reachable stop is eval 2*patience (min_evals = patience), so
+# patience is scaled to this stage's 20-eval budget: earliest stop at 16.
+early_stop_patience = 8
+# The stage reward is hand-scaled, sparse, and terminal-only; the PPO
+# default (normalize returns) would amplify the first rare success
+# toward the clip ceiling exactly when learning begins.
+normalize_reward = false
 eval_freq = 25_000
 checkpoint_freq = 100_000
 

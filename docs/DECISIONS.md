@@ -216,7 +216,7 @@ scripted oracles); **learning feasibility was blocked as configured**. Statuses
 below reflect the 0.7.0 review; the three core items were spot-checked as still
 present in the current tree.
 
-### Update `geom_rbound`/AABB when resizing a MuJoCo geom at runtime — *open (critical)*
+### Update `geom_rbound`/AABB when resizing a MuJoCo geom at runtime — *implemented (0.16.0)*
 The stringbed enlargement for "early contact forgiveness" writes `geom_size` and
 calls `mj_setConst`, which does **not** recompute the broadphase bounding sphere
 (`geom_rbound`) or midphase AABB. MuJoCo culls contact pairs on the stale
@@ -225,10 +225,12 @@ essentially inert at the racket tip and the recorded `racket_contact_scale`
 metadata is misleading. Videos show the ball passing through the visibly-enlarged
 racket. Fix: recompute `geom_rbound`/AABB after scaling, or compile the scale
 per-stage via `mujoco.MjSpec`; add a regression test firing a ball at the
-enlarged-only zone. *(Still on `mj_setConst` with no bound recompute in the
-current tree — `humanoid_tennis.py:467`.)*
+enlarged-only zone. *(0.16.0 recomputes both bounds from the scaled semi-axes
+after `mj_setConst`; `test_racket_forgiveness_band_generates_contacts` pins a
+ball contact in the enlarged-only annulus, and the stage-1 oracle was
+recalibrated for the corrected contact timing.)*
 
-### Sparse reward + iid per-step Gaussian exploration at 100 Hz = zero gradient — *open (critical)*
+### Sparse reward + iid per-step Gaussian exploration at 100 Hz = zero gradient — *partially implemented (0.16.0)*
 0 valid hits / 0 nonzero rewards in 264 random episodes; the end-to-end 25k run
 scored 1 success in 177 episodes, all evals `0.000 ± 0.000`. The tell: a
 *constant* random action held for a whole episode succeeds ~15% of the time —
@@ -236,15 +238,20 @@ iid noise averages to a near-still arm, so the failure is exploration structure,
 not task difficulty. Recommended (several together): `use_sde=True` or action
 repeat; enable escrowed `valid_hit_shaping` by default; add distance-to-ball
 shaping; extend `episode_len` past the miss-fault so a miss pays −1, not an
-indistinguishable 0. *(No `use_sde` in recipes; `valid_hit_shaping` still
-defaults `0.0`.)*
+indistinguishable 0. *(0.16.0 ships `use_sde=True` + `ent_coef=0.01` and
+Stage 1–2 recipe-level `valid_hit_shaping=0.25`; distance shaping, action
+repeat, and the `episode_len` extension remain open, and the env-level
+shaping default stays 0.0.)*
 
-### A flat −1 for all Stage 1–2 outcomes gives no aim gradient — *open (major)*
+### A flat −1 for all Stage 1–2 outcomes gives no aim gradient — *partially implemented (0.16.0)*
 Under `VALID_TARGET_RETURN`, a whiff, a hit landing out, and a net fault all pay
 exactly −1, and valid hits pay 0 (`valid_hit_shaping` defaults 0.0). The Stage 1
 oracle under Stage 2 randomization got 12/20 *hits* but 0/20 *target returns* —
 hit-vs-aim is the entire Stage 1→2 task and it is unrewarded. (Same shape as
-WallBall's flat-valley problem, Cardinal Rule 2.)
+WallBall's flat-valley problem, Cardinal Rule 2.) *(0.16.0 sets the escrowed
+`valid_hit_shaping=0.25` in the Stage 1–2 recipes, separating hit-then-miss
+from never-hitting at contact time; hit-landing-out vs whiff still terminate
+at the same −1, so a graded aim signal remains open.)*
 
 ### The zero-action "PD standing hold" only holds welded robots — *open (major)*
 The documented "zero action = two-player standing-reference PD hold" is
@@ -277,6 +284,9 @@ cost.
   value) and humanoid recipes set no `headline_key`, so the configured task
   metric (`stage_success`) never appears — the first file a human reads shows
   single-episode noise. Render `success_rate`/`*_ep_mean` and set `headline_key`.
+  *(0.16.0 sets `headline_key = "stage_success"` on the three stage recipes, so
+  selection, early stop, and `best_model_meta.json` follow the task metric; the
+  `stage_summary.txt` rendering half remains open.)*
 - Fixed-stage recipes pin `n_envs = 1`; Stage 0 trains 2 live action dims among
   56 inactive (96.6% dead weight), and the 0.5M/1M/2M budgets are ≈
   3.6h/7.3h/14.6h on 4-core CPU (undocumented). Un-pin `n_envs` for PPO

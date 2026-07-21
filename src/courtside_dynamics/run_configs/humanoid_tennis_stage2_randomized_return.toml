@@ -8,7 +8,11 @@
 [train]
 total_timesteps = 2_000_000
 n_envs = 1
-early_stop_patience = 20  # evals without a new best before stopping
+# Earliest reachable stop is eval 2*patience (min_evals = patience);
+# patience 20 of this stage's 80-eval budget: earliest stop at 40.
+early_stop_patience = 20
+# Sparse hand-scaled terminal reward; see stage-0 starter for rationale.
+normalize_reward = false
 eval_freq = 25_000
 checkpoint_freq = 100_000
 
