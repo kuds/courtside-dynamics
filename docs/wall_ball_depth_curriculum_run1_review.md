@@ -2,7 +2,15 @@
 
 Status: review of run `WallBallDepthCurriculum/sac/20260721_004722`
 (v0.15.0, git `1330509`, seed 0, 3M steps, 10h24m, completed without
-early stop). Evidence: `stage_summary.txt`, `config.json`,
+early stop). **First-round fixes shipped in 0.15.1** (see CHANGELOG):
+P0 items 1–3 (SAC warm start, window-mean gate, promotion warm-up
+package — the recipe adopts pause 50k + buffer clear as the
+continuation run's single training-dynamics lever), P1 item 5
+(`legal_paddle_hit_x_*` positional instrumentation), and P2 items 6–8
+(stage-index stamping into eval artifacts, multi-episode milestone
+videos, `reward_eval_episodes = 5`). Still open: the landing-point
+observation feature (item 4, trigger-gated on a de-noised stage-2+
+stall) and the second seed (item 9). Evidence: `stage_summary.txt`, `config.json`,
 `progress.csv` (stage/gate/eval time series), `eval_info.csv` and
 `eval_info_final.csv` (matched vs final-geometry eval streams),
 `best_model_long_horizon_eval.json` (50-seed audit), and

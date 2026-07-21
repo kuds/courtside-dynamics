@@ -174,6 +174,11 @@ def _convert_phase_labels(labels: Any, path: str) -> dict[int, Any]:
 
 
 _GATE_REQUIRED_KEYS = ("metric_key", "threshold", "sustain_evals", "stages")
+_GATE_OPTIONAL_KEYS = (
+    "promotion_rule",
+    "advance_update_pause_steps",
+    "clear_replay_buffer_on_advance",
+)
 
 
 def _validate_performance_gate(gate: Any, path: str) -> None:
@@ -194,11 +199,10 @@ def _validate_performance_gate(gate: Any, path: str) -> None:
             f"{path}: [train.performance_gate] replaces the recipe's gate "
             f"wholesale and must define {missing}"
         )
-    unknown = sorted(set(gate) - set(_GATE_REQUIRED_KEYS))
+    known_keys = _GATE_REQUIRED_KEYS + _GATE_OPTIONAL_KEYS
+    unknown = sorted(set(gate) - set(known_keys))
     if unknown:
-        suggestions = difflib.get_close_matches(
-            unknown[0], _GATE_REQUIRED_KEYS, n=3
-        )
+        suggestions = difflib.get_close_matches(unknown[0], known_keys, n=3)
         hint = (
             f"; did you mean {', '.join(map(repr, suggestions))}?"
             if suggestions
@@ -207,7 +211,7 @@ def _validate_performance_gate(gate: Any, path: str) -> None:
         raise ValueError(
             f"{path}: unknown [train.performance_gate] key(s) "
             f"{unknown}{hint} (train() reads exactly "
-            f"{list(_GATE_REQUIRED_KEYS)}, so anything else would be "
+            f"{list(known_keys)}, so anything else would be "
             f"silently ignored)"
         )
     if not isinstance(gate["metric_key"], str):
@@ -238,6 +242,29 @@ def _validate_performance_gate(gate: Any, path: str) -> None:
         raise ValueError(
             f"{path}: [train.performance_gate.stages] must be a non-empty "
             f"array of non-empty tables"
+        )
+    if "promotion_rule" in gate and not isinstance(
+        gate["promotion_rule"], str
+    ):
+        raise ValueError(
+            f"{path}: [train.performance_gate] promotion_rule must be a "
+            f"string, got {gate['promotion_rule']!r}"
+        )
+    if "advance_update_pause_steps" in gate:
+        pause = gate["advance_update_pause_steps"]
+        if isinstance(pause, bool) or not isinstance(pause, int):
+            raise ValueError(
+                f"{path}: [train.performance_gate] "
+                f"advance_update_pause_steps must be an integer, "
+                f"got {pause!r}"
+            )
+    if "clear_replay_buffer_on_advance" in gate and not isinstance(
+        gate["clear_replay_buffer_on_advance"], bool
+    ):
+        raise ValueError(
+            f"{path}: [train.performance_gate] "
+            f"clear_replay_buffer_on_advance must be a boolean, got "
+            f"{gate['clear_replay_buffer_on_advance']!r}"
         )
 
 

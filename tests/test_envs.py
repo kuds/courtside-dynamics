@@ -867,6 +867,50 @@ class TestWallBallRewardGate:
         assert np.median(oracle_bounces_seen) >= 2.0
         assert max(oracle_bounces_seen) >= 3
 
+    def test_legal_hit_x_instrumentation_tracks_contact_positions(self):
+        """Positional-play diagnostics: legal hits accumulate their world
+        x so eval can measure WHERE the policy plays (a deep-fence stage
+        "mastered" by camping the fence front must be visible as such).
+        The sum/mean pair is exact for zero-hit episodes: sum 0.0 with
+        count 0 carries no fake position, and the mean only divides by
+        real hits."""
+        from courtside_dynamics.recipes import RECIPES
+        from courtside_dynamics.scripted_policies import (
+            wall_ball_oracle_action,
+        )
+
+        env_kwargs = dict(RECIPES["WallBall"].env_kwargs)
+        env_kwargs.pop("render_mode", None)
+        env = WallBallEnv(**env_kwargs)
+        try:
+            obs, _ = env.reset(seed=0)
+            # Pre-hit: both keys present and exactly zero.
+            obs, _, _, _, info = env.step(np.zeros(3, dtype=np.float32))
+            assert info["legal_paddle_hit_x_sum"] == 0.0
+            assert info["legal_paddle_hit_x_mean"] == 0.0
+
+            obs, _ = env.reset(seed=0)
+            info = {}
+            for _ in range(env.episode_len):
+                obs, _, terminated, truncated, info = env.step(
+                    wall_ball_oracle_action(obs)
+                )
+                if terminated or truncated:
+                    break
+            count = info["legal_paddle_hit_count"]
+            assert count >= 1, "oracle made no legal hit; premise broken"
+            mean_x = info["legal_paddle_hit_x_mean"]
+            assert mean_x == pytest.approx(
+                info["legal_paddle_hit_x_sum"] / count
+            )
+            # Contact positions must be physically plausible: inside the
+            # paddle's world-space x workspace (with a small margin for
+            # the end-of-frame sampling).
+            low, high = env._paddle_x_world_range
+            assert low - 0.2 <= mean_x <= high + 0.2
+        finally:
+            env.close()
+
     def test_stalled_ball_terminates_episode(self):
         """A dead ball should end the episode well before episode_len.
 

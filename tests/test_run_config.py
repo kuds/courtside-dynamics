@@ -293,6 +293,56 @@ class TestLoader:
         path = _write(tmp_path, '[train]\nperformance_gate = "none"\n')
         assert load_run_config(path).train["performance_gate"] is None
 
+    def test_performance_gate_optional_keys_load_and_type_check(
+        self, tmp_path
+    ):
+        # The 0.15.1 gate options (window-mean promotion + warm-up
+        # package) are file-configurable with per-key type validation.
+        base = (
+            "[train.performance_gate]\n"
+            'metric_key = "bounce_count_ep_mean"\n'
+            "threshold = 3.0\n"
+            "sustain_evals = 2\n"
+            'promotion_rule = "window_mean"\n'
+            "advance_update_pause_steps = 50_000\n"
+            "clear_replay_buffer_on_advance = true\n"
+            "[[train.performance_gate.stages]]\n"
+            "serve_vy_max = 1.2\n"
+        )
+        gate = load_run_config(_write(tmp_path, base)).train[
+            "performance_gate"
+        ]
+        assert gate["promotion_rule"] == "window_mean"
+        assert gate["advance_update_pause_steps"] == 50_000
+        assert gate["clear_replay_buffer_on_advance"] is True
+
+        for broken, match in (
+            (
+                base.replace(
+                    'promotion_rule = "window_mean"\n',
+                    "promotion_rule = 3\n",
+                ),
+                "promotion_rule must be a string",
+            ),
+            (
+                base.replace(
+                    "advance_update_pause_steps = 50_000\n",
+                    'advance_update_pause_steps = "lots"\n',
+                ),
+                "advance_update_pause_steps must be an integer",
+            ),
+            (
+                base.replace(
+                    "clear_replay_buffer_on_advance = true\n",
+                    "clear_replay_buffer_on_advance = 1\n",
+                ),
+                "clear_replay_buffer_on_advance must be a boolean",
+            ),
+        ):
+            path = _write(tmp_path, broken, "broken_gate.toml")
+            with pytest.raises(ValueError, match=match):
+                load_run_config(path)
+
     def test_gate_unknown_keys_and_bad_scalar_types_fail_at_load(
         self, tmp_path
     ):

@@ -700,7 +700,16 @@ def test_wall_ball_depth_curriculum_walks_the_fence_back():
     assert gate["metric_key"] == "bounce_count_ep_mean"
     assert gate["threshold"] == 3.0
     assert gate["sustain_evals"] == 2
+    # Run-1 gate refinements (see the recipe comment): the bar itself is
+    # untouched, but promotion reads the 2-eval mean (stage 2 cleared
+    # 3.0 four separate times without two-in-a-row), and every advance
+    # runs the warm-up package -- clear the stale-stage buffer, pause
+    # updates for 50k fresh frontier steps.
+    assert gate["promotion_rule"] == "window_mean"
+    assert gate["advance_update_pause_steps"] == 50_000
+    assert gate["clear_replay_buffer_on_advance"] is True
     assert recipe.extra_cfg["final_info_eval"] is True
+    assert recipe.extra_cfg["reward_eval_episodes"] == 5
 
 
 def test_wall_ball_depth_curriculum_uses_open_scoring_and_defaults():

@@ -281,6 +281,9 @@ class InfoDictEvalCallback(BaseCallback):
         self._best_score: tuple[float, ...] | None = None
         self._evals_since_best = 0
         self._eval_count = 0
+        # Caller-owned scalars merged into every evaluation's metrics
+        # (see set_context_metric). Ordered dict so CSV rows stay stable.
+        self._context_metrics: dict[str, float] = {}
         # Most recent evaluation's aggregated metrics and a monotonically
         # increasing completion counter, for consumers that react to
         # evaluations (e.g. performance-gated curriculum callbacks).
@@ -311,6 +314,7 @@ class InfoDictEvalCallback(BaseCallback):
                 pass
 
         metrics = self._collect_metrics()
+        self._merge_context(metrics)
         self.last_metrics = dict(metrics)
         self.completed_evals += 1
 
@@ -526,6 +530,41 @@ class InfoDictEvalCallback(BaseCallback):
 
         return metrics
 
+    def set_context_metric(self, name: str, value: float) -> None:
+        """Attach a caller-owned scalar to every subsequent evaluation.
+
+        The value is merged into the aggregated metrics of each future
+        evaluation, so it reaches TensorBoard, the long-format CSV,
+        ``last_metrics`` consumers, and ``best_model_meta.json``. The
+        canonical use is a performance-gated curriculum stamping its
+        stage index onto the matched eval stream: run
+        20260721_004722's stage timeline was reconstructible only by
+        joining logger columns by timestep, because no eval artifact
+        recorded which geometry it measured. Setting the same name again
+        overwrites the previous value (a stage advance).
+        """
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("context metric name must be a non-empty string")
+        resolved = float(value)
+        if not np.isfinite(resolved):
+            raise ValueError("context metric value must be finite")
+        self._context_metrics[name] = resolved
+
+    def _merge_context(self, metrics: dict[str, float]) -> None:
+        """Merge context scalars, refusing to shadow a collected metric.
+
+        A collision means an env info key and a context name overlap --
+        silently preferring either side would corrupt whichever consumer
+        expected the other, so fail loudly on the first evaluation.
+        """
+        for name, value in self._context_metrics.items():
+            if name in metrics:
+                raise ValueError(
+                    f"context metric '{name}' collides with a collected "
+                    f"evaluation metric of the same name"
+                )
+            metrics[name] = value
+
     def reset_selection_state(self) -> None:
         """Forget the best score, patience, and degenerate-signal window.
 
@@ -718,6 +757,14 @@ class InfoDictEvalCallback(BaseCallback):
                     }
                 }
                 if confirmation is not None
+                else {}
+            ),
+            # Context scalars active at selection time (e.g. the
+            # curriculum stage this best was measured at), so "best 3.80"
+            # is never ambiguous about its geometry again.
+            **(
+                {"context": dict(self._context_metrics)}
+                if self._context_metrics
                 else {}
             ),
             # Bind the checkpoint and its observation statistics to this

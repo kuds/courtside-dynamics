@@ -5,6 +5,35 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## 0.15.1
+
+First-round fixes from the depth-curriculum run-1 review
+(`docs/wall_ball_depth_curriculum_run1_review.md`, run `20260721_004722`:
+budget-bound at stage 2 of 4, monotone final-geometry transfer confirmed).
+The gate gains an opt-in `promotion_rule = "window_mean"` (promote on the
+mean of the last `sustain_evals` evaluations — stage 2 cleared 3.0 in four
+separate 30-episode evals without ever managing two in a row) and a
+promotion warm-up package (`advance_update_pause_steps`,
+`clear_replay_buffer_on_advance`): each advance drops the stale-stage
+replay buffer and pauses gradient updates until fresh frontier-stage data
+exists, targeting the measured promotion shocks (matched eval 3.37→1.43
+and 3.10→1.70, ~0.5–1M steps of recovery each). `WallBallDepthCurriculum`
+adopts all three (window mean, 50k pause, clear) plus
+`reward_eval_episodes = 5` (the reporting-only reward eval stream cost
+~as many env steps as training itself). Policy-only `warm_start` now
+supports SAC (actor/critics/targets via the policy state dict plus the
+auto-tuned entropy temperature), enabling stage-2 continuation runs with
+a truncated `[train.performance_gate]` stage table. The gate stamps
+`curriculum_stage_index` into the matched eval stream (eval_info.csv,
+TensorBoard, `best_model_meta.json`, stage summary) so scores are never
+again ambiguous about their geometry. WallBall info dicts add
+`legal_paddle_hit_x_sum` / `legal_paddle_hit_x_mean` (where legal hits
+happen — the fence-front-camping tripwire for deep stages).
+`VideoRecordCallback` no longer stops at the first episode end: milestone
+videos/CSVs record up to `max_episodes` (default 3) within the
+`video_length` cap. No physics, observation-space, or reward changes;
+existing eval metrics remain comparable within the 0.15 era.
+
 ## 0.15.0
 
 Adds `WallBallDepthCurriculum` — the campaign's answer to the falsified
