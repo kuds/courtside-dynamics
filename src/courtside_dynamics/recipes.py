@@ -617,10 +617,159 @@ RECIPES: dict[str, Recipe] = {
             },
         },
         description=(
-            "Bootstrap-focused one-bounce baseline: monotone contact "
-            "rewards, fined retries instead of terminal weak-return "
-            "faults, and a performance-gated serve-spread ladder from a "
-            "narrow corridor to the full baseline serve."
+            "HISTORICAL (superseded by WallBallDepthCurriculum): the "
+            "cold-start problem this recipe targets was solved by "
+            "auto-entropy before it ever trained (lessons_learned.md "
+            "lesson 5), and its reward package bundles the since-"
+            "falsified weak-return retry. Kept for the record; use "
+            "WallBallDepthCurriculum for gated-curriculum training."
+        ),
+    ),
+    "WallBallDepthCurriculum": Recipe(
+        env_cls=WallBallEnv,
+        env_kwargs={
+            "render_mode": "rgb_array",
+            "min_force": 20.0,
+            # Open scoring, emergent style (design doc
+            # design_wall_ball_depth_curriculum.md): any paddle hit
+            # opens the return gate, volleys are legal paid returns, and
+            # there is no early-touch fine — near the wall the natural
+            # game is volleying, while from the deep stages every ball
+            # has bounced long before it arrives, so one-bounce baseline
+            # play emerges from geometry instead of a fault taxonomy.
+            # None of the one_bounce-era shaping (first_hit_bonus,
+            # weak_return_penalty, recovery fragments,
+            # recoverable_bounce_*) carries over.
+            "rally_style": "open",
+            # The action mapping stays pinned to the full physical
+            # workspace for the entire run so action semantics never
+            # drift across stages; each stage confines *position* with
+            # paddle_x_fence instead.
+            "paddle_home_x": -1.7,
+            "paddle_x_target_range": (-4.7, 0.3),
+            # Stage-0 geometry — volley range, where striking is easy.
+            # The full five-stage ladder below was calibrated by
+            # tools/depth_stage_sweep.py (2026-07-20, 200 episodes per
+            # cell): at every stage parked < crude full-swing <
+            # charge-and-lead oracle strictly, the oracle completes >=2
+            # returns from 93-97% of serves, and the placement-blind
+            # crude policy still completes a second exchange in 66-83%
+            # of episodes — the learnability bar the proven baseline
+            # geometry set (lesson 9).
+            "paddle_x_fence": (-2.7, 0.3),
+            "paddle_start_x": -1.6,
+            # Serve energy co-moves with depth via the gate (5.2 -> 7.0)
+            # so the ball reliably reaches the deeper paddle; the flat
+            # serve (lob 0) keeps contact at face height — lofted serves
+            # sail over the fixed-height face (sweep iteration 1).
+            "serve_start_x": 1.0,
+            "serve_speed": 5.2,
+            "serve_lob": 0.0,
+            "serve_speed_jitter": 0.5,
+            "serve_vy_min": 0.8,
+            "serve_vy_max": 2.0,
+            # Baseline-calibrated servo damping (see WallBallBaseline):
+            # caps saturated swings at ~12.5 m/s so full-power returns
+            # rebound shallow enough to recover.
+            "paddle_joint_damping": 8.0,
+        },
+        eval_env_overrides={
+            # The canonical scoring task is the ladder's FINAL stage —
+            # the campaign goal. The gate re-applies the current
+            # training stage to the matched evaluator (selection and
+            # early stopping stay matched-stage), but the final-config
+            # evaluator (eval_info_final.csv), milestone videos, the
+            # reward eval stream, and the post-training long-horizon
+            # audit all use this factory unsynced; leaving it at the
+            # stage-0 defaults would score the easiest geometry for the
+            # whole run and silently inflate apparent competence.
+            # "Deepest stage reached" is not expressible with the
+            # final-eval machinery; the fixed goal task is also the
+            # yardstick that stays comparable across runs. Must equal
+            # the last performance_gate stage (pinned by test).
+            "paddle_x_fence": (-4.7, -1.2),
+            "paddle_start_x": -3.9,
+            "serve_speed": 7.0,
+        },
+        default_total_timesteps=3_000_000,
+        name_prefix="wall_ball_depth_curriculum",
+        extra_cfg={
+            "n_envs": 8,
+            "early_stop_patience": 20,
+            # model_kwargs deliberately empty: SB3 defaults (auto
+            # entropy, gamma 0.99) are what every run that learned the
+            # task used (lesson 5); the campaign's capacity and reward
+            # probes both came back null, so nothing else is earned.
+            "success_key": "bounce_count",
+            # Success mirrors the gate bar: a sustained three-exchange
+            # rally is what earns the next depth stage.
+            "success_threshold": 3.0,
+            "headline_key": "bounce_count",
+            "best_metric_keys": (
+                "bounce_count_ep_mean",
+                "bounce_count_ep_ge_5_rate",
+            ),
+            "best_metric_min_delta": 0.5 / 30,
+            "confirm_best_eval": True,
+            "early_stop_degenerate_evals": 5,
+            "degenerate_guard_keys": ("paddle_hit_count_ep_mean",),
+            "info_eval_distribution_keys": ("bounce_count",),
+            "info_eval_survival_thresholds": {
+                "bounce_count": (2, 3, 5),
+            },
+            # Earned progression from volley range back toward the
+            # workspace baseline. The matched (training-stage) eval
+            # drives the gate and model selection; eval_info_final.csv
+            # and the final long-horizon audit score the ladder's final
+            # stage (see eval_env_overrides). curriculum/stage_index in
+            # TensorBoard is the campaign's real headline: how far back
+            # did it earn its way?
+            "performance_gate": {
+                "metric_key": "bounce_count_ep_mean",
+                "threshold": 3.0,
+                "sustain_evals": 2,
+                "stages": (
+                    {
+                        "paddle_x_fence": (-2.7, 0.3),
+                        "paddle_start_x": -1.6,
+                        "serve_speed": 5.2,
+                    },
+                    {
+                        "paddle_x_fence": (-3.2, -0.6),
+                        "paddle_start_x": -2.1,
+                        "serve_speed": 5.5,
+                    },
+                    {
+                        "paddle_x_fence": (-3.7, -1.0),
+                        "paddle_start_x": -2.7,
+                        "serve_speed": 6.0,
+                    },
+                    {
+                        "paddle_x_fence": (-4.2, -1.2),
+                        "paddle_start_x": -3.3,
+                        "serve_speed": 6.5,
+                    },
+                    {
+                        "paddle_x_fence": (-4.7, -1.2),
+                        "paddle_start_x": -3.9,
+                        "serve_speed": 7.0,
+                    },
+                ),
+            },
+            "final_info_eval": True,
+            "phase_key": "rally_phase",
+            "phase_labels": {
+                0: "await_bounce",
+                1: "await_paddle",
+                2: "await_wall",
+            },
+        },
+        description=(
+            "Earn your way back to the baseline: open-scoring wall "
+            "rallies with a performance-gated depth ladder that walks "
+            "the paddle fence from volley range to the workspace "
+            "baseline each time a sustained three-exchange rally is "
+            "demonstrated."
         ),
     ),
     "HumanoidTennisStage0Intercept": Recipe(

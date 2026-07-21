@@ -1,0 +1,41 @@
+# WallBallDepthCurriculum — earn your way back to the baseline: open
+# scoring (volleys legal, no early-touch fine) with a performance-gated
+# depth ladder that walks the paddle fence from volley range to the
+# workspace baseline as eval bounce_count_ep_mean sustains >= 3.0
+# (SAC with SB3-default auto entropy, 3M steps). Every stage was
+# calibrated by tools/depth_stage_sweep.py — re-run it before editing
+# any geometry here.
+# Usage: build_train_config("WallBallDepthCurriculum", log_dir=..., config_file=<this file>)
+# Everything here matches the recipe today; edit a value to diverge.
+# Do NOT set stage-0 geometry in [env] — the gate owns it. Final
+# scoring (eval_info_final.csv, videos, long-horizon audit) runs at the
+# ladder's final stage via the recipe's eval_env_overrides; the matched
+# selection eval is re-synced to the current stage by the gate.
+
+[train]
+total_timesteps = 3_000_000
+n_envs = 8
+early_stop_patience = 20  # evals without a new best before stopping
+
+[env]
+# The serve's lateral spread is fixed across all stages (only speed
+# co-moves with depth via the gate). serve_vy_min 0.8 is the no-op
+# invariant — a parked paddle can never be hit by the serve.
+serve_speed_jitter = 0.5
+serve_vy_max = 2.0
+
+# To replace the depth ladder, uncomment ALL of the following —
+# performance_gate replaces wholesale, never merges — and re-run
+# tools/depth_stage_sweep.py with the new stage table first:
+# [train.performance_gate]
+# metric_key = "bounce_count_ep_mean"
+# threshold = 3.0
+# sustain_evals = 2
+# [[train.performance_gate.stages]]
+# paddle_x_fence = [-2.7, 0.3]
+# paddle_start_x = -1.6
+# serve_speed = 5.2
+# [[train.performance_gate.stages]]
+# paddle_x_fence = [-4.7, -1.2]
+# paddle_start_x = -3.9
+# serve_speed = 7.0

@@ -84,6 +84,19 @@ policies and statistics stay comparable across versions — see
 [`CHANGELOG.md`](CHANGELOG.md) for the per-version details and migration
 notes.
 
+Version 0.15.0 adds `WallBallDepthCurriculum`: with budget, incentives,
+and capacity all exhausted as levers (`docs/lessons_learned.md` lesson
+19), the campaign now curricularizes *position* — open-scoring rallies
+(volleys legal, no early-touch fine) with a performance-gated depth
+ladder that walks the paddle fence from volley range back to the
+workspace baseline each time the policy sustains a three-exchange rally.
+The five stages were calibrated by `tools/depth_stage_sweep.py`
+(scripted-ladder monotonicity, oracle feasibility 93–97%, crude
+learnability 66–83% at every stage). `WallBallBootstrap` is now
+historical: its cold-start problem was solved by auto-entropy before it
+ever ran. Depth-ladder metrics are a new era — not comparable to the
+fixed-lane baseline runs (reference `20260718_023737`).
+
 Version 0.14.0 reverts the 0.13.0 recalibration: run `20260718_213222`
 falsified it (1.33 vs 3.23 eval bounces — the asymmetric weak-return
 retry taught soft, unchainable returns; see `docs/lessons_learned.md`),
@@ -117,6 +130,8 @@ available recipe keys are:
 - `WallBall`
 - `WallBallVolley`
 - `WallBallBaseline`
+- `WallBallBootstrap` (historical — superseded by `WallBallDepthCurriculum`)
+- `WallBallDepthCurriculum`
 - `HumanoidTennisStage0Intercept`
 - `HumanoidTennisStage1AnchoredReturn`
 - `HumanoidTennisStage2RandomizedReturn`

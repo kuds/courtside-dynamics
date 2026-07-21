@@ -12,7 +12,7 @@ soft-return signature of the asymmetric weak-return retry).
 Restore the empirically-proven configuration; keep only the harmless
 selection improvement:
 
-| Setting | 0.13.0 (falsified) | 0.13.1 (revert) |
+| Setting | 0.13.0 (falsified) | 0.14.0 (revert) |
 |---|---|---|
 | `env_kwargs.weak_return_penalty` | `0.1` retry | **removed** (terminal rule, as in the reference runs) |
 | `eval_env_overrides.weak_return_penalty` | `None` | removed (moot without the training retry) |
@@ -30,9 +30,19 @@ with the OOB penalty.
 Deliverables: recipe + starter TOML (drift test keeps them in
 lockstep), updated pin tests asserting the revert, design-doc outcome
 addendum in `design_court_and_config_updates.md`, README paragraph,
-version 0.13.1. The best model on record remains run `20260718_023737`.
+version 0.14.0 (the revert shipped in the same release train as Phases 2-3). The best model on record remains run `20260718_023737`.
 
 ## Phase 2 — Escalating wall reward (the next training lever)
+
+> **Outcome (run `20260719_223139`, increment 0.5, 3M budget):** the
+> escalator worked mechanically — double-bounce failures fell to 30%
+> while out-of-bounds rose to 58% (the policy swings harder and
+> commits to the next exchange) — but the ceiling did not move:
+> long-horizon 2.80 completed returns / ≥5 survival 10% vs the flat
+> reference's 3.42 / 22%, eval best 3.43 vs 3.33 (within sampling
+> noise). Not promoted; `wall_reward_increment` stays dark. See
+> `lessons_learned.md` lesson 19 — the binding constraint is
+> capability, not incentives.
 
 The double-bounce ceiling (~54% of failures in the best reference run)
 means the policy is not paid enough for *chaining* returns: every

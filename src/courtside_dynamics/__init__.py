@@ -79,7 +79,14 @@ from gymnasium.envs.registration import register
 # bit-identical, ships dark, ladder-calibrated at 0.5); run directories
 # restructured (model/ metrics/ reports/ media/; readers fall back to
 # the legacy flat layout) and eval_info.png split into themed pages.
-__version__ = "0.14.0"
+# 0.15.0: new WallBallDepthCurriculum recipe -- open scoring (volleys
+# legal, no early-touch fine) with a performance-gated depth ladder
+# that walks the paddle fence from volley range to the workspace
+# baseline (five stages calibrated by tools/depth_stage_sweep.py);
+# WallBallBootstrap marked historical. A new metric era: depth-ladder
+# numbers are not comparable to fixed-lane baseline runs (reference:
+# 20260718_023737).
+__version__ = "0.15.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.
