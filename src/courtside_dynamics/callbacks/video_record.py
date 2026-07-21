@@ -57,7 +57,16 @@ class VideoRecordCallback(BaseCallback):
     save_path:
         Directory where videos and CSVs are written. Created if missing.
     video_length:
-        Maximum number of steps to roll out when recording.
+        Maximum number of steps to roll out when recording (the hard cap
+        across all recorded episodes).
+    max_episodes:
+        Number of episodes to record before stopping, within the
+        ``video_length`` step cap. The recorder historically stopped at
+        the FIRST episode end regardless of ``video_length`` (run
+        20260721_004722's best-model video is 104 frames against a
+        10,000-step budget), leaving an n=1 behavioral record per
+        milestone. Default 3; ``None`` records episodes until
+        ``video_length`` is exhausted.
     save_freq:
         Record every ``save_freq`` training steps.
     name_prefix:
@@ -94,12 +103,22 @@ class VideoRecordCallback(BaseCallback):
         tb_log_prefix: str = "videorecord",
         seed: int | None = None,
         deterministic: bool = True,
+        max_episodes: int | None = 3,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose)
+        if max_episodes is not None and (
+            isinstance(max_episodes, bool)
+            or not isinstance(max_episodes, int)
+            or max_episodes < 1
+        ):
+            raise ValueError(
+                "max_episodes must be None or a positive integer"
+            )
         self.env_fn = env_fn
         self.save_path = save_path
         self.video_length = video_length
+        self.max_episodes = max_episodes
         self.save_freq = save_freq
         self.name_prefix = name_prefix
         self.tb_log_prefix = tb_log_prefix
@@ -201,6 +220,14 @@ class VideoRecordCallback(BaseCallback):
             assert not isinstance(obs, tuple)
             session_length = 0
             total_reward = 0.0
+            # Per-episode records: the VecEnv auto-resets on done, so the
+            # rollout continues straight into the next episode until
+            # ``max_episodes`` (or the ``video_length`` step cap). The CSV's
+            # ``done`` column marks the boundaries; ``total_reward`` restarts
+            # with each episode.
+            episode_rewards: list[float] = []
+            episode_lengths: list[int] = []
+            episode_start = 0
             csv_path = os.path.join(self.save_path, f"{name_prefix}.csv")
             auto_keys: list[str] = []
             auto_sums: dict[str, float] = {}
@@ -245,16 +272,34 @@ class VideoRecordCallback(BaseCallback):
 
                     rec_env.render()
                     if dones[0]:
-                        break
+                        episode_rewards.append(total_reward)
+                        episode_lengths.append(session_length - episode_start)
+                        episode_start = session_length
+                        total_reward = 0.0
+                        if (
+                            self.max_episodes is not None
+                            and len(episode_rewards) >= self.max_episodes
+                        ):
+                            break
 
-            # TensorBoard: emit the final-step snapshot plus a rollout mean
-            # per scalar info key. Also log the total reward so eyeballing
-            # the curve in TB matches the CSV.
+            # TensorBoard: per-episode reward/length means over the completed
+            # episodes (falling back to the running totals when the cap cut
+            # the first episode short), a completed-episode count, and a
+            # whole-rollout mean per scalar info key.
+            if episode_rewards:
+                reported_reward = sum(episode_rewards) / len(episode_rewards)
+                reported_length = sum(episode_lengths) / len(episode_lengths)
+            else:
+                reported_reward = total_reward
+                reported_length = session_length
             self.logger.record(
-                f"{self.tb_log_prefix}/total_reward", float(total_reward)
+                f"{self.tb_log_prefix}/total_reward", float(reported_reward)
             )
             self.logger.record(
-                f"{self.tb_log_prefix}/episode_length", int(session_length)
+                f"{self.tb_log_prefix}/episode_length", int(reported_length)
+            )
+            self.logger.record(
+                f"{self.tb_log_prefix}/episodes", len(episode_rewards)
             )
             if session_length > 0:
                 for k, total in auto_sums.items():
@@ -266,7 +311,9 @@ class VideoRecordCallback(BaseCallback):
             if self.verbose:
                 print(
                     f"[VideoRecordCallback] step={self.num_timesteps} "
-                    f"len={session_length} total_reward={total_reward:.2f}"
+                    f"len={session_length} "
+                    f"episodes={len(episode_rewards)} "
+                    f"mean_episode_reward={reported_reward:.2f}"
                 )
         finally:
             rec_env.close()

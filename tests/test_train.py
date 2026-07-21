@@ -457,6 +457,150 @@ def test_train_warm_starts_policy_only_and_records_provenance(tmp_path):
         assert initialization["source_artifacts"][filename]["sha256"] == expected
 
 
+def _make_sac_warm_start_source(tmp_path, *, log_ent_coef=-6.5):
+    """SAC sibling of the PPO helper: tiny model, marked policy weights,
+    a deliberately collapsed entropy temperature, saved as a canonical
+    best-run directory."""
+    source_dir = tmp_path / "sac_source"
+    source_dir.mkdir()
+
+    def env_fn():
+        return BallBalanceEnv(episode_len=12)
+
+    source_cfg = TrainConfig(
+        env_fn=env_fn,
+        algo="SAC",
+        log_dir=str(source_dir),
+        n_envs=1,
+        normalize_obs=True,
+        normalize_obs_excluded_indices=(0,),
+        model_kwargs={"buffer_size": 64, "learning_starts": 1_000},
+    )
+    raw_env = make_vec_env(env_fn, n_envs=1, seed=7)
+    normalizer = SelectiveVecNormalize(
+        raw_env,
+        norm_obs=True,
+        norm_reward=False,
+        normalize_obs_excluded_indices=(0,),
+    )
+    model = _build_algo(
+        "SAC",
+        normalizer,
+        str(source_dir),
+        buffer_size=64,
+        learning_starts=1_000,
+        seed=7,
+    )
+    with torch.no_grad():
+        first_parameter = next(model.policy.parameters())
+        first_parameter.fill_(0.125)
+        model.log_ent_coef.fill_(log_ent_coef)
+    model.save(source_dir / "best_model.zip")
+    normalizer.save(source_dir / "best_vec_normalize.pkl")
+    write_run_config(source_cfg, str(source_dir))
+    update_run_config_with_model(model, str(source_dir))
+    source_state = {
+        name: value.detach().cpu().clone()
+        for name, value in model.policy.state_dict().items()
+    }
+    normalizer.close()
+    return source_dir, env_fn, source_state
+
+
+class _CaptureSacWarmStart(BaseCallback):
+    def __init__(self) -> None:
+        super().__init__()
+        self.policy_state: dict[str, torch.Tensor] | None = None
+        self.optimizer_state_counts: tuple[int, int] | None = None
+        self.log_ent_coef: float | None = None
+        self.start_timestep: int | None = None
+
+    def _on_training_start(self) -> None:
+        self.policy_state = {
+            name: value.detach().cpu().clone()
+            for name, value in self.model.policy.state_dict().items()
+        }
+        self.optimizer_state_counts = (
+            len(self.model.policy.actor.optimizer.state),
+            len(self.model.policy.critic.optimizer.state),
+        )
+        self.log_ent_coef = float(self.model.log_ent_coef.detach().item())
+        self.start_timestep = int(self.model.num_timesteps)
+
+    def _on_step(self) -> bool:
+        return True
+
+
+def test_train_warm_starts_sac_policy_and_entropy(tmp_path):
+    source_dir, env_fn, source_state = _make_sac_warm_start_source(tmp_path)
+    target_dir = tmp_path / "sac_target"
+    capture = _CaptureSacWarmStart()
+    cfg = TrainConfig(
+        env_fn=env_fn,
+        algo="SAC",
+        total_timesteps=8,
+        log_dir=str(target_dir),
+        n_envs=1,
+        seed=13,
+        eval_freq=10_000,
+        checkpoint_freq=0,
+        video_freq=0,
+        record_video=False,
+        info_dict_eval=False,
+        n_eval_episodes=1,
+        normalize_obs=True,
+        normalize_obs_excluded_indices=(0,),
+        warm_start=WarmStartConfig(source_dir),
+        model_kwargs={"buffer_size": 64, "learning_starts": 1_000},
+        extra_callbacks=(capture,),
+    )
+    train(cfg)
+
+    # The full SAC policy transferred: actor, critics, AND critic
+    # targets -- a fresh random target network would put the TD
+    # bootstrap far from the transferred critics.
+    assert capture.policy_state is not None
+    assert capture.policy_state.keys() == source_state.keys()
+    assert any("critic_target" in name for name in source_state)
+    for name, expected in source_state.items():
+        torch.testing.assert_close(capture.policy_state[name], expected)
+    # Optimizers start stateless; the timestep clock restarts.
+    assert capture.optimizer_state_counts == (0, 0)
+    assert capture.start_timestep == 0
+    # The collapsed auto-entropy temperature carried over instead of
+    # restarting at ent_coef=1.0.
+    assert capture.log_ent_coef == pytest.approx(-6.5)
+
+    config = json.loads((target_dir / "config.json").read_text())
+    initialization = config["initialization"]
+    assert initialization["mode"] == "policy_and_observation_stats"
+    assert initialization["source"]["algo"] == "SAC"
+    assert "log_ent_coef" in initialization["transferred"]
+    assert initialization["transferred_ent_coef"] == pytest.approx(
+        float(np.exp(-6.5))
+    )
+    assert "replay_buffer" in initialization["reset"]
+
+
+def test_warm_start_rejects_algo_mismatch(tmp_path):
+    """A SAC target must not silently ingest a PPO source (or vice
+    versa) -- the policy classes differ and the transfer would be
+    meaningless even where shapes happen to line up."""
+    source_dir, env_fn, _source_state = _make_ppo_warm_start_source(
+        tmp_path, excluded_indices=(0,)
+    )
+    cfg = TrainConfig(
+        env_fn=env_fn,
+        algo="SAC",
+        log_dir=str(tmp_path / "mismatch_target"),
+        normalize_obs=True,
+        normalize_obs_excluded_indices=(0,),
+        warm_start=WarmStartConfig(source_dir),
+    )
+    with pytest.raises(ValueError, match="source algo must match"):
+        _prepare_warm_start(cfg)
+
+
 def test_prepare_warm_start_resolves_new_layout_source(tmp_path):
     """A 0.14-layout source run (model/best_model.zip) must warm-start
     exactly like a legacy flat run -- the loader resolves both through
@@ -558,14 +702,34 @@ def test_warm_start_setup_failure_closes_every_constructed_env(tmp_path):
     assert constructed <= closed
 
 
-def test_warm_start_is_ppo_only(tmp_path):
+def test_warm_start_supports_ppo_and_sac_only(tmp_path):
+    """The transfer path is written for exactly the two algorithms this
+    project trains; any future third algorithm must extend it explicitly
+    rather than falling through half-supported."""
     cfg = TrainConfig(
         env_fn=lambda: BallBalanceEnv(),
-        algo="SAC",
+        algo="TD3",
         log_dir=str(tmp_path / "target"),
         warm_start=WarmStartConfig(tmp_path),
     )
-    with pytest.raises(ValueError, match="supports PPO only"):
+    with pytest.raises(ValueError, match="supports PPO and SAC only"):
+        _prepare_warm_start(cfg)
+
+
+def test_reward_eval_episodes_requires_headline_selection(tmp_path):
+    """Trimming the reward eval stream is only legal when it is
+    reporting-only; without headline selection that stream owns
+    best-model selection and must keep the full episode count."""
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=12),
+        algo="PPO",
+        total_timesteps=8,
+        log_dir=str(tmp_path / "target"),
+        info_dict_eval=False,
+        reward_eval_episodes=5,
+        model_kwargs={"n_steps": 8, "batch_size": 4, "n_epochs": 1},
+    )
+    with pytest.raises(ValueError, match="headline-metric selection"):
         train(cfg)
 
 

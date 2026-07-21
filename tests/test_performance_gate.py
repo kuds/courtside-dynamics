@@ -37,13 +37,25 @@ class _FakeInfoEval:
         self.completed_evals = 0
         self.last_metrics: dict[str, float] | None = None
         self.selection_resets = 0
+        self.context_metrics: dict[str, float] = {}
 
     def reset_selection_state(self) -> None:
         self.selection_resets += 1
 
+    def set_context_metric(self, name: str, value: float) -> None:
+        self.context_metrics[name] = float(value)
+
     def finish_eval(self, metrics: dict[str, float]) -> None:
         self.last_metrics = dict(metrics)
         self.completed_evals += 1
+
+
+class _FakeReplayBuffer:
+    def __init__(self) -> None:
+        self.resets = 0
+
+    def reset(self) -> None:
+        self.resets += 1
 
 
 class _FakeModel:
@@ -52,6 +64,16 @@ class _FakeModel:
 
     def get_env(self):
         return self._training_env
+
+
+class _FakeOffPolicyModel(_FakeModel):
+    """Adds the SAC-shaped attributes the warm-up package touches."""
+
+    def __init__(self, training_env) -> None:
+        super().__init__(training_env)
+        self.gradient_steps = -1
+        self.replay_buffer = _FakeReplayBuffer()
+        self.num_timesteps = 0
 
 
 STAGES = (
@@ -186,6 +208,27 @@ def test_gate_rejects_attribute_no_env_owns():
         ({"threshold": float("nan")}, ValueError, "threshold"),
         ({"sustain_evals": 0}, ValueError, "sustain_evals"),
         ({"sustain_evals": True}, ValueError, "sustain_evals"),
+        ({"promotion_rule": "always"}, ValueError, "promotion_rule"),
+        (
+            {"advance_update_pause_steps": -1},
+            ValueError,
+            "advance_update_pause_steps",
+        ),
+        (
+            {"advance_update_pause_steps": True},
+            ValueError,
+            "advance_update_pause_steps",
+        ),
+        (
+            {"clear_replay_buffer_on_advance": 1},
+            ValueError,
+            "clear_replay_buffer_on_advance",
+        ),
+        (
+            {"clear_replay_buffer_on_advance": True},
+            ValueError,
+            "requires.*advance_update_pause_steps",
+        ),
     ],
 )
 def test_gate_configuration_is_validated(overrides, error, match):
@@ -194,4 +237,168 @@ def test_gate_configuration_is_validated(overrides, error, match):
         with pytest.raises(error, match=match):
             _gate(None, _FakeInfoEval(eval_env), **overrides)
     finally:
+        eval_env.close()
+
+
+def test_gate_stamps_stage_context_on_the_driving_evaluator():
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(train_env, info_eval, sustain_evals=1)
+        gate._on_training_start()
+        assert info_eval.context_metrics == {"curriculum_stage_index": 0.0}
+
+        info_eval.finish_eval({"bounce_count_ep_mean": 9.0})
+        gate._on_step()
+        assert gate.stage_index == 1
+        assert info_eval.context_metrics == {"curriculum_stage_index": 1.0}
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_gate_window_mean_promotes_on_the_average_not_each_eval():
+    """Run 20260721_004722's stage 2 cleared 3.0 four separate times but
+    never twice consecutively; the window-mean rule promotes exactly that
+    profile while a below-bar average still holds the stage."""
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            promotion_rule="window_mean",
+            threshold=3.0,
+            sustain_evals=2,
+        )
+        gate._on_training_start()
+
+        for metric in (
+            3.2,  # window not yet full
+            2.5,  # mean 2.85 < 3.0: hold
+            3.3,  # mean (2.5 + 3.3)/2 = 2.9 < 3.0: hold
+        ):
+            info_eval.finish_eval({"bounce_count_ep_mean": metric})
+            gate._on_step()
+            assert gate.stage_index == 0, metric
+
+        # 3.3 is already in the window; 2.9 brings the mean to 3.1 --
+        # promoted despite the second eval sitting below the bar, which
+        # the consecutive rule would have refused forever.
+        info_eval.finish_eval({"bounce_count_ep_mean": 2.9})
+        gate._on_step()
+        assert gate.stage_index == 1
+
+        # The window restarts at the new stage: one strong eval alone
+        # cannot promote again.
+        info_eval.finish_eval({"bounce_count_ep_mean": 9.0})
+        gate._on_step()
+        assert gate.stage_index == 1
+        info_eval.finish_eval({"bounce_count_ep_mean": 9.0})
+        gate._on_step()
+        assert gate.stage_index == 2
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_gate_window_mean_missing_metric_clears_the_window():
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            promotion_rule="window_mean",
+            threshold=3.0,
+            sustain_evals=2,
+        )
+        gate._on_training_start()
+        info_eval.finish_eval({"bounce_count_ep_mean": 9.0})
+        gate._on_step()
+        info_eval.finish_eval({})  # absent metric: evidence window resets
+        gate._on_step()
+        info_eval.finish_eval({"bounce_count_ep_mean": 9.0})
+        gate._on_step()
+        assert gate.stage_index == 0
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_gate_warmup_clears_buffer_and_pauses_updates_until_deadline():
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            sustain_evals=1,
+            advance_update_pause_steps=1_000,
+            clear_replay_buffer_on_advance=True,
+        )
+        model = _FakeOffPolicyModel(train_env)
+        gate.model = model  # type: ignore[assignment]
+        gate._on_training_start()
+        assert model.gradient_steps == -1
+
+        gate.num_timesteps = 500
+        info_eval.finish_eval({"bounce_count_ep_mean": 9.0})
+        gate._on_step()
+        assert gate.stage_index == 1
+        assert model.replay_buffer.resets == 1
+        assert model.gradient_steps == 0  # updates paused
+
+        # Still inside the pause window: stays frozen.
+        gate.num_timesteps = 1_400
+        gate._on_step()
+        assert model.gradient_steps == 0
+
+        # Deadline reached: original gradient_steps restored.
+        gate.num_timesteps = 1_500
+        gate._on_step()
+        assert model.gradient_steps == -1
+
+        # The next advance re-arms the whole package.
+        info_eval.finish_eval({"bounce_count_ep_mean": 9.0})
+        gate._on_step()
+        assert gate.stage_index == 2
+        assert model.replay_buffer.resets == 2
+        assert model.gradient_steps == 0
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_gate_warmup_requires_capable_model_at_training_start():
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            advance_update_pause_steps=1_000,
+        )
+        # _FakeModel has no gradient_steps: must fail before training.
+        with pytest.raises(TypeError, match="gradient_steps"):
+            gate._on_training_start()
+
+        gate_clear = _gate(
+            train_env,
+            info_eval,
+            advance_update_pause_steps=1_000,
+            clear_replay_buffer_on_advance=True,
+        )
+        model = _FakeOffPolicyModel(train_env)
+        model.replay_buffer = None  # type: ignore[assignment]
+        gate_clear.model = model  # type: ignore[assignment]
+        with pytest.raises(TypeError, match="replay_buffer"):
+            gate_clear._on_training_start()
+    finally:
+        train_env.close()
         eval_env.close()

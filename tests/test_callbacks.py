@@ -220,6 +220,89 @@ def test_auto_log_handles_empty_info(tmp_path, _stub_video_recorder):
     assert rows[0] == ["reward", "total_reward", "done"]
 
 
+def test_video_recorder_continues_past_episode_ends(
+    tmp_path, _stub_video_recorder
+):
+    """The recorder must not stop at the first episode end: run
+    20260721_004722's best-model 'video' was one 104-step episode against
+    a 10,000-step budget, an n=1 behavioral record. With auto-resetting
+    VecEnvs the rollout continues into the next episode until
+    ``max_episodes`` or the ``video_length`` cap."""
+    import gymnasium as gym
+    from gymnasium import spaces
+
+    from courtside_dynamics.callbacks.video_record import VideoRecordCallback
+
+    class _ShortEpisodeEnv(gym.Env):
+        def __init__(self) -> None:
+            self.observation_space = spaces.Box(
+                -1.0, 1.0, (1,), dtype=np.float32
+            )
+            self.action_space = spaces.Box(-1.0, 1.0, (1,), dtype=np.float32)
+            self._t = 0
+
+        def reset(self, *, seed=None, options=None):
+            super().reset(seed=seed)
+            self._t = 0
+            return np.zeros(1, dtype=np.float32), {}
+
+        def step(self, action):
+            del action
+            self._t += 1
+            return (
+                np.zeros(1, dtype=np.float32),
+                1.0,
+                self._t >= 3,
+                False,
+                {},
+            )
+
+    cb = VideoRecordCallback(
+        env_fn=_ShortEpisodeEnv,
+        save_path=str(tmp_path),
+        video_length=50,
+        save_freq=1,
+        name_prefix="multi",
+        max_episodes=3,
+    )
+    cb.model = _FakeModel(action_dim=1)
+    _run_callback_once(cb)
+
+    csv_files = list(tmp_path.glob("*.csv"))
+    with open(csv_files[0]) as f:
+        rows = list(csv.reader(f))
+    data_rows = rows[1:]
+    # Three 3-step episodes, then the recorder stops.
+    assert len(data_rows) == 9
+    done_flags = [row[-1] == "True" for row in data_rows]
+    assert done_flags == [False, False, True] * 3
+    # total_reward restarts with each episode.
+    totals = [float(row[-2]) for row in data_rows]
+    assert totals == [1.0, 2.0, 3.0] * 3
+
+    tb = cb.model.logger.records
+    assert tb["videorecord/episodes"] == 3
+    assert tb["videorecord/total_reward"] == pytest.approx(3.0)
+    assert tb["videorecord/episode_length"] == 3
+
+    # The video_length cap still binds when episodes are long: an
+    # unbounded max_episodes stops at the cap.
+    cb_capped = VideoRecordCallback(
+        env_fn=_ShortEpisodeEnv,
+        save_path=str(tmp_path / "capped"),
+        video_length=7,
+        save_freq=1,
+        name_prefix="capped",
+        max_episodes=None,
+    )
+    cb_capped.model = _FakeModel(action_dim=1)
+    _run_callback_once(cb_capped)
+    with open(next((tmp_path / "capped").glob("*.csv"))) as f:
+        capped_rows = list(csv.reader(f))
+    assert len(capped_rows[1:]) == 7  # 2 full episodes + 1 partial step
+    assert cb_capped.model.logger.records["videorecord/episodes"] == 2
+
+
 def test_video_callback_save_freq_zero_disables_recording(tmp_path):
     """``save_freq=0`` must be a no-op (matching InfoDictEvalCallback's
     ``eval_freq <= 0`` contract), not a ZeroDivisionError in the modulo

@@ -111,9 +111,14 @@ class WarmStartConfig:
 
     The source directory must contain the paired ``best_model.zip`` and
     ``best_vec_normalize.pkl`` artifacts plus that run's ``config.json``.
-    Only policy tensors and observation running statistics transfer.  The new
-    run deliberately starts with fresh optimizer, reward-normalization,
-    schedule, timestep, buffer, logger, and callback state.
+    The source and target must run the same algorithm (PPO or SAC). Only
+    policy tensors and observation running statistics transfer -- for SAC
+    that includes actor, critics, and critic targets via the policy
+    state dict, plus the auto-tuned entropy temperature when both sides
+    use auto entropy (a fresh ``"auto"`` restarts at ent_coef 1.0, which
+    would churn a converged policy). The new run deliberately starts
+    with fresh optimizer, reward-normalization, schedule, timestep,
+    buffer, logger, and callback state.
 
     ``reset_observation_indices`` identifies deterministic observation fields
     whose semantics changed between fixed stages (notably newly active mask
@@ -313,10 +318,15 @@ class TrainConfig:
     model_kwargs:
         Extra kwargs forwarded to the SB3 algorithm constructor.
     warm_start:
-        Optional policy-only initialization from a prior PPO run directory.
-        The canonical best checkpoint and matching VecNormalize snapshot are
-        validated and their policy/observation state is transferred into a
-        fresh target model. This is intentionally not a training resume.
+        Optional policy-only initialization from a prior run directory of
+        the same algorithm (PPO or SAC). The canonical best checkpoint
+        and matching VecNormalize snapshot are validated and their
+        policy/observation state is transferred into a fresh target
+        model (for SAC, also the auto-tuned entropy temperature). This
+        is intentionally not a training resume: optimizers, buffers,
+        timesteps, and callback state start fresh, so an off-policy
+        continuation should pair this with a raised ``learning_starts``
+        (fresh data before the first update).
     csv_header / info_row_fn:
         Passed through to ``VideoRecordCallback`` so envs can log their
         custom info rows.
@@ -419,6 +429,16 @@ class TrainConfig:
         threshold for the sustained number of consecutive evaluations.
         Requires ``info_dict_eval``. Unlike ``env_attr_schedules`` this
         is earned progression, not a timestep clock.
+    reward_eval_episodes:
+        Episode count for the reward-only ``EvalCallback`` stream. Only
+        settable when a headline metric owns selection (otherwise that
+        stream IS selection and must keep the full ``n_eval_episodes``).
+        Under headline selection the stream is reporting-only
+        (``evaluations.npz`` + ``eval/mean_reward``), yet historically
+        still rolled the full 30 episodes every ``eval_freq`` — in run
+        20260721_004722 the three 30-episode eval streams together cost
+        about as many env steps as the 3M training steps themselves.
+        ``None`` (default) keeps ``n_eval_episodes``.
     final_info_eval:
         When ``True``, attach a second ``InfoDictEvalCallback`` running
         on the *unmodified* evaluation env (the recipe's
@@ -498,6 +518,7 @@ class TrainConfig:
     degenerate_min_evals: int | None = None
     performance_gate: Mapping[str, Any] | None = None
     final_info_eval: bool = False
+    reward_eval_episodes: int | None = None
     # Parsed TOML run-configuration file (courtside_dynamics.run_config
     # .RunFileConfig), attached by build_train_config(config_file=...)
     # so artifacts can record its provenance and copy it into the run
@@ -607,8 +628,11 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
     warm_start = cfg.warm_start
     if warm_start is None:
         return None
-    if cfg.algo.upper() != "PPO":
-        raise ValueError("policy-only warm start currently supports PPO only")
+    algo = cfg.algo.upper()
+    if algo not in ("PPO", "SAC"):
+        raise ValueError(
+            "policy-only warm start currently supports PPO and SAC only"
+        )
     if not cfg.normalize_obs:
         raise ValueError("policy-only warm start requires normalize_obs=True")
 
@@ -651,8 +675,11 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
     source_env = source_config.get("env")
     if not isinstance(source_train, dict) or not isinstance(source_env, dict):
         raise ValueError("warm-start config lacks train_config/env provenance")
-    if str(source_train.get("algo", "")).upper() != "PPO":
-        raise ValueError("warm-start source must be a PPO run")
+    if str(source_train.get("algo", "")).upper() != algo:
+        raise ValueError(
+            f"warm-start source algo must match the target "
+            f"({algo}), got {source_train.get('algo')!r}"
+        )
     if source_train.get("normalize_obs") is not True:
         raise ValueError("warm-start source must have normalize_obs=True")
     try:
@@ -913,6 +940,25 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         # one.
         headline_selection = bool(cfg.info_dict_eval and cfg.headline_key)
 
+        reward_eval_episodes = cfg.n_eval_episodes
+        if cfg.reward_eval_episodes is not None:
+            if (
+                isinstance(cfg.reward_eval_episodes, bool)
+                or not isinstance(cfg.reward_eval_episodes, int)
+                or cfg.reward_eval_episodes < 1
+            ):
+                raise ValueError(
+                    "reward_eval_episodes must be a positive integer"
+                )
+            if not headline_selection:
+                raise ValueError(
+                    "reward_eval_episodes requires headline-metric "
+                    "selection (info_dict_eval + headline_key): without "
+                    "it the reward eval stream owns best-model selection "
+                    "and must keep the full n_eval_episodes"
+                )
+            reward_eval_episodes = cfg.reward_eval_episodes
+
         on_new_best: BaseCallback | None = None
         if use_vec_normalize and not headline_selection:
             on_new_best = _SaveVecNormalizeOnNewBest(
@@ -948,7 +994,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             log_path=os.path.dirname(artifact_path(cfg.log_dir, "evaluations")),
             render=False,
             deterministic=True,
-            n_eval_episodes=cfg.n_eval_episodes,
+            n_eval_episodes=reward_eval_episodes,
             eval_freq=_calls(cfg.eval_freq),
             callback_on_new_best=on_new_best,
             callback_after_eval=after_eval,
@@ -1092,12 +1138,40 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 # Ordered after the info-eval callback so a trigger sees
                 # that same trigger's fresh metrics.
                 gate_spec = dict(cfg.performance_gate)
+                unknown_gate_keys = sorted(
+                    set(gate_spec)
+                    - {
+                        "stages",
+                        "metric_key",
+                        "threshold",
+                        "sustain_evals",
+                        "promotion_rule",
+                        "advance_update_pause_steps",
+                        "clear_replay_buffer_on_advance",
+                    }
+                )
+                if unknown_gate_keys:
+                    # A typo'd gate key was previously a silent no-op --
+                    # exactly the failure class this repo bans.
+                    raise ValueError(
+                        f"unknown performance_gate key(s) "
+                        f"{unknown_gate_keys}"
+                    )
                 callbacks.append(
                     PerformanceGatedEnvStagesCallback(
                         stages=gate_spec["stages"],
                         metric_key=gate_spec["metric_key"],
                         threshold=gate_spec["threshold"],
                         sustain_evals=gate_spec["sustain_evals"],
+                        promotion_rule=gate_spec.get(
+                            "promotion_rule", "consecutive"
+                        ),
+                        advance_update_pause_steps=gate_spec.get(
+                            "advance_update_pause_steps", 0
+                        ),
+                        clear_replay_buffer_on_advance=gate_spec.get(
+                            "clear_replay_buffer_on_advance", False
+                        ),
                         info_eval=info_eval_callback,
                         verbose=cfg.verbose,
                     )
@@ -1167,7 +1241,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         # re-establishes cfg.seed for the new run's stochastic sequence.
         source_model: BaseAlgorithm | None = None
         if warm_start_artifacts is not None:
-            source_model = _resolve_algo("PPO").load(
+            source_model = _resolve_algo(cfg.algo).load(
                 str(warm_start_artifacts.model_path),
                 device="cpu",
             )
@@ -1184,12 +1258,50 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             policy=cfg.policy,
             **model_kwargs,
         )
+        transferred_log_ent_coef: float | None = None
         if source_model is not None:
             if type(source_model.policy) is not type(model.policy):
                 raise ValueError("source and target policy classes differ")
-            if model.policy.optimizer.state:
-                raise RuntimeError("fresh target PPO optimizer unexpectedly has state")
+            # PPO policies own a single optimizer; SAC splits actor and
+            # critic. Either way the fresh target's optimizers must be
+            # stateless before the weight transfer -- optimizer moments
+            # are deliberately NOT carried over. (``Any``-typed access:
+            # nn.Module.__getattr__ erases the submodule types.)
+            policy_any: Any = model.policy
+            fresh_optimizers = (
+                (policy_any.actor.optimizer, policy_any.critic.optimizer)
+                if hasattr(model.policy, "actor")
+                else (policy_any.optimizer,)
+            )
+            if any(optimizer.state for optimizer in fresh_optimizers):
+                raise RuntimeError(
+                    "fresh target optimizer unexpectedly has state"
+                )
+            # For SAC, policy.state_dict() covers actor, critic, AND the
+            # critic target networks, so the transfer resumes from a
+            # self-consistent TD state rather than fresh random targets.
             model.policy.load_state_dict(source_model.policy.state_dict(), strict=True)
+            # SAC's auto-tuned entropy temperature lives on the algorithm,
+            # not the policy. A fresh "auto" restarts at ent_coef=1.0 --
+            # a huge entropy bonus that would churn a converged policy
+            # (run 20260721_004722's coefficient sat at ~0.0009) -- so a
+            # matching auto source hands its temperature over. Mixing
+            # auto and fixed entropy across the boundary is a config
+            # contradiction; fail rather than guess.
+            source_log_ent = getattr(source_model, "log_ent_coef", None)
+            target_log_ent = getattr(model, "log_ent_coef", None)
+            if (source_log_ent is None) != (target_log_ent is None):
+                raise ValueError(
+                    "warm-start source and target entropy configurations "
+                    "differ (auto-tuned vs fixed ent_coef)"
+                )
+            if source_log_ent is not None and target_log_ent is not None:
+                target_log_ent.data.copy_(
+                    source_log_ent.data.to(target_log_ent.device)
+                )
+                transferred_log_ent_coef = float(
+                    target_log_ent.detach().exp().item()
+                )
 
             assert warm_start_artifacts is not None
             assert isinstance(train_env, VecNormalize)
@@ -1216,7 +1328,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     )
                 },
                 "source": {
-                    "algo": "PPO",
+                    "algo": cfg.algo.upper(),
                     "environment_class": source_env.get("class"),
                     "curriculum": source_curriculum,
                     "model_num_timesteps": int(source_model.num_timesteps),
@@ -1231,16 +1343,30 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 "transferred": [
                     "policy.state_dict",
                     "vec_normalize.obs_rms",
+                    *(
+                        ["log_ent_coef"]
+                        if transferred_log_ent_coef is not None
+                        else []
+                    ),
                 ],
                 "reset": [
                     "policy.optimizer_state",
                     "learning_rate_and_progress_schedule",
                     "num_timesteps",
-                    "rollout_buffer",
+                    (
+                        "replay_buffer"
+                        if cfg.algo.upper() in _OFF_POLICY_ALGOS
+                        else "rollout_buffer"
+                    ),
                     "vec_normalize.ret_rms",
                     "vec_normalize.returns",
                     "logger_and_callback_state",
                 ],
+                **(
+                    {"transferred_ent_coef": transferred_log_ent_coef}
+                    if transferred_log_ent_coef is not None
+                    else {}
+                ),
                 "normalize_obs_excluded_indices": list(
                     cfg.normalize_obs_excluded_indices
                 ),

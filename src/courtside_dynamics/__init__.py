@@ -86,7 +86,7 @@ from gymnasium.envs.registration import register
 # WallBallBootstrap marked historical. A new metric era: depth-ladder
 # numbers are not comparable to fixed-lane baseline runs (reference:
 # 20260718_023737).
-__version__ = "0.15.0"
+__version__ = "0.15.1"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.

@@ -26,11 +26,17 @@ serve_vy_max = 2.0
 
 # To replace the depth ladder, uncomment ALL of the following —
 # performance_gate replaces wholesale, never merges — and re-run
-# tools/depth_stage_sweep.py with the new stage table first:
+# tools/depth_stage_sweep.py with the new stage table first. A
+# CONTINUATION run (warm-started from a prior run's final model)
+# restarts the ladder at the reached stage by listing only the
+# remaining stages here:
 # [train.performance_gate]
 # metric_key = "bounce_count_ep_mean"
 # threshold = 3.0
 # sustain_evals = 2
+# promotion_rule = "window_mean"          # mean of last 2 evals >= 3.0
+# advance_update_pause_steps = 50_000     # promotion warm-up: pause...
+# clear_replay_buffer_on_advance = true   # ...and drop stale-stage data
 # [[train.performance_gate.stages]]
 # paddle_x_fence = [-2.7, 0.3]
 # paddle_start_x = -1.6

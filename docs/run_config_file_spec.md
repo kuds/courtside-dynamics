@@ -132,11 +132,13 @@ therefore fails loudly on everything:
 - A rejected field (`env_fn`, ...) → `ValueError` explaining why.
 - Unknown top-level table → `ValueError` (only `train`, `env`, `eval_env`).
 - `[train.performance_gate]` is validated structurally at load: the four
-  keys `train()` reads (`metric_key`, `threshold`, `sustain_evals`,
-  `stages`) must all be present with sane types, any other key is
-  rejected (it would be silently ignored downstream), and `stages` must
-  be a non-empty array of non-empty tables. Deeper semantics stay with
-  `PerformanceGatedEnvStagesCallback`.
+  required keys (`metric_key`, `threshold`, `sustain_evals`, `stages`)
+  must all be present with sane types; the optional keys
+  (`promotion_rule`, `advance_update_pause_steps`,
+  `clear_replay_buffer_on_advance`) are type-checked when present; any
+  other key is rejected (it would be silently ignored downstream), and
+  `stages` must be a non-empty array of non-empty tables. Deeper
+  semantics stay with `PerformanceGatedEnvStagesCallback`.
 - `phase_labels` keys must be strict decimal strings (`"1_0"`, `"+2"`,
   and whitespace variants are rejected rather than silently relabeling a
   different phase), and colliding spellings of the same id (`"1"`/`"01"`)

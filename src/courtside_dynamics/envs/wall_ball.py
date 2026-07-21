@@ -479,6 +479,16 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.wall_contact_count = 0     # all wall contacts incl. stray hits
         self.paddle_hit_count = 0
         self.legal_paddle_hit_count = 0
+        # World-space paddle x summed over the episode's legal
+        # (gate-opening) paddle hits, so eval aggregation can measure
+        # WHERE the policy actually plays -- e.g. whether a deep-fence
+        # stage is mastered from the back court or by camping the fence
+        # front. Sampled at the end of the control frame that registered
+        # the hit (the paddle moves at most one frame's travel past the
+        # true contact point). A sum, not a mean: 0.0 with a zero
+        # ``legal_paddle_hit_count`` is exact, whereas a fake 0.0 "mean"
+        # would sit indistinguishably inside the court's x range.
+        self.legal_paddle_hit_x_sum = 0.0
         self.one_bounce_recovery_count = 0
         self.one_bounce_return_count = 0
         self._rally_phase = (
@@ -1264,6 +1274,9 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             first_hit = not self._paddle_hit_since_last_wall
             if first_hit:
                 self.legal_paddle_hit_count += 1
+                self.legal_paddle_hit_x_sum += float(
+                    self.data.body("paddle_head").xpos[0]
+                )
                 reward += self.paddle_hit_bonus
                 rew_paddle += self.paddle_hit_bonus
                 self._pending_bonus += self.paddle_hit_bonus
@@ -1611,6 +1624,16 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "wall_contact_count": self.wall_contact_count,
             "paddle_hit_count": self.paddle_hit_count,
             "legal_paddle_hit_count": self.legal_paddle_hit_count,
+            # Positional play diagnostics: where (world x) the legal hits
+            # happened. The mean divides by the hit count (0.0 when no
+            # hits yet -- filter on legal_paddle_hit_count > 0 before
+            # aggregating positions across episodes).
+            "legal_paddle_hit_x_sum": self.legal_paddle_hit_x_sum,
+            "legal_paddle_hit_x_mean": (
+                self.legal_paddle_hit_x_sum / self.legal_paddle_hit_count
+                if self.legal_paddle_hit_count > 0
+                else 0.0
+            ),
             "one_bounce_recovery_count": self.one_bounce_recovery_count,
             "one_bounce_return_count": self.one_bounce_return_count,
             # Friendly alias: ``bounce_count`` is retained for callbacks and
@@ -1692,6 +1715,12 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "wall_contact_count": self.wall_contact_count,
             "paddle_hit_count": self.paddle_hit_count,
             "legal_paddle_hit_count": self.legal_paddle_hit_count,
+            "legal_paddle_hit_x_sum": self.legal_paddle_hit_x_sum,
+            "legal_paddle_hit_x_mean": (
+                self.legal_paddle_hit_x_sum / self.legal_paddle_hit_count
+                if self.legal_paddle_hit_count > 0
+                else 0.0
+            ),
             "one_bounce_recovery_count": self.one_bounce_recovery_count,
             "one_bounce_return_count": self.one_bounce_return_count,
             "return_count": self.bounce_count,
@@ -1747,6 +1776,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.wall_contact_count = 0
         self.paddle_hit_count = 0
         self.legal_paddle_hit_count = 0
+        self.legal_paddle_hit_x_sum = 0.0
         self.one_bounce_recovery_count = 0
         self.one_bounce_return_count = 0
         self.early_touch_count = 0

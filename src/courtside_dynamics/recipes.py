@@ -724,10 +724,31 @@ RECIPES: dict[str, Recipe] = {
             # stage (see eval_env_overrides). curriculum/stage_index in
             # TensorBoard is the campaign's real headline: how far back
             # did it earn its way?
+            #
+            # Run 20260721_004722 (the first campaign run) sharpened
+            # three gate settings without touching the bar itself:
+            #
+            # - window_mean promotion: with 30-episode batches the
+            #   per-eval SE near the bar is ~0.4 bounces, so "two
+            #   consecutive >= 3.0" is a coin flip for a true-3.0
+            #   policy -- stage 2 cleared 3.0 in four separate evals
+            #   without ever promoting. The 2-eval mean estimates the
+            #   same quantity at half the variance.
+            # - Promotion warm-up (pause + clear): each advance
+            #   previously crashed the matched eval (3.37 -> 1.43,
+            #   3.10 -> 1.70; ~0.5-1M steps of recovery) while SAC kept
+            #   updating 1:1 against a buffer that was ~100%
+            #   previous-stage physics (the fence participates in
+            #   dynamics via target clamping). Now an advance drops the
+            #   buffer and holds gradient updates for 50k steps of
+            #   fresh frontier-stage data.
             "performance_gate": {
                 "metric_key": "bounce_count_ep_mean",
                 "threshold": 3.0,
                 "sustain_evals": 2,
+                "promotion_rule": "window_mean",
+                "advance_update_pause_steps": 50_000,
+                "clear_replay_buffer_on_advance": True,
                 "stages": (
                     {
                         "paddle_x_fence": (-2.7, 0.3),
@@ -757,6 +778,13 @@ RECIPES: dict[str, Recipe] = {
                 ),
             },
             "final_info_eval": True,
+            # The reward EvalCallback stream is reporting-only under
+            # headline selection yet historically rolled the full 30
+            # episodes every 25k steps; across run 20260721_004722 the
+            # three eval streams together cost about as many env steps
+            # as the 3M training steps. 5 episodes keep evaluations.npz
+            # alive and return the wall clock to training.
+            "reward_eval_episodes": 5,
             "phase_key": "rally_phase",
             "phase_labels": {
                 0: "await_bounce",

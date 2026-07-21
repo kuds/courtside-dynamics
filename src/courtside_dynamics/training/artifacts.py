@@ -840,6 +840,13 @@ def write_run_summary(
             desc = f"step {selected_step:,}"
             if primary is not None and primary in values:
                 desc += f" ({primary} {float(values[primary]):.2f})"
+            # Curriculum context: a matched-stage score is meaningless
+            # without its stage (run 20260721_004722's "best 3.80" took
+            # a progress.csv join to attribute to stage-2 geometry).
+            context = best_meta.get("context") or {}
+            stage = context.get("curriculum_stage_index")
+            if isinstance(stage, (int, float)):
+                desc += f" [at curriculum stage {int(stage)}]"
             desc += "  [task-metric selection]"
             lines.append(_kv("Best model", desc))
 
