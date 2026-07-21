@@ -219,10 +219,12 @@ def _tennis_curriculum_extra_cfg(
         "normalize_obs_excluded_indices": (
             _HUMANOID_TENNIS_NORMALIZATION_EXCLUSIONS
         ),
-        # The stage reward is hand-scaled, sparse, and terminal-only
-        # ({-2, -1, 0, +1}); the PPO default (VecNormalize returns) would
-        # amplify the first rare success toward the clip_reward ceiling
-        # exactly when learning begins (humanoid_env_review.md I-F5).
+        # The stage reward is hand-scaled and sparse: terminal outcomes
+        # in {-2, -1, 0, +1}, plus (stages 1-2) an escrowed +/-0.25
+        # contact pulse that commits on success and claws back otherwise.
+        # The PPO default (VecNormalize returns) would amplify the first
+        # rare success toward the clip_reward ceiling exactly when
+        # learning begins (humanoid_env_review.md I-F5).
         "normalize_reward": False,
         # Stock iid per-step Gaussian exploration at 100 Hz averages to a
         # near-still arm (0 contacts in 264 random episodes, while a
@@ -257,9 +259,23 @@ def _tennis_curriculum_extra_cfg(
         "success_threshold": 1.0,
         # Best-model selection and early stop follow the task metric, not
         # the shaped eval reward (run 20260712_190054's reward-selected
-        # "best" completed zero rallies). Reward stays as the last
-        # lexicographic tie-break so zero-success early evals still rank.
+        # "best" completed zero rallies). legal_hit_count_ep_mean sits
+        # between the success keys and the reward tie-break so
+        # pre-success contact progress (the regime the escrowed shaping
+        # creates) still resets patience and updates best_model instead
+        # of presenting a bit-flat score until the first target return.
         "headline_key": "stage_success",
+        "best_metric_keys": (
+            "stage_success_ep_mean",
+            "success_rate",
+            "legal_hit_count_ep_mean",
+            "episode_reward_mean",
+        ),
+        # Note: eval is deterministic for stages 0-1 (scripted launch,
+        # deterministic policy, frozen normalizer), so the confirmation
+        # batch replays the candidate exactly there; it only guards
+        # against single-batch flukes under stage 2's randomized feeds
+        # and is kept uniform as cheap future-proofing.
         "confirm_best_eval": True,
         # With headline selection the reward EvalCallback stream is
         # reporting-only; 5 episodes keep evaluations.npz alive while the

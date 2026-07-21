@@ -76,6 +76,15 @@ def test_humanoid_notebook_preserves_curriculum_recipe_contracts() -> None:
     assert "AUTO_ADVANCE = True" in notebook_source
     assert 'ALGO = None' in notebook_source
     assert 'TOTAL_TIMESTEPS = None' in notebook_source
+    # None-sentinel knobs: an unconditional early_stop_patience=... or
+    # model_kwargs={} override would replace the recipes' calibrated
+    # per-stage patience (8/12/20) and exploration bundle wholesale.
+    assert "EARLY_STOP_PATIENCE = None" in notebook_source
+    assert "MODEL_KWARGS = None" in notebook_source
+    assert "early_stop_patience=EARLY_STOP_PATIENCE" not in notebook_source
+    assert "model_kwargs=MODEL_KWARGS" not in notebook_source
+    assert 'overrides["early_stop_patience"] = EARLY_STOP_PATIENCE' in notebook_source
+    assert 'overrides["model_kwargs"] = MODEL_KWARGS' in notebook_source
     assert 'recipe_n_envs = recipe.extra_cfg.get("n_envs")' in notebook_source
     assert "cfg.checkpoint_freq =" not in notebook_source
     assert "cfg.video_freq =" not in notebook_source

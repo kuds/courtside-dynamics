@@ -11,7 +11,8 @@ n_envs = 1
 # Earliest reachable stop is eval 2*patience (min_evals = patience), so
 # patience is scaled to this stage's 40-eval budget: earliest stop at 24.
 early_stop_patience = 12
-# Sparse hand-scaled terminal reward; see stage-0 starter for rationale.
+# Sparse hand-scaled reward (terminal outcomes plus an escrowed
+# contact pulse); see the stage-0 starter for rationale.
 normalize_reward = false
 eval_freq = 25_000
 checkpoint_freq = 100_000

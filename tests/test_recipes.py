@@ -332,6 +332,12 @@ def test_humanoid_tennis_curriculum_recipes_are_fixed_stage_and_recordable(
     # and per-stage patience scaled to each eval budget (earliest stop
     # is eval 2 * patience).
     assert cfg.headline_key == "stage_success"
+    assert cfg.best_metric_keys == (
+        "stage_success_ep_mean",
+        "success_rate",
+        "legal_hit_count_ep_mean",
+        "episode_reward_mean",
+    )
     assert cfg.confirm_best_eval is True
     assert cfg.reward_eval_episodes == 5
     assert cfg.normalize_reward is False

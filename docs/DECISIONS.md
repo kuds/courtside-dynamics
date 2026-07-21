@@ -213,8 +213,8 @@ Source: [`humanoid_env_review.md`](humanoid_env_review.md) (main @ `0d294f2`,
 v0.7.0, 2026-07-13). Environment correctness, determinism, and physics rated
 strong (trajectories bitwise-reproducible; Stages 0–1 proven solvable by
 scripted oracles); **learning feasibility was blocked as configured**. Statuses
-below reflect the 0.7.0 review; the three core items were spot-checked as still
-present in the current tree.
+below were last updated at 0.16.0; items still marked open were spot-checked as
+still present in the current tree.
 
 ### Update `geom_rbound`/AABB when resizing a MuJoCo geom at runtime — *implemented (0.16.0)*
 The stringbed enlargement for "early contact forgiveness" writes `geom_size` and
@@ -226,9 +226,10 @@ metadata is misleading. Videos show the ball passing through the visibly-enlarge
 racket. Fix: recompute `geom_rbound`/AABB after scaling, or compile the scale
 per-stage via `mujoco.MjSpec`; add a regression test firing a ball at the
 enlarged-only zone. *(0.16.0 recomputes both bounds from the scaled semi-axes
-after `mj_setConst`; `test_racket_forgiveness_band_generates_contacts` pins a
-ball contact in the enlarged-only annulus, and the stage-1 oracle was
-recalibrated for the corrected contact timing.)*
+when scaling — `mj_setConst` does not refresh them;
+`test_racket_forgiveness_band_generates_contacts` pins a ball contact in the
+enlarged-only annulus, and the stage-1 oracle was recalibrated for the
+corrected contact timing.)*
 
 ### Sparse reward + iid per-step Gaussian exploration at 100 Hz = zero gradient — *partially implemented (0.16.0)*
 0 valid hits / 0 nonzero rewards in 264 random episodes; the end-to-end 25k run
@@ -285,8 +286,11 @@ cost.
   metric (`stage_success`) never appears — the first file a human reads shows
   single-episode noise. Render `success_rate`/`*_ep_mean` and set `headline_key`.
   *(0.16.0 sets `headline_key = "stage_success"` on the three stage recipes, so
-  selection, early stop, and `best_model_meta.json` follow the task metric; the
-  `stage_summary.txt` rendering half remains open.)*
+  selection, early stop, and `best_model_meta.json` follow the task metric, and
+  the existing headline block now surfaces `stage_success_ep_mean` in
+  `stage_summary.txt`; still open: rendering `success_rate` and the
+  non-headline `*_ep_mean` keys, which remain single-episode `*_final`
+  values.)*
 - Fixed-stage recipes pin `n_envs = 1`; Stage 0 trains 2 live action dims among
   56 inactive (96.6% dead weight), and the 0.5M/1M/2M budgets are ≈
   3.6h/7.3h/14.6h on 4-core CPU (undocumented). Un-pin `n_envs` for PPO

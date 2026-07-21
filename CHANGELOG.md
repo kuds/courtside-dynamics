@@ -28,7 +28,10 @@ WallBall and ball recipes are unchanged.
   "stage_success"` (plus `confirm_best_eval` and 5-episode
   reporting-only reward evals) moves `best_model.zip` and early stop
   off the shaped eval reward — the run-20260712_190054 failure mode the
-  WallBall recipes already guard against.
+  WallBall recipes already guard against. `legal_hit_count_ep_mean`
+  sits between the success keys and the reward tie-break so
+  pre-success contact progress still resets patience and updates the
+  best model.
 - **Exploration and shaping unblockers.** Stock iid Gaussian
   exploration measured zero contacts in 264 random episodes while a
   constant held action succeeds ~15% — the recipes now set
