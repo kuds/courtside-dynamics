@@ -7,7 +7,10 @@
 # any geometry here.
 # Usage: build_train_config("WallBallDepthCurriculum", log_dir=..., config_file=<this file>)
 # Everything here matches the recipe today; edit a value to diverge.
-# Do NOT set stage-0 geometry in [env] — the gate owns it.
+# Do NOT set stage-0 geometry in [env] — the gate owns it. Final
+# scoring (eval_info_final.csv, videos, long-horizon audit) runs at the
+# ladder's final stage via the recipe's eval_env_overrides; the matched
+# selection eval is re-synced to the current stage by the gate.
 
 [train]
 total_timesteps = 3_000_000

@@ -722,7 +722,13 @@ def test_wall_ball_depth_curriculum_uses_open_scoring_and_defaults():
     ):
         assert banned not in kwargs, banned
     assert "model_kwargs" not in recipe.extra_cfg
-    assert recipe.eval_env_overrides == {}
+    # Canonical scoring pins the ladder's FINAL stage: the final-config
+    # evaluator, milestone videos, and the long-horizon audit build from
+    # eval_env_overrides unsynced by the gate, so an empty dict would
+    # score the easiest (stage-0) geometry for the whole run. The
+    # matched evaluator is re-synced per stage by the gate regardless.
+    last_stage = recipe.extra_cfg["performance_gate"]["stages"][-1]
+    assert recipe.eval_env_overrides == dict(last_stage)
     assert recipe.extra_cfg["success_threshold"] == 3.0
     assert recipe.extra_cfg["best_metric_keys"] == (
         "bounce_count_ep_mean",

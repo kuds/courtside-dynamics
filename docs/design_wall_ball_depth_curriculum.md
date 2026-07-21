@@ -106,8 +106,14 @@ the sweep numbers recorded in this doc's outcome addendum.
 - **Selection**: `best_metric_keys = (bounce_count_ep_mean,
   bounce_count_ep_ge_5_rate)` with the standard min-delta, confirmation
   batch, and degenerate guard.
-- **Final scoring**: `final_info_eval = True` at the deepest reached
-  stage, plus the 50-seed long-horizon audit at that stage's geometry.
+- **Final scoring**: `final_info_eval = True` at the **ladder's final
+  stage** (pinned via `eval_env_overrides`, exactly the Bootstrap
+  pattern), plus the 50-seed long-horizon audit at that geometry. The
+  proposal originally said "deepest reached stage", but the
+  final-config evaluator is deliberately unsynced from the gate and
+  cannot know it; a fixed goal-task yardstick is also what stays
+  comparable across runs. Early in a run the final stream honestly
+  reads near zero — that is the transfer deficit, not a bug.
   `curriculum/stage_index` in TensorBoard is the campaign's real
   headline: how far back did it earn its way?
 - **Era break**: open scoring + moving geometry means these numbers are
@@ -161,8 +167,13 @@ for the record.
 ## Outcome addendum: calibration sweep (2026-07-20)
 
 The blocking sweep (`tools/depth_stage_sweep.py`) passed after seven
-iterations. The shipped ladder differs from the candidate table above
-in three sweep-forced ways:
+iterations. Post-implementation adversarial review also forced one
+spec correction, folded into the Gate-and-evaluation section above:
+final scoring pins the ladder's final stage via `eval_env_overrides`
+("deepest reached" is not expressible by the gate-unsynced final
+evaluator, and an empty override would have silently scored stage-0
+geometry all run). The shipped ladder differs from the candidate table
+above in three sweep-forced ways:
 
 1. **All serves are flat** (`serve_lob = 0`). Lofted serves arc over
    the fixed-height paddle face — the candidate's lob taper was

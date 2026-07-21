@@ -673,6 +673,24 @@ RECIPES: dict[str, Recipe] = {
             # rebound shallow enough to recover.
             "paddle_joint_damping": 8.0,
         },
+        eval_env_overrides={
+            # The canonical scoring task is the ladder's FINAL stage —
+            # the campaign goal. The gate re-applies the current
+            # training stage to the matched evaluator (selection and
+            # early stopping stay matched-stage), but the final-config
+            # evaluator (eval_info_final.csv), milestone videos, the
+            # reward eval stream, and the post-training long-horizon
+            # audit all use this factory unsynced; leaving it at the
+            # stage-0 defaults would score the easiest geometry for the
+            # whole run and silently inflate apparent competence.
+            # "Deepest stage reached" is not expressible with the
+            # final-eval machinery; the fixed goal task is also the
+            # yardstick that stays comparable across runs. Must equal
+            # the last performance_gate stage (pinned by test).
+            "paddle_x_fence": (-4.7, -1.2),
+            "paddle_start_x": -3.9,
+            "serve_speed": 7.0,
+        },
         default_total_timesteps=3_000_000,
         name_prefix="wall_ball_depth_curriculum",
         extra_cfg={
@@ -702,10 +720,10 @@ RECIPES: dict[str, Recipe] = {
             # Earned progression from volley range back toward the
             # workspace baseline. The matched (training-stage) eval
             # drives the gate and model selection; eval_info_final.csv
-            # and the final long-horizon audit score the deepest stage
-            # reached. curriculum/stage_index in TensorBoard is the
-            # campaign's real headline: how far back did it earn its
-            # way?
+            # and the final long-horizon audit score the ladder's final
+            # stage (see eval_env_overrides). curriculum/stage_index in
+            # TensorBoard is the campaign's real headline: how far back
+            # did it earn its way?
             "performance_gate": {
                 "metric_key": "bounce_count_ep_mean",
                 "threshold": 3.0,
