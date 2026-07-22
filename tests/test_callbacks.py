@@ -1055,3 +1055,62 @@ def test_info_dict_eval_selection_writes_artifacts_end_to_end(tmp_path):
     ]
     assert set(meta["selection_values"]) == set(meta["selection_keys"])
     assert set(meta["artifacts"]) == {"best_model.zip"}
+
+
+def test_info_dict_eval_archive_best_copies_the_best_triple(tmp_path):
+    """``archive_best`` snapshots whatever ``_save_best`` wrote -- the
+    stage-gated curriculum calls it just before ``reset_selection_state``
+    would let the next stage's first eval overwrite the champion."""
+    import json
+
+    from gymnasium.envs.classic_control import PendulumEnv
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import (
+        InfoDictEvalCallback,
+    )
+
+    eval_env = make_vec_env(PendulumEnv, n_envs=1)
+    try:
+        save_dir = tmp_path / "model"
+        save_dir.mkdir()
+        callback = InfoDictEvalCallback(
+            eval_env, best_model_save_path=str(save_dir)
+        )
+
+        # Nothing saved yet: archiving is a clean no-op.
+        empty_dest = tmp_path / "stage_bests" / "stage_00"
+        assert callback.archive_best(str(empty_dest)) is None
+        assert not empty_dest.exists()
+
+        # Simulate a saved best triple (contents are opaque bytes to the
+        # archive; only the meta json is parsed).
+        (save_dir / "best_model.zip").write_bytes(b"model-bytes")
+        (save_dir / "best_vec_normalize.pkl").write_bytes(b"norm-bytes")
+        meta = {"timestep": 123, "context": {"curriculum_stage_index": 1.0}}
+        (save_dir / "best_model_meta.json").write_text(
+            json.dumps(meta) + "\n"
+        )
+
+        dest = tmp_path / "stage_bests" / "stage_01"
+        returned = callback.archive_best(str(dest))
+        assert returned == meta
+        assert (dest / "best_model.zip").read_bytes() == b"model-bytes"
+        assert (dest / "best_vec_normalize.pkl").read_bytes() == b"norm-bytes"
+        assert json.loads((dest / "best_model_meta.json").read_text()) == meta
+        # Originals stay in place: the archive is a copy, not a move.
+        assert (save_dir / "best_model.zip").exists()
+
+        # Without a normalizer file (non-VecNormalize runs), the model
+        # and meta still archive.
+        (save_dir / "best_vec_normalize.pkl").unlink()
+        dest2 = tmp_path / "stage_bests" / "stage_02"
+        assert callback.archive_best(str(dest2)) == meta
+        assert (dest2 / "best_model.zip").exists()
+        assert not (dest2 / "best_vec_normalize.pkl").exists()
+
+        # No save path configured: always a no-op.
+        callback_no_path = InfoDictEvalCallback(eval_env)
+        assert callback_no_path.archive_best(str(tmp_path / "x")) is None
+    finally:
+        eval_env.close()

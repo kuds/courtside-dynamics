@@ -301,6 +301,20 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
                     "metric_key": cfg.performance_gate["metric_key"],
                     "threshold": cfg.performance_gate["threshold"],
                     "sustain_evals": cfg.performance_gate["sustain_evals"],
+                    # Mirror train()'s resolution defaults so the block
+                    # records the gate as actually run whether the keys
+                    # came from a recipe, a TOML, or were left unset.
+                    "promotion_rule": cfg.performance_gate.get(
+                        "promotion_rule", "consecutive"
+                    ),
+                    "advance_update_pause_steps": cfg.performance_gate.get(
+                        "advance_update_pause_steps", 0
+                    ),
+                    "clear_replay_buffer_on_advance": (
+                        cfg.performance_gate.get(
+                            "clear_replay_buffer_on_advance", False
+                        )
+                    ),
                     "stages": [
                         dict(stage)
                         for stage in cfg.performance_gate["stages"]
@@ -575,6 +589,10 @@ RUN_LAYOUT: dict[str, str] = {
     "best_model_meta": "model/best_model_meta.json",
     "final_model": "model/final_model.zip",
     "vec_normalize": "model/vec_normalize.pkl",
+    # Per-stage champions archived by the performance gate before each
+    # advance resets selection state (stage_bests/stage_NN/ holds the
+    # same best_model/best_vec_normalize/best_model_meta triple).
+    "stage_bests_dir": "model/stage_bests",
     # metrics/: machine-readable training/eval series. ``progress.csv``
     # lives directly in metrics/ (it is pandas-readable metrics, not TB
     # event data), no longer inside the TensorBoard folder.
@@ -593,6 +611,7 @@ RUN_LAYOUT: dict[str, str] = {
     "eval_diagnostics": "reports/eval_diagnostics.png",
     "best_long_eval": "reports/best_model_long_horizon_eval.json",
     "best_long_eval_episodes": "reports/best_model_long_horizon_episodes.csv",
+    "curriculum_stages": "reports/curriculum_stages.json",
     # media/: replay footage.
     "best_model_video": "media/best_model.mp4",
     "videos_dir": "media/videos",
@@ -662,6 +681,9 @@ _CONDITIONAL_ARTIFACTS: frozenset[str] = frozenset(
         "eval_info_final_csv",
         "best_long_eval",
         "best_long_eval_episodes",
+        # Written only by performance-gated curriculum runs.
+        "stage_bests_dir",
+        "curriculum_stages",
     }
 )
 

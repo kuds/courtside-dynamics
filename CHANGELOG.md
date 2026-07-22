@@ -5,6 +5,40 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## 0.18.0
+
+Performance-gated curriculum runs now keep their per-stage history.
+Previously each stage advance called `reset_selection_state()` and the
+next stage's first evaluation overwrote `best_model.zip` — destroying
+the departing stage's champion. Runs `20260721_142121` and
+`20260722_002913` each ended wanting exactly that checkpoint (the
+stage-entry policy was the best either run measured at the next
+stage's geometry), and only luck preserved one of them as the
+run-level best.
+
+- **`model/stage_bests/stage_NN/`**: on every advance the gate
+  archives the departing stage's `best_model.zip` /
+  `best_vec_normalize.pkl` / `best_model_meta.json` (immediately
+  before the selection reset), and the final stage's best is
+  duplicated there at training end so the per-stage index is complete
+  — a continuation can warm-start from any stage's champion.
+- **`reports/curriculum_stages.json`**: written at training end with
+  each stage's entry/exit timesteps, evaluation count, promotion
+  window values, streak, and archived best selection values — the
+  table every campaign review previously reconstructed by hand from
+  `eval_info.csv`.
+- **`config.json` gate provenance**: the structured
+  `performance_gate` block now records `promotion_rule`,
+  `advance_update_pause_steps`, and `clear_replay_buffer_on_advance`
+  (mirroring `train()`'s resolution defaults) — run
+  `20260721_142121`'s warm-up package was active but provably absent
+  from its artifact.
+
+Both new artifacts are registered in `RUN_LAYOUT` as conditional
+(gate-only) entries, so non-gated runs audit clean. No physics,
+reward, or training-behavior change; all 0.17.0 artifacts and curves
+remain comparable.
+
 ## 0.17.0
 
 `WallBallDepthCurriculum` widens the promotion window: `sustain_evals`

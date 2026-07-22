@@ -26,6 +26,7 @@ _DIRECTORY_NAMES = {
     "tensorboard_dir",
     "videos_dir",
     "checkpoints_dir",
+    "stage_bests_dir",
 }
 
 

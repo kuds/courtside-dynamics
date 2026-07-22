@@ -1173,6 +1173,16 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                             "clear_replay_buffer_on_advance", False
                         ),
                         info_eval=info_eval_callback,
+                        # Per-stage champion archive + history report:
+                        # without these, every advance's selection reset
+                        # lets the next stage's first eval overwrite the
+                        # departing stage's best_model.zip.
+                        stage_bests_dir=artifact_path(
+                            cfg.log_dir, "stage_bests_dir"
+                        ),
+                        stage_history_path=artifact_path(
+                            cfg.log_dir, "curriculum_stages"
+                        ),
                         verbose=cfg.verbose,
                     )
                 )

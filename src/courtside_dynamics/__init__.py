@@ -103,7 +103,15 @@ from gymnasium.envs.registration import register
 # bar). Threshold unchanged at 3.0. Promotion timing -- and therefore
 # stage_index trajectories -- are not comparable with 2-eval runs;
 # per-stage eval metrics remain comparable.
-__version__ = "0.17.0"
+# 0.18.0: performance-gated runs archive each stage's best triple to
+# model/stage_bests/stage_NN/ (before the advance's selection reset
+# destroys it) and write reports/curriculum_stages.json (entry/exit
+# timesteps, eval counts, promotion windows, per-stage bests);
+# config.json's gate block now records promotion_rule /
+# advance_update_pause_steps / clear_replay_buffer_on_advance. No
+# physics, reward, or training-behavior change; all 0.17.0 artifacts
+# and curves remain comparable.
+__version__ = "0.18.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.

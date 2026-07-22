@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+
 import gymnasium as gym
 import numpy as np
 import pytest
@@ -38,9 +41,22 @@ class _FakeInfoEval:
         self.last_metrics: dict[str, float] | None = None
         self.selection_resets = 0
         self.context_metrics: dict[str, float] = {}
+        # (destination, selection_resets at call time): the second slot
+        # pins the archive-before-reset ordering the gate must honor.
+        self.archives: list[tuple[str, int]] = []
 
     def reset_selection_state(self) -> None:
         self.selection_resets += 1
+
+    def archive_best(self, destination_dir: str) -> dict[str, int]:
+        os.makedirs(destination_dir, exist_ok=True)
+        meta = {"timestep": self.completed_evals}
+        with open(
+            os.path.join(destination_dir, "best_model_meta.json"), "w"
+        ) as stream:
+            json.dump(meta, stream)
+        self.archives.append((destination_dir, self.selection_resets))
+        return meta
 
     def set_context_metric(self, name: str, value: float) -> None:
         self.context_metrics[name] = float(value)
@@ -208,6 +224,8 @@ def test_gate_rejects_attribute_no_env_owns():
         ({"threshold": float("nan")}, ValueError, "threshold"),
         ({"sustain_evals": 0}, ValueError, "sustain_evals"),
         ({"sustain_evals": True}, ValueError, "sustain_evals"),
+        ({"stage_bests_dir": ""}, ValueError, "stage_bests_dir"),
+        ({"stage_history_path": "  "}, ValueError, "stage_history_path"),
         ({"promotion_rule": "always"}, ValueError, "promotion_rule"),
         (
             {"advance_update_pause_steps": -1},
@@ -399,6 +417,103 @@ def test_gate_warmup_requires_capable_model_at_training_start():
         gate_clear.model = model  # type: ignore[assignment]
         with pytest.raises(TypeError, match="replay_buffer"):
             gate_clear._on_training_start()
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_gate_archives_stage_bests_and_writes_history(tmp_path):
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            sustain_evals=1,
+            stage_bests_dir=str(tmp_path / "model" / "stage_bests"),
+            stage_history_path=str(
+                tmp_path / "reports" / "curriculum_stages.json"
+            ),
+        )
+        gate._on_training_start()
+
+        info_eval.finish_eval({"bounce_count_ep_mean": 2.0})  # promote 0->1
+        gate._on_step()
+        info_eval.finish_eval({"bounce_count_ep_mean": 0.5})  # stay at 1
+        gate._on_step()
+        gate._on_training_end()
+
+        # Stage 0 archived on the advance, stage 1 at training end -- and
+        # the advance-time archive ran BEFORE the selection reset, while
+        # best_model.zip still held the departing stage's champion.
+        assert [
+            os.path.basename(dest) for dest, _ in info_eval.archives
+        ] == ["stage_00", "stage_01"]
+        assert info_eval.archives[0][1] == 0
+        assert info_eval.selection_resets == 1
+
+        history = json.loads(
+            (tmp_path / "reports" / "curriculum_stages.json").read_text()
+        )
+        assert history["metric_key"] == "bounce_count_ep_mean"
+        assert history["threshold"] == 1.3
+        assert history["stage_count"] == len(STAGES)
+        assert history["final_stage_index"] == 1
+        rows = history["stages"]
+        assert [row["stage_index"] for row in rows] == [0, 1]
+        assert rows[0]["promoted"] is True
+        assert rows[0]["evals"] == 1
+        assert rows[0]["streak"] == 1
+        assert rows[0]["stage"] == dict(STAGES[0])
+        assert rows[0]["best"] == {"timestep": 1}
+        assert rows[1]["promoted"] is False
+        assert rows[1]["evals"] == 1
+        assert rows[1]["best"] == {"timestep": 2}
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_gate_without_archive_paths_stays_inert(tmp_path):
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(train_env, info_eval, sustain_evals=1)
+        gate._on_training_start()
+        info_eval.finish_eval({"bounce_count_ep_mean": 2.0})
+        gate._on_step()
+        gate._on_training_end()
+        assert info_eval.archives == []
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_gate_history_records_window_mean_promotion_evidence(tmp_path):
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            promotion_rule="window_mean",
+            stage_history_path=str(tmp_path / "curriculum_stages.json"),
+        )
+        gate._on_training_start()
+        for metric in (1.1, 1.6):  # mean 1.35 >= 1.3 -> promote
+            info_eval.finish_eval({"bounce_count_ep_mean": metric})
+            gate._on_step()
+        gate._on_training_end()
+
+        rows = json.loads(
+            (tmp_path / "curriculum_stages.json").read_text()
+        )["stages"]
+        assert rows[0]["promoted"] is True
+        assert rows[0]["promotion_window"] == [1.1, 1.6]
     finally:
         train_env.close()
         eval_env.close()

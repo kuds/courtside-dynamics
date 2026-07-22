@@ -14,7 +14,9 @@ weakness.
 
 from __future__ import annotations
 
+import json
 import numbers
+import os
 from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
@@ -114,6 +116,22 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         Additional vectorized environments to keep in sync (the training
         env from ``self.training_env`` and ``info_eval.eval_env`` are
         always synced; final-config evaluators must NOT be listed here).
+    stage_bests_dir:
+        When set, every stage's best artifacts are archived to
+        ``<stage_bests_dir>/stage_NN/`` -- on each advance for the
+        departing stage (immediately before ``reset_selection_state``
+        lets the next stage's first evaluation overwrite them) and at
+        training end for the final stage. Without this, per-stage
+        champions are destroyed by design: runs 20260721_142121 and
+        20260722_002913 each needed a stage champion afterwards, and
+        only luck (the stage-entry eval becoming the next stage's first
+        best) preserved one of them.
+    stage_history_path:
+        When set, a per-stage history report is written here at training
+        end: entry/exit timesteps, evaluation counts, promotion windows,
+        and each stage's archived best selection values -- the table
+        every campaign review previously reconstructed by hand from
+        ``eval_info.csv``.
     """
 
     def __init__(
@@ -128,6 +146,8 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         advance_update_pause_steps: int = 0,
         clear_replay_buffer_on_advance: bool = False,
         extra_target_envs: Sequence[VecEnv] = (),
+        stage_bests_dir: str | None = None,
+        stage_history_path: str | None = None,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose)
@@ -177,6 +197,14 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                 "advance_update_pause_steps > 0: without a pause the "
                 "learner's next update would sample a near-empty buffer"
             )
+        for name, value in (
+            ("stage_bests_dir", stage_bests_dir),
+            ("stage_history_path", stage_history_path),
+        ):
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError(f"{name} must be None or a non-empty string")
         self.stages: tuple[dict[str, Any], ...] = resolved_stages
         self.metric_key: str = metric_key
         self.threshold: float = float(threshold)
@@ -198,6 +226,11 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         # paused) and the gradient_steps value to restore when it ends.
         self._update_pause_until: int | None = None
         self._resume_gradient_steps: int | None = None
+        self.stage_bests_dir: str | None = stage_bests_dir
+        self.stage_history_path: str | None = stage_history_path
+        self._stage_entry_timestep: int = 0
+        self._stage_eval_count: int = 0
+        self._stage_history: list[dict[str, Any]] = []
 
     @property
     def stage_index(self) -> int:
@@ -275,7 +308,74 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                     "clear_replay_buffer_on_advance requires a model with "
                     "a resettable 'replay_buffer'"
                 )
+        self._stage_entry_timestep = int(self.num_timesteps)
         self._apply_stage()
+
+    def _close_stage_record(self, *, promoted: bool) -> None:
+        """Archive the departing/final stage's best and append its history row.
+
+        Must run BEFORE ``reset_selection_state`` on an advance: the
+        reset lets the next stage's first evaluation overwrite
+        ``best_model.zip``, and the departing stage's champion would be
+        gone. The archived ``best_model_meta.json`` payload (selection
+        values, timestep, sha256s, stage context) rides on the history
+        row so ``curriculum_stages.json`` is self-contained.
+        """
+        best_meta = None
+        if self.stage_bests_dir is not None:
+            destination = os.path.join(
+                self.stage_bests_dir, f"stage_{self._stage_index:02d}"
+            )
+            best_meta = self.info_eval.archive_best(destination)
+        self._stage_history.append(
+            {
+                "stage_index": self._stage_index,
+                "stage": dict(self.stages[self._stage_index]),
+                "entry_timestep": self._stage_entry_timestep,
+                "exit_timestep": int(self.num_timesteps),
+                "evals": self._stage_eval_count,
+                "promoted": promoted,
+                "promotion_window": [float(v) for v in self._metric_window],
+                "streak": self._streak,
+                "best": best_meta,
+            }
+        )
+
+    def _write_stage_history(self) -> None:
+        if self.stage_history_path is None:
+            return
+        payload = {
+            "metric_key": self.metric_key,
+            "threshold": self.threshold,
+            "sustain_evals": self.sustain_evals,
+            "promotion_rule": self.promotion_rule,
+            "advance_update_pause_steps": self.advance_update_pause_steps,
+            "clear_replay_buffer_on_advance": (
+                self.clear_replay_buffer_on_advance
+            ),
+            "stage_count": len(self.stages),
+            "final_stage_index": self._stage_index,
+            "stages": self._stage_history,
+        }
+        parent = os.path.dirname(self.stage_history_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        temporary = self.stage_history_path + ".tmp"
+        with open(temporary, "w") as stream:
+            json.dump(payload, stream, indent=2)
+            stream.write("\n")
+        os.replace(temporary, self.stage_history_path)
+
+    def _on_training_end(self) -> None:
+        """Close out the stage training ended on and write the history.
+
+        The final stage's best is also the run-level canonical best;
+        duplicating it under ``stage_bests/`` keeps the per-stage index
+        complete, so a continuation can seed from ANY stage's champion
+        without special-casing the last one.
+        """
+        self._close_stage_record(promoted=False)
+        self._write_stage_history()
 
     def _maybe_resume_updates(self) -> None:
         """Restore ``gradient_steps`` once the post-advance pause ends."""
@@ -323,12 +423,19 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         if self.info_eval.completed_evals == self._seen_evals:
             return True
         self._seen_evals = self.info_eval.completed_evals
+        self._stage_eval_count += 1
         metrics = self.info_eval.last_metrics or {}
         if (
             self._promotion_earned(metrics)
             and self._stage_index < len(self.stages) - 1
         ):
+            # Archive the departing stage's champion and close its
+            # history row while the window/streak still describe the
+            # promotion evidence and best_model.zip still holds it.
+            self._close_stage_record(promoted=True)
             self._stage_index += 1
+            self._stage_entry_timestep = int(self.num_timesteps)
+            self._stage_eval_count = 0
             self._streak = 0
             self._metric_window.clear()
             self._apply_stage()
