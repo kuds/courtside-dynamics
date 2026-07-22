@@ -602,6 +602,25 @@ def test_wall_ball_bootstrap_recipe_gates_nested_serve_distributions():
     assert recipe.extra_cfg["model_kwargs"]["ent_coef"] == "auto_0.02"
 
 
+def test_depth_curriculum_config_json_records_full_gate(tmp_path):
+    """config.json's structured gate block must record the gate as run:
+    run 20260721_142121's promotion_rule/pause/clear were active (recipe
+    defaults) but provably absent from its artifact."""
+    import json
+
+    from courtside_dynamics.training.artifacts import write_run_config
+
+    cfg = build_train_config("WallBallDepthCurriculum", log_dir=str(tmp_path))
+    path = write_run_config(cfg, str(tmp_path))
+    with open(path) as handle:
+        gate = json.load(handle)["train_config"]["performance_gate"]
+    assert gate["sustain_evals"] == 3
+    assert gate["promotion_rule"] == "window_mean"
+    assert gate["advance_update_pause_steps"] == 50_000
+    assert gate["clear_replay_buffer_on_advance"] is True
+    assert len(gate["stages"]) == 5
+
+
 def test_wall_ball_bootstrap_config_builds_and_records_gate(tmp_path):
     cfg = build_train_config("WallBallBootstrap", log_dir=str(tmp_path))
     assert cfg.performance_gate is not None

@@ -5,6 +5,49 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## 0.18.0
+
+Performance-gated curriculum runs now keep their per-stage history.
+Previously each stage advance called `reset_selection_state()` and the
+next stage's first evaluation overwrote `best_model.zip` — destroying
+the departing stage's champion. Runs `20260721_142121` and
+`20260722_002913` each ended wanting exactly that checkpoint (the
+stage-entry policy was the best either run measured at the next
+stage's geometry), and only luck preserved one of them as the
+run-level best.
+
+- **`model/stage_bests/stage_NN/`**: on every advance the gate
+  archives the departing stage's `best_model.zip` /
+  `best_vec_normalize.pkl` / `best_model_meta.json` (immediately
+  before the selection reset), and the final stage's best is
+  duplicated there at training end — skipped when that stage recorded
+  no evaluation, since the on-disk triple would belong to the previous
+  stage. The run's `config.json` is copied alongside each triple, so a
+  `stage_NN/` directory is a valid (legacy-flat-layout)
+  `WarmStartConfig.source_run_dir`: a continuation really can
+  warm-start from any archived stage's champion.
+- **`reports/curriculum_stages.json`**: refreshed atomically on every
+  stage close and finalized at training end, with each stage's
+  entry/exit timesteps, evaluation count, promotion window values
+  (kept under both promotion rules), streak, and archived best
+  selection values — the table every campaign review previously
+  reconstructed by hand from `eval_info.csv`. Interrupted runs keep
+  it too: train()'s KeyboardInterrupt salvage path finalizes the gate
+  (SB3 skips `on_training_end` when an exception escapes the training
+  loop), and completed-stage rows are already durable on disk even
+  against a hard runtime death.
+- **`config.json` gate provenance**: the structured
+  `performance_gate` block now records `promotion_rule`,
+  `advance_update_pause_steps`, and `clear_replay_buffer_on_advance`
+  (mirroring `train()`'s resolution defaults) — run
+  `20260721_142121`'s warm-up package was active but provably absent
+  from its artifact.
+
+Both new artifacts are registered in `RUN_LAYOUT` as conditional
+(gate-only) entries, so non-gated runs audit clean. No physics,
+reward, or training-behavior change; all 0.17.0 artifacts and curves
+remain comparable.
+
 ## 0.17.0
 
 `WallBallDepthCurriculum` widens the promotion window: `sustain_evals`

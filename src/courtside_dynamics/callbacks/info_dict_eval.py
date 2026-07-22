@@ -33,8 +33,10 @@ import csv
 import hashlib
 import json
 import os
+import shutil
 from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
@@ -781,6 +783,45 @@ class InfoDictEvalCallback(BaseCallback):
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
             f.write("\n")
+
+    #: The co-produced triple ``_save_best`` writes; ``archive_best``
+    #: copies whichever of these exist (the normalizer is absent when
+    #: the model trains without VecNormalize).
+    _BEST_ARTIFACT_NAMES = (
+        "best_model.zip",
+        "best_vec_normalize.pkl",
+        "best_model_meta.json",
+    )
+
+    def archive_best(self, destination_dir: str) -> dict[str, Any] | None:
+        """Copy the current best artifacts into ``destination_dir``.
+
+        For stage-gated curricula, called immediately before
+        ``reset_selection_state``: the reset lets the next stage's first
+        evaluation overwrite ``best_model.zip``, which destroys the
+        departing stage's champion (runs 20260721_142121 and
+        20260722_002913 each ended wanting exactly that checkpoint --
+        the stage-entry policy was the best either run ever measured at
+        the next stage's geometry, and only one of them happened to
+        survive as the run-level best). Returns the parsed
+        ``best_model_meta.json`` of the archived best, or ``None`` when
+        there is nothing to archive (no save path configured, or no
+        completed evaluation yet).
+        """
+        if self.best_model_save_path is None:
+            return None
+        meta_path = os.path.join(
+            self.best_model_save_path, "best_model_meta.json"
+        )
+        if not os.path.isfile(meta_path):
+            return None
+        os.makedirs(destination_dir, exist_ok=True)
+        for name in self._BEST_ARTIFACT_NAMES:
+            source = os.path.join(self.best_model_save_path, name)
+            if os.path.isfile(source):
+                shutil.copy2(source, os.path.join(destination_dir, name))
+        with open(meta_path) as stream:
+            return json.load(stream)
 
     def _append_csv(self, metrics: Mapping[str, float], timestep: int) -> None:
         """Append one (timestep, metric, value) row per metric in long format."""
