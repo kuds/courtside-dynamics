@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import numbers
 import os
+import shutil
 from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
@@ -127,11 +128,19 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         only luck (the stage-entry eval becoming the next stage's first
         best) preserved one of them.
     stage_history_path:
-        When set, a per-stage history report is written here at training
-        end: entry/exit timesteps, evaluation counts, promotion windows,
-        and each stage's archived best selection values -- the table
-        every campaign review previously reconstructed by hand from
+        When set, a per-stage history report is written here -- refreshed
+        atomically on every stage close (so completed stages survive a
+        hard runtime death) and finalized at training end or interrupt:
+        entry/exit timesteps, evaluation counts, promotion windows, and
+        each stage's archived best selection values -- the table every
+        campaign review previously reconstructed by hand from
         ``eval_info.csv``.
+    run_config_path:
+        Optional path to the run's ``config.json``; when set, it is
+        copied into each archived stage directory, which makes
+        ``stage_bests/stage_NN/`` a valid legacy-flat-layout
+        ``WarmStartConfig.source_run_dir`` -- continuations really can
+        seed from any stage's champion without hand-assembling files.
     """
 
     def __init__(
@@ -148,6 +157,7 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         extra_target_envs: Sequence[VecEnv] = (),
         stage_bests_dir: str | None = None,
         stage_history_path: str | None = None,
+        run_config_path: str | None = None,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose)
@@ -200,6 +210,7 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         for name, value in (
             ("stage_bests_dir", stage_bests_dir),
             ("stage_history_path", stage_history_path),
+            ("run_config_path", run_config_path),
         ):
             if value is not None and (
                 not isinstance(value, str) or not value.strip()
@@ -228,6 +239,8 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         self._resume_gradient_steps: int | None = None
         self.stage_bests_dir: str | None = stage_bests_dir
         self.stage_history_path: str | None = stage_history_path
+        self.run_config_path: str | None = run_config_path
+        self._finalized: bool = False
         self._stage_entry_timestep: int = 0
         self._stage_eval_count: int = 0
         self._stage_history: list[dict[str, Any]] = []
@@ -322,11 +335,25 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         row so ``curriculum_stages.json`` is self-contained.
         """
         best_meta = None
-        if self.stage_bests_dir is not None:
+        # Zero stage evaluations means any on-disk best triple predates
+        # this stage (the reset leaves the previous champion on disk
+        # until the next evaluation overwrites it): archiving it here
+        # would file the PREVIOUS stage's champion under this stage's
+        # label. One-or-more evaluations guarantees the triple was
+        # written in-stage -- the first post-reset eval always saves.
+        if self.stage_bests_dir is not None and self._stage_eval_count > 0:
             destination = os.path.join(
                 self.stage_bests_dir, f"stage_{self._stage_index:02d}"
             )
             best_meta = self.info_eval.archive_best(destination)
+            if best_meta is not None and self.run_config_path is not None:
+                # With config.json alongside the triple, the stage dir
+                # is a valid legacy-flat-layout warm-start source.
+                if os.path.isfile(self.run_config_path):
+                    shutil.copy2(
+                        self.run_config_path,
+                        os.path.join(destination, "config.json"),
+                    )
         self._stage_history.append(
             {
                 "stage_index": self._stage_index,
@@ -340,6 +367,10 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                 "best": best_meta,
             }
         )
+        # Refresh the report on every stage close: completed-stage rows
+        # then survive even a hard runtime death that skips both
+        # _on_training_end and train()'s interrupt salvage.
+        self._write_stage_history()
 
     def _write_stage_history(self) -> None:
         if self.stage_history_path is None:
@@ -366,16 +397,31 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
             stream.write("\n")
         os.replace(temporary, self.stage_history_path)
 
-    def _on_training_end(self) -> None:
-        """Close out the stage training ended on and write the history.
+    def finalize(self) -> None:
+        """Close out the current stage and write the history -- once.
+
+        Called from ``_on_training_end`` on a normal ``learn()`` exit
+        and from train()'s KeyboardInterrupt salvage path (SB3 does not
+        run ``on_training_end`` when an exception propagates out of the
+        training loop, and the whole point of the salvage path is that
+        the run dir stays self-describing). Idempotent so the interrupt
+        path plus a later normal close cannot append a duplicate row.
 
         The final stage's best is also the run-level canonical best;
         duplicating it under ``stage_bests/`` keeps the per-stage index
-        complete, so a continuation can seed from ANY stage's champion
+        complete (skipped when the final stage recorded no evaluation:
+        the on-disk best would belong to the previous stage), so a
+        continuation can seed from ANY archived stage's champion
         without special-casing the last one.
         """
+        if self._finalized:
+            return
+        self._finalized = True
         self._close_stage_record(promoted=False)
         self._write_stage_history()
+
+    def _on_training_end(self) -> None:
+        self.finalize()
 
     def _maybe_resume_updates(self) -> None:
         """Restore ``gradient_steps`` once the post-advance pause ends."""
@@ -408,11 +454,16 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         resolved = float(value)
         # The streak is maintained under both rules -- it drives the
         # "consecutive" decision and stays a logged diagnostic under
-        # "window_mean".
+        # "window_mean". The metric window is likewise kept under both:
+        # under "consecutive" it never drives promotion, but at a stage
+        # close it holds the last ``sustain_evals`` measurements (all
+        # threshold-clearing at a promotion, since the streak spans
+        # them), so curriculum_stages.json records promotion evidence
+        # for consecutive-rule gates too.
         self._streak = self._streak + 1 if resolved >= self.threshold else 0
+        self._metric_window.append(resolved)
         if self.promotion_rule == "consecutive":
             return self._streak >= self.sustain_evals
-        self._metric_window.append(resolved)
         if len(self._metric_window) < self.sustain_evals:
             return False
         window_mean = sum(self._metric_window) / len(self._metric_window)

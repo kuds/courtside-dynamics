@@ -1001,6 +1001,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         )
 
         callbacks: list[BaseCallback] = [eval_callback]
+        # Bound outside the gated-construction branch so the interrupt
+        # salvage path can finalize the gate's stage history (or skip
+        # cleanly for non-gated runs).
+        gate_callback: PerformanceGatedEnvStagesCallback | None = None
         if cfg.checkpoint_freq > 0:
             callbacks.append(
                 CheckpointCallback(
@@ -1157,35 +1161,37 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                         f"unknown performance_gate key(s) "
                         f"{unknown_gate_keys}"
                     )
-                callbacks.append(
-                    PerformanceGatedEnvStagesCallback(
-                        stages=gate_spec["stages"],
-                        metric_key=gate_spec["metric_key"],
-                        threshold=gate_spec["threshold"],
-                        sustain_evals=gate_spec["sustain_evals"],
-                        promotion_rule=gate_spec.get(
-                            "promotion_rule", "consecutive"
-                        ),
-                        advance_update_pause_steps=gate_spec.get(
-                            "advance_update_pause_steps", 0
-                        ),
-                        clear_replay_buffer_on_advance=gate_spec.get(
-                            "clear_replay_buffer_on_advance", False
-                        ),
-                        info_eval=info_eval_callback,
-                        # Per-stage champion archive + history report:
-                        # without these, every advance's selection reset
-                        # lets the next stage's first eval overwrite the
-                        # departing stage's best_model.zip.
-                        stage_bests_dir=artifact_path(
-                            cfg.log_dir, "stage_bests_dir"
-                        ),
-                        stage_history_path=artifact_path(
-                            cfg.log_dir, "curriculum_stages"
-                        ),
-                        verbose=cfg.verbose,
-                    )
+                gate_callback = PerformanceGatedEnvStagesCallback(
+                    stages=gate_spec["stages"],
+                    metric_key=gate_spec["metric_key"],
+                    threshold=gate_spec["threshold"],
+                    sustain_evals=gate_spec["sustain_evals"],
+                    promotion_rule=gate_spec.get(
+                        "promotion_rule", "consecutive"
+                    ),
+                    advance_update_pause_steps=gate_spec.get(
+                        "advance_update_pause_steps", 0
+                    ),
+                    clear_replay_buffer_on_advance=gate_spec.get(
+                        "clear_replay_buffer_on_advance", False
+                    ),
+                    info_eval=info_eval_callback,
+                    # Per-stage champion archive + history report:
+                    # without these, every advance's selection reset
+                    # lets the next stage's first eval overwrite the
+                    # departing stage's best_model.zip. config.json is
+                    # copied alongside each archived triple so a stage
+                    # dir is a valid warm-start source.
+                    stage_bests_dir=artifact_path(
+                        cfg.log_dir, "stage_bests_dir"
+                    ),
+                    stage_history_path=artifact_path(
+                        cfg.log_dir, "curriculum_stages"
+                    ),
+                    run_config_path=artifact_path(cfg.log_dir, "config"),
+                    verbose=cfg.verbose,
                 )
+                callbacks.append(gate_callback)
             if cfg.final_info_eval:
                 # Honest final-task metrics on the recipe's unmodified
                 # eval configuration; deliberately NOT registered with
@@ -1438,6 +1444,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     "Training interrupted -- saving final_model and summary "
                     "for the partial run."
                 )
+                # SB3 only calls on_training_end after a clean training
+                # loop, so an interrupt would otherwise lose the gate's
+                # in-flight stage row and final-stage archive; finalize
+                # is idempotent, so a duplicate close cannot occur.
+                if gate_callback is not None:
+                    gate_callback.finalize()
             model.save(artifact_path(cfg.log_dir, "final_model"))
             if use_vec_normalize:
                 assert isinstance(train_env, VecNormalize)

@@ -20,13 +20,22 @@ run-level best.
   archives the departing stage's `best_model.zip` /
   `best_vec_normalize.pkl` / `best_model_meta.json` (immediately
   before the selection reset), and the final stage's best is
-  duplicated there at training end so the per-stage index is complete
-  — a continuation can warm-start from any stage's champion.
-- **`reports/curriculum_stages.json`**: written at training end with
-  each stage's entry/exit timesteps, evaluation count, promotion
-  window values, streak, and archived best selection values — the
-  table every campaign review previously reconstructed by hand from
-  `eval_info.csv`.
+  duplicated there at training end — skipped when that stage recorded
+  no evaluation, since the on-disk triple would belong to the previous
+  stage. The run's `config.json` is copied alongside each triple, so a
+  `stage_NN/` directory is a valid (legacy-flat-layout)
+  `WarmStartConfig.source_run_dir`: a continuation really can
+  warm-start from any archived stage's champion.
+- **`reports/curriculum_stages.json`**: refreshed atomically on every
+  stage close and finalized at training end, with each stage's
+  entry/exit timesteps, evaluation count, promotion window values
+  (kept under both promotion rules), streak, and archived best
+  selection values — the table every campaign review previously
+  reconstructed by hand from `eval_info.csv`. Interrupted runs keep
+  it too: train()'s KeyboardInterrupt salvage path finalizes the gate
+  (SB3 skips `on_training_end` when an exception escapes the training
+  loop), and completed-stage rows are already durable on disk even
+  against a hard runtime death.
 - **`config.json` gate provenance**: the structured
   `performance_gate` block now records `promotion_rule`,
   `advance_update_pause_steps`, and `clear_replay_buffer_on_advance`

@@ -465,6 +465,9 @@ def test_gate_archives_stage_bests_and_writes_history(tmp_path):
         assert rows[0]["promoted"] is True
         assert rows[0]["evals"] == 1
         assert rows[0]["streak"] == 1
+        # The evidence window is kept under the consecutive rule too
+        # (deque maxlen == sustain_evals == 1 here).
+        assert rows[0]["promotion_window"] == [2.0]
         assert rows[0]["stage"] == dict(STAGES[0])
         assert rows[0]["best"] == {"timestep": 1}
         assert rows[1]["promoted"] is False
@@ -514,6 +517,124 @@ def test_gate_history_records_window_mean_promotion_evidence(tmp_path):
         )["stages"]
         assert rows[0]["promoted"] is True
         assert rows[0]["promotion_window"] == [1.1, 1.6]
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_gate_skips_archiving_a_stage_with_zero_evaluations(tmp_path):
+    """Training ending right after a promotion must not file the
+    PREVIOUS stage's champion under the new stage's label: the on-disk
+    best triple predates the stage whenever the stage saw no eval."""
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            sustain_evals=1,
+            stage_bests_dir=str(tmp_path / "stage_bests"),
+            stage_history_path=str(tmp_path / "curriculum_stages.json"),
+        )
+        gate._on_training_start()
+        info_eval.finish_eval({"bounce_count_ep_mean": 2.0})  # promote 0->1
+        gate._on_step()
+        gate._on_training_end()  # zero evals at stage 1
+
+        assert [
+            os.path.basename(dest) for dest, _ in info_eval.archives
+        ] == ["stage_00"]
+        assert not (tmp_path / "stage_bests" / "stage_01").exists()
+        rows = json.loads(
+            (tmp_path / "curriculum_stages.json").read_text()
+        )["stages"]
+        assert rows[1]["evals"] == 0
+        assert rows[1]["best"] is None
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_gate_finalize_is_idempotent_and_covers_interrupts(tmp_path):
+    """finalize() is the interrupt-salvage entry point; a later normal
+    on_training_end must not append a duplicate final-stage row."""
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            sustain_evals=1,
+            stage_history_path=str(tmp_path / "curriculum_stages.json"),
+        )
+        gate._on_training_start()
+        info_eval.finish_eval({"bounce_count_ep_mean": 2.0})
+        gate._on_step()
+
+        gate.finalize()  # the interrupt path
+        gate._on_training_end()  # a hypothetical later normal close
+        gate.finalize()
+
+        rows = json.loads(
+            (tmp_path / "curriculum_stages.json").read_text()
+        )["stages"]
+        assert [row["stage_index"] for row in rows] == [0, 1]
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_gate_history_survives_before_training_end(tmp_path):
+    """Completed-stage rows are durable at advance time (atomic
+    refresh), so a hard runtime death cannot lose them."""
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            sustain_evals=1,
+            stage_history_path=str(tmp_path / "curriculum_stages.json"),
+        )
+        gate._on_training_start()
+        info_eval.finish_eval({"bounce_count_ep_mean": 2.0})
+        gate._on_step()  # advance closes stage 0 and refreshes the file
+
+        rows = json.loads(
+            (tmp_path / "curriculum_stages.json").read_text()
+        )["stages"]
+        assert [row["stage_index"] for row in rows] == [0]
+        assert rows[0]["promoted"] is True
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_gate_copies_run_config_into_stage_archives(tmp_path):
+    """With config.json alongside the archived triple, a stage_NN dir is
+    a valid legacy-flat-layout WarmStartConfig.source_run_dir."""
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        run_config = tmp_path / "config.json"
+        run_config.write_text('{"train_config": {"algo": "SAC"}}\n')
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            sustain_evals=1,
+            stage_bests_dir=str(tmp_path / "stage_bests"),
+            run_config_path=str(run_config),
+        )
+        gate._on_training_start()
+        info_eval.finish_eval({"bounce_count_ep_mean": 2.0})
+        gate._on_step()
+
+        copied = tmp_path / "stage_bests" / "stage_00" / "config.json"
+        assert copied.read_text() == run_config.read_text()
     finally:
         train_env.close()
         eval_env.close()
