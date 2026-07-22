@@ -5,6 +5,23 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## 0.17.0
+
+`WallBallDepthCurriculum` widens the promotion window: `sustain_evals`
+2 → 3 (`window_mean`, so promotion now needs the mean of the last
+three 30-episode evals ≥ 3.0). Run `20260721_142121` — the first
+campaign run under `window_mean` — promoted out of stage 0 on a 2-eval
+mean of 3.08, only ~0.3 standard errors above the bar (per-eval SE
+near 3.0 is ~0.4 bounces), i.e. a variance-driven promotion; its
+stage-1 exit (3.37) would have cleared any reasonable window. The
+threshold itself stays 3.0: observed eval maxima at the easy stages
+(3.27/3.47) leave no headroom to raise it without gating the whole
+run, and the run's stage-2 stall was a post-advance recovery failure,
+not premature promotion. Cost is ~50k extra steps per stage. Promotion
+timing — and therefore `curriculum/stage_index` trajectories — are not
+comparable with 2-eval runs; per-stage eval metrics remain comparable.
+`WallBallBootstrap` (historical) keeps its 2-eval gate.
+
 ## 0.16.1
 
 Version bump only; no physics, observation, action, or recipe changes.

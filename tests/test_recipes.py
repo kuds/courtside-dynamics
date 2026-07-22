@@ -763,7 +763,7 @@ def test_wall_ball_depth_curriculum_walks_the_fence_back():
 
     assert gate["metric_key"] == "bounce_count_ep_mean"
     assert gate["threshold"] == 3.0
-    assert gate["sustain_evals"] == 2
+    assert gate["sustain_evals"] == 3
     # Run-1 gate refinements (see the recipe comment): the bar itself is
     # untouched, but promotion reads the 2-eval mean (stage 2 cleared
     # 3.0 four separate times without two-in-a-row), and every advance

@@ -33,8 +33,8 @@ serve_vy_max = 2.0
 # [train.performance_gate]
 # metric_key = "bounce_count_ep_mean"
 # threshold = 3.0
-# sustain_evals = 2
-# promotion_rule = "window_mean"          # mean of last 2 evals >= 3.0
+# sustain_evals = 3
+# promotion_rule = "window_mean"          # mean of last 3 evals >= 3.0
 # advance_update_pause_steps = 50_000     # promotion warm-up: pause...
 # clear_replay_buffer_on_advance = true   # ...and drop stale-stage data
 # [[train.performance_gate.stages]]

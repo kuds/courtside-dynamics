@@ -97,7 +97,13 @@ from gymnasium.envs.registration import register
 # build_train_config. WallBall recipes unchanged.
 # 0.16.1: version bump only; no physics, observation, action, or
 # recipe changes -- 0.16.0 artifacts remain comparable.
-__version__ = "0.16.1"
+# 0.17.0: WallBallDepthCurriculum promotion window widened
+# (sustain_evals 2 -> 3, window_mean) after run 20260721_142121's
+# stage-0 exit cleared on a 2-eval mean of 3.08 (~0.3 SE above the
+# bar). Threshold unchanged at 3.0. Promotion timing -- and therefore
+# stage_index trajectories -- are not comparable with 2-eval runs;
+# per-stage eval metrics remain comparable.
+__version__ = "0.17.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.

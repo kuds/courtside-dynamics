@@ -796,10 +796,22 @@ RECIPES: dict[str, Recipe] = {
             #   dynamics via target clamping). Now an advance drops the
             #   buffer and holds gradient updates for 50k steps of
             #   fresh frontier-stage data.
+            #
+            # Run 20260721_142121 (the second campaign run, first with
+            # window_mean) widened the window from 2 to 3 evals: its
+            # stage-0 exit cleared on a 2-eval mean of 3.08 -- ~0.3 SE
+            # above the bar, a variance-driven promotion by the same SE
+            # arithmetic above -- while its stage-1 exit (3.37) would
+            # have cleared any reasonable window. The bar itself stays
+            # 3.0: observed skill ceilings at the easy stages (eval
+            # maxima 3.27/3.47) leave no headroom to raise it without
+            # gating the whole run, and the stage-2 stall that ended
+            # the run was a post-advance recovery failure, not a
+            # premature promotion.
             "performance_gate": {
                 "metric_key": "bounce_count_ep_mean",
                 "threshold": 3.0,
-                "sustain_evals": 2,
+                "sustain_evals": 3,
                 "promotion_rule": "window_mean",
                 "advance_update_pause_steps": 50_000,
                 "clear_replay_buffer_on_advance": True,
