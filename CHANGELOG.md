@@ -5,6 +5,76 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## 0.17.0
+
+`WallBallDepthCurriculum` widens the promotion window: `sustain_evals`
+2 → 3 (`window_mean`, so promotion now needs the mean of the last
+three 30-episode evals ≥ 3.0). Run `20260721_142121` — the first
+campaign run under `window_mean` — promoted out of stage 0 on a 2-eval
+mean of 3.08, only ~0.3 standard errors above the bar (per-eval SE
+near 3.0 is ~0.4 bounces), i.e. a variance-driven promotion; its
+stage-1 exit (3.37) would have cleared any reasonable window. The
+threshold itself stays 3.0: observed eval maxima at the easy stages
+(3.27/3.47) leave no headroom to raise it without gating the whole
+run, and the run's stage-2 stall was a post-advance recovery failure,
+not premature promotion. Cost is ~50k extra steps per stage. Promotion
+timing — and therefore `curriculum/stage_index` trajectories — are not
+comparable with 2-eval runs; per-stage eval metrics remain comparable.
+`WallBallBootstrap` (historical) keeps its 2-eval gate.
+
+## 0.16.1
+
+Version bump only; no physics, observation, action, or recipe changes.
+All 0.16.0 artifacts and learning curves remain comparable.
+
+## 0.16.0
+
+Humanoid-tennis stage overhaul: the curriculum's racket forgiveness now
+physically works, and the three PPO stage recipes adopt the open
+remediations from `docs/humanoid_env_review.md` / `docs/DECISIONS.md`.
+A new metric era for the tennis stages — contact behavior and rewards
+changed, so prior tennis-stage artifacts and curves are not comparable.
+WallBall and ball recipes are unchanged.
+
+- **Stringbed collision bounds fixed.** The `racket_contact_scale`
+  enlargement wrote `geom_size` and called `mj_setConst`, which never
+  refreshes `geom_rbound`/`geom_aabb`; MuJoCo's broadphase culled every
+  contact beyond the nominal extent, leaving the forgiveness inert.
+  Both bounds are now recomputed from the scaled semi-axes, and a
+  regression test pins that a ball in the enlarged-only annulus
+  generates a contact (and does not against the nominal stringbed).
+  The stage-1 feasibility oracle was recalibrated for the corrected
+  physics (swing at control call 56, pitch 0.65; both mirrored sides
+  land the target return in 129 steps).
+- **Task-metric selection for Stages 0–2.** `headline_key =
+  "stage_success"` (plus `confirm_best_eval` and 5-episode
+  reporting-only reward evals) moves `best_model.zip` and early stop
+  off the shaped eval reward — the run-20260712_190054 failure mode the
+  WallBall recipes already guard against. `legal_hit_count_ep_mean`
+  sits between the success keys and the reward tie-break so
+  pre-success contact progress still resets patience and updates the
+  best model.
+- **Exploration and shaping unblockers.** Stock iid Gaussian
+  exploration measured zero contacts in 264 random episodes while a
+  constant held action succeeds ~15% — the recipes now set
+  `use_sde = true` with a small `ent_coef = 0.01` floor, and Stages 1–2
+  enable the (previously inert) escrowed `valid_hit_shaping = 0.25` so
+  a hit that becomes a target return keeps a contact-time reward while
+  episode-total farming stays impossible.
+- **Reward normalization off for the tennis stages.** The PPO default
+  (normalize returns) would amplify the first sparse success toward the
+  clip ceiling on this hand-scaled terminal-only reward
+  (`normalize_reward = false` in recipes and starters).
+- **Early stop reachable per stage.** Patience scaled to each stage's
+  eval budget (8 / 12 / 20 for 20 / 40 / 80 evals); the shared 20 was
+  mathematically inert for Stages 0–1.
+- **Eager config validation.** `build_train_config` now resolves the
+  algo name and validates merged `model_kwargs` against the resolved
+  algorithm's constructor before any environment or artifact work
+  (cross-algorithm keys previously failed only inside `train()` after
+  the env fleet was built, and a string `ent_coef` on PPO survived
+  until the first gradient update).
+
 ## 0.15.1
 
 First-round fixes from the depth-curriculum run-1 review

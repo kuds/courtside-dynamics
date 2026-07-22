@@ -252,8 +252,13 @@ _ORACLE_SHOULDER_ACTION = np.float32(-0.12161012)
 # derived from the G1 actuator ctrlranges; neutral action misses the feed.
 _STAGE0_SHOULDER_PITCH_ACTION = np.float32(-0.0608051)
 _STAGE0_SHOULDER_ROLL_ACTION = np.float32(-0.7799171)
-_STAGE1_SWING_SHOULDER_PITCH_ACTION = np.float32(0.4857513)
-_STAGE1_SWING_CONTROL_STEP = 57
+# Recalibrated for the fixed stringbed collision bounds: the enlarged
+# annulus now really collides, so contact arrives earlier in the feed's
+# flight and the swing must start one control call sooner with more
+# pitch. The success basin is swing step 56 with pitch in [0.6, 0.7]
+# (55 whiffs entirely, 57 returns short of the net); 0.65 is its center.
+_STAGE1_SWING_SHOULDER_PITCH_ACTION = np.float32(0.65)
+_STAGE1_SWING_CONTROL_STEP = 56
 
 
 def humanoid_tennis_stage0_action(obs: np.ndarray) -> np.ndarray:
@@ -281,7 +286,7 @@ def humanoid_tennis_stage1_action(
 ) -> np.ndarray:
     """Return the two-phase deterministic physical Stage 1 swing.
 
-    The shoulder prepares for 57 control calls, then swings forward. The
+    The shoulder prepares for 56 control calls, then swings forward. The
     timing is a feasibility fixture, not a robust target-return controller.
     """
     if isinstance(control_step, bool) or not isinstance(control_step, int):

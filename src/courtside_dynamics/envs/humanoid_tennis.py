@@ -464,6 +464,19 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
                 # only the physical stringbed's in-plane reach is forgiven.
                 self.model.geom_size[geom_id, 0] = nominal[0]
                 self.model.geom_size[geom_id, 1:3] = nominal[1:3] * scale
+                # Neither the size write nor mj_setConst refreshes the
+                # compile-time collision bounds, and MuJoCo's broadphase
+                # culls candidate pairs on them -- without this, contacts
+                # in the enlarged outer band are silently dropped and the
+                # forgiveness is inert. For an ellipsoid the bounding
+                # sphere radius is the largest semi-axis and the
+                # geom-frame AABB half-sizes are the semi-axes.
+                self.model.geom_rbound[geom_id] = float(
+                    np.max(self.model.geom_size[geom_id])
+                )
+                self.model.geom_aabb[geom_id, 3:6] = self.model.geom_size[
+                    geom_id
+                ]
             mujoco.mj_setConst(self.model, self.data)
 
         self._state_machine = RallyStateMachine(

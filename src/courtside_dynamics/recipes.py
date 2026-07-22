@@ -23,9 +23,11 @@ from courtside_dynamics.envs import (
     BallBalanceEnv,
     BallBounceEnv,
     HumanoidTennisCoopEnv,
+    TennisRewardConfig,
     WallBallEnv,
 )
 from courtside_dynamics.training import TrainConfig
+from courtside_dynamics.training.algos import resolve_algo, validate_model_kwargs
 
 
 @dataclass(frozen=True)
@@ -199,14 +201,42 @@ _HUMANOID_TENNIS_NORMALIZATION_EXCLUSIONS = tuple(
 )
 
 
-def _tennis_curriculum_extra_cfg(*, video_length: int) -> dict[str, Any]:
-    """Shared fixed-stage recording/evaluation contract for Stages 0–2."""
+def _tennis_curriculum_extra_cfg(
+    *, video_length: int, early_stop_patience: int
+) -> dict[str, Any]:
+    """Shared fixed-stage recording/evaluation contract for Stages 0–2.
+
+    ``early_stop_patience`` is per-stage because the earliest reachable
+    stop is evaluation ``2 * patience`` (min_evals equals patience), so
+    the value must be scaled to each stage's eval budget
+    (total_timesteps / eval_freq = 20 / 40 / 80 evals) or the stop can
+    never fire — the WallBall-era 20 was mathematically inert for
+    Stages 0–1 (humanoid_env_review.md finding N-F1).
+    """
     return {
         "n_envs": 1,
-        "early_stop_patience": 20,
+        "early_stop_patience": early_stop_patience,
         "normalize_obs_excluded_indices": (
             _HUMANOID_TENNIS_NORMALIZATION_EXCLUSIONS
         ),
+        # The stage reward is hand-scaled and sparse: terminal outcomes
+        # in {-2, -1, 0, +1}, plus (stages 1-2) an escrowed +/-0.25
+        # contact pulse that commits on success and claws back otherwise.
+        # The PPO default (VecNormalize returns) would amplify the first
+        # rare success toward the clip_reward ceiling exactly when
+        # learning begins (humanoid_env_review.md I-F5).
+        "normalize_reward": False,
+        # Stock iid per-step Gaussian exploration at 100 Hz averages to a
+        # near-still arm (0 contacts in 264 random episodes, while a
+        # *constant* random action held all episode succeeds ~15% —
+        # humanoid_env_review.md C2 / DECISIONS.md). gSDE gives temporally
+        # correlated exploration; the small entropy floor guards against
+        # std collapse onto the repeatable "safe non-swing" −1 while the
+        # success reward is still unsampled.
+        "model_kwargs": {
+            "use_sde": True,
+            "ent_coef": 0.01,
+        },
         "eval_freq": 25_000,
         "checkpoint_freq": 100_000,
         "video_freq": 100_000,
@@ -227,6 +257,30 @@ def _tennis_curriculum_extra_cfg(*, video_length: int) -> dict[str, Any]:
         "info_eval_distribution_keys": ("rally_count",),
         "success_key": "stage_success",
         "success_threshold": 1.0,
+        # Best-model selection and early stop follow the task metric, not
+        # the shaped eval reward (run 20260712_190054's reward-selected
+        # "best" completed zero rallies). legal_hit_count_ep_mean sits
+        # between the success keys and the reward tie-break so
+        # pre-success contact progress (the regime the escrowed shaping
+        # creates) still resets patience and updates best_model instead
+        # of presenting a bit-flat score until the first target return.
+        "headline_key": "stage_success",
+        "best_metric_keys": (
+            "stage_success_ep_mean",
+            "success_rate",
+            "legal_hit_count_ep_mean",
+            "episode_reward_mean",
+        ),
+        # Note: eval is deterministic for stages 0-1 (scripted launch,
+        # deterministic policy, frozen normalizer), so the confirmation
+        # batch replays the candidate exactly there; it only guards
+        # against single-batch flukes under stage 2's randomized feeds
+        # and is kept uniform as cheap future-proofing.
+        "confirm_best_eval": True,
+        # With headline selection the reward EvalCallback stream is
+        # reporting-only; 5 episodes keep evaluations.npz alive while the
+        # info-dict stream takes the full 20 for selection.
+        "reward_eval_episodes": 5,
         "phase_key": "rally_phase",
         "phase_labels": {
             0: "initial_feed",
@@ -742,10 +796,22 @@ RECIPES: dict[str, Recipe] = {
             #   dynamics via target clamping). Now an advance drops the
             #   buffer and holds gradient updates for 50k steps of
             #   fresh frontier-stage data.
+            #
+            # Run 20260721_142121 (the second campaign run, first with
+            # window_mean) widened the window from 2 to 3 evals: its
+            # stage-0 exit cleared on a 2-eval mean of 3.08 -- ~0.3 SE
+            # above the bar, a variance-driven promotion by the same SE
+            # arithmetic above -- while its stage-1 exit (3.37) would
+            # have cleared any reasonable window. The bar itself stays
+            # 3.0: observed skill ceilings at the easy stages (eval
+            # maxima 3.27/3.47) leave no headroom to raise it without
+            # gating the whole run, and the stage-2 stall that ended
+            # the run was a post-advance recovery failure, not a
+            # premature promotion.
             "performance_gate": {
                 "metric_key": "bounce_count_ep_mean",
                 "threshold": 3.0,
-                "sustain_evals": 2,
+                "sustain_evals": 3,
                 "promotion_rule": "window_mean",
                 "advance_update_pause_steps": 50_000,
                 "clear_replay_buffer_on_advance": True,
@@ -810,7 +876,10 @@ RECIPES: dict[str, Recipe] = {
         default_total_timesteps=500_000,
         default_algo="PPO",
         name_prefix="humanoid_tennis_stage0_intercept",
-        extra_cfg=_tennis_curriculum_extra_cfg(video_length=150),
+        # patience 8 of a 20-eval budget: earliest stop at eval 16.
+        extra_cfg=_tennis_curriculum_extra_cfg(
+            video_length=150, early_stop_patience=8
+        ),
         description=(
             "Experimental fixed-pelvis, two-shoulder physical intercept task. "
             "Success is the first legal racket contact; convergence is not "
@@ -823,11 +892,23 @@ RECIPES: dict[str, Recipe] = {
             "render_mode": "rgb_array",
             "episode_len": 300,
             "curriculum_config": 1,
+            # Target-return stages otherwise pay a flat −1 for whiff,
+            # off-target hit, and net fault alike — zero differential
+            # signal between hitting and never moving (30/30 random
+            # episodes at exactly −1.000, humanoid_env_review.md). The
+            # escrowed shaping pays +0.25 at racket contact and claws it
+            # back at episode end unless the hit becomes a target return,
+            # so the discounted contact-time signal survives while
+            # episode-total farming of non-target hits stays impossible.
+            "reward_config": TennisRewardConfig(valid_hit_shaping=0.25),
         },
         default_total_timesteps=1_000_000,
         default_algo="PPO",
         name_prefix="humanoid_tennis_stage1_anchored_return",
-        extra_cfg=_tennis_curriculum_extra_cfg(video_length=300),
+        # patience 12 of a 40-eval budget: earliest stop at eval 24.
+        extra_cfg=_tennis_curriculum_extra_cfg(
+            video_length=300, early_stop_patience=12
+        ),
         description=(
             "Experimental fixed-pelvis right-arm return into a generous "
             "physical target region; convergence is not claimed."
@@ -839,11 +920,16 @@ RECIPES: dict[str, Recipe] = {
             "render_mode": "rgb_array",
             "episode_len": 300,
             "curriculum_config": 2,
+            # Same escrowed contact shaping as Stage 1 (see that recipe).
+            "reward_config": TennisRewardConfig(valid_hit_shaping=0.25),
         },
         default_total_timesteps=2_000_000,
         default_algo="PPO",
         name_prefix="humanoid_tennis_stage2_randomized_return",
-        extra_cfg=_tennis_curriculum_extra_cfg(video_length=300),
+        # patience 20 of an 80-eval budget: earliest stop at eval 40.
+        extra_cfg=_tennis_curriculum_extra_cfg(
+            video_length=300, early_stop_patience=20
+        ),
         description=(
             "Experimental fixed-pelvis target return with bounded seeded "
             "launch randomization; convergence is not claimed."
@@ -1032,6 +1118,10 @@ def build_train_config(
             )
     recipe = RECIPES[env_name]
     resolved_algo = recipe.default_algo if algo is None else algo
+    # Fail on a typo'd algo name now, before any env or artifact work
+    # (train() would otherwise only hit the registry after the eager
+    # env probe below has built and torn down real environments).
+    resolve_algo(resolved_algo)
 
     file_config = None
     if config_file is not None:
@@ -1074,6 +1164,16 @@ def build_train_config(
     if total_timesteps is not None:
         cfg_kwargs["total_timesteps"] = total_timesteps
     cfg_kwargs.update(overrides)
+
+    # Validate the merged model_kwargs (recipe extra_cfg, TOML deep-merge,
+    # and explicit overrides alike) against the resolved algorithm's
+    # constructor before the env probe: a cross-algorithm key would
+    # otherwise TypeError only inside train() after the vectorised env
+    # fleet is built, and a string ent_coef on PPO even survives
+    # construction, crashing a full rollout into the run.
+    merged_model_kwargs = cfg_kwargs.get("model_kwargs")
+    if merged_model_kwargs:
+        validate_model_kwargs(resolved_algo, merged_model_kwargs)
 
     cfg = TrainConfig(**cfg_kwargs)
     if file_config is not None:

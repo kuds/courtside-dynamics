@@ -147,6 +147,23 @@ def test_algo_registry_has_sac_and_ppo():
     assert "PPO" not in OFF_POLICY_ALGOS
 
 
+def test_validate_model_kwargs_accepts_and_rejects_per_algo():
+    from courtside_dynamics.training.algos import validate_model_kwargs
+
+    # Shared and per-algo keys pass for the algo that owns them.
+    validate_model_kwargs("PPO", {"n_steps": 512, "ent_coef": 0.01})
+    validate_model_kwargs("SAC", {"buffer_size": 1_000, "ent_coef": "auto"})
+    validate_model_kwargs("sac", {"gradient_steps": -1})  # case-insensitive
+
+    with pytest.raises(ValueError, match="not accepted by PPO"):
+        validate_model_kwargs("PPO", {"buffer_size": 1_000})
+    with pytest.raises(ValueError, match="numeric ent_coef"):
+        validate_model_kwargs("PPO", {"ent_coef": "auto_0.02"})
+    # Keys _build_algo supplies itself are rejected outright.
+    with pytest.raises(ValueError, match="trainer supplies"):
+        validate_model_kwargs("PPO", {"tensorboard_log": "/tmp/tb"})
+
+
 def test_scalar_info_keys_reexported_from_video_record():
     """The helper moved to ``callbacks._info`` but must stay importable
     from ``video_record`` (existing code and tests import it there)."""
