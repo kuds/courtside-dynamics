@@ -1777,6 +1777,14 @@ class TestWallBallAdvanceRefund:
             assert info["term_nonfinite"]
             assert np.isfinite(obs).all()
             np.testing.assert_allclose(obs, obs_ok)
+            assert info["pre_bounce_legal_paddle_hit_count"] == 0
+            assert info["post_bounce_legal_paddle_hit_count"] == 0
+            assert info["opening_volley_count"] == 0
+            assert info["post_bounce_completed_return_count"] == 0
+            assert info["event_pre_bounce_legal_paddle_hit"] is False
+            assert info["event_post_bounce_legal_paddle_hit"] is False
+            assert info["event_opening_volley"] is False
+            assert info["event_post_bounce_completed_return"] is False
         finally:
             env.close()
 
@@ -2341,6 +2349,11 @@ class TestWallBallRecoveryResetCurriculum:
                 assert env.bounce_count == 0
                 assert env.wall_contact_count == 0
                 assert env.legal_paddle_hit_count == 0
+                assert env.pre_bounce_legal_paddle_hit_count == 0
+                assert env.post_bounce_legal_paddle_hit_count == 0
+                assert env.opening_volley_count == 0
+                assert env.post_bounce_completed_return_count == 0
+                assert env._floor_bounce_since_last_wall_or_reset is False
                 assert env.one_bounce_recovery_count == 0
                 assert env.one_bounce_return_count == 0
                 assert env._recoverable_bounce_eligible is False
@@ -2387,7 +2400,11 @@ class TestWallBallRallyStyleInfoContract:
     _EVENT_KEYS = (
         "event_floor_bounce",
         "event_legal_paddle_hit",
+        "event_pre_bounce_legal_paddle_hit",
+        "event_post_bounce_legal_paddle_hit",
+        "event_opening_volley",
         "event_completed_return",
+        "event_post_bounce_completed_return",
         "event_recoverable_bounce",
         "event_post_wall_bounce",
         "event_style_violation",
@@ -2407,6 +2424,10 @@ class TestWallBallRallyStyleInfoContract:
             assert not (terminated or truncated)
             assert isinstance(info["rally_phase_name"], str)
             assert info["legal_paddle_hit_count"] == 0
+            assert info["pre_bounce_legal_paddle_hit_count"] == 0
+            assert info["post_bounce_legal_paddle_hit_count"] == 0
+            assert info["opening_volley_count"] == 0
+            assert info["post_bounce_completed_return_count"] == 0
             assert info["one_bounce_recovery_count"] == 0
             assert info["one_bounce_return_count"] == 0
             assert info["return_count"] == 0
@@ -2438,6 +2459,10 @@ class TestWallBallRallyStyleInfoContract:
         try:
             env.reset(seed=0)
             env.legal_paddle_hit_count = 4
+            env.pre_bounce_legal_paddle_hit_count = 1
+            env.post_bounce_legal_paddle_hit_count = 3
+            env.opening_volley_count = 1
+            env.post_bounce_completed_return_count = 2
             env.one_bounce_recovery_count = 3
             env.one_bounce_return_count = 2
             env._rally_phase = 2
@@ -2446,6 +2471,10 @@ class TestWallBallRallyStyleInfoContract:
                 np.zeros(env.action_space.shape, dtype=np.float32)
             )
             assert info["legal_paddle_hit_count"] == 0
+            assert info["pre_bounce_legal_paddle_hit_count"] == 0
+            assert info["post_bounce_legal_paddle_hit_count"] == 0
+            assert info["opening_volley_count"] == 0
+            assert info["post_bounce_completed_return_count"] == 0
             assert info["one_bounce_recovery_count"] == 0
             assert info["one_bounce_return_count"] == 0
             assert info["rally_phase_name"] == reset_phase
@@ -2554,6 +2583,164 @@ class TestWallBallRallyStyleSemantics:
             assert info["one_bounce_return_count"] == 1
             assert info["return_count"] == 1
             assert info["bounce_count"] == 1
+        finally:
+            env.close()
+
+    def test_opening_volley_and_post_bounce_hit_are_distinguished(self):
+        env = self._strict_env("open")
+        try:
+            env.reset(seed=0)
+
+            _, _, terminated, truncated, info = self._paddle_hit(env)
+            assert not (terminated or truncated)
+            assert info["event_legal_paddle_hit"] is True
+            assert info["event_pre_bounce_legal_paddle_hit"] is True
+            assert info["event_post_bounce_legal_paddle_hit"] is False
+            assert info["event_opening_volley"] is True
+            assert info["pre_bounce_legal_paddle_hit_count"] == 1
+            assert info["post_bounce_legal_paddle_hit_count"] == 0
+            assert info["opening_volley_count"] == 1
+
+            _, _, terminated, truncated, info = self._wall_hit(env)
+            assert not (terminated or truncated)
+            assert info["event_completed_return"] is True
+            assert info["event_post_bounce_completed_return"] is False
+            assert info["post_bounce_completed_return_count"] == 0
+
+            self._floor_bounce(env)
+            _, _, terminated, truncated, info = self._paddle_hit(env)
+            assert not (terminated or truncated)
+            assert info["event_legal_paddle_hit"] is True
+            assert info["event_pre_bounce_legal_paddle_hit"] is False
+            assert info["event_post_bounce_legal_paddle_hit"] is True
+            assert info["event_opening_volley"] is False
+            assert info["pre_bounce_legal_paddle_hit_count"] == 1
+            assert info["post_bounce_legal_paddle_hit_count"] == 1
+            assert info["opening_volley_count"] == 1
+            assert (
+                info["pre_bounce_legal_paddle_hit_count"]
+                + info["post_bounce_legal_paddle_hit_count"]
+                == info["legal_paddle_hit_count"]
+            )
+
+            _, _, terminated, truncated, info = self._wall_hit(env)
+            assert not (terminated or truncated)
+            assert info["event_completed_return"] is True
+            assert info["event_post_bounce_completed_return"] is True
+            assert info["post_bounce_completed_return_count"] == 1
+            assert info["bounce_count"] == 2
+        finally:
+            env.close()
+
+    @pytest.mark.parametrize(
+        ("events", "expected_post_bounce"),
+        [
+            (
+                [
+                    (0, 0, "floor"),
+                    (1, 1, "paddle"),
+                    (2, 2, "wall"),
+                ],
+                True,
+            ),
+            (
+                [
+                    (0, 1, "paddle"),
+                    (1, 0, "floor"),
+                    (2, 2, "wall"),
+                ],
+                False,
+            ),
+        ],
+    )
+    def test_open_same_frame_sequence_uses_physical_contact_order(
+        self, monkeypatch, events, expected_post_bounce
+    ):
+        env = self._strict_env("open")
+        try:
+            env.reset(seed=0)
+
+            def fake_simulation(_action, _frame_skip):
+                env._substep_contact_events = events
+                env._substep_paddle_touch = env.min_force + 1.0
+                env._substep_wall_touch = env.min_force + 1.0
+
+            monkeypatch.setattr(env, "do_simulation", fake_simulation)
+            _, reward, terminated, truncated, info = env.step(
+                self._zero_action(env)
+            )
+
+            assert not (terminated or truncated)
+            assert reward == pytest.approx(1.0)
+            assert info["event_floor_bounce"] is True
+            assert info["event_legal_paddle_hit"] is True
+            assert info["event_completed_return"] is True
+            assert (
+                info["event_post_bounce_legal_paddle_hit"]
+                is expected_post_bounce
+            )
+            assert (
+                info["event_pre_bounce_legal_paddle_hit"]
+                is not expected_post_bounce
+            )
+            assert (
+                info["event_post_bounce_completed_return"]
+                is expected_post_bounce
+            )
+        finally:
+            env.close()
+
+    def test_post_bounce_reset_seeds_sequence_state_without_hit_credit(self):
+        env = self._strict_env(
+            "one_bounce",
+            recovery_reset_probability=1.0,
+            post_bounce_reset_fraction=1.0,
+        )
+        try:
+            _, reset_info = env.reset(seed=0)
+            assert reset_info["reset_mode"] == "post_bounce"
+            assert env.floor_bounce_total == 1
+            assert env.legal_paddle_hit_count == 0
+            assert env.post_bounce_legal_paddle_hit_count == 0
+
+            _, _, terminated, truncated, info = self._paddle_hit(env)
+            assert not (terminated or truncated)
+            assert info["event_post_bounce_legal_paddle_hit"] is True
+            assert info["event_pre_bounce_legal_paddle_hit"] is False
+            assert info["event_opening_volley"] is False
+            assert info["post_bounce_legal_paddle_hit_count"] == 1
+            assert info["pre_bounce_legal_paddle_hit_count"] == 0
+            assert info["opening_volley_count"] == 0
+
+            _, _, terminated, truncated, info = self._wall_hit(env)
+            assert not (terminated or truncated)
+            assert info["event_post_bounce_completed_return"] is True
+            assert info["post_bounce_completed_return_count"] == 1
+        finally:
+            env.close()
+
+    def test_nonfinite_action_preserves_sequence_counts_without_events(self):
+        env = self._strict_env("open")
+        try:
+            env.reset(seed=0)
+            self._floor_bounce(env)
+            self._paddle_hit(env)
+
+            _, reward, terminated, truncated, info = env.step(
+                np.full(env.action_space.shape, np.nan, dtype=np.float32)
+            )
+            assert np.isfinite(reward)
+            assert terminated and not truncated
+            assert info["term_nonfinite"] is True
+            assert info["legal_paddle_hit_count"] == 1
+            assert info["post_bounce_legal_paddle_hit_count"] == 1
+            assert info["pre_bounce_legal_paddle_hit_count"] == 0
+            assert info["opening_volley_count"] == 0
+            assert info["post_bounce_completed_return_count"] == 0
+            assert info["event_pre_bounce_legal_paddle_hit"] is False
+            assert info["event_post_bounce_legal_paddle_hit"] is False
+            assert info["event_opening_volley"] is False
+            assert info["event_post_bounce_completed_return"] is False
         finally:
             env.close()
 

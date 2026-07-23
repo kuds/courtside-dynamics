@@ -479,6 +479,15 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.wall_contact_count = 0     # all wall contacts incl. stray hits
         self.paddle_hit_count = 0
         self.legal_paddle_hit_count = 0
+        # Behavior-neutral contact-sequence telemetry. Every gate-opening
+        # legal hit belongs to exactly one side of this partition according
+        # to whether a qualified floor bounce occurred since the preceding
+        # wall contact (or episode reset). The completed-return counter
+        # carries that classification through to the gated wall contact.
+        self.pre_bounce_legal_paddle_hit_count = 0
+        self.post_bounce_legal_paddle_hit_count = 0
+        self.opening_volley_count = 0
+        self.post_bounce_completed_return_count = 0
         # World-space paddle x summed over the episode's legal
         # (gate-opening) paddle hits, so eval aggregation can measure
         # WHERE the policy actually plays -- e.g. whether a deep-fence
@@ -506,6 +515,10 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # since the most recent wall contact. Wall +1 fires only when
         # this is True at the moment of the wall edge.
         self._paddle_hit_since_last_wall = False
+        # Telemetry-only event-sequence state. Neither flag enters the
+        # observation, reward, rally rules, or termination logic.
+        self._floor_bounce_since_last_wall_or_reset = False
+        self._current_return_was_post_bounce = False
         # Tracking-shaping window: True between (virtual or real) wall
         # hit and the next paddle hit. Opened on reset so the serve
         # flight produces dense shaping signal.
@@ -1175,24 +1188,23 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                         np.asarray(ball_joint.qpos[:3]).copy(),
                         np.asarray(ball_joint.qvel[:3]).copy(),
                     )
-            if self.rally_style != "open":
-                if on_face and not self._ball_on_paddle:
-                    self._substep_contact_events.append(
-                        (
-                            substep_index,
-                            _CONTACT_EVENT_PRIORITY["paddle"],
-                            "paddle",
-                        )
+            if on_face and not self._ball_on_paddle:
+                self._substep_contact_events.append(
+                    (
+                        substep_index,
+                        _CONTACT_EVENT_PRIORITY["paddle"],
+                        "paddle",
                     )
-                wall_active = on_wall or wall_sensed > 0.0
-                if wall_active and not self._ball_on_wall:
-                    self._substep_contact_events.append(
-                        (
-                            substep_index,
-                            _CONTACT_EVENT_PRIORITY["wall"],
-                            "wall",
-                        )
+                )
+            wall_active = on_wall or wall_sensed > 0.0
+            if wall_active and not self._ball_on_wall:
+                self._substep_contact_events.append(
+                    (
+                        substep_index,
+                        _CONTACT_EVENT_PRIORITY["wall"],
+                        "wall",
                     )
+                )
             self._ball_on_floor = on_floor
             self._ball_on_paddle = on_face
             self._ball_on_wall = on_wall or wall_sensed > 0.0
@@ -1259,7 +1271,11 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             for _, _, event_name in self._substep_contact_events
         )
         event_legal_paddle_hit = False
+        event_pre_bounce_legal_paddle_hit = False
+        event_post_bounce_legal_paddle_hit = False
+        event_opening_volley = False
         event_completed_return = False
+        event_post_bounce_completed_return = False
         event_recoverable_bounce = False
         event_post_wall_bounce = False
         recoverable_bounce_score = 0.0
@@ -1267,12 +1283,32 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         style_violation_reason: str | None = None
         double_bounce_latched = False
 
-        def accept_paddle_hit() -> None:
+        def accept_paddle_hit(
+            *, after_bounce: bool | None = None
+        ) -> None:
             """Open the gated return and pay its refundable first-hit bonus."""
             nonlocal reward, rew_paddle, rew_first_hit
             nonlocal event_legal_paddle_hit
+            nonlocal event_pre_bounce_legal_paddle_hit
+            nonlocal event_post_bounce_legal_paddle_hit
+            nonlocal event_opening_volley
             first_hit = not self._paddle_hit_since_last_wall
             if first_hit:
+                hit_was_post_bounce = (
+                    self._floor_bounce_since_last_wall_or_reset
+                    if after_bounce is None
+                    else after_bounce
+                )
+                if hit_was_post_bounce:
+                    self.post_bounce_legal_paddle_hit_count += 1
+                    event_post_bounce_legal_paddle_hit = True
+                else:
+                    self.pre_bounce_legal_paddle_hit_count += 1
+                    event_pre_bounce_legal_paddle_hit = True
+                    if self.legal_paddle_hit_count == 0:
+                        self.opening_volley_count += 1
+                        event_opening_volley = True
+                self._current_return_was_post_bounce = hit_was_post_bounce
                 self.legal_paddle_hit_count += 1
                 self.legal_paddle_hit_x_sum += float(
                     self.data.body("paddle_head").xpos[0]
@@ -1298,6 +1334,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             """Close the current cycle, paying only a gated legal return."""
             nonlocal reward, rew_wall, rew_shaping, rew_paddle
             nonlocal event_completed_return
+            nonlocal event_post_bounce_completed_return
             self.wall_contact_count += 1
             legal_return = (
                 self._paddle_hit_since_last_wall
@@ -1323,6 +1360,9 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 self._pending_shaping = 0.0
                 self._pending_bonus = 0.0
                 event_completed_return = True
+                if self._current_return_was_post_bounce:
+                    self.post_bounce_completed_return_count += 1
+                    event_post_bounce_completed_return = True
             else:
                 # Wall -> wall with no paddle return between: a failed
                 # cycle. Claw back the advances paid during it (only
@@ -1336,6 +1376,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 if self.rally_style == "one_bounce":
                     self._recoverable_bounce_eligible = False
             self._paddle_hit_since_last_wall = False
+            self._current_return_was_post_bounce = False
+            self._floor_bounce_since_last_wall_or_reset = False
             self.floor_bounce_count = 0
             self._rally_phase = (
                 _AWAIT_BOUNCE
@@ -1349,13 +1391,30 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         if self.rally_style == "open":
             # Preserve the original frame-edge behavior exactly for the
             # backwards-compatible setup and its already-trained policies.
+            # Contact-sequence telemetry independently follows the physical
+            # substep order, so a floor onset later in the same control frame
+            # cannot retroactively turn an earlier paddle hit into a
+            # post-bounce hit. This does not change the legacy paddle-then-wall
+            # reward/event processing below.
+            bounce_seen = self._floor_bounce_since_last_wall_or_reset
+            paddle_hit_after_bounce = bounce_seen
+            for contact_event in self._ordered_frame_events(
+                paddle_edge=paddle_edge, wall_edge=wall_edge
+            ):
+                if contact_event == "floor":
+                    bounce_seen = True
+                elif contact_event == "wall":
+                    bounce_seen = False
+                elif contact_event == "paddle":
+                    paddle_hit_after_bounce = bounce_seen
             if paddle_edge:
                 self.paddle_hit_count += 1
-                accept_paddle_hit()
+                accept_paddle_hit(after_bounce=paddle_hit_after_bounce)
                 event_this_step = True
             if wall_edge:
                 accept_wall_contact()
                 event_this_step = True
+            self._floor_bounce_since_last_wall_or_reset = bounce_seen
         else:
             # Strict modes process floor/paddle/wall contacts in MuJoCo
             # substep order. Once a fault occurs, later contacts in the same
@@ -1364,6 +1423,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 paddle_edge=paddle_edge, wall_edge=wall_edge
             ):
                 if contact_event == "floor":
+                    self._floor_bounce_since_last_wall_or_reset = True
                     self.floor_bounce_count += 1
                     self.floor_bounce_total += 1
                     if self.floor_bounce_count >= 2:
@@ -1417,6 +1477,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                         self._pending_shaping = 0.0
                         self._pending_bonus = 0.0
                         self._paddle_hit_since_last_wall = False
+                        self._current_return_was_post_bounce = False
                         self._recoverable_bounce_eligible = False
                         self._rally_phase = _AWAIT_PADDLE
                         # Open a fresh shaping window, mirroring the
@@ -1624,6 +1685,16 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "wall_contact_count": self.wall_contact_count,
             "paddle_hit_count": self.paddle_hit_count,
             "legal_paddle_hit_count": self.legal_paddle_hit_count,
+            "pre_bounce_legal_paddle_hit_count": (
+                self.pre_bounce_legal_paddle_hit_count
+            ),
+            "post_bounce_legal_paddle_hit_count": (
+                self.post_bounce_legal_paddle_hit_count
+            ),
+            "opening_volley_count": self.opening_volley_count,
+            "post_bounce_completed_return_count": (
+                self.post_bounce_completed_return_count
+            ),
             # Positional play diagnostics: where (world x) the legal hits
             # happened. The mean divides by the hit count (0.0 when no
             # hits yet -- filter on legal_paddle_hit_count > 0 before
@@ -1653,7 +1724,17 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "weak_return_count": self.weak_return_count,
             "event_floor_bounce": bool(event_floor_bounce),
             "event_legal_paddle_hit": bool(event_legal_paddle_hit),
+            "event_pre_bounce_legal_paddle_hit": bool(
+                event_pre_bounce_legal_paddle_hit
+            ),
+            "event_post_bounce_legal_paddle_hit": bool(
+                event_post_bounce_legal_paddle_hit
+            ),
+            "event_opening_volley": bool(event_opening_volley),
             "event_completed_return": bool(event_completed_return),
+            "event_post_bounce_completed_return": bool(
+                event_post_bounce_completed_return
+            ),
             "event_recoverable_bounce": bool(event_recoverable_bounce),
             "event_post_wall_bounce": bool(event_post_wall_bounce),
             "event_early_touch": bool(event_early_touch),
@@ -1715,6 +1796,16 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "wall_contact_count": self.wall_contact_count,
             "paddle_hit_count": self.paddle_hit_count,
             "legal_paddle_hit_count": self.legal_paddle_hit_count,
+            "pre_bounce_legal_paddle_hit_count": (
+                self.pre_bounce_legal_paddle_hit_count
+            ),
+            "post_bounce_legal_paddle_hit_count": (
+                self.post_bounce_legal_paddle_hit_count
+            ),
+            "opening_volley_count": self.opening_volley_count,
+            "post_bounce_completed_return_count": (
+                self.post_bounce_completed_return_count
+            ),
             "legal_paddle_hit_x_sum": self.legal_paddle_hit_x_sum,
             "legal_paddle_hit_x_mean": (
                 self.legal_paddle_hit_x_sum / self.legal_paddle_hit_count
@@ -1737,7 +1828,11 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             "weak_return_count": self.weak_return_count,
             "event_floor_bounce": False,
             "event_legal_paddle_hit": False,
+            "event_pre_bounce_legal_paddle_hit": False,
+            "event_post_bounce_legal_paddle_hit": False,
+            "event_opening_volley": False,
             "event_completed_return": False,
+            "event_post_bounce_completed_return": False,
             "event_recoverable_bounce": False,
             "event_post_wall_bounce": False,
             "event_early_touch": False,
@@ -1776,6 +1871,10 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.wall_contact_count = 0
         self.paddle_hit_count = 0
         self.legal_paddle_hit_count = 0
+        self.pre_bounce_legal_paddle_hit_count = 0
+        self.post_bounce_legal_paddle_hit_count = 0
+        self.opening_volley_count = 0
+        self.post_bounce_completed_return_count = 0
         self.legal_paddle_hit_x_sum = 0.0
         self.one_bounce_recovery_count = 0
         self.one_bounce_return_count = 0
@@ -1800,6 +1899,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._ball_on_paddle = False
         self._ball_on_wall = False
         self._paddle_hit_since_last_wall = False
+        self._floor_bounce_since_last_wall_or_reset = False
+        self._current_return_was_post_bounce = False
         # Open the shaping window from t=0 as if a virtual wall hit
         # had just happened. Without this the serve flight earns no
         # shaping and the policy has to find the ball cold.
@@ -1921,6 +2022,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             self._rally_phase = _AWAIT_PADDLE
             self.floor_bounce_count = 1
             self.floor_bounce_total = 1
+            self._floor_bounce_since_last_wall_or_reset = True
         qvel[self._ball_dofadr + 0] = vx
         qvel[self._ball_dofadr + 1] = vy
         qvel[self._ball_dofadr + 2] = vz

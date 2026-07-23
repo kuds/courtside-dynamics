@@ -260,17 +260,33 @@ def _wall_ball_row(
     terminal_floor: int,
     reason: str,
     legal_paddle_hits: int | None = None,
+    pre_bounce_legal_hits: int = 0,
+    post_bounce_legal_hits: int | None = None,
+    opening_volleys: int = 0,
+    post_bounce_completed_returns: int = 0,
     one_bounce_recoveries: int = 0,
     one_bounce_returns: int = 0,
     style_violation_reason: str | None = None,
 ) -> dict[str, object]:
+    resolved_legal_hits = (
+        returns + 1 if legal_paddle_hits is None else legal_paddle_hits
+    )
+    resolved_post_bounce_hits = (
+        resolved_legal_hits - pre_bounce_legal_hits
+        if post_bounce_legal_hits is None
+        else post_bounce_legal_hits
+    )
     row: dict[str, object] = {
         "episode_reward": reward,
         "episode_length": length,
         "completed_returns": returns,
         "paddle_hit_count": returns + 1,
-        "legal_paddle_hit_count": (
-            returns + 1 if legal_paddle_hits is None else legal_paddle_hits
+        "legal_paddle_hit_count": resolved_legal_hits,
+        "pre_bounce_legal_paddle_hit_count": pre_bounce_legal_hits,
+        "post_bounce_legal_paddle_hit_count": resolved_post_bounce_hits,
+        "opening_volley_count": opening_volleys,
+        "post_bounce_completed_return_count": (
+            post_bounce_completed_returns
         ),
         "wall_contact_count": returns,
         "floor_bounce_total": floor_total,
@@ -372,6 +388,7 @@ def test_summarize_wall_ball_episodes_reports_strict_style_metrics():
             terminal_floor=0,
             reason="timeout",
             legal_paddle_hits=2,
+            post_bounce_completed_returns=2,
             one_bounce_recoveries=2,
             one_bounce_returns=2,
         ),
@@ -382,6 +399,9 @@ def test_summarize_wall_ball_episodes_reports_strict_style_metrics():
     assert summary["metrics"]["legal_paddle_hit_count"]["mean"] == 1.0
     assert summary["metrics"]["one_bounce_recovery_count"]["mean"] == 1.0
     assert summary["metrics"]["one_bounce_return_count"]["mean"] == 1.0
+    assert summary["contact_sequence_diagnostics"][
+        "post_bounce_completed_return_rate"
+    ] == 1.0
     assert summary["terminations"]["style_violation"] == {
         "count": 1,
         "rate": 0.5,
@@ -434,6 +454,10 @@ class _FakeWallBallEnv(Env):
             "floor_bounce_total": 0,
             "floor_bounce_count": 0,
             "legal_paddle_hit_count": self._step,
+            "pre_bounce_legal_paddle_hit_count": self._step,
+            "post_bounce_legal_paddle_hit_count": 0,
+            "opening_volley_count": 1,
+            "post_bounce_completed_return_count": 0,
             "one_bounce_recovery_count": 0,
             "one_bounce_return_count": 0,
             "style_violation_reason": None,
@@ -502,6 +526,10 @@ def test_rollout_counts_post_floor_bounce_recovery_and_return():
                 "floor_bounce_total": floor_total,
                 "floor_bounce_count": 0,
                 "legal_paddle_hit_count": paddle_hits,
+                "pre_bounce_legal_paddle_hit_count": 0,
+                "post_bounce_legal_paddle_hit_count": paddle_hits,
+                "opening_volley_count": 0,
+                "post_bounce_completed_return_count": returns,
                 "one_bounce_recovery_count": int(self._step >= 2),
                 "one_bounce_return_count": int(self._step >= 3),
                 "style_violation_reason": None,
@@ -549,6 +577,10 @@ def test_rollout_counts_post_floor_bounce_recovery_and_return():
     assert row["post_floor_bounce_completed_returns"] == 1
     assert row["unrecovered_floor_bounces"] == 0
     assert row["legal_paddle_hit_count"] == 1
+    assert row["pre_bounce_legal_paddle_hit_count"] == 0
+    assert row["post_bounce_legal_paddle_hit_count"] == 1
+    assert row["opening_volley_count"] == 0
+    assert row["post_bounce_completed_return_count"] == 1
     assert row["one_bounce_recovery_count"] == 1
     assert row["one_bounce_return_count"] == 1
 
@@ -650,7 +682,19 @@ def test_evaluate_best_wall_ball_writes_drive_ready_metrics(tmp_path, monkeypatc
         "verified_against_training_constructor"
     )
     assert payload["metrics"]["completed_returns"]["mean"] == 3.0
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
+    assert payload["contact_sequence_diagnostics"] == {
+        "legal_hit_total": 6,
+        "pre_bounce_legal_hit_total": 6,
+        "post_bounce_legal_hit_total": 0,
+        "post_bounce_legal_hit_rate": 0.0,
+        "opening_volley_total": 2,
+        "episodes_with_opening_volley": 2,
+        "opening_volley_episode_rate": 1.0,
+        "completed_return_total": 6,
+        "post_bounce_completed_return_total": 0,
+        "post_bounce_completed_return_rate": 0.0,
+    }
     assert payload["evaluation"]["return_survival_thresholds"] == [1, 2, 3, 5]
     assert payload["return_survival_curve"]["5"] == {
         "count": 0,

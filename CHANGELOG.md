@@ -5,6 +5,44 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## 0.19.0
+
+`WallBallDepthCurriculum` now slides the paddle's entire movement
+window toward the baseline instead of only extending its rear edge.
+Run `20260722_124613` exposed the old ladder's loophole: all five
+stages shared a front-court interval, so the policy could reach the
+final stage while continuing to contact the ball at a shallow
+position. The replacement ladder keeps adjacent stages
+overlapping but removes any position common to every stage:
+
+- paddle fences are now `[-2.7, 0.3]`, `[-3.2, -0.8]`,
+  `[-3.7, -1.6]`, `[-4.2, -2.4]`, and `[-4.7, -3.0]`;
+- paddle starts, serve speeds, open scoring, rewards, the
+  three-evaluation promotion gate, and its replay-clear / 50k-update
+  pause are unchanged;
+- the default recipe and starter-config budget increase from 3M to 6M
+  steps so the run has time to reach and train at the final stage; and
+- fixed final evaluation now uses the new final-stage fence.
+
+WallBall `info` now partitions legal paddle hits into pre- and
+post-bounce counts, records whether the episode opened with a volley,
+and counts completed returns initiated after a bounce. Matching
+one-step event flags make contact ordering auditable without changing
+the reward or observation. The long-horizon report advances to schema
+3 and includes pooled contact-sequence rates alongside its existing
+floor-bounce proxy diagnostics. The calibration sweep validates the
+counter identities, reports the new behavior metrics, and adds a
+non-blocking pre-bounce interception probe.
+
+The replacement geometry passed the 200-episode-per-cell scripted sweep
+on 2026-07-23. Oracle ≥2-return rates were 92–96% and crude-controller
+rates remained nonzero at every stage; the diagnostic opening-volley
+probe fell from 100% in stages 0–2 to 38% in stage 3 and 0% in stage 4.
+There is no environment policy-space or reward change, so 0.18.0
+checkpoints remain loadable; however, the new stage geometry and budget
+make curriculum progression and aggregate learning curves a new
+comparison era.
+
 ## 0.18.0
 
 Performance-gated curriculum runs now keep their per-stage history.

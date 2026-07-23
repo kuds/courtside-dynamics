@@ -780,6 +780,10 @@ _WALL_BALL_REQUIRED_INFO_KEYS = frozenset(
         "floor_bounce_total",
         "floor_bounce_count",
         "legal_paddle_hit_count",
+        "pre_bounce_legal_paddle_hit_count",
+        "post_bounce_legal_paddle_hit_count",
+        "opening_volley_count",
+        "post_bounce_completed_return_count",
         "one_bounce_recovery_count",
         "one_bounce_return_count",
         "style_violation_reason",
@@ -921,6 +925,10 @@ def _rollout_wall_ball_seed(
         "completed_returns": 0,
         "paddle_hits": 0,
         "legal_paddle_hits": 0,
+        "pre_bounce_legal_hits": 0,
+        "post_bounce_legal_hits": 0,
+        "opening_volleys": 0,
+        "post_bounce_completed_returns": 0,
         "wall_contacts": 0,
         "floor_bounces": 0,
         "one_bounce_recoveries": 0,
@@ -950,6 +958,16 @@ def _rollout_wall_ball_seed(
             "completed_returns": int(info["bounce_count"]),
             "paddle_hits": int(info["paddle_hit_count"]),
             "legal_paddle_hits": int(info["legal_paddle_hit_count"]),
+            "pre_bounce_legal_hits": int(
+                info["pre_bounce_legal_paddle_hit_count"]
+            ),
+            "post_bounce_legal_hits": int(
+                info["post_bounce_legal_paddle_hit_count"]
+            ),
+            "opening_volleys": int(info["opening_volley_count"]),
+            "post_bounce_completed_returns": int(
+                info["post_bounce_completed_return_count"]
+            ),
             "wall_contacts": int(info["wall_contact_count"]),
             "floor_bounces": int(info["floor_bounce_total"]),
             "one_bounce_recoveries": int(info["one_bounce_recovery_count"]),
@@ -960,6 +978,31 @@ def _rollout_wall_ball_seed(
             for key in current_counts
         ):
             raise ValueError("WallBall episode counters must be monotone")
+        if (
+            current_counts["pre_bounce_legal_hits"]
+            + current_counts["post_bounce_legal_hits"]
+            != current_counts["legal_paddle_hits"]
+        ):
+            raise ValueError(
+                "WallBall pre/post-bounce legal hits must partition legal hits"
+            )
+        if (
+            current_counts["opening_volleys"]
+            > current_counts["pre_bounce_legal_hits"]
+            or current_counts["opening_volleys"] > 1
+        ):
+            raise ValueError(
+                "WallBall opening volleys must be a zero-or-one subset "
+                "of pre-bounce legal hits"
+            )
+        if current_counts["post_bounce_completed_returns"] > min(
+            current_counts["post_bounce_legal_hits"],
+            current_counts["completed_returns"],
+        ):
+            raise ValueError(
+                "WallBall post-bounce completed returns must be backed by "
+                "post-bounce legal hits and completed returns"
+            )
         deltas = {
             key: current_counts[key] - previous_counts[key]
             for key in current_counts
@@ -997,6 +1040,16 @@ def _rollout_wall_ball_seed(
         "completed_returns": int(final_info["bounce_count"]),
         "paddle_hit_count": int(final_info["paddle_hit_count"]),
         "legal_paddle_hit_count": int(final_info["legal_paddle_hit_count"]),
+        "pre_bounce_legal_paddle_hit_count": int(
+            final_info["pre_bounce_legal_paddle_hit_count"]
+        ),
+        "post_bounce_legal_paddle_hit_count": int(
+            final_info["post_bounce_legal_paddle_hit_count"]
+        ),
+        "opening_volley_count": int(final_info["opening_volley_count"]),
+        "post_bounce_completed_return_count": int(
+            final_info["post_bounce_completed_return_count"]
+        ),
         "wall_contact_count": int(final_info["wall_contact_count"]),
         "floor_bounce_total": int(final_info["floor_bounce_total"]),
         "terminal_floor_bounce_count": int(final_info["floor_bounce_count"]),
@@ -1054,6 +1107,10 @@ def _summarize_wall_ball_episodes(
             "completed_returns",
             "paddle_hit_count",
             "legal_paddle_hit_count",
+            "pre_bounce_legal_paddle_hit_count",
+            "post_bounce_legal_paddle_hit_count",
+            "opening_volley_count",
+            "post_bounce_completed_return_count",
             "wall_contact_count",
             "floor_bounce_total",
             "terminal_floor_bounce_count",
@@ -1155,6 +1212,52 @@ def _summarize_wall_ball_episodes(
             )
         ),
     }
+    legal_hit_total = sum(
+        int(row["legal_paddle_hit_count"]) for row in rows
+    )
+    post_bounce_hit_total = sum(
+        int(row["post_bounce_legal_paddle_hit_count"]) for row in rows
+    )
+    completed_return_total = sum(
+        int(row["completed_returns"]) for row in rows
+    )
+    post_bounce_return_total = sum(
+        int(row["post_bounce_completed_return_count"]) for row in rows
+    )
+    opening_volley_total = sum(
+        int(row["opening_volley_count"]) for row in rows
+    )
+    contact_sequence_diagnostics = {
+        "legal_hit_total": int(legal_hit_total),
+        "pre_bounce_legal_hit_total": int(
+            sum(
+                int(row["pre_bounce_legal_paddle_hit_count"])
+                for row in rows
+            )
+        ),
+        "post_bounce_legal_hit_total": int(post_bounce_hit_total),
+        "post_bounce_legal_hit_rate": (
+            float(post_bounce_hit_total / legal_hit_total)
+            if legal_hit_total
+            else 0.0
+        ),
+        "opening_volley_total": int(opening_volley_total),
+        "episodes_with_opening_volley": int(
+            sum(int(row["opening_volley_count"]) > 0 for row in rows)
+        ),
+        "opening_volley_episode_rate": float(
+            sum(int(row["opening_volley_count"]) > 0 for row in rows) / n
+        ),
+        "completed_return_total": int(completed_return_total),
+        "post_bounce_completed_return_total": int(
+            post_bounce_return_total
+        ),
+        "post_bounce_completed_return_rate": (
+            float(post_bounce_return_total / completed_return_total)
+            if completed_return_total
+            else 0.0
+        ),
+    }
     return {
         "metrics": metrics,
         "reward_components": reward_components,
@@ -1163,6 +1266,7 @@ def _summarize_wall_ball_episodes(
         "terminations": terminations,
         "style_violation_reasons": style_violation_reasons,
         "floor_bounce_diagnostics": floor_diagnostics,
+        "contact_sequence_diagnostics": contact_sequence_diagnostics,
     }
 
 
@@ -1494,7 +1598,7 @@ def evaluate_best_wall_ball(
     _atomic_write_csv(episodes_path, rows, evaluation_id=evaluation_id)
     episodes_sha256 = _sha256(episodes_path)
     payload: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "evaluation_id": evaluation_id,
         "generated_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "training_run": {

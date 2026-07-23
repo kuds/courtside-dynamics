@@ -745,13 +745,8 @@ def test_selection_survival_keys_are_backed_by_thresholds():
 
 
 def test_wall_ball_depth_curriculum_walks_the_fence_back():
-    """The depth ladder must walk monotonically deeper with serve energy
-    co-moving, start at the constructor's stage-0 geometry, keep every
-    fence generous (deep-narrow fences die on unreachable mid-court
-    rebounds), and end at the physical workspace limit -- all under a
-    pinned full-workspace action mapping so action semantics never
-    drift. Stage values were calibrated by tools/depth_stage_sweep.py;
-    edits here must re-run that sweep."""
+    """The calibrated ladder slides toward baseline without a common
+    front-court refuge while adjacent stages remain connected."""
     recipe = RECIPES["WallBallDepthCurriculum"]
     gate = recipe.extra_cfg["performance_gate"]
     stages = gate["stages"]
@@ -760,18 +755,28 @@ def test_wall_ball_depth_curriculum_walks_the_fence_back():
     for key, value in stages[0].items():
         assert recipe.env_kwargs[key] == value
 
-    backs = [stage["paddle_x_fence"][0] for stage in stages]
-    fronts = [stage["paddle_x_fence"][1] for stage in stages]
+    fences = [stage["paddle_x_fence"] for stage in stages]
+    assert fences == [
+        (-2.7, 0.3),
+        (-3.2, -0.8),
+        (-3.7, -1.6),
+        (-4.2, -2.4),
+        (-4.7, -3.0),
+    ]
+    backs = [back for back, _ in fences]
+    fronts = [front for _, front in fences]
     starts = [stage["paddle_start_x"] for stage in stages]
     speeds = [stage["serve_speed"] for stage in stages]
     assert backs == sorted(backs, reverse=True)
     assert fronts == sorted(fronts, reverse=True)
-    assert starts == sorted(starts, reverse=True)
-    assert speeds == sorted(speeds)
-    assert all(
-        front - back >= 2.5
-        for back, front in zip(backs, fronts, strict=True)
-    )
+    assert starts == [-1.6, -2.1, -2.7, -3.3, -3.9]
+    assert speeds == [5.2, 5.5, 6.0, 6.5, 7.0]
+    # Interval intersection is non-empty iff max(lower) <= min(upper).
+    assert max(backs) > min(fronts)
+    for current, following in zip(fences[:-1], fences[1:], strict=True):
+        assert max(current[0], following[0]) < min(
+            current[1], following[1]
+        )
     for stage in stages:
         back, front = stage["paddle_x_fence"]
         assert back <= stage["paddle_start_x"] <= front
@@ -831,11 +836,11 @@ def test_wall_ball_depth_curriculum_uses_open_scoring_and_defaults():
 def test_wall_ball_depth_curriculum_config_builds_and_stages_apply(tmp_path):
     """The gate's stage dicts must be reachable, settable env attributes
     (a typo'd stage key would otherwise die mid-run), and the built
-    config must carry the gate and the 3M budget."""
+    config must carry the gate and the 6M budget."""
     cfg = build_train_config("WallBallDepthCurriculum", log_dir=str(tmp_path))
     assert cfg.performance_gate is not None
     assert cfg.performance_gate["metric_key"] == "bounce_count_ep_mean"
-    assert cfg.total_timesteps == 3_000_000
+    assert cfg.total_timesteps == 6_000_000
     assert cfg.final_info_eval is True
 
     env = cfg.env_fn()
@@ -848,7 +853,7 @@ def test_wall_ball_depth_curriculum_config_builds_and_stages_apply(tmp_path):
                 assert hasattr(env, key)
                 setattr(env, key, value)
         env.reset(seed=0)
-        assert env.paddle_x_fence == (-4.7, -1.2)
+        assert env.paddle_x_fence == (-4.7, -3.0)
     finally:
         env.close()
 
