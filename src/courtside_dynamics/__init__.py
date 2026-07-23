@@ -111,7 +111,13 @@ from gymnasium.envs.registration import register
 # advance_update_pause_steps / clear_replay_buffer_on_advance. No
 # physics, reward, or training-behavior change; all 0.17.0 artifacts
 # and curves remain comparable.
-__version__ = "0.18.0"
+# 0.19.0: WallBallDepthCurriculum replaces its all-stage common
+# front-court refuge with overlapping sliding paddle windows and raises
+# the default budget to 6M steps. New info-only counters distinguish
+# pre-bounce, post-bounce, opening-volley, and post-bounce-return
+# behavior. Policy spaces and rewards are unchanged, but curriculum
+# trajectories start a new comparison era.
+__version__ = "0.19.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.

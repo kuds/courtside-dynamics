@@ -688,9 +688,9 @@ RECIPES: dict[str, Recipe] = {
             # design_wall_ball_depth_curriculum.md): any paddle hit
             # opens the return gate, volleys are legal paid returns, and
             # there is no early-touch fine — near the wall the natural
-            # game is volleying, while from the deep stages every ball
-            # has bounced long before it arrives, so one-bounce baseline
-            # play emerges from geometry instead of a fault taxonomy.
+            # game is volleying, while the sliding deep stages are
+            # intended to make one-bounce baseline play emerge from
+            # geometry instead of a fault taxonomy.
             # None of the one_bounce-era shaping (first_hit_bonus,
             # weak_return_penalty, recovery fragments,
             # recoverable_bounce_*) carries over.
@@ -702,14 +702,14 @@ RECIPES: dict[str, Recipe] = {
             "paddle_home_x": -1.7,
             "paddle_x_target_range": (-4.7, 0.3),
             # Stage-0 geometry — volley range, where striking is easy.
-            # The full five-stage ladder below was calibrated by
-            # tools/depth_stage_sweep.py (2026-07-20, 200 episodes per
-            # cell): at every stage parked < crude full-swing <
-            # charge-and-lead oracle strictly, the oracle completes >=2
-            # returns from 93-97% of serves, and the placement-blind
-            # crude policy still completes a second exchange in 66-83%
-            # of episodes — the learnability bar the proven baseline
-            # geometry set (lesson 9).
+            # Run 20260722_124613 exposed a flaw in the original ladder:
+            # every stage shared a front-court interval, so the policy
+            # could advance while keeping its contacts near the same
+            # shallow x position. The replacement ladder below slides the
+            # entire fence backward, preserving adjacent overlap but
+            # removing the all-stage common refuge. A 200-episode-per-cell
+            # sweep on 2026-07-23 passed all static, feasibility,
+            # learnability, monotonicity, and telemetry checks.
             "paddle_x_fence": (-2.7, 0.3),
             "paddle_start_x": -1.6,
             # Serve energy co-moves with depth via the gate (5.2 -> 7.0)
@@ -741,11 +741,11 @@ RECIPES: dict[str, Recipe] = {
             # final-eval machinery; the fixed goal task is also the
             # yardstick that stays comparable across runs. Must equal
             # the last performance_gate stage (pinned by test).
-            "paddle_x_fence": (-4.7, -1.2),
+            "paddle_x_fence": (-4.7, -3.0),
             "paddle_start_x": -3.9,
             "serve_speed": 7.0,
         },
-        default_total_timesteps=3_000_000,
+        default_total_timesteps=6_000_000,
         name_prefix="wall_ball_depth_curriculum",
         extra_cfg={
             "n_envs": 8,
@@ -822,22 +822,22 @@ RECIPES: dict[str, Recipe] = {
                         "serve_speed": 5.2,
                     },
                     {
-                        "paddle_x_fence": (-3.2, -0.6),
+                        "paddle_x_fence": (-3.2, -0.8),
                         "paddle_start_x": -2.1,
                         "serve_speed": 5.5,
                     },
                     {
-                        "paddle_x_fence": (-3.7, -1.0),
+                        "paddle_x_fence": (-3.7, -1.6),
                         "paddle_start_x": -2.7,
                         "serve_speed": 6.0,
                     },
                     {
-                        "paddle_x_fence": (-4.2, -1.2),
+                        "paddle_x_fence": (-4.2, -2.4),
                         "paddle_start_x": -3.3,
                         "serve_speed": 6.5,
                     },
                     {
-                        "paddle_x_fence": (-4.7, -1.2),
+                        "paddle_x_fence": (-4.7, -3.0),
                         "paddle_start_x": -3.9,
                         "serve_speed": 7.0,
                     },

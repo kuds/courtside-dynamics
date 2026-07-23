@@ -1,235 +1,252 @@
-# Design: WallBallDepthCurriculum — earn your way back to the baseline
+# Design: WallBallDepthCurriculum — rally from the workspace baseline
 
-Status: implemented in 0.15.0 (calibration sweep passed 2026-07-20; see
-the outcome addendum at the end for the final stage table and sweep
-numbers — the candidate table below is kept as proposed for the record).
-Awaiting its first training run.
+Status: implemented and pre-flight validated for 0.19.0, 2026-07-23.
+The first depth curriculum shipped in 0.15.0 and its gate/artifact
+refinements shipped through 0.18.0. The latest run showed that the policy
+can rally at the final stage, but also exposed a positional shortcut.
+This revision removes that shortcut before adding another reward or rule.
 
-## Motivation
+## Evidence and decision
 
-Ten training runs of the service-line rally (`wall_ball_baseline_review.md`,
-`lessons_learned.md`) bracket the same ceiling — ~3.2–3.4 eval bounces,
-~2.7–3.4 long-horizon returns — and the three cheap levers are exhausted:
-budget (lesson 8), incentives (lesson 19), and network capacity (lesson 19
-addendum). The failure taxonomy is pure rally precision: from the pinned
-mid-court lane, a return must be struck so its rebound lands somewhere
-recoverable, and that placement problem is what every model plateaus on.
+The latest run, `20260722_124613`, reached stage 4 at about 4.175M steps
+and produced a best matched-stage evaluation of about 3.33 completed
+returns. That is useful evidence of rally skill. It is not yet evidence
+of baseline play:
 
-Meanwhile the *goal* of the baseline environment was never mid-court play:
-it is to rally from the baseline. The tennis-court overlay (0.13.0) made
-the gap visible — today's lane straddles the ITF service line, 5.5–7.1 m
-from the wall, while the paddle's physical workspace ends at x = −4.7
-(8.6 m) and the true baseline sits at −7.985 (11.885 m).
+- Stage 4 started the paddle around x = −3.9, but legal contacts averaged
+  around x = −1.85.
+- The old final fence was (−4.7, −1.2), so the policy could sprint forward
+  after reset and play near the fence front.
+- More importantly, every old stage shared the interval (−2.7, −1.2).
+  The curriculum changed the back of the range while retaining a
+  front-court refuge that was legal for the entire run.
 
-This design curricularizes **position**: start where striking is easy
-(near the wall, volley range), and walk the paddle backward each time the
-policy demonstrates a sustained 3-exchange rally. Decisions fixed by the
-review discussion: observations stay 23-dim; no early-touch fine; volley
-play at the start is explicitly acceptable.
+The next experiment therefore changes the physical opportunity set, not
+the objective. Each stage slides the whole movement window backward. The
+windows still overlap enough to transfer adjacent-stage skill, but no x
+position is legal at every stage. At the final stage, a legal hit is
+mechanically a workspace-baseline hit.
 
-## Core idea: open scoring, emergent style
+This is the smallest intervention that directly addresses the observed
+shortcut. A depth reward could still be optimized at the old front edge,
+and a must-bounce rule would change the task before establishing whether
+geometry alone already produces the desired style.
 
-The curriculum runs under the env's existing **`open` rally style**, not
-`one_bounce`:
+## Sliding-window ladder
 
-- Any paddle hit opens the return gate; wall contact pays +1. Volleys are
-  legal, paid returns — there is no "early touch" concept and no fine.
-- Out-of-bounds, double-bounce, and stall terminals keep play honest
-  (unchanged, symmetric — lesson 1).
-- **The one-bounce pattern emerges from geometry instead of rules.** Near
-  the wall the natural game is volleying; from deep positions every ball
-  has bounced long before it arrives, so post-bounce baseline play is what
-  the deep stages *are*, without a fault taxonomy to price.
+The replacement ladder keeps the existing starts and calibrated flat-serve
+schedule while moving each fence front backward:
 
-Why not `one_bounce` with the fine set to zero: the fine is not what
-blocks volleys — the bounce-gate is. A volleyed ball would reach the wall
-unpaid, while pre-bounce serve-taming (the trick every trained model
-already uses in 20–45% of episodes) would become free. Open scoring
-removes both problems at once.
+| Stage | Paddle fence (x) | Start | Serve speed | Adjacent transfer |
+|---|---:|---:|---:|---|
+| 0 | (−2.7, 0.3) | −1.6 | 5.2 | Existing shallow entry task |
+| 1 | (−3.2, −0.8) | −2.1 | 5.5 | Overlap with s0: (−2.7, −0.8) |
+| 2 | (−3.7, −1.6) | −2.7 | 6.0 | Overlap with s1: (−3.2, −1.6) |
+| 3 | (−4.2, −2.4) | −3.3 | 6.5 | Overlap with s2: (−3.7, −2.4) |
+| 4 | (−4.7, −3.0) | −3.9 | 7.0 | Overlap with s3: (−4.2, −3.0) |
 
-Not carried over from the one-bounce presets: `first_hit_bonus`,
-`weak_return_penalty` (no floor-before-wall fault exists in open),
-recovery fragments and `recoverable_bounce_*` (one-bounce machinery; the
-curriculum's early stages are the easy practice those existed to
-synthesize), and `wall_reward_increment` (stays dark, lesson 19).
+The fixed control geometry remains:
 
-## Stage ladder (candidate — final values come from the sweep)
+- `paddle_x_target_range = (-4.7, 0.3)` and
+  `paddle_home_x = -1.7`, so action semantics do not drift.
+- `serve_start_x = 1.0`, `serve_lob = 0.0`, and
+  `paddle_joint_damping = 8.0`.
+- `paddle_start_x` places the body inside the current fence; the fixed
+  control home is part of the action mapping, not a stage ready position.
 
-The action mapping stays pinned to the full physical range (−4.7, 0.3)
-for the whole run so action semantics never drift; each stage confines
-position with `paddle_x_fence` and moves `paddle_start_x` /
-`paddle_home_x`. Serve energy co-moves so the ball reliably reaches the
-deeper paddle. All values are `set_wrapper_attr`-settable between
-episodes — the same plumbing the bootstrap gate uses.
+The final fence is the baseline of the current paddle workspace, not the
+true ITF baseline at x = −7.985. Extending play beyond x = −4.7 still
+requires an XML workspace and serve-energy change and remains a later
+campaign phase.
 
-| Stage | Fence (x) | Home / start | Serve (speed, lob) | Character |
-|---|---|---|---|---|
-| 0 | (−2.2, 0.3) | −1.0 | 6.0, 2.0 | Volley range: block the serve back on the fly |
-| 1 | (−2.7, −0.3) | −1.5 | 5.8, 1.5 | Short court: mix of volleys and first-bounce play |
-| 2 | (−3.2, −0.9) | −2.1 | 5.5, 1.0 | Approaching today's lane |
-| 3 | (−3.7, −1.6) | −2.7 | 5.5, 0.5 | The proven service-line regime, wider |
-| 4 | (−4.2, −2.3) | −3.3 | 5.5, 0.25 | Deep court |
-| 5 | (−4.7, −3.1) | −3.9 | 5.5, 0.0 | The workspace baseline: 7.0–8.6 m from the wall |
+## What deliberately does not change
 
-Fence width stays ≥ ~1.4 m at every stage (the damping×lane sweep showed
-narrow-and-deep fails). `paddle_joint_damping` is per-stage-sweepable;
-the candidate keeps 8.0 throughout, but stage 0 may want the volley
-preset's 5.0 — the sweep decides.
+The pilot isolates geometry:
 
-### Pre-flight calibration (blocking, lessons 2/3/9)
+- Rally style remains `open`. Pre-bounce hits are legal and paid; the
+  telemetry measures them rather than silently changing their reward.
+- Reward coefficients and reward components remain unchanged.
+- The promotion metric remains `bounce_count_ep_mean` with threshold
+  3.0, the current three-evaluation `window_mean`, and matched-stage
+  evaluation.
+- The existing promotion warm-up remains: clear replay, collect 50k
+  frontier-stage steps, then resume updates. Network weights still
+  transfer.
+- Best-model selection, per-stage archives, final-stage scoring, and
+  long-horizon evaluation remain unchanged.
 
-Before any training, every candidate stage is swept with the scripted
-ladder — parked / blind tracker / oracle (the open-style
-`wall_ball_oracle_action`, fence-projected like `stage_sweep.py` did):
+This is important experimentally: if the policy moves backward and keeps
+rallying, the result belongs to the sliding constraint rather than a
+simultaneous reward or gate change.
 
-1. **Within-stage monotonicity**: parked < tracker < oracle, strictly.
-2. **Feasibility**: oracle completes ≥2 returns from ≥90% of serves at
-   every stage.
-3. **Learnability**: the blind tracker completes a second exchange in a
-   non-trivial fraction of episodes at every stage (the 0.10.0
-   calibration bar).
-4. **No difficulty inversion across stages**: tracker/oracle scores may
-   decline with depth but must not spike down then up (the U-shape that
-   killed the one-bounce depth ladder). Stages that invert get re-tuned
-   (serve energy, fence width, damping) or dropped.
+## Telemetry contract
 
-The sweep's output — the final stage table — ships in the recipe with
-the sweep numbers recorded in this doc's outcome addendum.
+The environment reports cumulative episode counters:
 
-## Gate and evaluation
+- `pre_bounce_legal_paddle_hit_count`: legal gate-opening hits before a
+  floor bounce in that rally cycle.
+- `post_bounce_legal_paddle_hit_count`: legal gate-opening hits after a
+  floor bounce in that rally cycle.
+- `opening_volley_count`: opening-cycle legal hits made before the serve
+  bounces.
+- `post_bounce_completed_return_count`: completed returns whose legal
+  paddle hit occurred after the floor bounce.
 
-- **Gate**: `PerformanceGatedEnvStagesCallback`, `metric_key =
-  bounce_count_ep_mean`, `threshold = 3.0` (the review's "3 successful
-  rallies"), `sustain_evals = 2`, evaluated at the **current stage's
-  geometry** (matched-stage info-eval, stages applied to the eval env,
-  selection state reset on every advance — all existing behavior).
-- **Selection**: `best_metric_keys = (bounce_count_ep_mean,
-  bounce_count_ep_ge_5_rate)` with the standard min-delta, confirmation
-  batch, and degenerate guard.
-- **Final scoring**: `final_info_eval = True` at the **ladder's final
-  stage** (pinned via `eval_env_overrides`, exactly the Bootstrap
-  pattern), plus the 50-seed long-horizon audit at that geometry. The
-  proposal originally said "deepest reached stage", but the
-  final-config evaluator is deliberately unsynced from the gate and
-  cannot know it; a fixed goal-task yardstick is also what stays
-  comparable across runs. Early in a run the final stream honestly
-  reads near zero — that is the transfer deficit, not a bug.
-  `curriculum/stage_index` in TensorBoard is the campaign's real
-  headline: how far back did it earn its way?
-- **Era break**: open scoring + moving geometry means these numbers are
-  a new metric era; the one-bounce baseline era stays frozen with run
-  `20260718_023737` as its reference. No baseline recipe or metric
-  changes.
+These complement the existing legal-hit count and contact-x sum/mean. The
+following identities are part of the telemetry contract and are checked by
+the calibration sweep:
 
-## Recipe and packaging
+```text
+pre_bounce_legal_paddle_hit_count
+  + post_bounce_legal_paddle_hit_count
+  == legal_paddle_hit_count
 
-New recipe `WallBallDepthCurriculum` (new name on purpose — see the
-Bootstrap note): `rally_style="open"`, stage-0 kwargs as env defaults,
-`performance_gate` carrying the swept ladder, SAC with auto-entropy
-(recipe `model_kwargs` empty), `n_envs = 8`, `early_stop_patience = 20`,
-budget 3M (six stages need room; early stop still applies within the
-final plateau), `eval_freq` 25k. Packaged starter TOML follows via the
-drift test; the notebook catalog picks the recipe up automatically.
+opening_volley_count <= pre_bounce_legal_paddle_hit_count
 
-`WallBallBootstrap` is marked **historical/superseded** in its recipe
-description and the README: its cold-start problem was solved by
-auto-entropy before it ever ran (lesson 5), and its reward package
-contains since-falsified components. The recipe and its tests remain
-for the record.
+post_bounce_completed_return_count <= bounce_count
+post_bounce_completed_return_count
+  <= post_bounce_legal_paddle_hit_count
+```
 
-## Out of scope (explicitly deferred)
+For review, a baseline return means:
 
-- **True-baseline stages (x < −4.7)**: need the XML workspace extension
-  (slide range / paddle base) plus a serve-and-rebound energy
-  recalibration so balls reach 8–12 m. That is campaign phase 2, gated
-  on the policy earning stage 5.
-- **Landing-point observation feature**: observations stay 23-dim per
-  the review decision. If deep stages stall on interception ballistics
-  (visible as stage-gate stalls with tracker-like failure taxonomy),
-  this is the queued follow-up, measured against the stage it stalled
-  on.
-- Multi-seed runs, PPO arm, human-in-the-loop stage overrides.
+```text
+completed return
+AND its legal paddle hit followed a floor bounce
+AND contact_x was inside the stage's baseline target
+```
 
-## Testing and rollout
+The final condition is mechanical at stage 4 because the complete legal
+range is (−4.7, −3.0). Contact x and the new counters should still be
+reported separately: one answers where the policy played, the other
+answers whether it waited for the bounce.
 
-- Recipe pin tests (open style, no fine kwargs, gate structure,
-  threshold-backed selection keys) + starter drift lockstep + the
-  standard loud-failure checks on stage dicts (attrs must be
-  `set_wrapper_attr`-reachable; the gate already raises on typos).
-- The calibration sweep runs first and gates implementation of the
-  final stage table; its script lands in the repo (not scratchpad) so
-  future stage edits re-run it.
-- One training run; review against the gate trajectory (stages reached,
-  time-in-stage) rather than raw bounce means — reaching stage 3+ with
-  sustained 3-rallies already exceeds everything the fixed-lane era
-  achieved at equivalent depth.
+## Calibration outcome and sweep contract
 
-## Outcome addendum: calibration sweep (2026-07-20)
+`tools/depth_stage_sweep.py` was run at 200 episodes per policy and stage
+(4,000 episodes total) on 2026-07-23. The old 2026-07-20 numbers did not
+certify these narrower, fully sliding windows, so the replacement ladder
+received a fresh pre-flight.
 
-The blocking sweep (`tools/depth_stage_sweep.py`) passed after seven
-iterations. Post-implementation adversarial review also forced one
-spec correction, folded into the Gate-and-evaluation section above:
-final scoring pins the ladder's final stage via `eval_env_overrides`
-("deepest reached" is not expressible by the gate-unsynced final
-evaluator, and an empty override would have silently scored stage-0
-geometry all run). The shipped ladder differs from the candidate table
-above in three sweep-forced ways:
+The script first performs static checks:
 
-1. **All serves are flat** (`serve_lob = 0`). Lofted serves arc over
-   the fixed-height paddle face — the candidate's lob taper was
-   unplayable at every stage (iteration 1: oracle near 0%).
-2. **Serve speed rises with depth** (5.2 → 7.0) instead of falling.
-   Slow serves die mid-court and never reach a deep paddle; faster
-   serves land deeper (5.5 lands ≈ −1.5..−2.0; 7.0 ≈ −2.6) and carry
-   the energy a deep return needs. The pure-volley stage 0 was dropped
-   for the same reason — with flat serves, volley-range play emerges at
-   the shallow fence without a dedicated stage.
-3. **Five stages, generous fence fronts** (width 2.6–3.5 m). Narrow
-   deep fences strand the paddle behind unreachable mid-court rebounds
-   (the 0.10.0 lesson, re-confirmed here).
+1. Every `paddle_start_x` lies inside its stage fence.
+2. Every adjacent pair of fences has positive-width overlap.
+3. The intersection of all stage fences is empty.
 
-Final ladder (each stage: fence, start, serve speed): (−2.7, 0.3) /
-−1.6 / 5.2 → (−3.2, −0.6) / −2.1 / 5.5 → (−3.7, −1.0) / −2.7 / 6.0 →
-(−4.2, −1.2) / −3.3 / 6.5 → (−4.7, −1.2) / −3.9 / 7.0. Damping 8.0 and
-`serve_start_x` 1.0 throughout.
+It then runs four scripted cells per stage:
 
-Probe notes: the fence-projected `wall_ball_baseline_oracle_action`
-fails at wide fences (its ≤0.9 m commit gate starts the charge too
-late; double-bounce dominated) — the sweep ships its own
-*charge-and-lead* oracle (commit the full charge at the bounce,
-ballistic y/z lead at the closing-speed intercept, ready position a
-calibrated run-up behind the predicted landing point: 1.1 m shallow,
-1.4 m deep). A timed pre-bounce charge variant was tried and rejected
-(it launches at serve time and arrives stationary — weak volley
-blocks). The crude full-swing rung is the learnability bar, per lesson
-9; a pure y-tracker recovers 0% here (fixed-depth face sits in the flat
-serve's dead zone) and was the wrong rung, as it was for the 0.10.0
-baseline calibration.
+- parked;
+- placement-blind crude full swing, the historical learnability bar;
+- stage-calibrated run-up or timed-charge oracle, the feasibility bar;
+- an uncalibrated pre-bounce chase probe, which asks whether the opening
+  serve can still be volleyed from that fence.
 
-Sweep verdict at 200 episodes/cell (per stage 0→4):
+The existing dynamic criteria remain blocking:
 
-| Measure | s0 | s1 | s2 | s3 | s4 |
-|---|---|---|---|---|---|
-| parked reward | −1.00 | −1.00 | −1.00 | −1.00 | −1.00 |
-| crude reward | 5.66 | 5.87 | 5.98 | 6.38 | 7.30 |
-| oracle reward | 8.23 | 8.77 | 8.51 | 9.54 | 11.57 |
-| oracle ≥2 returns | 94% | 93% | 94% | 94% | 97% |
-| crude ≥2 returns | 83% | 73% | 70% | 66% | 74% |
+1. parked reward < crude reward < oracle reward within every stage;
+2. the oracle completes at least two returns on at least 90% of serves;
+3. the crude controller completes a second exchange in a nonzero fraction
+   of episodes;
+4. no adjacent oracle bounce mean jumps above 1.5 times its predecessor.
 
-All four blocking criteria hold: strict parked < crude < oracle at
-every stage, oracle feasibility ≥ 90%, crude learnability far above
-zero, and no stage dramatically easier than its predecessor (the
-enforced form of the inversion criterion: an oracle bounce-mean jump
-> 1.5× over the previous stage fails the sweep, checked for every
-adjacent pair). Stated honestly rather than as a blanket "no
-inversion": the oracle bounce means 2.57 / 2.54 / 2.35 / 2.42 / 2.68
-do dip shallowly at stage 2 and end mildly *above* stage 0, and both
-probes' rewards rise with depth (crude 5.66 → 7.30) — serve energy
-co-moves with depth, and a hotter incoming ball pays back more rebound
-energy per swing, so the deepest stages are somewhat friendlier to a
-committed swinger than mid-ladder. Nothing approaches the dramatic
-U-shape that killed the one-bounce depth ladder (worst adjacent rise:
-1.11×), and the gate's bar is absolute (3.0 exchanges), so a mild
-ease-off at depth cannot stall progression — at worst the mid-ladder
-stage 2 is the campaign's real test. Failure taxonomies stay committed
-(OOB-heavy, not double-bounce-heavy) for both probe policies at depth.
+Telemetry identities are also blocking. The sweep prints mean pre-bounce
+hits, mean post-bounce hits, opening-volley episode rate, and mean
+post-bounce completed returns for every cell. The chase probe's
+opening-volley rate is diagnostic, not a pass/fail threshold: it has not
+yet been calibrated well enough to turn a zero into proof of mechanical
+impossibility.
+
+If the oracle cannot clear the narrower stages, retune overlap or serve
+landing geometry before training. Do not make an infeasible ladder
+learnable by adding reward.
+
+The fresh sweep passed every static and dynamic criterion:
+
+| Stage | Crude ≥2 returns | Oracle ≥2 returns | Oracle mean returns | Opening-volley probe |
+|---|---:|---:|---:|---:|
+| 0 | 83% | 94% | 2.58 | 100% |
+| 1 | 73% | 96% | 2.44 | 100% |
+| 2 | 69% | 92% | 2.35 | 100% |
+| 3 | 58% | 94% | 2.25 | 38% |
+| 4 | 14% | 95% | 2.29 | 0% |
+
+All telemetry identities passed. The stage-4 result is especially useful:
+post-bounce rallying remains feasible, while the diagnostic controller
+could no longer reach the opening flight. Because that probe is
+deliberately non-blocking and not a learned policy, this is evidence that
+the geometry strongly suppresses volleying—not proof that a trained policy
+can never discover one.
+
+## Six-million-step pilot
+
+Run one full SAC pilot with a 6M-step budget. The latest run did not reach
+stage 4 until roughly 4.175M, so the previous 3M default could end before
+the experiment reaches its actual target. Early stopping can still finish
+a settled final plateau.
+
+The pilot review targets are:
+
+- reach stage 4 and retain independent rally performance near the current
+  three-return level;
+- all stage-4 contacts fall inside (−4.7, −3.0), by construction;
+- at least 70% of completed stage-4 returns are post-bounce returns;
+- learned-policy opening volleys are near zero at stage 4;
+- promotion shocks recover within roughly 250k steps rather than consuming
+  most of a stage residency;
+- final-stage and long-horizon results do not show a material rally
+  regression relative to the latest run.
+
+These behavioral targets are review criteria, not new promotion gates for
+the first pilot. The current bounce-count gate stays the only training
+gate so the experiment remains interpretable.
+
+## Pre-registered escalation rules
+
+Add complexity only for the failure that appears:
+
+- **Opening volleys persist at stage 4:** add an explicit must-bounce rule.
+  This is a task-rule problem; a small depth reward is not a reliable way
+  to prohibit a legal volley.
+- **The scripted oracle fails a stage:** widen or subdivide the transition,
+  or adjust serve landing geometry. Do not start RL on a failed geometry.
+- **The oracle passes but RL stalls:** reduce the shift between adjacent
+  windows first. If interception remains the binding failure, reconsider
+  the queued landing-point observation feature.
+- **Contacts are post-bounce and deep but completed returns collapse:** add
+  a small bonus only for a successfully completed post-bounce baseline
+  return. Do not pay raw position or an uncompleted touch.
+- **The policy hugs each stage's front boundary:** that is acceptable when
+  the final boundary itself is the workspace baseline. If x = −3.0 is not
+  deep enough for the next campaign goal, extend the physical workspace
+  rather than reopening a common front-court refuge.
+- **Replay clearing causes excessive relearning:** run a matched
+  clear-versus-keep comparison before changing observations or rewards.
+
+If the pilot passes, compare the old and sliding ladders over three seeds
+at 6M steps, then confirm the winner on fresh seeds with a fixed
+long-horizon audit.
+
+## Historical calibration note
+
+The original five-stage ladder was:
+
+```text
+(-2.7,  0.3)
+(-3.2, -0.6)
+(-3.7, -1.0)
+(-4.2, -1.2)
+(-4.7, -1.2)
+```
+
+Its 2026-07-20 sweep passed the scripted feasibility and learnability
+checks: oracle ≥2-return rates were 93–97%, crude ≥2-return rates were
+66–83%, and no adjacent oracle bounce mean jumped by 1.5 times. Those
+results established that the serve schedule and open-style curriculum
+could support deeper starts.
+
+They did not test the positional objective. The shared interval
+(−2.7, −1.2) let every stage collapse to the same front-court strategy,
+which the latest contact-x telemetry finally exposed. The sliding ladder
+keeps the useful calibrated serve schedule while removing that shared
+shortcut.

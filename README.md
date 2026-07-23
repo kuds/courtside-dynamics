@@ -84,7 +84,21 @@ policies and statistics stay comparable across versions — see
 [`CHANGELOG.md`](CHANGELOG.md) for the per-version details and migration
 notes.
 
-Version 0.15.0 adds `WallBallDepthCurriculum`: with budget, incentives,
+Version 0.19.0 revises `WallBallDepthCurriculum` after run
+`20260722_124613` showed that every stage's shared front-court interval
+let the policy keep contacting near `x=-1.85` instead of learning from
+the baseline. The five paddle fences now slide backward as whole
+windows, retaining adjacent overlap but no all-stage refuge, and the
+default budget is 6M steps so the final stage has training headroom.
+Rewards, policy spaces, open scoring, and the three-evaluation
+promotion gate are unchanged. New pre-/post-bounce contact telemetry
+measures whether baseline play emerges from the geometry; the changed
+curriculum trajectory begins a new comparison era. The replacement
+ladder passed a 200-episode-per-cell scripted sweep: oracle ≥2-return
+rates were 92–96%, while the diagnostic opening-volley probe fell to
+0% at the final stage.
+
+Version 0.15.0 added `WallBallDepthCurriculum`: with budget, incentives,
 and capacity all exhausted as levers (`docs/lessons_learned.md` lesson
 19), the campaign now curricularizes *position* — open-scoring rallies
 (volleys legal, no early-touch fine) with a performance-gated depth
