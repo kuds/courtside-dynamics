@@ -243,6 +243,24 @@ def test_sb3_notebook_uses_run_config_files_not_pinned_model_kwargs() -> None:
     assert "cfg.run_config_file" in source
 
 
+def test_sb3_notebook_wires_optional_warm_start() -> None:
+    """Warm start is not TOML-configurable (it carries live run
+    provenance), so the notebook must expose it as a None-sentinel knob
+    and pass it only when set -- a bare path is wrapped, a
+    WarmStartConfig passes through."""
+    source = "\n".join(
+        _source(cell) for cell in _load_sb3_notebook()["cells"]
+    )
+    assert "from courtside_dynamics.training import WarmStartConfig" in source
+    assert "WARM_START = None" in source
+    assert "if WARM_START is not None:" in source
+    assert 'overrides["warm_start"]' in source
+    assert "WarmStartConfig(source_run_dir=WARM_START)" in source
+    # The knob must feed the same overrides dict the builder unpacks, so
+    # it wins over recipe/TOML layers like the other explicit variables.
+    assert "warm_start=WARM_START" not in source
+
+
 def test_sb3_notebook_replay_uses_tennis_court_style() -> None:
     source = "\n".join(
         _source(cell) for cell in _load_sb3_notebook()["cells"]
