@@ -1,85 +1,112 @@
-# Design: WallBallDepthCurriculum — align the serve landing with the paddle start
+# Design: WallBallDepthCurriculum — test serve-landing alignment
 
-Status: proposed, 2026-07-24. This is a diagnostic review of the run-2
-sliding-ladder pilot (`WallBallDepthCurriculum`, cold-start SAC, 6M-step
-budget) together with a controlled serve-speed and matched-stage sweep run
-on the saved checkpoints. It records the findings and specifies a
-geometry-only fix. The design being reviewed is
-`design_wall_ball_depth_curriculum.md`; the prior run's review is
-`wall_ball_depth_curriculum_run1_review.md`.
+Status: experimental implementation, revised 2026-07-24 after artifact and
+log audit. The branch preserves the fixed-origin production recipe, adds a
+separately named aligned treatment, and contains paired validation
+instrumentation. The treatment is not yet certified for a full 6M retrain.
+This document reviews the run-2 sliding-ladder pilot
+(`WallBallDepthCurriculum`, cold-start SAC, 6M-step budget) and defines a
+staged test of serve-origin alignment. It does **not** yet establish alignment
+as the root cause of the run's stage-1 stall or authorize a full 6M retrain.
+The design being reviewed is `design_wall_ball_depth_curriculum.md`; the prior
+run's review is `wall_ball_depth_curriculum_run1_review.md`.
 
-Evidence base: the run's Google Drive artifacts — 13 milestone checkpoints
-(model `.zip`, `vecnormalize.pkl`, rollout `.mp4`, per-step rollout `.csv`)
-at every 250k steps from 250k to 3.25M of the 6M budget — plus new
-rollouts of the 1.75M / 2.75M / 3.25M models reproduced locally with the
-repo env (SB3 2.9.0, MuJoCo 3.10) and a parked-paddle serve-physics
-measurement. All per-checkpoint CSV telemetry-contract identities pass.
+Evidence base:
 
-## TL;DR
+- 13 Drive milestone checkpoints at every 250k steps from 250k to 3.25M,
+  each with a model, `vecnormalize.pkl`, rollout video, and per-step rollout
+  CSV;
+- reproduced rollouts of the 1.75M, 2.75M, and 3.25M models;
+- fixed-geometry serve-speed and matched-stage sweeps;
+- parked-paddle serve-landing measurements and zero-action/controller
+  prototypes; and
+- the separately recovered curriculum history, which records promotion from
+  stage 0 to stage 1 at 1.425M and no promotion to stage 2 through roughly
+  3.4M.
 
-- **The serve lands progressively short of the paddle start as the ladder
-  deepens** — aligned at stage 0, **1.35 m short at stage 4**. The
-  serve-speed schedule (5.2 → 7.0) was calibrated so the ball *reaches* the
-  paddle (100% contact) but not so it *lands at* the paddle. The deep paddle
-  must abandon its start and charge ~1.3 m forward to meet a ball that
-  bounces well in front of it, and completed returns collapse in lockstep
-  with the growing gap (2.8 → 0.6 returns, stage 0 → 4).
-- **This is the likely reason the deep stages are so much harder than the
-  pre-flight sweep predicted.** The sweep certifies *feasibility* — a
-  scripted charge-and-lead oracle returns ≥2 balls 94–95% of the time at
-  every stage — but that oracle *compensates* for the misalignment by
-  charging. An RL policy from the deep start does not learn that charge for
-  free; it just gets a worse serve to return.
-- **Recommended fix (geometry only): co-move `serve_start_x` with each
-  stage so the serve lands at the paddle start**, then add a
-  serve-landing≈paddle-start check to `tools/depth_stage_sweep.py`,
-  re-calibrate the ladder, and re-run the pilot. This changes neither the
-  reward, the task rules, the gate, nor the observation — it is the smallest
-  intervention that removes a forced forward-charge the deep stages are
-  currently made to learn on top of the rally.
-- **Pre-flight (2026-07-24) passes.** With `serve_start_x` co-moved, the
-  serve lands on the paddle start to ±0.02 m at every stage, the no-op
-  invariant still holds (a parked paddle scores 0), and the uncalibrated
-  learnability bar is as-good-or-better — the stage-4 second-return rate
-  *doubles* (11% → 22%). Only the oracle's charge timing needs re-tuning for
-  the new serve. The definitive verdict still needs a retrain.
+The review-log archive omitted the curriculum history and matched gate-eval
+artifacts. They must be included with the next experiment so the stage
+timeline is auditable from the same bundle.
 
-## What the Drive artifacts actually measure
+## Decision summary
 
-The per-checkpoint `wall_ball_depth_curriculum_sac_<steps>.csv` / `.mp4`
-are **3-episode rollouts at the fixed stage-4 final geometry** (fence
-(−4.7, −3.0), start −3.9, serve 7.0), written by `VideoRecordCallback`
-using the recipe's `eval_env_overrides` unsynced to the gate
-(`recipes.py:730-747`, `callbacks/video_record.py`). Verified three ways:
-every one of the 36 legal contacts in the 39 milestone episodes lands
-inside the stage-4 fence and outside every shallower fence; the design doc
-says videos run at the final stage; and the code path confirms it. So the
-milestone stream measures final-geometry **transfer**, not the matched
-training stage, at n=3 per checkpoint — a behavioral probe, not a robust
-level estimate. The matched-stage timeline
-(`reports/curriculum_stages.json`, `metrics/eval_info.csv`) is not in the
-Drive folder, so "which stage did the run reach" cannot be read directly;
-it is inferred below from matched-geometry rollouts of the saved models.
+- **Confirmed geometry:** with `serve_start_x=1.0` at every stage, the mean
+  first-bounce position moves much less than the paddle start. The mean
+  landing-minus-start gap is about +0.30 m at stage 1 and grows to +1.34 m at
+  stage 4.
+- **Candidate mechanism, not root cause:** the run actually trained at stage 1.
+  Therefore the stage-1 gap is the only alignment mismatch that can plausibly
+  contribute to the observed promotion stall. The larger stage-2-to-stage-4
+  gaps were never encountered in training and cannot have caused failure to
+  leave stage 1; they matter only to future stages and final-stage transfer.
+- **The first prototype was not a passed pre-flight:** it aligned the *mean*
+  landing and preserved the zero-action score, but the unchanged oracle fell
+  below the existing 90% feasibility threshold at stage 3 (88%) and stage 4
+  (66%). The crude controller was mixed and is coupled to serve placement.
+- **Implemented for testing:** `WallBallDepthCurriculum` remains the
+  fixed-origin control and `WallBallDepthCurriculumAligned` is the separately
+  named treatment. Stage 0 remains at `serve_start_x=1.0`; candidate origins
+  are wired into treatment stages 1–4 and its final evaluation. The sweep now
+  selects either ladder, records exact per-seed controller and landing
+  outcomes, and applies a blocking distributional landing contract to the
+  candidate.
+- **Held-out certification remains blocked:** on seeds 1000–1199, every
+  aligned landing-distribution check passed, but its oracle reached the
+  existing ≥90% feasibility bar only at stages 0–2. Stages 3 and 4 scored
+  84.5% and 60%. The paired fixed-origin baseline also scored only 89% at
+  stage 4, one point below the bar.
+- **Before a 6M pilot:** run a paired stage-1 baseline-versus-aligned training
+  experiment. Promotion past stage 1 is the primary outcome. Advance to a
+  full aligned ladder only if that focused experiment supports the mechanism.
 
-## Findings
+## What the milestone artifacts measure
 
-### 1. The milestone CSVs understate the policy (n=3 sampling noise)
+The per-checkpoint
+`wall_ball_depth_curriculum_sac_<steps>.csv` / `.mp4` artifacts are
+three-episode rollouts at the fixed stage-4 geometry: fence
+`(-4.7, -3.0)`, paddle start `-3.9`, and serve speed `7.0`. They are written
+through the recipe's final-evaluation overrides, not the current
+performance-gate stage. The stream therefore measures final-geometry
+**transfer**, not matched-stage gate performance.
 
-The 3.25M milestone CSV shows 0.33 completed returns at stage-4 geometry.
-Re-rolling the same model for 30 episodes gives **0.63** (≥1 return in 63%
-of episodes); 15 episodes gave 0.87. The Drive snapshot simply caught a bad
-3-serve draw. The behavioral read still holds — deep contact (−3.4), 100%
-post-bounce, zero opening volleys, ~1 return then double-bounce — but any
-single milestone number is quantized to {0, ⅓, ⅔} and should not be read as
-a level. Widen the milestone rollout past 3 episodes, or read the 15-episode
-`eval_info_final.csv`.
+The callback reused the same three milestone seeds at every checkpoint.
+Consequently, the pooled set is 13 policies evaluated on three repeated seed
+slots, not 39 independent samples from one policy. A single checkpoint mean
+is quantized in thirds and the pooled percentages are descriptive summaries,
+not confidence-calibrated estimates of one policy's level.
 
-### 2. Serve pace is not an out-of-distribution eval confound
+At 3.25M, the milestone episodes contain return counts `[1, 0, 0]`, for a mean
+of 0.33. A separate 30-episode reroll of the same checkpoint at stage 4 gives
+0.63 completed returns and a 63% rate of at least one return. That difference
+is compatible with ordinary n=3 sampling noise; it should not be described as
+proof that either estimate is the policy's true performance. Future milestone
+rollouts must use more episodes and rotate or explicitly record seeds.
 
-Holding the stage-4 geometry fixed and varying only the serve speed
-(3.25M model, 30 eps/cell):
+Across the 39 milestone rows:
 
-| serve | completed returns | ≥1 return | hit-rate | contact-x |
+- completed returns total 14, for a descriptive mean of 0.359;
+- 31 episodes terminate on double bounce and 8 on out-of-bounds, with no
+  timeouts;
+- 36 legal hits occur across 33 of 39 episodes;
+- all 36 legal hits are post-bounce and there are no opening volleys; and
+- the legal-hit-weighted contact position is about `-3.43`.
+
+Thus “100% post-bounce” applies to the 36 observed legal hits. It must not be
+read as a 100% episode hit rate; six episodes have no legal hit. The most
+common failure bucket is hit-but-no-completed-return (20/39), followed by an
+episode with at least one completed return (13/39), then a whiff (6/39).
+Those counts show both first-return conversion and later recovery problems;
+they do not by themselves identify post-return recovery as the sole binding
+failure.
+
+## Observed policy sweeps
+
+### Serve speed at fixed stage-4 geometry
+
+Holding the stage-4 fence and paddle start fixed while varying serve speed
+for the 3.25M model gives:
+
+| serve | completed returns | ≥1 return | hit rate | contact x |
 |---:|---:|---:|---:|---:|
 | 5.2 | 0.00 | 0% | 100% | −3.02 |
 | 5.5 | 0.00 | 0% | 100% | −3.04 |
@@ -87,317 +114,436 @@ Holding the stage-4 geometry fixed and varying only the serve speed
 | 6.5 | 0.40 | 40% | 100% | −3.23 |
 | 7.0 | 0.63 | 63% | 100% | −3.31 |
 
-Returns rise **monotonically with serve speed**. A slower serve at the deep
-geometry does not recover returns — it eliminates them: the ball arrives too
-weak to be sent back to the wall and dies short. The fast serve is *required*
-at depth, exactly as the design intends ("serve energy co-moves with depth so
-the ball reliably reaches the deeper paddle", `recipes.py:715-718`). Any
-theory that the flat milestone curve is an artifact of testing at too fast a
-serve is refuted.
+The same monotone pattern appears at the 1.75M and 2.75M checkpoints. This
+supports the narrow statement that the tested policies perform better with
+the faster serve under the fixed deep geometry. Because those policies were
+trained under the existing serve schedule, it does not prove that `7.0` is
+universally required, that another policy could not learn a slower serve, or
+that serve speed is free of distribution shift.
 
-### 3. The policy is a shallow-court policy that has not climbed the ladder
+The stage-1 alignment experiment therefore keeps serve speed unchanged. It
+tests origin placement without co-varying pace.
 
-Evaluating each saved model at each **matched** full-stage config
-(fence + start + serve together), completed returns (30 eps/cell):
+### Matched full-stage configurations
+
+Completed returns from 30 episodes per cell:
 
 | stage (start / serve) | 1.75M | 2.75M | 3.25M |
 |:---|---:|---:|---:|
-| 0  (−1.6 / 5.2) | 1.53 | 2.30 | **2.33** |
-| 1  (−2.1 / 5.5) | 1.50 | 2.03 | 2.20 |
-| 2  (−2.7 / 6.0) | 1.27 | 1.30 | 1.20 |
-| 3  (−3.3 / 6.5) | 0.77 | 0.77 | 0.97 |
-| 4  (−3.9 / 7.0) | 0.63 | 0.60 | **0.63** |
+| 0 (−1.6 / 5.2) | 1.53 | 2.30 | 2.33 |
+| 1 (−2.1 / 5.5) | 1.50 | 2.03 | 2.20 |
+| 2 (−2.7 / 6.0) | 1.27 | 1.30 | 1.20 |
+| 3 (−3.3 / 6.5) | 0.77 | 0.77 | 0.97 |
+| 4 (−3.9 / 7.0) | 0.63 | 0.60 | 0.63 |
 
-Two things stand out. Performance **degrades monotonically with depth** —
-the same policy rallies 2.33 returns (up to 6, ≥3 in 40% of episodes) from
-the forward start and 0.63 from the deep start. And **improvement over
-training is concentrated at the shallow stages** (0–1 climb 1.5 → 2.3;
-2–4 are flat across 1.5M steps). That is the signature of a run **training
-at stage 0–1 and not promoting** — its stage-0 matched mean (~2.3) sits
-below the 3.0 gate, so it never earns the deeper stages, and nothing
-improves at depth. The flat deep-geometry milestone curve is the honest
-consequence: a stage-0/1 policy tested at stage 4.
+Performance degrades monotonically with the matched-stage index, and
+improvement across checkpoints is concentrated at stages 0–1. This is
+consistent with the recovered timeline showing training at stage 1. It is
+not a causal isolation of serve alignment: fence, paddle start, serve speed,
+and training exposure all change together.
 
-(These matched-stage numbers are estimates of the gate metric: deterministic
-policy, `serve_speed_jitter=0.5`, 30 eps, seeds 1000–1029. The true gate
-value may differ by a few tenths, but the *shape* — improvement only at
-shallow stages — is stable across all three checkpoints.)
+The matched-stage means also vary by held-out seed batch. For the same 3.25M
+model, stage-0 means of 2.33, 2.80, and 2.90 were observed in separate
+25–30-episode batches; stage-1 means were 2.20, 2.36, and 2.83. A single
+2.33 estimate below the 3.0 gate cannot establish the promotion history.
+The recovered timeline, rather than this inference, is the source of truth
+for the stage-1 stall.
 
-### 4. Root cause — the serve lands short of the paddle start (parked paddle)
+## Candidate mechanism: landing relative to paddle start
 
-Serve landing (ball-x at its first floor bounce) measured with a parked
-paddle, so this is pure serve physics, independent of any policy:
+With the paddle parked away from the serve, mean ball x at the first floor
+bounce is:
 
-| stage | paddle start | serve | serve lands at | **shortfall (land − start)** |
+| stage | paddle start | serve speed | current mean landing | mean gap (landing − start) |
 |---:|---:|---:|---:|---:|
-| 0 | −1.60 | 5.2 | −1.64 | **−0.04** (aligned) |
-| 1 | −2.10 | 5.5 | −1.79 | +0.31 |
-| 2 | −2.70 | 6.0 | −2.04 | +0.66 |
-| 3 | −3.30 | 6.5 | −2.29 | +1.01 |
-| 4 | −3.90 | 7.0 | −2.55 | **+1.35** |
+| 0 | −1.60 | 5.2 | −1.65 | −0.05 |
+| 1 | −2.10 | 5.5 | −1.80 | +0.30 |
+| 2 | −2.70 | 6.0 | −2.06 | +0.64 |
+| 3 | −3.30 | 6.5 | −2.31 | +0.99 |
+| 4 | −3.90 | 7.0 | −2.56 | +1.34 |
 
-The paddle start recedes 2.3 m across the ladder (−1.6 → −3.9), but the
-serve landing recedes only 0.9 m (−1.64 → −2.55). The serve-speed schedule
-**under-compensates** for the depth recession, so the ball falls further and
-further in front of the deep paddle. Cause: **`serve_start_x` is fixed at
-1.0 for every stage** — in the recipe base kwargs (`recipes.py:719`) and in
-the sweep's stage table (`tools/depth_stage_sweep.py:60-74`). The ladder
-translates `paddle_x_fence`, `paddle_start_x`, and `serve_speed`, but not
-the serve origin, so the ball is always launched from the same near-wall
-spot and merely thrown harder. Gravity plus one bounce means the landing
-point barely moves while the paddle marches deep. (The reset code comment at
-`wall_ball.py:1968` says stages "translate it with the paddle start" — but
-this recipe's stage table does not.)
+This is a policy-independent geometry measurement. The paddle start recedes
+2.3 m over the ladder while the mean landing recedes only about 0.9 m because
+`serve_start_x` remains fixed at `1.0`.
 
-Completed returns track the shortfall almost perfectly: 2.8 → 2.4 → 1.2 →
-0.8 → 0.6 as the gap grows 0 → +1.35. The ball still *reaches* the paddle
-(100% contact at every stage — post-bounce it travels on to ~−3.4 inside
-the fence), so the misalignment does not cost contact; it costs **return
-quality**: the paddle must charge ~1.3 m forward off its start and strike a
-ball from an awkward, out-of-position pose, which is the dominant
-"hit-but-no-return" failure bucket at depth.
+The measurement establishes the mismatch, but the causal interpretation
+needs two corrections:
 
-### 5. The misalignment has already shaped the learned policy
+1. The current stall is at stage 1, where the measured mean mismatch is about
+   0.30 m. Stage-2-to-stage-4 gaps cannot explain a stage-1 promotion failure
+   because the run never trained there.
+2. The stage-4 landing gap is not paddle travel. The ball continues toward the
+   paddle after bouncing. With start `-3.9`, observed contact around
+   `-3.31` to `-3.38` implies approximately 0.5–0.6 m of forward movement,
+   not 1.35 m.
 
-Applying the fix (co-moved `serve_start_x`) to the *trained* 3.25M policy
-does **not** help — its stage-4 hit-rate drops from 100% to ~75% and it
-loses returns it used to make. That is expected and, in fact,
-corroborating: the policy learned to *charge forward* to meet the short
-serve, so aligning the serve makes its learned charge overshoot. The
-optimal strategy under an aligned serve is different — "play from your
-start" rather than "charge forward" — and no policy or scripted controller
-built for the misaligned serve can demonstrate it. The clean existence
-proof is **stage 0, which is already aligned**: there the policy rallies
-2.8 returns with the easy play-from-your-start motion. Aligning the deep
-stages recreates that structure.
+A plausible mechanism remains: changing the bounce location may alter
+interception timing, pose, and hit-to-return conversion at stage 1, and the
+effect could grow at later stages. The existing data show association, not
+that this mechanism is necessary or sufficient. In particular, stage 0 is
+already approximately aligned and still does not reliably clear the 3.0
+promotion gate.
 
-## Recommended fix — co-move the serve origin with the stage
+Applying aligned origins to a policy trained on the current ladder produced
+mixed or worse transfer results. That is compatible with controller/policy
+coupling to the old serve, but it is not affirmative evidence that the policy
+learned a specific forward-charge strategy or that a newly trained policy
+will benefit. Only a training A/B can answer that question.
 
-Add `serve_start_x` to every `performance_gate` stage, co-moving it with
-`paddle_start_x` so the serve lands at (or just in front of) the paddle
-start at each stage, restoring the stage-0 alignment across the whole
-ladder. Measured values (parked-paddle pre-flight, 2026-07-24) — the
-origin→landing shift held cleanly 1:1, and each lands the serve on the
-paddle start to within ±0.02 m:
+## Candidate serve origins
 
-| stage | fence | start | serve | `serve_start_x` (today → set to) | aligned landing |
-|---:|---|---:|---:|:---|---:|
-| 0 | (−2.7, 0.3)  | −1.6 | 5.2 | 1.0 → **1.04** | −1.61 |
-| 1 | (−3.2, −0.8) | −2.1 | 5.5 | 1.0 → **0.69** | −2.11 |
-| 2 | (−3.7, −1.6) | −2.7 | 6.0 | 1.0 → **0.34** | −2.72 |
-| 3 | (−4.2, −2.4) | −3.3 | 6.5 | 1.0 → **−0.01** | −3.32 |
-| 4 | (−4.7, −3.0) | −3.9 | 7.0 | 1.0 → **−0.35** | −3.91 |
+Use stage 0 as an unchanged control. Its current mean gap is small and it is
+inside the proposed tolerance, so changing `1.0` to `1.04` would introduce an
+unnecessary difference before the causal test.
 
-Concretely, the `[[train.performance_gate.stages]]` entries (and the sweep's
-`STAGES` table) each gain a `serve_start_x`. This is a config + calibration
-change; no env, reward, or observation code changes.
+| stage | start | serve speed | current origin | candidate origin | candidate mean landing |
+|---:|---:|---:|---:|---:|---:|
+| 0 | −1.60 | 5.2 | 1.00 | **1.00** | −1.65 |
+| 1 | −2.10 | 5.5 | 1.00 | **0.69** | −2.11 |
+| 2 | −2.70 | 6.0 | 1.00 | **0.34** | −2.72 |
+| 3 | −3.30 | 6.5 | 1.00 | **−0.01** | −3.32 |
+| 4 | −3.90 | 7.0 | 1.00 | **−0.35** | −3.91 |
 
-## Pre-flight check (2026-07-24)
+These are calibration candidates, not final certified values. The reported
+candidate landings are sample means. “Within ±0.02 m” describes the distance
+between each reported mean and the corresponding start; it does **not** mean
+that every serve under `serve_speed_jitter=0.5` lands within ±0.02 m.
 
-Ran the sweep's own controllers (`_crude`, `_oracle`, parked) on the current
-vs. aligned ladder, plus the parked-paddle landing measurement. Static
-checks pass on both (geometry is unchanged). Results:
+## What the 2026-07-24 prototype did and did not pass
 
-| stage | serve landing (current → aligned) | parked (no-op) | crude ≥2 return (current → aligned) | oracle ≥2 return (current → aligned) |
+The prototype used candidate origins at stages 1–4 and `1.04` at stage 0. It
+ran mean landing, zero-action, crude-controller, and existing-oracle checks:
+
+| stage | mean landing (current → prototype) | zero-action mean | crude ≥2 (current → prototype) | oracle ≥2 (current → prototype) |
 |---:|---:|---:|---:|---:|
 | 0 | −1.65 → −1.61 | 0.00 | 85% → 74% | 99% → 98% |
-| 1 | −1.80 → −2.11 | 0.00 | 74% → **95%** | 99% → 100% |
-| 2 | −2.06 → −2.72 | 0.00 | 65% → **90%** | 95% → 94% |
+| 1 | −1.80 → −2.11 | 0.00 | 74% → 95% | 99% → 100% |
+| 2 | −2.06 → −2.72 | 0.00 | 65% → 90% | 95% → 94% |
 | 3 | −2.31 → −3.32 | 0.00 | 52% → 51% | 95% → 88% |
-| 4 | −2.56 → −3.91 | 0.00 | 11% → **22%** | 98% → 66% |
+| 4 | −2.56 → −3.91 | 0.00 | 11% → 22% | 98% → 66% |
 
-Reading:
+The correct reading is:
 
-- **Alignment achieved.** The aligned serve lands on the paddle start to
-  ±0.02 m at every stage.
-- **No-op invariant preserved.** A parked paddle scores 0 on both ladders —
-  aligning the serve does not let a static paddle cheat.
-- **Learnability improves (the clean signal).** The uncalibrated crude
-  controller — the historical learnability bar — completes a second exchange
-  *as often or more often* on the aligned ladder, with the largest gains at
-  the stages where the misalignment was worst (s1, s2, and s4's rate
-  doubling). This revised a wrong prior expectation: because crude sweeps the
-  whole fence back-to-front, it does not collapse on the aligned serve.
-- **Oracle needs re-derivation (a calibration artifact, not a regression).**
-  The oracle drops at s3–s4 (s4 98% → 66%) only because its `oracle_charge_gap`
-  timing is tuned to the old forward-landing serve. It must be re-tuned for
-  the aligned serve before the certification run, exactly as the sweep-update
-  section requires; the uncalibrated crude bar (which improves) is the
-  trustworthy learnability read here.
+- **Mean landing check passed.** The measured mean moved to within 0.02 m of
+  the start at each prototype stage. Landing standard deviations, quantiles,
+  and tail failures were not retained in the log, so distributional alignment
+  remains unverified.
+- **Zero-action check passed.** A zero-action policy scored 0 on both ladders.
+- **Crude-controller evidence is mixed.** It improves at stages 1, 2, and 4
+  but declines at stages 0 and 3. The observed stage-4 rate doubles from
+  11% to 22%, but this is 80 episodes with no retained paired per-episode
+  outcomes and should be treated as suggestive. The controller sweeps across
+  the fence and is coupled to serve placement.
+- **Full feasibility failed.** The existing contract requires the oracle to
+  complete at least two returns on at least 90% of serves. The prototype
+  scores 88% at stage 3 and 66% at stage 4, so it did not pass the full
+  pre-flight.
+- **Why the oracle failed is not yet established.** Stale charge timing is a
+  reasonable hypothesis, but it must be tested by deriving a placement-fair
+  oracle on calibration seeds and evaluating it on held-out seeds. It should
+  not be declared a calibration artifact in advance.
 
-Nothing in the pre-flight contraindicates the fix; the scripted learnability
-bar points the right way. The definitive verdict remains the retrain below.
+No production ladder or 6M pilot should proceed from this partial prototype
+alone.
+
+## Implemented held-out sweep
+
+The revised sweep measures the exact first-floor-contact substep rather than
+the ball position on the following environment frame, holds the paddle at its
+configured start, accepts explicit ladder and held-out seed selections, and
+persists the complete per-seed controller and landing records as JSON. The
+report also records the invocation, UTC timestamp, Git/source fingerprints,
+and any declared calibration seed range.
+
+The paired runs used 200 episodes per cell and common seeds 1000–1199. The
+stage-0 configuration, controller rows, and landing samples are exactly equal
+across the two artifacts.
+
+| stage | mean landing offset (baseline → aligned) | aligned std | aligned within ±0.30 m | crude ≥2 (baseline → aligned) | oracle ≥2 (baseline → aligned) |
+|---:|---:|---:|---:|---:|---:|
+| 0 | −0.001 → −0.001 | 0.155 | 100.0% | 82.0% → 82.0% | 95.5% → 95.5% |
+| 1 | +0.349 → +0.039 | 0.155 | 100.0% | 72.0% → 94.0% | 95.5% → 96.0% |
+| 2 | +0.698 → +0.038 | 0.156 | 100.0% | 68.5% → 89.5% | 94.0% → 94.0% |
+| 3 | +1.048 → +0.038 | 0.156 | 100.0% | 56.0% → 46.5% | 92.5% → **84.5%** |
+| 4 | +1.397 → +0.047 | 0.156 | 99.5% | 16.0% → 12.0% | **89.0%** → **60.0%** |
+
+The aligned geometry portion passes with raw distribution evidence, not only
+a close sample mean. Full certification still fails: the aligned oracle
+misses the existing feasibility contract at stages 3–4, with Wilson 95%
+intervals of 78.8–88.9% and 53.1–66.5%. The baseline also misses at stage 4
+by one percentage point (178/200; Wilson 83.9–92.6%), showing that the
+controller threshold is seed-sensitive near the boundary. The paired results
+are mixed: the aligned crude point estimates are higher at stages 1–2 and
+lower at stages 3–4. Those marginal percentages are descriptive; the
+artifacts do not yet report paired-contrast uncertainty. The aligned oracle
+declines at stages 3–4 are much larger, but they remain controller-specific
+mechanical evidence rather than evidence about SAC learning.
+
+An exploratory `oracle_charge_gap` timing search on separate seeds 0–199 did
+not restore the 90% bar, especially at stage 4. It produced no standalone raw
+calibration artifact; that declared range appears in the aligned report. The
+baseline's older oracle has no retained calibration-range provenance. These
+limitations are now explicit rather than inferred. The remaining issue should
+be treated as controller redesign or task recalibration rather than presumed
+to be a one-parameter timing fix.
+
+Seeds 1000–1199 are now consumed diagnostic data. Any controller redesign
+that responds to these outcomes must use them as calibration evidence, not
+reuse them for certification. Pre-reserve a fresh final set (2000–2199) before
+the next controller iteration and do not inspect it until parameters are
+frozen.
+
+Both reports were produced from a dirty working tree. They fingerprint the
+script and tracked diff, so they are useful diagnostics, but the hashes do not
+contain the patch needed to reconstruct that state independently. A final
+certification artifact must run from a clean committed revision (or archive
+the exact patch and relevant dependency environment).
+
+## Strengthened calibration contract
+
+The existing sweep certifies feasibility (oracle ≥2 returns on at least 90%
+of episodes) and a minimal crude-controller learnability signal. Add a
+distributional landing contract and make the certification reproducible.
+
+For each stage and ladder variant:
+
+1. Run 200 held-out episodes with `serve_speed_jitter` enabled and common
+   paired seeds across baseline and candidate. The tool uses two explicit
+   invocations (`--ladder baseline` and `--ladder aligned`) with the same
+   `--seed-start` and episode count; the JSON pairing key makes the
+   relationship auditable.
+2. Hold the paddle at the configured start, make any physical contact before
+   the first bounce a blocking failure, save every first-bounce x, and report
+   mean, standard deviation, p05, median, p95, maximum absolute error, and the
+   fraction within ±0.30 m of `paddle_start_x`.
+3. For the aligned candidate, require at least 95% of individual serve
+   landings to be within ±0.30 m. A close mean is insufficient if the
+   jittered tails miss the band. The fixed-origin baseline is measured on the
+   same seeds as a comparison condition; its known deeper-stage misalignment
+   is not itself a baseline certification failure.
+4. Run the true hold-start parked, crude, and oracle policies on the same
+   held-out seed set and save per-episode returns, contacts, terminations, and
+   telemetry identities rather than only rounded aggregates. Treat any
+   hold-start contact or completed return as a blocking invariant failure.
+5. Tune controller parameters on a separate calibration seed set, freeze
+   them, then evaluate the held-out 200. Do not tune on the certification
+   episodes. Record the calibration range and artifact identifier together
+   with the code revision, source-state fingerprint, command, and timestamp.
+   Once a held-out result has informed a redesign, retire that seed set and
+   certify on a fresh pre-reserved range.
+6. Require every existing static, telemetry, learnability, feasibility, and
+   monotonicity criterion to pass. In particular, the held-out oracle point
+   estimate must meet the existing ≥90% threshold at every stage; report a
+   binomial confidence interval alongside it.
+
+Stage 0 must be byte-for-byte equivalent across the baseline and candidate
+ladder in this sweep, including `serve_start_x=1.0`. That preserves a negative
+control and prevents a nominal alignment correction from changing the task
+before stage 1.
+
+## Paired stage-1 training A/B
+
+Stage 1 already passes its candidate landing, hold-start, crude, oracle, and
+telemetry checks even though the full ladder fails at later stages. That is
+enough mechanical evidence to test the only mismatch that could have
+contributed to the observed stage-1 stall; it is not certification of stages
+2–4 and does not show that SAC learns better.
+
+- **Baseline arm:** `WallBallDepthCurriculum`, stage-1
+  `serve_start_x=1.0`.
+- **Candidate arm:** `WallBallDepthCurriculumAligned`, stage-1
+  `serve_start_x=0.69`.
+- Keep stage 0 at `1.0` and keep every other environment, reward, gate,
+  observation, logging, and training parameter identical.
+- For each independent pair, train a separate baseline seed to stage-1 entry,
+  save its complete state (model, normalizer, replay buffer, optimizer,
+  counters, and RNG state), then clone that state once into the baseline and
+  aligned arms. Use a fixed horizon of 1.5M post-fork training steps. Cloning
+  one shared checkpoint into many RNG continuations is only a conditional
+  pilot, not independent training-seed replication; it cannot authorize the
+  6M decision without independent-state confirmation.
+- Before the four-pair variance pilot, pre-register an ordered
+  checkpoint-generation list of 48 seeds (twice the maximum supported pair
+  count) and a 1.75M stage-0 entry horizon. Train seeds in that order until
+  enough entry states exist, retain and report every non-entry, and use the
+  first `n_required` entrants in the pre-registered order. Never replace a
+  seed selectively after inspecting its trajectory. If the list yields fewer
+  than `n_required` entrants, the confirmatory A/B is infeasible/no-go rather
+  than an invitation to extend or cherry-pick.
+- If complete resumable states are unavailable, pre-register a separate
+  common-seed cold-start design with independently trained seed pairs and a
+  3.5M total horizon. Do not mix continuation and cold-start pairs in one
+  estimate.
+- Define the primary paired outcome before launch. For continuations, use
+  `min(T_baseline, H) - min(T_aligned, H)`, where `T` is steps from the fork
+  to stage-2 promotion and `H=1.5M`; positive values favor alignment. For the
+  cold-start fallback, use the same restricted-time difference from training
+  start with `H=3.5M`.
+- Use 250k steps as the minimum worthwhile mean gain. Begin with four blinded
+  pairs solely to estimate the paired-outcome variance, then set the final
+  sample size for 80% power at one-sided α=0.05. Use at least eight total
+  pairs; if the calculated requirement is 9–24, use that requirement. If it
+  exceeds 24, the confirmatory A/B is infeasible/no-go under the available
+  budget before unblinding—do not run 24 and describe it as 80%-powered. Do
+  not inspect arm labels, select seeds, or extend only one arm during
+  sample-size re-estimation.
+- The go rule is conjunctive: mean paired gain at least 250k steps, a
+  one-sided 95% percentile-bootstrap lower bound above zero (100,000 resamples
+  of whole pairs with a fixed analysis seed), zero telemetry-identity
+  violations, and a still-passing scripted hold-start invariant. Hitting 24
+  pairs without meeting every condition is inconclusive/no-go for a full
+  aligned pilot, not permission to keep sampling. Because `rally_style` is
+  deliberately `open`, contact style is descriptive rather than a hidden
+  pass/fail condition.
+- Save the complete curriculum history, gate-eval rows, progress data, raw
+  evaluation episodes, and configuration snapshot for both arms.
+- Cross-evaluate the resulting baseline and aligned policies on both the
+  fixed-origin and aligned serve geometries using common episode seeds. This
+  2×2 policy-by-geometry matrix separates training effects from the changed
+  final-evaluation distribution.
+
+Primary estimand:
+
+- the mean paired restricted-time gain defined above.
+
+Secondary endpoints at matched stage 1 (reported with paired intervals but
+not substituted for the primary go rule):
+
+- promotion proportion by the fixed horizon;
+- gate `bounce_count_ep_mean`;
+- hit-to-completed-return conversion;
+- double-bounce and out-of-bounds shares;
+- contact position and post-bounce style; and
+- sensitivity across held-out seed batches.
+
+The candidate mechanism is supported only if the aligned arm passes the
+pre-registered restricted-time go rule without violating hold-start or
+telemetry contracts. If the arms are indistinguishable or the aligned arm is
+worse, stop: the stage-1 stall is more likely dominated by recovery,
+interception, gate noise, or another mechanism. Do not expose stages 2–4 in a
+6M run merely because their landing means look better.
 
 ## What deliberately does not change
 
-Isolate the serve geometry, per the parent design's one-lever discipline:
+The calibration and stage-1 A/B isolate serve origin:
 
-- **Reward coefficients and components** — unchanged. This does not add a
-  depth bonus, a must-bounce rule, or a completed-post-bounce-return bonus;
-  those remain shelved behind their pre-registered triggers.
-- **The promotion gate** — `bounce_count_ep_mean ≥ 3.0`, window-mean of 3,
-  50k pause + replay clear on advance. Unchanged.
-- **Rally style** (`open`), fence geometry, `paddle_start_x`, and the serve
-  *speed* schedule — unchanged. Only the serve *origin* moves.
-- **Observation space** — unchanged (still 23-dim; the landing-point
-  feature stays a separate, later lever).
-- **Evaluation** — still runs on the true full serve at the final stage;
-  no recovery-curriculum or drop-ball starts are introduced (the env's
-  `one_bounce` recovery resets stay disabled for open style).
+- reward coefficients and components;
+- the `bounce_count_ep_mean ≥ 3.0` promotion gate, its window, pause, and
+  replay-clear behavior;
+- rally style, fence geometry, paddle start, and serve-speed schedule;
+- the 23-dimensional observation space; and
+- recovery reset rules, evaluation pipeline, metric definitions, and cadence.
 
-If the policy now moves backward and keeps rallying, the result belongs to
-serve alignment rather than a simultaneous reward, rule, or observation
-change.
+The final-task **distribution does change** in the aligned recipe because its
+final evaluator uses `serve_start_x=-0.35` instead of the baseline's `1.0`.
+Historical and aligned final scores or videos are therefore not directly
+comparable. Use the 2×2 cross-evaluation above for attribution; “unchanged
+evaluation” here refers only to machinery and metrics, not serve geometry.
 
-## Sweep / calibration contract update
+The landing-point observation feature and gate/ladder redesign remain separate
+levers. If the stage-1 alignment A/B fails, evaluate those mechanisms in their
+own experiments rather than combining them here.
 
-`tools/depth_stage_sweep.py` currently certifies that a stage is
-**feasible** (oracle ≥2 returns from ≥90% of serves) and **learnable**
-(crude controller completes a second exchange in >0% of episodes). Neither
-tests *where the serve lands relative to the paddle start* — which is
-exactly the gap this fix targets. Add a blocking static check:
+## Serve-speed alternative remains open
 
-- **Serve-landing alignment:** for each stage, the mean serve-landing x
-  (parked paddle, serve physics only) must lie within a small tolerance of
-  `paddle_start_x` (proposed ±0.3 m). Report the per-stage landing and
-  shortfall alongside the existing feasibility/learnability numbers.
+The stage-4 crude-controller probe measured:
 
-Note that the oracle's `oracle_run_up` / `oracle_charge_gap` parameters are
-calibrated to the *current* short serve; after co-moving `serve_start_x`
-they must be re-derived (a play-from-start oracle needs little or no
-forward charge). The 2026-07-24 pre-flight confirmed this: the uncalibrated
-crude bar improved on the aligned ladder, while the calibrated oracle
-dropped at the deep stages purely from stale charge timing. Re-tune the
-oracle and re-run the full 200-episode-per-cell sweep before any training,
-as the parent design requires.
-
-## Validation plan
-
-1. **Calibrate:** the 2026-07-24 pre-flight already set `serve_start_x` per
-   stage and confirmed the landing-alignment check (±0.02 m), the no-op
-   invariant, and an improved crude learnability bar. What remains before
-   training: re-derive the oracle charge params for the aligned serve and
-   re-run the full 200-episode-per-cell sweep so every existing static /
-   feasibility / learnability / monotonicity / telemetry criterion passes on
-   the calibrated ladder.
-2. **Retrain:** run the 6M-step pilot on the aligned ladder. This is the
-   only clean test of the learnability claim — a policy *trained* on the
-   aligned serve can adopt the play-from-start strategy that trained/scripted
-   controllers on the misaligned serve cannot.
-3. **Compare** (falsifiable predictions to pre-register): vs. the misaligned
-   run at matched budget — (a) the ladder promotes past stage 1 (the
-   misaligned run appears stuck at stage 0–1 below the 3.0 gate); (b) at
-   matched deep stages, hit-to-return conversion rises and the
-   double-bounce share falls; (c) deep contact x stays inside the stage
-   fence (the style win must not regress). If alignment does not lift
-   promotion past stage 1, the binding constraint is elsewhere (recovery /
-   interception), and the pre-registered landing-point observation feature
-   becomes the next lever.
-
-## Caveats and what is not yet proven
-
-- **Single seed.** Every number here is one training run; pacing and level
-  estimates are n=1.
-- **The learnability benefit is only partly measured.** The geometry fix is
-  validated (serve realigned to ±0.02 m; no-op invariant preserved), and the
-  scripted crude bar improves on the aligned ladder (stage-4 ≥2-return rate
-  doubles), which is a positive but *scripted* signal. Stage 0 is an
-  existence proof. Only the retrain (step 2) confirms that a *trained* policy
-  climbs the aligned ladder further than the misaligned one.
-- **`serve_start_x` values are measured, not final.** The pre-flight fixed
-  them to land the serve on the paddle start (±0.02 m); the full sweep, run
-  alongside the re-tuned oracle, is what certifies the calibrated ladder.
-- **"Stuck at stage 0–1" is inferred** from matched-geometry rollouts of the
-  saved models, not read from the run's stage timeline. Pulling
-  `reports/curriculum_stages.json` and matched `eval_info.csv` into the
-  artifact set would confirm it directly and is recommended regardless.
-- **Relationship to other levers.** Serve alignment is complementary to,
-  and cheaper than, the two levers already on the shelf: the landing-point
-  observation feature (run-1 P1, aimed at interception/recovery) and a
-  finer ladder / de-noised gate (run-1 P0, aimed at promotion pacing).
-  Alignment addresses the *serve geometry* root cause with a geometry-only
-  change and should be tried first; if the deep-recovery wall persists after
-  alignment, escalate to the landing-point feature as a separate run.
-
-## Alternatives considered
-
-**Raise the serve speed instead of moving the origin (tested, rejected).**
-The obvious alternative is to leave `serve_start_x` at 1.0 and increase each
-stage's `serve_speed` so the ball simply flies deeper. Measured at stage 4
-(parked-paddle landing + the sweep's crude controller):
-
-| approach | serve | lands at | ball vx @ bounce | crude ≥2 | OOB |
+| approach | serve | mean landing | ball vx at bounce | crude ≥2 | OOB |
 |---|---:|---:|---:|---:|---:|
-| baseline (misaligned) | 7.0 | −2.49 | 6.14 | 11% | 4% |
-| raise speed | 8.0 | −2.99 | 7.03 | 86% | 55% |
-| raise speed | 9.0 | −3.50 | 7.93 | 80% | 39% |
-| raise speed | 10.0 | −4.00 | 8.83 | 11% | 6% |
-| **move origin** | 7.0 | −3.84 | **6.14** | **22%** | **6%** |
+| baseline origin 1.0 | 7.0 | −2.49 | 6.14 | 11% | 4% |
+| origin 1.0 | 8.0 | −2.99 | 7.03 | 86% | 55% |
+| origin 1.0 | 9.0 | −3.50 | 7.93 | 80% | 39% |
+| origin 1.0 | 10.0 | −4.00 | 8.83 | 11% | 6% |
+| move origin to −0.35 | 7.0 | −3.84 | 6.14 | 22% | 6% |
 
-Rejected for three reasons:
+Moving the origin remains the preferred next experiment because it changes
+landing position without simultaneously increasing horizontal pace. However,
+the data do not categorically reject a speed adjustment: speeds 8–9 improve
+the crude controller's ≥2-return metric substantially while also increasing
+OOB terminations and ball velocity. Because the controller is placement
+coupled and OOB can occur after completed returns, this table describes a
+tradeoff rather than selecting a winner.
 
-1. **It needs a large speed jump.** Reaching −3.9 takes serve ≈ 9.7 — a
-   ~40% increase outside the sweep-certified 5.2–7.0 band, re-opening the
-   whole serve calibration rather than making a small change.
-2. **Speed and reach are coupled through the flat serve, so it buys pace it
-   can't afford.** With `lob=0`, time-to-first-bounce is fixed (~0.49 s), so
-   extra reach *is* extra horizontal velocity: ball speed at the bounce
-   climbs 6.14 → 8.83 (+44%) and persists into the rally, making the
-   recovery-limited deep rally *harder* — the opposite of the goal. The
-   origin move lands the ball just as deep at the same 6.14 pace.
-3. **It destabilizes the rally.** At the intermediate speeds it must pass
-   through (8–9), 39–55% of episodes go out of bounds as the harder ball is
-   knocked out of the play volume. The origin move holds OOB at the baseline
-   6%.
+Do not change speed in the stage-1 origin A/B. If origin alignment fails,
+serve speed or a joint landing/energy calibration can be tested later under a
+separate pre-registered comparison.
 
-At the one speed that actually reaches −3.9 (serve 10 → −4.00), the crude
-controller returns fewer balls (11% ≥2) than the origin move (22% ≥2) at the
-same depth, with a 40%-hotter ball on top. Moving the origin decouples
-*where* the serve lands from *how fast* the rally is; raising speed couples
-them, trading a geometry problem for an energy one — and the deep rally is
-already energy-limited.
+Serve loft likewise remains a separate alternative. Prior experiments found
+that lofted serves can pass over the fixed-height paddle face, but that does
+not need to be resolved for the origin-only A/B.
 
-**Add serve loft** is the other way to decouple reach from horizontal pace
-(carry the ball deeper on an arc), but the parent design already ruled it
-out: lofted serves sail over the fixed-height paddle face
-(`recipes.py:716-718`). The origin move remains the only lever that adds
-reach without adding pace or arc.
+## Experimental implementation scope
 
-## Method notes (reproducibility)
+The branch now contains the minimum isolated implementation needed for
+certification and the A/B:
 
-- Models and `vecnormalize.pkl` for 1.75M / 2.75M / 3.25M were pulled from
-  Drive and integrity-checked (exact byte size + zip-CRC on every archive
-  member + well-formed pickle streams).
-- Rollouts: `SAC.load` + `VecNormalize.load` (train=False, norm_reward=
-  False), deterministic policy, `normalize_obs(obs)` before `predict`, raw
-  single env stepped to the 750-step cap; the same seeds across compared
-  cells. Serve landing recorded as ball-x at the first `event_floor_bounce`
-  with the paddle parked at the fence back (so the serve is never
-  intercepted pre-bounce).
-- Sweeps: 30 eps/cell unless noted; the parked-paddle landing measurement
-  used 40–60 eps/cell. The pre-flight ran the sweep's own `_crude` / `_oracle`
-  controllers (imported verbatim from `tools/depth_stage_sweep.py`) at
-  80 eps/cell.
+1. the existing `WallBallDepthCurriculum` recipe and starter remain the
+   fixed-origin control;
+2. `WallBallDepthCurriculumAligned` is a separate treatment with effective
+   stage origins `1.0`, `0.69`, `0.34`, `-0.01`, and `-0.35`;
+3. stage 0 is identical across recipes and remains at origin `1.0`;
+4. the treatment's final evaluation is explicitly pinned to
+   `serve_start_x=-0.35`, with cross-geometry evaluation required for
+   historical comparison;
+5. the sweep selects baseline or aligned stage tables, enforces the aligned
+   landing contract, and records raw paired outcomes plus run provenance;
+6. separate packaged starter configurations and tests prevent control/
+   treatment drift.
+
+These changes make the branch runnable as the treatment configuration. They
+do not change the production default: the failed stage-3/4 feasibility cells
+and the unrun stage-1 training A/B remain blockers for using the aligned
+recipe in a full pilot.
+
+This remains a configuration and calibration change; no environment, reward,
+or observation implementation change is intended.
+
+## Method and evidence limitations
+
+- This is one training run. Checkpoint comparisons do not provide independent
+  training seeds.
+- Milestone checkpoints repeat the same three evaluation seeds.
+- The 30-episode policy sweeps and 80-episode controller checks were retained
+  only as rounded aggregates, so paired uncertainty cannot be reconstructed.
+- The prototype landing log retained means but discarded standard deviations
+  and individual landing positions.
+- The exploratory stage-3/4 timing search used calibration seeds 0–199 but
+  produced no standalone raw calibration artifact. New sweep reports record
+  that declared range for the aligned search; the older baseline oracle has
+  no retained calibration-range provenance. Repeat any future tuning into a
+  separately retained artifact.
+- Seeds 1000–1199 have been inspected and must not be reused as held-out data
+  after controller changes.
+- The current diagnostic reports identify a dirty source state by hashes but
+  do not embed its patch. Certification requires a clean committed revision
+  or an archived exact source patch and dependency environment.
+- Matched-stage comparisons co-vary fence, start, speed, and training
+  exposure.
+- A trained-policy transfer failure under a new origin does not predict
+  from-scratch learnability in either direction.
+- All future claims should distinguish individual legal-hit rate,
+  episode-hit rate, completed-return count, and gate bounce count.
 
 ## Final recommendation
 
-Ship the serve-alignment fix as the next lever, in this order:
+Treat serve alignment as a plausible, low-dimensional candidate mechanism.
+Begin the experimental configuration and instrumentation work, but do not
+ship the production ladder or start a 6M aligned pilot yet.
 
-1. **Add `serve_start_x` to each ladder stage** (values above), in both the
-   recipe's `[[train.performance_gate.stages]]` and the sweep's `STAGES`.
-2. **Add the serve-landing≈paddle-start check** to
-   `tools/depth_stage_sweep.py`, re-tune the oracle charge params, and re-run
-   the 200-episode certification.
-3. **Retrain the 6M-step pilot** on the aligned ladder (in the training
-   environment, with the full gate/eval/logging), and evaluate the
-   pre-registered predictions above — first among them that the ladder now
-   promotes past stage 1.
-4. **Also surface the matched-stage artifacts** (`curriculum_stages.json`,
-   `eval_info.csv`, `progress.csv`) so "stuck at stage 0–1" is confirmed from
-   the timeline, not just inferred.
+Proceed in this order:
 
-Hold the landing-point observation feature (run-1 P1) in reserve: it targets
-the *recovery* wall, which is a distinct skill from serve interception. If,
-after alignment, the run promotes but deep rally length still plateaus at one
-completed return, that is the trigger to ship it — as a separate run, one
-lever at a time.
+1. preserve stage 0 at origin `1.0`;
+2. pre-register and run the powered paired stage-1
+   baseline-versus-`0.69` training A/B now; stage 1 already passes the
+   mechanical landing and oracle checks relevant to the observed stall;
+3. only if that A/B passes its go rule, redesign or recalibrate the stage-3/4
+   feasibility controller on calibration data, freeze it, and certify on the
+   untouched 2000–2199 range without weakening the existing criteria;
+4. advance to a full aligned-ladder 6M pilot only after both the A/B and fresh
+   late-stage certification pass; and
+5. if the A/B fails, stop and test recovery/interception, observation, or gate-noise
+   hypotheses as separate levers.
+
+This sequence tests the observed stall directly, keeps the intervention
+falsifiable, and avoids attributing the unencountered stage-2-to-stage-4 gaps
+to a stage-1 failure.

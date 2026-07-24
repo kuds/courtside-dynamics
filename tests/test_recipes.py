@@ -167,6 +167,7 @@ def test_wall_ball_baseline_run_config_records_curriculum_schedule(tmp_path):
         "WallBallVolley",
         "WallBallBaseline",
         "WallBallDepthCurriculum",
+        "WallBallDepthCurriculumAligned",
     ],
 )
 def test_contact_envs_wire_a_success_metric(env_name, tmp_path):
@@ -486,6 +487,7 @@ def test_training_notebook_preserves_curriculum_recipe_defaults():
         "WallBallVolley",
         "WallBallBaseline",
         "WallBallDepthCurriculum",
+        "WallBallDepthCurriculumAligned",
     ],
 )
 def test_wall_ball_headline_metric_is_rally_count(env_name, tmp_path):
@@ -510,6 +512,7 @@ def test_wall_ball_headline_metric_is_rally_count(env_name, tmp_path):
         "WallBallVolley",
         "WallBallBaseline",
         "WallBallDepthCurriculum",
+        "WallBallDepthCurriculumAligned",
     ],
 )
 def test_wall_ball_recipe_uses_simplified_paddle_interface(env_name, tmp_path):
@@ -538,6 +541,12 @@ def test_wall_ball_recipe_preserves_original_open_setup():
         ("WallBallVolley", "volley", -1.7, (-4.7, 0.3)),
         ("WallBallBaseline", "one_bounce", -2.7, (-3.2, -1.6)),
         ("WallBallDepthCurriculum", "open", -1.7, (-4.7, 0.3)),
+        (
+            "WallBallDepthCurriculumAligned",
+            "open",
+            -1.7,
+            (-4.7, 0.3),
+        ),
     ],
 )
 def test_wall_ball_style_recipes_record_world_space_paddle_setup(
@@ -602,7 +611,13 @@ def test_wall_ball_bootstrap_recipe_gates_nested_serve_distributions():
     assert recipe.extra_cfg["model_kwargs"]["ent_coef"] == "auto_0.02"
 
 
-def test_depth_curriculum_config_json_records_full_gate(tmp_path):
+@pytest.mark.parametrize(
+    "recipe_name",
+    ("WallBallDepthCurriculum", "WallBallDepthCurriculumAligned"),
+)
+def test_depth_curriculum_config_json_records_full_gate(
+    recipe_name, tmp_path
+):
     """config.json's structured gate block must record the gate as run:
     run 20260721_142121's promotion_rule/pause/clear were active (recipe
     defaults) but provably absent from its artifact."""
@@ -610,7 +625,7 @@ def test_depth_curriculum_config_json_records_full_gate(tmp_path):
 
     from courtside_dynamics.training.artifacts import write_run_config
 
-    cfg = build_train_config("WallBallDepthCurriculum", log_dir=str(tmp_path))
+    cfg = build_train_config(recipe_name, log_dir=str(tmp_path))
     path = write_run_config(cfg, str(tmp_path))
     with open(path) as handle:
         gate = json.load(handle)["train_config"]["performance_gate"]
@@ -766,10 +781,15 @@ def test_wall_ball_depth_curriculum_walks_the_fence_back():
     backs = [back for back, _ in fences]
     fronts = [front for _, front in fences]
     starts = [stage["paddle_start_x"] for stage in stages]
+    serve_origins = [
+        stage.get("serve_start_x", recipe.env_kwargs["serve_start_x"])
+        for stage in stages
+    ]
     speeds = [stage["serve_speed"] for stage in stages]
     assert backs == sorted(backs, reverse=True)
     assert fronts == sorted(fronts, reverse=True)
     assert starts == [-1.6, -2.1, -2.7, -3.3, -3.9]
+    assert serve_origins == [1.0] * 5
     assert speeds == [5.2, 5.5, 6.0, 6.5, 7.0]
     # Interval intersection is non-empty iff max(lower) <= min(upper).
     assert max(backs) > min(fronts)
@@ -800,11 +820,17 @@ def test_wall_ball_depth_curriculum_walks_the_fence_back():
     assert recipe.extra_cfg["reward_eval_episodes"] == 5
 
 
-def test_wall_ball_depth_curriculum_uses_open_scoring_and_defaults():
+@pytest.mark.parametrize(
+    "recipe_name",
+    ("WallBallDepthCurriculum", "WallBallDepthCurriculumAligned"),
+)
+def test_wall_ball_depth_curriculum_uses_open_scoring_and_defaults(
+    recipe_name,
+):
     """Open scoring, emergent style: no one_bounce fault taxonomy or
     bootstrap shaping may leak in, and model_kwargs stays empty (SB3
     auto entropy -- lesson 5; capacity and reward probes were null)."""
-    recipe = RECIPES["WallBallDepthCurriculum"]
+    recipe = RECIPES[recipe_name]
     kwargs = recipe.env_kwargs
 
     assert kwargs["rally_style"] == "open"
@@ -833,29 +859,105 @@ def test_wall_ball_depth_curriculum_uses_open_scoring_and_defaults():
     )
 
 
-def test_wall_ball_depth_curriculum_config_builds_and_stages_apply(tmp_path):
+@pytest.mark.parametrize(
+    ("recipe_name", "final_serve_start_x"),
+    (
+        ("WallBallDepthCurriculum", 1.0),
+        ("WallBallDepthCurriculumAligned", -0.35),
+    ),
+)
+def test_wall_ball_depth_curriculum_config_builds_and_stages_apply(
+    recipe_name, final_serve_start_x, tmp_path
+):
     """The gate's stage dicts must be reachable, settable env attributes
     (a typo'd stage key would otherwise die mid-run), and the built
     config must carry the gate and the 6M budget."""
-    cfg = build_train_config("WallBallDepthCurriculum", log_dir=str(tmp_path))
+    cfg = build_train_config(recipe_name, log_dir=str(tmp_path))
     assert cfg.performance_gate is not None
     assert cfg.performance_gate["metric_key"] == "bounce_count_ep_mean"
     assert cfg.total_timesteps == 6_000_000
     assert cfg.final_info_eval is True
 
     env = cfg.env_fn()
+    eval_env = cfg.eval_env_fn()
     try:
         assert env.rally_style == "open"
         assert env.paddle_x_fence == (-2.7, 0.3)
+        assert env.serve_start_x == 1.0
         assert env.serve_speed == 5.2
+        assert eval_env.serve_start_x == final_serve_start_x
+        for key, value in cfg.performance_gate["stages"][0].items():
+            setattr(eval_env, key, value)
+        eval_env.reset(seed=0)
+        assert eval_env.serve_start_x == 1.0
         for stage in cfg.performance_gate["stages"]:
             for key, value in stage.items():
                 assert hasattr(env, key)
                 setattr(env, key, value)
         env.reset(seed=0)
         assert env.paddle_x_fence == (-4.7, -3.0)
+        assert env.serve_start_x == final_serve_start_x
     finally:
         env.close()
+        eval_env.close()
+
+
+def test_aligned_depth_curriculum_is_an_isolated_paired_treatment():
+    baseline = RECIPES["WallBallDepthCurriculum"]
+    aligned = RECIPES["WallBallDepthCurriculumAligned"]
+    baseline_gate = baseline.extra_cfg["performance_gate"]
+    aligned_gate = aligned.extra_cfg["performance_gate"]
+    baseline_stages = baseline_gate["stages"]
+    aligned_stages = aligned_gate["stages"]
+
+    assert baseline.name_prefix == "wall_ball_depth_curriculum"
+    assert aligned.name_prefix == "wall_ball_depth_curriculum_aligned"
+    assert "EXPERIMENTAL" in aligned.description
+    assert baseline.env_kwargs == aligned.env_kwargs
+    assert baseline.env_kwargs is not aligned.env_kwargs
+    assert baseline.extra_cfg is not aligned.extra_cfg
+    assert baseline_gate is not aligned_gate
+    assert baseline_stages is not aligned_stages
+    assert baseline_stages[0] == aligned_stages[0]
+    assert baseline_stages[0] is not aligned_stages[0]
+
+    assert {
+        key: value
+        for key, value in baseline_gate.items()
+        if key != "stages"
+    } == {
+        key: value
+        for key, value in aligned_gate.items()
+        if key != "stages"
+    }
+    for stage_index, (baseline_stage, aligned_stage) in enumerate(
+        zip(baseline_stages, aligned_stages, strict=True)
+    ):
+        assert {
+            key: value
+            for key, value in aligned_stage.items()
+            if key != "serve_start_x"
+        } == {
+            key: value
+            for key, value in baseline_stage.items()
+            if key != "serve_start_x"
+        }
+        assert baseline_stage["serve_start_x"] == 1.0
+        if stage_index == 0:
+            assert baseline_stage == aligned_stage
+
+    baseline_origins = [
+        stage.get("serve_start_x", baseline.env_kwargs["serve_start_x"])
+        for stage in baseline_stages
+    ]
+    aligned_origins = [
+        stage.get("serve_start_x", aligned.env_kwargs["serve_start_x"])
+        for stage in aligned_stages
+    ]
+    assert baseline_origins == [1.0] * 5
+    assert aligned_origins == [1.0, 0.69, 0.34, -0.01, -0.35]
+    assert baseline.eval_env_overrides == dict(baseline_stages[-1])
+    assert aligned.eval_env_overrides == dict(aligned_stages[-1])
 
 
 def test_wall_ball_bootstrap_is_marked_historical():
