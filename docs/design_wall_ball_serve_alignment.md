@@ -319,6 +319,50 @@ as the parent design requires.
   change and should be tried first; if the deep-recovery wall persists after
   alignment, escalate to the landing-point feature as a separate run.
 
+## Alternatives considered
+
+**Raise the serve speed instead of moving the origin (tested, rejected).**
+The obvious alternative is to leave `serve_start_x` at 1.0 and increase each
+stage's `serve_speed` so the ball simply flies deeper. Measured at stage 4
+(parked-paddle landing + the sweep's crude controller):
+
+| approach | serve | lands at | ball vx @ bounce | crude ≥2 | OOB |
+|---|---:|---:|---:|---:|---:|
+| baseline (misaligned) | 7.0 | −2.49 | 6.14 | 11% | 4% |
+| raise speed | 8.0 | −2.99 | 7.03 | 86% | 55% |
+| raise speed | 9.0 | −3.50 | 7.93 | 80% | 39% |
+| raise speed | 10.0 | −4.00 | 8.83 | 11% | 6% |
+| **move origin** | 7.0 | −3.84 | **6.14** | **22%** | **6%** |
+
+Rejected for three reasons:
+
+1. **It needs a large speed jump.** Reaching −3.9 takes serve ≈ 9.7 — a
+   ~40% increase outside the sweep-certified 5.2–7.0 band, re-opening the
+   whole serve calibration rather than making a small change.
+2. **Speed and reach are coupled through the flat serve, so it buys pace it
+   can't afford.** With `lob=0`, time-to-first-bounce is fixed (~0.49 s), so
+   extra reach *is* extra horizontal velocity: ball speed at the bounce
+   climbs 6.14 → 8.83 (+44%) and persists into the rally, making the
+   recovery-limited deep rally *harder* — the opposite of the goal. The
+   origin move lands the ball just as deep at the same 6.14 pace.
+3. **It destabilizes the rally.** At the intermediate speeds it must pass
+   through (8–9), 39–55% of episodes go out of bounds as the harder ball is
+   knocked out of the play volume. The origin move holds OOB at the baseline
+   6%.
+
+At the one speed that actually reaches −3.9 (serve 10 → −4.00), the crude
+controller returns fewer balls (11% ≥2) than the origin move (22% ≥2) at the
+same depth, with a 40%-hotter ball on top. Moving the origin decouples
+*where* the serve lands from *how fast* the rally is; raising speed couples
+them, trading a geometry problem for an energy one — and the deep rally is
+already energy-limited.
+
+**Add serve loft** is the other way to decouple reach from horizontal pace
+(carry the ball deeper on an arc), but the parent design already ruled it
+out: lofted serves sail over the fixed-height paddle face
+(`recipes.py:716-718`). The origin move remains the only lever that adds
+reach without adding pace or arc.
+
 ## Method notes (reproducibility)
 
 - Models and `vecnormalize.pkl` for 1.75M / 2.75M / 3.25M were pulled from
