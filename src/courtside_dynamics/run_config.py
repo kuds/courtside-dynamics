@@ -178,6 +178,8 @@ _GATE_OPTIONAL_KEYS = (
     "promotion_rule",
     "advance_update_pause_steps",
     "clear_replay_buffer_on_advance",
+    "reset_entropy_on_advance",
+    "entropy_reset_value",
 )
 
 

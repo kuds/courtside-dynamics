@@ -109,6 +109,20 @@ class InfoDictEvalCallback(BaseCallback):
         metric in long format (``timestep,metric,value``) so the data
         survives outside TensorBoard. The header is written on the
         first call.
+    evaluations_npz_path:
+        Optional path. When set, every evaluation also appends to an
+        ``evaluations.npz`` in SB3 ``EvalCallback``'s exact schema
+        (``timesteps``, ``results``, ``ep_lengths``), and the two
+        ``eval/mean_reward`` / ``eval/mean_ep_length`` TensorBoard series
+        are mirrored. This lets one stream own the reward artifact
+        instead of standing up a second evaluator and a second env to
+        roll the same distribution again: under headline-metric
+        selection the reward ``EvalCallback`` is reporting-only
+        (``best_model_save_path=None``) and this callback already
+        collects per-episode returns for its own reward tie-break, so
+        the extra pass was pure duplication. Writes are atomic and
+        failures log-and-continue -- a diagnostic artifact must not take
+        a run down (lesson 7).
     best_metric_keys:
         Ordered metric names (as they appear in this callback's metric
         dict, e.g. ``("bounce_count_ep_mean", "success_rate",
@@ -199,6 +213,7 @@ class InfoDictEvalCallback(BaseCallback):
         terminal_info_keys: Sequence[str] = (),
         episode_distribution_keys: Sequence[str] = (),
         csv_path: str | None = None,
+        evaluations_npz_path: str | None = None,
         best_metric_keys: Sequence[str] = (),
         best_model_save_path: str | None = None,
         early_stop_patience: int | None = None,
@@ -212,6 +227,21 @@ class InfoDictEvalCallback(BaseCallback):
         degenerate_min_evals: int = 0,
     ) -> None:
         super().__init__(verbose)
+        # The rollout loop reads infos[0]/rewards[0] and counts episodes
+        # from worker 0 only. A multi-worker eval env would still be
+        # stepped in full but three quarters of its work would go
+        # unrecorded, and the metrics would silently describe one worker
+        # -- so refuse it rather than quietly mismeasure. Vectorizing
+        # evaluation means rewriting this loop, not passing a bigger env.
+        # ``getattr`` because callers legitimately pass a stub env in
+        # tests that exercise selection without rolling anything.
+        eval_num_envs = getattr(eval_env, "num_envs", None)
+        if eval_num_envs is not None and eval_num_envs != 1:
+            raise ValueError(
+                f"eval_env must be single-worker (num_envs=1), got "
+                f"{eval_num_envs}: this callback aggregates worker 0 only, "
+                f"so extra workers would be stepped but not measured"
+            )
         self.eval_env = eval_env
         self.n_eval_episodes = n_eval_episodes
         self.eval_freq = eval_freq
@@ -248,6 +278,19 @@ class InfoDictEvalCallback(BaseCallback):
                 )
             self.episode_survival_thresholds[key] = tuple(sorted(thresholds))
         self.csv_path = csv_path
+        self.evaluations_npz_path = evaluations_npz_path
+        # Rows for ``evaluations.npz``: SB3's EvalCallback schema, so
+        # notebook_utils' learning plots and stage_summary's reward block
+        # read this stream unchanged.
+        self._npz_timesteps: list[int] = []
+        self._npz_results: list[list[float]] = []
+        self._npz_ep_lengths: list[list[int]] = []
+        # Per-episode reward/length samples from the most recent
+        # ``_collect_metrics`` call, or None when it did not run (tests
+        # monkeypatch that method, so absence must be tolerated).
+        self._last_episode_samples: (
+            tuple[list[float], list[int]] | None
+        ) = None
         self.best_metric_keys = tuple(dict.fromkeys(best_metric_keys))
         self.best_model_save_path = best_model_save_path
         self.early_stop_patience = early_stop_patience
@@ -290,6 +333,20 @@ class InfoDictEvalCallback(BaseCallback):
         # increasing completion counter, for consumers that react to
         # evaluations (e.g. performance-gated curriculum callbacks).
         self.last_metrics: dict[str, float] | None = None
+        # The confirmation batch's metrics when ``confirm_best`` re-sampled
+        # a candidate on the most recent evaluation, else None. Published
+        # as diagnostic surface: the batch is a full ``n_eval_episodes``
+        # rollout that otherwise vanishes except for the copy stored in
+        # best_model_meta.json.
+        #
+        # Deliberately NOT pooled into the curriculum gate's promotion
+        # window, though it is tempting to -- see docs/DECISIONS.md. The
+        # batch is CONDITIONALLY sampled (it only runs when the primary
+        # batch beat the running best), so averaging it in regresses
+        # exactly the high draws toward the mean and leaves low draws
+        # alone. That biases the window downward, silently raising the
+        # gate bar.
+        self.last_confirmation_metrics: dict[str, float] | None = None
         self.completed_evals = 0
         # (score, guard values) for the most recent evaluations, sized to
         # the degenerate-signal window.
@@ -315,19 +372,85 @@ class InfoDictEvalCallback(BaseCallback):
             except (AttributeError, AssertionError):
                 pass
 
+        self._last_episode_samples = None
         metrics = self._collect_metrics()
         self._merge_context(metrics)
         self.last_metrics = dict(metrics)
+        # Cleared per evaluation so a consumer never pools a stale
+        # confirmation from an earlier eval.
+        self.last_confirmation_metrics = None
         self.completed_evals += 1
 
         logger = self.logger
         for name, value in metrics.items():
             logger.record(f"{self.log_prefix}/{name}", value)
+        if self.evaluations_npz_path is not None:
+            # This stream owns evaluations.npz, i.e. it replaced the
+            # reward evaluator. Mirror the two series that evaluator
+            # published so existing TensorBoard dashboards and any
+            # eval/mean_reward consumer keep working.
+            if "episode_reward_mean" in metrics:
+                logger.record("eval/mean_reward", metrics["episode_reward_mean"])
+            if "episode_length" in metrics:
+                logger.record("eval/mean_ep_length", metrics["episode_length"])
 
         if self.csv_path is not None:
             self._append_csv(metrics, self.num_timesteps)
+        if self.evaluations_npz_path is not None:
+            self._append_evaluations_npz(self.num_timesteps)
 
         return self._update_best_and_maybe_stop(metrics)
+
+    def _append_evaluations_npz(self, timestep: int) -> None:
+        """Append this evaluation to ``evaluations.npz`` and rewrite it.
+
+        Emits SB3 ``EvalCallback``'s exact schema (``timesteps``,
+        ``results``, ``ep_lengths``) so this stream can own the artifact
+        when the reward evaluator is retired, and every existing reader
+        -- notebook_utils' learning plots, ``stage_summary.txt``'s reward
+        block -- keeps working.
+
+        Diagnostic-only, so a failure logs and continues rather than
+        taking the run down with it.
+        """
+        destination = self.evaluations_npz_path
+        if destination is None:
+            return
+        samples = self._last_episode_samples
+        if samples is None:
+            return
+        rewards, lengths = samples
+        if not rewards:
+            return
+        if self._npz_results and len(rewards) != len(self._npz_results[0]):
+            # Ragged rows cannot form the rectangular array the schema
+            # promises. Say so rather than silently dropping the row.
+            print(
+                f"[InfoDictEvalCallback] skipping evaluations.npz row at "
+                f"{timestep} steps: {len(rewards)} episodes, expected "
+                f"{len(self._npz_results[0])}"
+            )
+            return
+        self._npz_timesteps.append(int(timestep))
+        self._npz_results.append(list(rewards))
+        self._npz_ep_lengths.append(list(lengths))
+        try:
+            parent = os.path.dirname(destination)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            temporary = f"{destination}.tmp.npz"
+            np.savez(
+                temporary,
+                timesteps=np.asarray(self._npz_timesteps, dtype=np.int64),
+                results=np.asarray(self._npz_results, dtype=np.float64),
+                ep_lengths=np.asarray(self._npz_ep_lengths, dtype=np.int64),
+            )
+            os.replace(temporary, destination)
+        except OSError as error:  # pragma: no cover - disk-level failure
+            print(
+                f"[InfoDictEvalCallback] could not write "
+                f"{destination}: {error}"
+            )
 
     def _collect_metrics(self) -> dict[str, float]:
         """Roll out ``n_eval_episodes`` on the eval env and aggregate.
@@ -351,7 +474,12 @@ class InfoDictEvalCallback(BaseCallback):
         # so reward can serve as the final tie-break in
         # ``best_metric_keys`` without a second rollout.
         episode_rewards: list[float] = []
+        # Per-episode step counts, kept alongside the rewards so this
+        # callback can emit the same ``evaluations.npz`` schema SB3's
+        # EvalCallback does (see ``evaluations_npz_path``).
+        episode_lengths: list[int] = []
         current_ep_reward = 0.0
+        current_ep_length = 0
         total_steps = 0
         total_episodes = 0
 
@@ -366,6 +494,7 @@ class InfoDictEvalCallback(BaseCallback):
             obs, rewards, dones, infos = self.eval_env.step(action)
             assert not isinstance(obs, tuple)
             total_steps += 1
+            current_ep_length += 1
             current_ep_reward += float(rewards[0])
             info = infos[0]
             last_info = info
@@ -426,7 +555,9 @@ class InfoDictEvalCallback(BaseCallback):
                 finals.update({key: ep_terminal[key] for key in step_keys})
                 episode_finals.append(ep_terminal)
                 episode_rewards.append(current_ep_reward)
+                episode_lengths.append(current_ep_length)
                 current_ep_reward = 0.0
+                current_ep_length = 0
                 total_episodes += 1
 
         # Fall back to the last seen step if a rollout hit video_length
@@ -441,6 +572,7 @@ class InfoDictEvalCallback(BaseCallback):
             for key in scalar_keys:
                 finals[key] = float(last_info[key])
 
+        self._last_episode_samples = (episode_rewards, episode_lengths)
         metrics: dict[str, float] = {
             "episode_length": total_steps / max(1, total_episodes),
         }
@@ -631,6 +763,12 @@ class InfoDictEvalCallback(BaseCallback):
             # with 30-episode evals a single lucky episode moves an
             # episode-mean by 1/30, enough to win a strict comparison.
             confirmation = self._collect_metrics()
+            self._merge_context(confirmation)
+            # Published whether or not the candidate survives: as
+            # evidence about the *policy's* current performance the batch
+            # is valid either way, and a gate pooling it must not see a
+            # sample set that depends on the selection outcome.
+            self.last_confirmation_metrics = dict(confirmation)
             confirm_score = self._score_of(confirmation)
             if self._improves(confirm_score, self._best_score):
                 # Bank the weaker of the two samples -- under the same

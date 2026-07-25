@@ -439,6 +439,24 @@ class TrainConfig:
         20260721_004722 the three 30-episode eval streams together cost
         about as many env steps as the 3M training steps themselves.
         ``None`` (default) keeps ``n_eval_episodes``.
+
+        Ignored when ``final_info_eval`` is also on: the two streams roll
+        the *same* distribution, so the reward evaluator is retired
+        entirely and ``final_eval_episodes`` sizes the surviving stream.
+    final_eval_episodes:
+        Episode count for the ``final_info_eval`` stream. ``None``
+        (default) resolves to the full ``n_eval_episodes`` when the reward
+        evaluator was merged into this stream, and to the historical
+        ``n_eval_episodes // 2`` reporting sample when both streams still
+        run.
+
+        The full count is the right default for a merged stream because
+        it is then the *only* stream scoring the campaign's goal task
+        during training. At run 20260721_004722's per-episode spread the
+        old 5-episode reward stream had a standard error of ~0.8-1.1
+        bounces -- it could not resolve the transfer curve
+        (0.30 -> 0.98 -> 1.76) that the depth campaign exists to buy.
+        Set this explicitly to trade that resolution back for wall clock.
     final_info_eval:
         When ``True``, attach a second ``InfoDictEvalCallback`` running
         on the *unmodified* evaluation env (the recipe's
@@ -519,6 +537,7 @@ class TrainConfig:
     performance_gate: Mapping[str, Any] | None = None
     final_info_eval: bool = False
     reward_eval_episodes: int | None = None
+    final_eval_episodes: int | None = None
     # Parsed TOML run-configuration file (courtside_dynamics.run_config
     # .RunFileConfig), attached by build_train_config(config_file=...)
     # so artifacts can record its provenance and copy it into the run
@@ -959,6 +978,52 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 )
             reward_eval_episodes = cfg.reward_eval_episodes
 
+        if cfg.final_eval_episodes is not None:
+            if (
+                isinstance(cfg.final_eval_episodes, bool)
+                or not isinstance(cfg.final_eval_episodes, int)
+                or cfg.final_eval_episodes < 1
+            ):
+                raise ValueError(
+                    "final_eval_episodes must be a positive integer"
+                )
+            if not (cfg.info_dict_eval and cfg.final_info_eval):
+                raise ValueError(
+                    "final_eval_episodes requires info_dict_eval and "
+                    "final_info_eval: it sizes the final-config eval "
+                    "stream, which only exists when both are on"
+                )
+
+        # The reward EvalCallback and the final-config info-eval stream
+        # roll the SAME distribution (the recipe's eval_env_overrides --
+        # for a curriculum, the ladder's final stage): the gate re-syncs
+        # only the matched evaluator. Under headline selection the reward
+        # stream is reporting-only, and InfoDictEvalCallback already
+        # collects per-episode returns for its reward tie-break, so it is
+        # a strict superset. Retire the duplicate pass and hand it
+        # evaluations.npz -- one env and one rollout fewer per eval, and
+        # the goal-task curve stops being a 5-episode estimate.
+        merge_reward_eval_into_final = bool(
+            headline_selection and cfg.info_dict_eval and cfg.final_info_eval
+        )
+        final_eval_episodes = cfg.final_eval_episodes
+        if final_eval_episodes is None:
+            if merge_reward_eval_into_final:
+                # One stream now scores the goal task, so give it the full
+                # episode budget rather than the // 2 reporting sample the
+                # split streams used. The old reward stream's 5 episodes
+                # had a standard error of ~0.8-1.1 bounces at run
+                # 20260721_004722's per-episode spread -- it could not
+                # resolve the 0.30 -> 0.98 -> 1.76 transfer curve at all.
+                # Costs ~10 episodes per evaluation over the two streams
+                # it replaces, for a 6x larger sample on the campaign's
+                # actual target metric.
+                final_eval_episodes = cfg.n_eval_episodes
+            else:
+                # Two streams still split the work: keep the historical
+                # reporting-sample size so unmerged runs are unchanged.
+                final_eval_episodes = max(1, cfg.n_eval_episodes // 2)
+
         on_new_best: BaseCallback | None = None
         if use_vec_normalize and not headline_selection:
             on_new_best = _SaveVecNormalizeOnNewBest(
@@ -986,21 +1051,27 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         # layout's model/ folder; EvalCallback likewise writes
         # ``evaluations.npz`` inside ``log_path``, i.e. metrics/.
         best_model_dir = os.path.dirname(artifact_path(cfg.log_dir, "best_model"))
-        eval_callback = EvalCallback(
-            eval_env,
-            best_model_save_path=(
-                None if headline_selection else best_model_dir
-            ),
-            log_path=os.path.dirname(artifact_path(cfg.log_dir, "evaluations")),
-            render=False,
-            deterministic=True,
-            n_eval_episodes=reward_eval_episodes,
-            eval_freq=_calls(cfg.eval_freq),
-            callback_on_new_best=on_new_best,
-            callback_after_eval=after_eval,
-        )
+        eval_callback: EvalCallback | None = None
+        if not merge_reward_eval_into_final:
+            eval_callback = EvalCallback(
+                eval_env,
+                best_model_save_path=(
+                    None if headline_selection else best_model_dir
+                ),
+                log_path=os.path.dirname(
+                    artifact_path(cfg.log_dir, "evaluations")
+                ),
+                render=False,
+                deterministic=True,
+                n_eval_episodes=reward_eval_episodes,
+                eval_freq=_calls(cfg.eval_freq),
+                callback_on_new_best=on_new_best,
+                callback_after_eval=after_eval,
+            )
 
-        callbacks: list[BaseCallback] = [eval_callback]
+        callbacks: list[BaseCallback] = (
+            [] if eval_callback is None else [eval_callback]
+        )
         # Bound outside the gated-construction branch so the interrupt
         # salvage path can finalize the gate's stage history (or skip
         # cleanly for non-gated runs).
@@ -1152,6 +1223,8 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                         "promotion_rule",
                         "advance_update_pause_steps",
                         "clear_replay_buffer_on_advance",
+                        "reset_entropy_on_advance",
+                        "entropy_reset_value",
                     }
                 )
                 if unknown_gate_keys:
@@ -1174,6 +1247,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     ),
                     clear_replay_buffer_on_advance=gate_spec.get(
                         "clear_replay_buffer_on_advance", False
+                    ),
+                    reset_entropy_on_advance=gate_spec.get(
+                        "reset_entropy_on_advance", False
+                    ),
+                    entropy_reset_value=gate_spec.get(
+                        "entropy_reset_value"
                     ),
                     info_eval=info_eval_callback,
                     # Per-stage champion archive + history report:
@@ -1216,9 +1295,16 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 callbacks.append(
                     InfoDictEvalCallback(
                         eval_env=final_info_env,
-                        n_eval_episodes=max(1, cfg.n_eval_episodes // 2),
+                        n_eval_episodes=final_eval_episodes,
                         eval_freq=_calls(cfg.eval_freq),
                         log_prefix="eval_info_final",
+                        # Owns evaluations.npz when the reward evaluator
+                        # was retired into this stream.
+                        evaluations_npz_path=(
+                            artifact_path(cfg.log_dir, "evaluations")
+                            if merge_reward_eval_into_final
+                            else None
+                        ),
                         phase_key=cfg.phase_key,
                         phase_labels=cfg.phase_labels,
                         success_key=cfg.success_key,

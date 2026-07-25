@@ -27,7 +27,7 @@ pip install -e ".[train]"
 - `notebooks` adds MediaPy but intentionally does not install Jupyter. Colab
   provides and pins its own Jupyter server; install Jupyter or JupyterLab
   separately for a fresh local environment.
-- `dev` adds pytest, pytest-timeout, Ruff, and mypy.
+- `dev` adds pytest, pytest-timeout, pytest-xdist, Ruff, and mypy.
 
 For training and notebooks together, run
 `pip install -e ".[train,notebooks]"`.
@@ -338,6 +338,35 @@ ruff check .
 mypy
 pytest
 ```
+
+`pytest` runs the suite serially in about 3.5 minutes. To parallelize,
+**always pin the thread pools**:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pytest -n 2
+```
+
+Measured on 4 cores: 209s serial → 88–133s across runs. The pinning is
+not optional —
+the same `-n 2` with torch's default thread count exceeded 600s, a >3×
+regression, because each `pytest-xdist` worker oversubscribes threads.
+That is why `-n` is deliberately absent from `addopts`; CI pairs the two
+explicitly.
+
+To check that a built distribution actually works — as opposed to merely
+building — install it and run the packaging smoke test:
+
+```bash
+python -m build --wheel
+pip install dist/*.whl        # in a fresh venv, not the source checkout
+python tools/smoke_wheel.py
+```
+
+This is the only check that can catch a missing
+`[tool.setuptools.package-data]` glob: the simulation assets (MJCFs, STL
+meshes, starter TOMLs) sit beside the code in a source tree whether or not
+they are packaged, so the test suite passes either way while wheel users
+fail at environment construction. CI runs it on every build.
 
 The suite covers Gymnasium registration and API invariants, MuJoCo physics and
 contact semantics, rally rules, fixed-stage curriculum and promotion metrics,

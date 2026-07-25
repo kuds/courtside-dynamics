@@ -237,6 +237,11 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "checkpoint_freq": cfg.checkpoint_freq,
             "video_freq": cfg.video_freq,
             "n_eval_episodes": cfg.n_eval_episodes,
+            # Both eval-stream sizes were previously absent from this
+            # block, so a run's artifacts could not say whether its
+            # reward stream rolled 5 episodes or 30.
+            "reward_eval_episodes": cfg.reward_eval_episodes,
+            "final_eval_episodes": cfg.final_eval_episodes,
             "early_stop_patience": cfg.early_stop_patience,
             "video_length": cfg.video_length,
             "record_video": cfg.record_video,
@@ -314,6 +319,12 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
                         cfg.performance_gate.get(
                             "clear_replay_buffer_on_advance", False
                         )
+                    ),
+                    "reset_entropy_on_advance": cfg.performance_gate.get(
+                        "reset_entropy_on_advance", False
+                    ),
+                    "entropy_reset_value": cfg.performance_gate.get(
+                        "entropy_reset_value"
                     ),
                     "stages": [
                         dict(stage)

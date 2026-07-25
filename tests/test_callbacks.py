@@ -1114,3 +1114,177 @@ def test_info_dict_eval_archive_best_copies_the_best_triple(tmp_path):
         assert callback_no_path.archive_best(str(tmp_path / "x")) is None
     finally:
         eval_env.close()
+
+
+def test_confirmation_batch_is_published_for_pooling(tmp_path, monkeypatch):
+    """``last_confirmation_metrics`` exposes the second batch.
+
+    It is a full ``n_eval_episodes`` rollout on the same distribution that
+    the run already paid for; the performance gate can pool it into the
+    promotion window instead of discarding it.
+    """
+    import json
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    cb = InfoDictEvalCallback(
+        eval_env=object(),
+        best_metric_keys=("bounce_count_ep_mean",),
+        best_model_save_path=str(tmp_path),
+        confirm_best=True,
+        best_metric_min_delta=0.5 / 30,
+    )
+    cb.model = _FakeSavableModel(action_dim=3)
+    cb.model.get_vec_normalize_env = lambda: None  # type: ignore[attr-defined]
+
+    # First evaluation: accepted unconfirmed, so there is no second batch.
+    cb.num_timesteps = 100
+    assert cb._update_best_and_maybe_stop({"bounce_count_ep_mean": 1.0})
+    assert cb.last_confirmation_metrics is None
+
+    # A confirmed improvement publishes the confirmation batch.
+    monkeypatch.setattr(
+        cb, "_collect_metrics", lambda: {"bounce_count_ep_mean": 1.2}
+    )
+    cb.num_timesteps = 200
+    assert cb._update_best_and_maybe_stop({"bounce_count_ep_mean": 1.3})
+    assert cb.last_confirmation_metrics == {"bounce_count_ep_mean": 1.2}
+    with open(tmp_path / "best_model_meta.json") as stream:
+        assert json.load(stream)["timestep"] == 200
+
+    # A *rejected* candidate still publishes its batch: as evidence about
+    # the policy it is valid either way, and a pooling gate must not see a
+    # sample set that depends on the selection outcome.
+    monkeypatch.setattr(
+        cb, "_collect_metrics", lambda: {"bounce_count_ep_mean": 0.2}
+    )
+    cb.num_timesteps = 300
+    assert cb._update_best_and_maybe_stop({"bounce_count_ep_mean": 1.9})
+    assert cb.last_confirmation_metrics == {"bounce_count_ep_mean": 0.2}
+    with open(tmp_path / "best_model_meta.json") as stream:
+        assert json.load(stream)["timestep"] == 200
+
+
+def test_confirmation_slot_is_cleared_on_every_evaluation():
+    """A stale confirmation must never be pooled into a later decision."""
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.envs import WallBallEnv
+
+    eval_env = make_vec_env(lambda: WallBallEnv(episode_len=30), n_envs=1)
+    try:
+        cb = InfoDictEvalCallback(
+            eval_env=eval_env,
+            n_eval_episodes=1,
+            eval_freq=1,
+            success_key="bounce_count",
+        )
+        cb.model = _FakeSavableModel(action_dim=3)
+        cb.model.get_vec_normalize_env = lambda: None  # type: ignore[attr-defined]
+        cb.n_calls = 1
+        cb.last_confirmation_metrics = {"stale": 1.0}
+
+        assert cb._on_step() is True
+        assert cb.completed_evals == 1
+        assert cb.last_confirmation_metrics is None
+    finally:
+        eval_env.close()
+
+
+def test_info_dict_eval_refuses_a_multi_worker_eval_env():
+    """Worker 0 only is aggregated, so a bigger env must fail loudly.
+
+    The rollout loop reads ``infos[0]``/``rewards[0]``; extra workers
+    would be stepped but never measured, and the metrics would silently
+    describe one worker's episodes.
+    """
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.envs import WallBallEnv
+
+    eval_env = make_vec_env(lambda: WallBallEnv(episode_len=20), n_envs=4)
+    try:
+        with pytest.raises(ValueError, match="num_envs=1"):
+            InfoDictEvalCallback(eval_env=eval_env, n_eval_episodes=1)
+    finally:
+        eval_env.close()
+
+
+def test_info_dict_eval_accepts_a_single_worker_eval_env():
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.envs import WallBallEnv
+
+    eval_env = make_vec_env(lambda: WallBallEnv(episode_len=20), n_envs=1)
+    try:
+        cb = InfoDictEvalCallback(eval_env=eval_env, n_eval_episodes=1)
+        assert cb.eval_env is eval_env
+    finally:
+        eval_env.close()
+
+
+def test_evaluations_npz_records_the_primary_batch_not_the_confirmation(
+    tmp_path, monkeypatch
+):
+    """Ordering guard: the npz row must be the evaluation's own batch.
+
+    ``confirm_best`` reruns ``_collect_metrics``, which overwrites the
+    per-episode sample buffer the npz writer reads. The writer therefore
+    has to run BEFORE selection; if the two are ever reordered the reward
+    curve would silently start plotting confirmation batches -- a
+    conditionally-sampled subset drawn only when a candidate beat the
+    running best.
+    """
+    import numpy as np
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.envs import WallBallEnv
+
+    npz_path = tmp_path / "evaluations.npz"
+    eval_env = make_vec_env(lambda: WallBallEnv(episode_len=30), n_envs=1)
+    try:
+        cb = InfoDictEvalCallback(
+            eval_env=eval_env,
+            n_eval_episodes=1,
+            eval_freq=1,
+            success_key="bounce_count",
+            evaluations_npz_path=str(npz_path),
+            best_metric_keys=("bounce_count_ep_mean",),
+            best_model_save_path=str(tmp_path),
+            confirm_best=True,
+        )
+        cb.model = _FakeSavableModel(action_dim=3)
+        cb.model.get_vec_normalize_env = lambda: None  # type: ignore[attr-defined]
+
+        # First evaluation: real rollout, no confirmation possible.
+        cb.n_calls = 1
+        assert cb._on_step() is True
+        first = np.load(npz_path)["results"][0].copy()
+
+        # Second evaluation: force a candidate improvement so the
+        # confirmation batch runs, and make its samples unmistakable.
+        sentinel = 12345.0
+
+        def _confirmation_batch():
+            cb._last_episode_samples = ([sentinel], [7])
+            return {"bounce_count_ep_mean": 99.0}
+
+        monkeypatch.setattr(cb, "_collect_metrics", _confirmation_batch)
+        cb.n_calls = 2
+        assert cb._on_step() is True
+
+        payload = np.load(npz_path)
+        # Row 0 is untouched, and the sentinel from the confirmation-shaped
+        # rollout is the only thing row 1 could contain if ordering broke.
+        assert payload["results"][0] == pytest.approx(first)
+        assert payload["results"].shape[0] == 2
+        assert sentinel in payload["results"][1]
+        # The confirmation ran (it is what produced the sentinel row), but
+        # it did not add a row of its own.
+        assert cb.last_confirmation_metrics is not None
+    finally:
+        eval_env.close()

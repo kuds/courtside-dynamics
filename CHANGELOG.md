@@ -5,6 +5,103 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## 0.20.0
+
+Curriculum-harness changes aimed at the depth campaign's dominant cost:
+per-stage promotion price, not total budget. Runs
+`20260721_004722` (3M steps, reached stage 2 of 4) and
+`20260724_152530` (6M budget, still on stage 1 at 2.55M) place the same
+ladder position at twice the compute, so what binds is the cost of each
+promotion.
+
+One new `performance_gate` key, **default off**, so existing runs are
+bit-identical:
+
+- `reset_entropy_on_advance` restores SAC's auto-tuned entropy
+  temperature to its initial value on every stage advance and clears the
+  temperature optimizer's moment buffers. Run `20260721_004722` ended at
+  `train/ent_coef` 9.2e-4 and never re-inflated after a promotion, so the
+  policy met each new geometry very nearly deterministic — and
+  `advance_update_pause_steps` sets `gradient_steps = 0`, freezing
+  `log_ent_coef` too, so the tuner could not recover during the pause
+  either. Restores the *pressure* to re-expand entropy, not the action
+  noise itself: sampling spread lives in the policy's learned `log_std`
+  and re-expands over the following gradient steps. Raises at training
+  start when `ent_coef` is a fixed float, rather than being a silent
+  no-op. The restore target is read from the **configured** `ent_coef`
+  string rather than the live tensor: a warm-started continuation
+  deliberately inherits the source run's collapsed `log_ent_coef`, so
+  sampling the tensor would restore precisely the collapse the reset
+  exists to undo. `entropy_reset_value` overrides that target when
+  `"auto"`'s 1.0 is more exploration than a mid-campaign continuation
+  wants.
+
+`InfoDictEvalCallback` now publishes `last_confirmation_metrics` (cleared
+per evaluation) so `confirm_best`'s second batch is observable instead of
+vanishing except for the copy in `best_model_meta.json`.
+
+A `pool_confirmation_samples` gate switch that folded that batch into the
+promotion window was **built and then rejected** — see `docs/DECISIONS.md`.
+The batch is conditionally sampled (it only runs when the primary batch
+beat the running best), so averaging it in regresses exactly the high
+draws toward the mean while leaving low draws alone. That biases the
+window downward and silently raises the bar, the one thing run 1's review
+said not to do. Simulated at the campaign's own numbers it cost **+27
+evaluations ≈ +666k env steps per promotion** in the slow-climb regime
+Run A is actually in.
+
+Evaluation streams are consolidated. Under headline-metric selection the
+reward `EvalCallback` and the final-config info-eval stream roll the
+*same* distribution (the recipe's `eval_env_overrides`; the gate re-syncs
+only the matched evaluator), and the reward stream is reporting-only
+there. It is now retired and the final-config stream owns
+`evaluations.npz`, emitting SB3's exact schema and mirroring
+`eval/mean_reward` / `eval/mean_ep_length`, so TensorBoard dashboards,
+`notebook_utils` plots, and `stage_summary.txt` read unchanged. One env
+and one rollout pass fewer per evaluation; for run `20260724_152530`'s
+config the three streams cost 50 episodes per 25k training steps.
+
+New `final_eval_episodes` sizes that stream. It defaults to the **full
+`n_eval_episodes`** when the merge happens — 30 for the depth recipe,
+against the 5 + 15 the two split streams used — because the survivor is
+then the only stream scoring the goal task during training. At 5 episodes
+that estimate had a standard error of ~0.8–1.1 bounces, too noisy to
+resolve the 0.30 → 0.98 → 1.76 transfer curve the campaign exists to buy.
+Runs that keep both streams are unchanged (`n_eval_episodes // 2`).
+
+Net eval cost per 25k training steps for the depth recipe: 50 episodes
+across three rollout passes becomes 60 across two. Ten more episodes buys
+a 6× larger sample on the campaign's target metric; set
+`final_eval_episodes` explicitly to trade it back for wall clock.
+
+Selection, the gate, `best_model.zip`, `best_model_meta.json`, and the
+per-stage `stage_bests/` archive are all driven by the matched stream and
+are unchanged.
+
+Reporting and provenance:
+
+- `curriculum_stages.json` records `reset_entropy_on_advance` (additive:
+  existing readers are unaffected, but the file is not byte-identical to
+  a 0.19.0 run's) and `curriculum/entropy_resets` is a new TensorBoard
+  series.
+- `config.json` now records `reward_eval_episodes` and
+  `final_eval_episodes`. Both were absent from the hand-maintained
+  `train_config` block, so a run's artifacts could not say whether its
+  reward stream rolled 5 episodes or 30. A new test pins that the block
+  covers every `TrainConfig` field except the four code-valued ones and
+  the two recorded at top level, so the next field cannot drift the same
+  way.
+- `InfoDictEvalCallback` now rejects a multi-worker `eval_env`. Its
+  rollout loop reads `infos[0]`/`rewards[0]` and counts episodes from
+  worker 0 only, so extra workers were stepped but never measured — a
+  silent mismeasurement, and the reason vectorizing evaluation is a
+  rewrite of that loop rather than a bigger env.
+
+Metrics era: unchanged for the matched stream and for `eval_info.csv`.
+`evaluations.npz` keeps its schema but its rows come from a different
+(larger) episode count, so absolute reward curves are comparable in
+meaning and less noisy, not bit-identical.
+
 ## 0.19.0
 
 `WallBallDepthCurriculum` now slides the paddle's entire movement

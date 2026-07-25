@@ -43,6 +43,44 @@ _PROMOTION_RULES = ("consecutive", "window_mean")
 STAGE_CONTEXT_METRIC = "curriculum_stage_index"
 
 
+def _configured_ent_coef_init(model: Any) -> float:
+    """The initial alpha SAC's ``ent_coef`` string asks for.
+
+    SB3 keeps the constructor argument on ``model.ent_coef`` and parses it
+    in ``_setup_model``: ``"auto"`` starts the temperature at 1.0 and
+    ``"auto_<value>"`` at ``<value>``. Re-deriving it here -- rather than
+    sampling the live tensor -- is what makes the reset target independent
+    of whatever the temperature currently happens to be.
+    """
+    configured = getattr(model, "ent_coef", None)
+    if not isinstance(configured, str) or not configured.startswith("auto"):
+        raise TypeError(
+            "reset_entropy_on_advance requires a string ent_coef of the "
+            f"form 'auto' or 'auto_<init>', got {configured!r}"
+        )
+    if "_" not in configured:
+        return 1.0
+    # Mirror SB3's own parse (``float(self.ent_coef.split("_")[1])``)
+    # exactly. ``partition`` would hand "auto_1_0" the tail "1_0", which
+    # float() reads as 10.0 via Python's numeric underscores while SB3
+    # initializes at 1.0 -- a restore target that silently disagrees with
+    # what the run actually started from.
+    raw = configured.split("_")[1]
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ValueError(
+            f"could not read the initial entropy coefficient from "
+            f"ent_coef={configured!r}"
+        ) from error
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(
+            f"the initial entropy coefficient in ent_coef={configured!r} "
+            f"must be finite and positive"
+        )
+    return value
+
+
 class PerformanceGatedEnvStagesCallback(BaseCallback):
     """Advance env attributes through stages as eval performance allows.
 
@@ -113,6 +151,44 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         would have SAC immediately optimizing against a near-empty
         buffer -- and a model exposing ``replay_buffer`` (both checked
         loudly).
+    reset_entropy_on_advance:
+        When ``True``, every stage advance restores SAC's auto-tuned
+        entropy temperature to the value it was initialized with and
+        clears the temperature optimizer's moment buffers, so the tuner
+        can actually climb again. Run 20260721_004722 ended with
+        ``train/ent_coef`` at 9.2e-4 and never re-inflated it after a
+        promotion, so the policy met each new geometry very nearly
+        deterministic -- and ``advance_update_pause_steps`` sets
+        ``gradient_steps = 0``, which freezes ``log_ent_coef`` along
+        with everything else, so the tuner cannot recover during the
+        pause either. That run's review queued this as a watch item;
+        run 20260724_152530 fired the trigger it named (stage 1 spent
+        >1.4M steps without promoting).
+
+        This restores the *pressure* to re-expand entropy; it does not
+        widen the action distribution on the spot. Sampling noise comes
+        from the policy's own learned ``log_std``, which re-expands over
+        the gradient steps that follow -- so expect a ramp, not a step.
+
+        Requires an auto-tuned coefficient (``ent_coef`` left at
+        ``"auto"`` / ``"auto_<init>"``, which is what gives SAC a
+        ``log_ent_coef`` tensor and an ``ent_coef_optimizer``). A fixed
+        float ``ent_coef`` has nothing to reset and raises at training
+        start rather than silently doing nothing.
+
+        The restore target is read from the *configured* ``ent_coef``
+        string, not from the live tensor. This matters for the warm-start
+        continuation path: ``train()`` deliberately transfers the source
+        run's ``log_ent_coef`` so a fresh ``"auto"`` does not restart at
+        1.0, so a continuation begins already collapsed. Sampling the
+        tensor at training start would capture ~1e-3 and make every later
+        "reset" restore exactly the collapse it exists to undo.
+    entropy_reset_value:
+        Alpha to restore instead of the configured initial value. Requires
+        ``reset_entropy_on_advance=True``. Use it when the configured
+        ``"auto"`` initial value (1.0) is more exploration than a
+        mid-campaign continuation wants -- e.g. ``0.02`` to match the
+        exploration package the 0.11.0 bootstrap calibrated.
     extra_target_envs:
         Additional vectorized environments to keep in sync (the training
         env from ``self.training_env`` and ``info_eval.eval_env`` are
@@ -154,6 +230,8 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         promotion_rule: str = "consecutive",
         advance_update_pause_steps: int = 0,
         clear_replay_buffer_on_advance: bool = False,
+        reset_entropy_on_advance: bool = False,
+        entropy_reset_value: float | None = None,
         extra_target_envs: Sequence[VecEnv] = (),
         stage_bests_dir: str | None = None,
         stage_history_path: str | None = None,
@@ -201,6 +279,23 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
             raise ValueError(
                 "clear_replay_buffer_on_advance must be a boolean"
             )
+        if not isinstance(reset_entropy_on_advance, bool):
+            raise ValueError("reset_entropy_on_advance must be a boolean")
+        if entropy_reset_value is not None:
+            if (
+                isinstance(entropy_reset_value, bool)
+                or not isinstance(entropy_reset_value, numbers.Real)
+                or not np.isfinite(entropy_reset_value)
+                or entropy_reset_value <= 0.0
+            ):
+                raise ValueError(
+                    "entropy_reset_value must be a finite positive number"
+                )
+            if not reset_entropy_on_advance:
+                raise ValueError(
+                    "entropy_reset_value requires "
+                    "reset_entropy_on_advance=True"
+                )
         if clear_replay_buffer_on_advance and advance_update_pause_steps <= 0:
             raise ValueError(
                 "clear_replay_buffer_on_advance requires "
@@ -225,6 +320,10 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         self.clear_replay_buffer_on_advance: bool = (
             clear_replay_buffer_on_advance
         )
+        self.reset_entropy_on_advance: bool = reset_entropy_on_advance
+        self.entropy_reset_value: float | None = (
+            None if entropy_reset_value is None else float(entropy_reset_value)
+        )
         self.info_eval: InfoDictEvalCallback = info_eval
         self.extra_target_envs: tuple[VecEnv, ...] = tuple(extra_target_envs)
         self._stage_index: int = 0
@@ -237,6 +336,11 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         # paused) and the gradient_steps value to restore when it ends.
         self._update_pause_until: int | None = None
         self._resume_gradient_steps: int | None = None
+        # log(alpha) the run was initialized with, captured at training
+        # start (before any gradient step), and how many advances have
+        # restored it.
+        self._initial_log_ent_coef: float | None = None
+        self._entropy_resets: int = 0
         self.stage_bests_dir: str | None = stage_bests_dir
         self.stage_history_path: str | None = stage_history_path
         self.run_config_path: str | None = run_config_path
@@ -298,6 +402,8 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                 "curriculum/update_pause_until",
                 float(self._update_pause_until),
             )
+        if self.reset_entropy_on_advance:
+            logger.record("curriculum/entropy_resets", self._entropy_resets)
         for attr_name, value in self.stages[self._stage_index].items():
             if isinstance(value, numbers.Real):
                 logger.record(f"curriculum/{attr_name}", float(value))
@@ -321,6 +427,31 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                     "clear_replay_buffer_on_advance requires a model with "
                     "a resettable 'replay_buffer'"
                 )
+        if self.reset_entropy_on_advance:
+            log_ent_coef = getattr(self.model, "log_ent_coef", None)
+            optimizer = getattr(self.model, "ent_coef_optimizer", None)
+            if log_ent_coef is None or optimizer is None:
+                raise TypeError(
+                    "reset_entropy_on_advance requires a model with an "
+                    "auto-tuned entropy coefficient (ent_coef='auto' or "
+                    "'auto_<init>', which creates 'log_ent_coef' and "
+                    "'ent_coef_optimizer'); a fixed float ent_coef has "
+                    "no temperature state to restore, so the reset would "
+                    "silently do nothing"
+                )
+            # Resolve the target from the CONFIGURED ent_coef, not from
+            # the live tensor. A warm-started continuation deliberately
+            # inherits the source run's collapsed log_ent_coef (train.py
+            # transfers it so a fresh "auto" does not restart at 1.0), so
+            # reading the tensor here would capture ~1e-3 and make every
+            # later "reset" restore the collapse it exists to undo.
+            self._initial_log_ent_coef = float(
+                np.log(
+                    self.entropy_reset_value
+                    if self.entropy_reset_value is not None
+                    else _configured_ent_coef_init(self.model)
+                )
+            )
         self._stage_entry_timestep = int(self.num_timesteps)
         self._apply_stage()
 
@@ -384,6 +515,7 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
             "clear_replay_buffer_on_advance": (
                 self.clear_replay_buffer_on_advance
             ),
+            "reset_entropy_on_advance": self.reset_entropy_on_advance,
             "stage_count": len(self.stages),
             "final_stage_index": self._stage_index,
             "stages": self._stage_history,
@@ -441,6 +573,33 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                     f"updates at {self.num_timesteps} steps "
                     f"(gradient_steps={self._resume_gradient_steps})."
                 )
+
+    def _reset_entropy_temperature(self) -> None:
+        """Restore log(alpha) to its initial value and clear its optimizer.
+
+        Clearing the optimizer state matters as much as the value: Adam's
+        first/second-moment buffers are what a 1.4M-step decay to ~1e-3
+        leaves behind, and without dropping them the restored coefficient
+        is pushed straight back down.
+        """
+        assert self._initial_log_ent_coef is not None
+        log_ent_coef = getattr(self.model, "log_ent_coef", None)
+        optimizer = getattr(self.model, "ent_coef_optimizer", None)
+        if log_ent_coef is None or optimizer is None:
+            # Validated at training start; a model that loses the
+            # attributes mid-run is a bug, not something to paper over.
+            raise TypeError(
+                "reset_entropy_on_advance: the model no longer exposes "
+                "'log_ent_coef'/'ent_coef_optimizer'"
+            )
+        # ``detach()`` shares storage with the leaf, so this writes the
+        # value in place without replacing the tensor the optimizer's
+        # param group points at.
+        log_ent_coef.detach().fill_(self._initial_log_ent_coef)
+        # Same parameter object, so the optimizer keeps its param group;
+        # only the accumulated moments go.
+        optimizer.state.clear()
+        self._entropy_resets += 1
 
     def _promotion_earned(self, metrics: Mapping[str, Any]) -> bool:
         """Update the sustain state with a fresh eval; True when mastered."""
@@ -511,6 +670,12 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                 self._update_pause_until = (
                     self.num_timesteps + self.advance_update_pause_steps
                 )
+            # After the pause is armed: gradient_steps == 0 freezes
+            # log_ent_coef too, so the restored temperature is what the
+            # learner resumes with rather than something the paused
+            # tuner immediately undoes.
+            if self.reset_entropy_on_advance:
+                self._reset_entropy_temperature()
             rule = (
                 f"held >= {self.threshold} for {self.sustain_evals} "
                 f"consecutive evaluations"
@@ -525,6 +690,12 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                 if self.advance_update_pause_steps > 0
                 else ""
             )
+            if self.reset_entropy_on_advance:
+                assert self._initial_log_ent_coef is not None
+                warmup += (
+                    f" Entropy temperature restored to "
+                    f"{np.exp(self._initial_log_ent_coef):.4g}."
+                )
             print(
                 f"[PerformanceGatedEnvStagesCallback] advancing to stage "
                 f"{self._stage_index}/{len(self.stages) - 1} at "

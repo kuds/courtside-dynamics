@@ -328,7 +328,7 @@ _ARTIFACT_HINTS: dict[str, str] = {
     RUN_LAYOUT["config"]: "written at the very start of train(); absent means train() never ran on this dir",
     RUN_LAYOUT["monitor_dir"]: "monitor CSVs appear once training starts; rows once the first episodes finish",
     RUN_LAYOUT["progress_csv"]: "written by the CSV logger train() wires up; appears after SB3's first metric dump",
-    RUN_LAYOUT["evaluations"]: "written by EvalCallback; check eval_freq <= total_timesteps",
+    RUN_LAYOUT["evaluations"]: "written by the reward eval stream; check eval_freq <= total_timesteps",
     RUN_LAYOUT["eval_info_csv"]: "written by InfoDictEvalCallback each eval; requires info_dict_eval=True",
     RUN_LAYOUT["best_model"]: "saved by EvalCallback on its first completed evaluation",
     RUN_LAYOUT["best_vec_normalize"]: "needs VecNormalize enabled plus at least one new-best eval",

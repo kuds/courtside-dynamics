@@ -177,6 +177,135 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### Per-stage promotion price, not total budget, is what binds the depth campaign — *characteristic*
+Run `20260721_004722` reached stage 2 of 4 on 3M steps; run
+`20260724_152530` was still on stage 1 at 2.55M of a 6M budget, with
+stage 0 costing 1,425,000 steps in *both* (within 0.02%). Doubling the
+budget did not move the ladder position, so the lever is the cost of each
+promotion, not the total. Two of the three components are self-inflicted:
+promotion-shock recovery (~0.5–1M steps per advance) and gate latency.
+Note also that `20260724_152530` cold-started (`warm_start: null`)
+despite run 1's review making warm continuation its P0 #1 and 0.15.1
+shipping SAC warm start — so it re-paid stage 0's 1.43M-step bill for
+nothing. **Lesson:** for a gated ladder, measure steps-per-promotion and
+project it against the budget *before* launching; a cold start on an
+already-mastered stage 0 is ~24% of a 6M run spent re-learning a solved
+problem.
+
+### Resetting the entropy temperature on advance — *implemented (0.20.0, default off)*
+`train/ent_coef` sat at 0.0007–0.0009 from ~100k steps onward in run
+`20260721_004722` and never re-inflated after a promotion, so the policy
+met each new geometry very nearly deterministic. The warm-up package made
+that worse: `advance_update_pause_steps` sets `gradient_steps = 0`, which
+freezes `log_ent_coef` along with everything else, so the tuner could not
+recover *during* the pause either. Run 1's review filed this as a watch
+item gated on "if a de-noised continuation still recovers slowly from
+stage shocks"; `20260724_152530` fired it (stage 1 >1.4M steps, vs 0.97M
+for the same stage in run 1). Shipped as the `reset_entropy_on_advance`
+gate key. Two implementation notes worth keeping: clearing the Adam moment
+buffers matters as much as restoring the value (stale moments push the
+restored coefficient straight back down), and this restores *pressure*
+to re-expand entropy — sampling spread lives in the policy's learned
+`log_std` and re-expands over subsequent gradient steps, so expect a ramp,
+not a step.
+
+### A sliding fence turns a growing slab of the action range into a zero-gradient plateau — *characteristic*
+`_action_to_controls` clamps the *target*, not the mapping
+(`wall_ball.py:1097-1105`) — correct, and it keeps action semantics fixed
+across stages. The consequence, unrecorded until now: with
+`paddle_x_target_range = (-4.7, 0.3)` and `paddle_home_x = -1.7` the map
+is piecewise linear about `a = 0`, so the fraction of the x-action range
+that saturates against the fence grows **33.3% → 52.5% → 64.2% → 70.0% →
+71.7%** across stages 0–4 (live band shrinking 66.7% → 28.3%). Inside a
+saturated region `∂target/∂a = 0`, so Q is flat and the actor's
+reparameterized gradient vanishes. The policy a fence slide clamps is
+exactly the front-camper the ladder exists to break, and once clamped it
+has no gradient pointing deeper — it can only escape on action noise,
+which by then is nearly gone (see the entropy entry above). This is a
+**third** promotion-shock mechanism alongside the two already recorded
+(stale replay buffer, unobservable fence).
+
+### Don't pool the `confirm_best` batch into the promotion window — *built, then rejected (0.20.0)*
+Tempting and wrong. `confirm_best` re-rolls a full `n_eval_episodes` batch
+on the current stage before dethroning a best, and the gate never saw it,
+so folding it into the promotion window looks like free evidence — the
+switch was written, tested, and reverted before shipping. The flaw: that
+batch is **conditionally sampled**. It only runs when the primary batch
+beat the running best, so pooling averages a deliberately-selected *high*
+draw with an independent one (regressing it toward the mean) while leaving
+low draws untouched. The window mean is therefore biased downward, which
+silently *raises* the bar by an unquantified amount — precisely what run
+1's review forbade ("do not lower the bar; de-noise the estimator
+instead", and raising it invisibly is worse). Simulated at the campaign's
+own numbers (true mean climbing toward a 3.0 bar, per-episode std 2.0,
+n=30, 3-eval window mean, `min_delta` 0.5/30): mean window entry
+**3.005 → 2.954** (bias −0.046), and evaluations-to-promotion **41.8 →
+47.6** on a fast climb and **132 → 159** on a slow one — **+27 evals ≈
++666k env steps per promotion** in the regime Run A is actually in, on a
+campaign whose binding constraint *is* steps-per-promotion. **Lesson:**
+extra episodes only reduce variance when whether you collect them is
+independent of what the first sample said. The honest way to buy gate
+evidence is unconditional — raise `n_eval_episodes` or `sustain_evals`,
+or pair the episode set (next entry). `last_confirmation_metrics` is still
+published as diagnostic surface; nothing consumes it for decisions.
+
+### Unpaired evaluation is the root of the gate noise — *open (P1)*
+`InfoDictEvalCallback` calls `self.eval_env.reset()` with no seed and
+never re-seeds (`info_dict_eval.py`), so **every evaluation draws a fresh
+30 episodes**. Consecutive evals are therefore unpaired and the full
+~0.4-bounce batch SE lands on every promotion decision and every
+best-model comparison. The project's response was to widen the promotion
+window (2 → 3 evals), which buys reliability at 75k steps of latency per
+decision — treating the variance rather than removing it. Re-seeding the
+*matched* stream to a fixed episode set each evaluation makes the
+comparison paired (common random numbers): the variance of eval-to-eval
+*differences* collapses, and `sustain_evals` could go back to 2. Keep the
+final-config stream fresh-random, where an unbiased estimate is what is
+wanted. Recommended alongside 0.20.0's `pool_confirmation_samples`, which
+attacks the same SE from the sample-size side.
+
+### Three eval streams, two of them on the same distribution — *implemented (0.20.0)*
+Under headline selection a gated run stood up three periodic evaluators;
+the reward `EvalCallback` and the final-config info-eval both rolled the
+recipe's `eval_env_overrides` distribution (the gate re-syncs only the
+matched evaluator). For run `20260724_152530`: 5 + 30 + 15 = 50 episodes
+per 25k training steps, ~17,500 env steps of evaluation per 25,000 of
+training at ~350-step episodes — and up to ~112% overhead on evals that
+trigger a confirmation. `InfoDictEvalCallback` was already a strict
+superset of the reward evaluator (it collects per-episode returns for its
+own reward tie-break), so the duplicate is retired and the final-config
+stream owns `evaluations.npz`. 0.20.0 also makes the single-worker
+requirement explicit: the rollout loop reads `infos[0]`/`rewards[0]` and
+counted worker 0 only, so a multi-worker eval env was stepped in full and
+three quarters of it went unmeasured — now rejected at construction.
+**Still open:** all eval envs are built `n_envs=1` (`train.py`), so
+evaluation runs batch-1 and serial while training runs 8-wide. That is the
+real wall-clock lever (~21,000 serial eval steps per 25,000 training steps
+at the 0.20.0 episode counts), and claiming it means rewriting the rollout
+loop to aggregate every worker — not passing a bigger env.
+
+### `config.json`'s `train_config` is a hand-maintained allowlist — *partially implemented (0.20.0)*
+`artifacts.py` enumerates the fields to serialize by hand, so a new
+`TrainConfig` field is silently absent from every run's provenance
+snapshot until someone remembers to add it. `reward_eval_episodes` — set
+to 5 by two recipes and directly changing how much evidence a run's
+reward stream collects — was missing for its whole life. 0.20.0 records
+it and `final_eval_episodes`, and a test now pins that the block covers
+every field except the four code-valued ones (`env_fn`, `eval_env_fn`,
+`extra_callbacks`, `info_row_fn`) and the two recorded at top level
+(`recipe_name`, `run_config_file`) — in both directions, so a derived
+value cannot be smuggled into the block either. Adding a field without
+recording it is now a test failure rather than a discovery made months
+later while reading a run.
+
+### `final_stage_index` reports the departing stage mid-run — *open (P3)*
+`_write_stage_history` reads `self._stage_index` but is called from
+`_close_stage_record`, which runs *before* the increment on an advance, so
+a live or hard-killed run's `curriculum_stages.json` names the stage that
+just ended. Run `20260724_152530` showed `final_stage_index: 0` while
+`best_model_meta.json` recorded `curriculum_stage_index: 1.0`.
+Self-corrects at `finalize()`; only misleads while a run is in flight.
+
 ### Instrument for post-hoc attribution — *mostly open (P2)*
 Recurring pain: Monitor CSVs persisted only `r,l,t` (no `info_keywords`), so
 training-time terminations couldn't be attributed after the fact; `*_ep_mean`

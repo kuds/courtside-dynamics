@@ -56,6 +56,9 @@ notebooks = [
 dev = [
     "pytest>=7",
     "pytest-timeout",
+    # Parallel test execution. Only ever use it with OMP_NUM_THREADS=1 /
+    # MKL_NUM_THREADS=1 -- see the addopts comment below.
+    "pytest-xdist",
     "ruff>=0.5",
     "mypy>=1.10",
 ]
@@ -85,7 +88,18 @@ version = { attr = "courtside_dynamics.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+# --timeout: the slowest test is ~11s, so 300 is pure insurance against a
+# hung MuJoCo/GL call burning a CI runner's whole 6h allowance. Set here
+# rather than in the CI invocation so a local run gets it too.
+#
+# Deliberately NOT setting -n here. Parallelism is a real win but only
+# with torch's thread pools pinned: measured on 4 cores, `-n 2` with
+# OMP_NUM_THREADS=1 runs the suite in 88-133s against 209s serial, while
+# the same -n WITHOUT pinning exceeded 600s -- a >3x regression from every
+# xdist worker oversubscribing threads. A default that is catastrophic
+# unless paired with an env var does not belong in addopts; CI pairs them
+# explicitly and the README documents the pair.
+addopts = "-ra --strict-markers --timeout=300"
 
 [tool.ruff]
 line-length = 88
@@ -115,7 +129,7 @@ ignore_missing_imports = true
 check_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true
-files = ["src/courtside_dynamics"]
+files = ["src/courtside_dynamics", "tools"]
 
 [[tool.mypy.overrides]]
 # glfw >= 2.10.1 ships a stub written with PEP 695 `type` aliases,

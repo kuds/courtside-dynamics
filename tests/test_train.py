@@ -890,3 +890,196 @@ def test_run_summary_reports_task_metric_selected_best_model(tmp_path):
     assert ">=3 25.0%" in text
     # The reward-series best line is still reported for context.
     assert "2.000 +/- 0.000 (at 75,000 steps)" in text
+
+
+def _merged_eval_cfg(tmp_path, **overrides):
+    """A tiny headline-selection run with the final-config eval stream on."""
+    cfg_kwargs = dict(
+        env_fn=lambda: BallBalanceEnv(episode_len=12),
+        algo="SAC",
+        total_timesteps=600,
+        log_dir=str(tmp_path),
+        n_envs=1,
+        seed=0,
+        eval_freq=200,
+        checkpoint_freq=0,
+        video_freq=0,
+        record_video=False,
+        normalize_obs=False,
+        n_eval_episodes=2,
+        info_dict_eval=True,
+        headline_key="steps_alive",
+        final_info_eval=True,
+        model_kwargs={"learning_starts": 16, "buffer_size": 500},
+    )
+    cfg_kwargs.update(overrides)
+    return TrainConfig(**cfg_kwargs)
+
+
+def test_final_info_eval_owns_evaluations_npz_when_reward_stream_retired(
+    tmp_path,
+):
+    """One stream, one rollout, same artifact.
+
+    The reward EvalCallback and the final-config info-eval roll the SAME
+    distribution (the recipe's eval_env_overrides), and under headline
+    selection the reward stream is reporting-only. Retiring it must not
+    cost the ``evaluations.npz`` artifact every downstream reader expects.
+    """
+    import json
+
+    import numpy as np
+
+    train(_merged_eval_cfg(tmp_path))
+
+    payload = np.load(tmp_path / "metrics" / "evaluations.npz")
+    assert set(payload.files) >= {"timesteps", "results", "ep_lengths"}
+    # Rectangular: one row per evaluation, one column per episode.
+    assert payload["results"].ndim == 2
+    assert payload["results"].shape[0] == payload["timesteps"].shape[0]
+    assert payload["results"].shape == payload["ep_lengths"].shape
+    assert payload["results"].shape[0] >= 1
+    # A merged stream is the only one scoring the goal task, so it gets
+    # the FULL n_eval_episodes -- not the // 2 reporting sample the split
+    # streams used.
+    assert payload["results"].shape[1] == 2
+    assert (payload["ep_lengths"] > 0).all()
+
+    # Both stream sizes are now part of the run's provenance snapshot.
+    config = json.load(open(tmp_path / "config.json"))
+    assert "reward_eval_episodes" in config["train_config"]
+    assert "final_eval_episodes" in config["train_config"]
+
+
+def test_final_eval_episodes_sizes_the_merged_stream(tmp_path):
+    import numpy as np
+
+    train(_merged_eval_cfg(tmp_path, final_eval_episodes=3))
+
+    payload = np.load(tmp_path / "metrics" / "evaluations.npz")
+    assert payload["results"].shape[1] == 3
+
+
+def test_evaluations_npz_stays_readable_by_the_learning_plots(tmp_path):
+    """notebook_utils reads this artifact by name; keep the contract."""
+    from courtside_dynamics.notebook_utils import locate_artifact
+
+    train(_merged_eval_cfg(tmp_path))
+    assert locate_artifact(tmp_path, "evaluations") is not None
+
+
+def test_final_eval_episodes_requires_the_final_info_eval_stream(tmp_path):
+    cfg = _merged_eval_cfg(
+        tmp_path, final_info_eval=False, final_eval_episodes=4
+    )
+    with pytest.raises(ValueError, match="requires info_dict_eval and"):
+        train(cfg)
+
+
+def test_final_eval_episodes_rejects_non_positive(tmp_path):
+    cfg = _merged_eval_cfg(tmp_path, final_eval_episodes=0)
+    with pytest.raises(
+        ValueError, match="final_eval_episodes must be a positive integer"
+    ):
+        train(cfg)
+
+
+def test_reward_eval_stream_survives_without_the_final_info_eval(tmp_path):
+    """Nothing to merge into: EvalCallback keeps owning evaluations.npz."""
+    import numpy as np
+
+    train(
+        _merged_eval_cfg(
+            tmp_path, final_info_eval=False, reward_eval_episodes=1
+        )
+    )
+    payload = np.load(tmp_path / "metrics" / "evaluations.npz")
+    assert payload["results"].shape[1] == 1
+
+
+def test_merged_stream_gets_the_full_episode_budget(tmp_path):
+    """A merged stream is sized by n_eval_episodes, not the // 2 sample.
+
+    Mirrors the depth recipe's shape (n_eval_episodes 30 with
+    reward_eval_episodes 5): the retired reward stream's small budget must
+    NOT cap the surviving stream, because that stream is then the only one
+    scoring the campaign's goal task. The old split sizing would have
+    given max(n // 2, reward_eval_episodes) = 2 here.
+    """
+    import numpy as np
+
+    train(
+        _merged_eval_cfg(
+            tmp_path,
+            n_eval_episodes=4,
+            reward_eval_episodes=1,
+            total_timesteps=400,
+            eval_freq=200,
+        )
+    )
+
+    payload = np.load(tmp_path / "metrics" / "evaluations.npz")
+    assert payload["results"].shape[1] == 4
+
+
+def test_no_merge_without_headline_selection(tmp_path):
+    """Without headline selection the reward stream owns selection.
+
+    It must keep running and keep writing evaluations.npz at the full
+    n_eval_episodes, even with the final-config stream also attached.
+    """
+    import numpy as np
+
+    cfg = _merged_eval_cfg(
+        tmp_path,
+        n_eval_episodes=4,
+        headline_key=None,  # no headline selection -> no merge
+        total_timesteps=400,
+        eval_freq=200,
+    )
+    train(cfg)
+
+    payload = np.load(tmp_path / "metrics" / "evaluations.npz")
+    assert payload["results"].shape[1] == 4
+
+
+def test_config_json_records_every_train_config_data_field(tmp_path):
+    """``config.json``'s ``train_config`` block is hand-maintained.
+
+    A new ``TrainConfig`` field is therefore silently absent from every
+    run's provenance snapshot until someone remembers to add it --
+    ``reward_eval_episodes`` was missing for its whole life, so a run's
+    artifacts could not say whether its reward stream rolled 5 episodes or
+    30. Pin the coverage so the next field cannot drift the same way.
+    """
+    import dataclasses
+
+    # The only fields deliberately absent from the block.
+    code_valued = {"env_fn", "eval_env_fn", "extra_callbacks", "info_row_fn"}
+    recorded_at_top_level = {"recipe_name", "run_config_file"}
+
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=8),
+        log_dir=str(tmp_path),
+    )
+    write_run_config(cfg, str(tmp_path))
+    payload = json.loads((tmp_path / "config.json").read_text())
+
+    expected = {
+        field.name
+        for field in dataclasses.fields(TrainConfig)
+    } - code_valued - recorded_at_top_level
+    recorded = set(payload["train_config"])
+
+    missing = expected - recorded
+    assert not missing, (
+        f"TrainConfig fields absent from config.json's train_config block: "
+        f"{sorted(missing)}. Add them to artifacts.write_run_config, or to "
+        f"this test's exclusion sets with a reason."
+    )
+    # Nothing derived should be smuggled in either -- the block should be
+    # exactly the run's configuration.
+    assert not recorded - expected, sorted(recorded - expected)
+    # The excluded-but-real fields must still be recorded somewhere.
+    for name in recorded_at_top_level:
+        assert name in payload
