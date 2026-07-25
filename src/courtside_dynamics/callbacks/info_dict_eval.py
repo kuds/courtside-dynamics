@@ -656,11 +656,32 @@ class InfoDictEvalCallback(BaseCallback):
                     metrics.setdefault(f"phase_frac_{label}", 0.0)
 
         if self.verbose:
-            print(
-                f"[InfoDictEvalCallback] step={self.num_timesteps} "
-                f"episodes={total_episodes} total_steps={total_steps} "
-                f"finals={finals}"
-            )
+            # One readable line per evaluation, at eval_freq cadence --
+            # the periodic progress SB3's EvalCallback used to print
+            # before headline selection retired it. ``log_prefix``
+            # leads so the matched-stage and final-config streams stay
+            # distinguishable when both are verbose. The stage index is
+            # read from the context metrics because ``_merge_context``
+            # runs after this method returns.
+            fields = [
+                f"step={self.num_timesteps}",
+                f"episodes={total_episodes}",
+                f"total_steps={total_steps}",
+            ]
+            reward = metrics.get("episode_reward_mean")
+            if reward is not None:
+                fields.append(f"reward={reward:.3f}")
+            episode_length = metrics.get("episode_length")
+            if episode_length is not None:
+                fields.append(f"len={episode_length:.0f}")
+            stage = self._context_metrics.get("curriculum_stage_index")
+            if stage is not None:
+                fields.append(f"stage={stage:.0f}")
+            for key in self.best_metric_keys[:1]:
+                selection_value = metrics.get(key)
+                if selection_value is not None:
+                    fields.append(f"{key}={selection_value:.3f}")
+            print(f"[{self.log_prefix}] " + " ".join(fields))
 
         return metrics
 

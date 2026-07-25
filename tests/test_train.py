@@ -1022,6 +1022,51 @@ def test_merged_stream_gets_the_full_episode_budget(tmp_path):
     assert payload["results"].shape[1] == 4
 
 
+def test_eval_verbose_prints_one_line_per_evaluation(tmp_path, capsys):
+    """`eval_verbose` restores periodic progress without SB3's table.
+
+    Retiring the reward EvalCallback left a run silent between stage
+    advances, so a multi-hour job showed nothing. The heartbeat must
+    carry the numbers a watcher actually needs (reward, episode length)
+    and must NOT drag in SB3's per-rollout table, which SAC emits every
+    log_interval (4) episodes.
+    """
+    train(
+        _merged_eval_cfg(
+            tmp_path,
+            total_timesteps=400,
+            eval_freq=200,
+            eval_verbose=1,
+            verbose=0,
+        )
+    )
+
+    captured = capsys.readouterr().out
+    # Both streams report, and the log_prefix keeps them apart.
+    assert "[eval_info]" in captured
+    assert "[eval_info_final]" in captured
+    assert "reward=" in captured
+    assert "len=" in captured
+    # One line per evaluation per stream, not per rollout.
+    assert captured.count("[eval_info]") == 2
+    # SB3's rollout table stays off: that is the whole point of the split.
+    assert "rollout/" not in captured
+
+
+def test_eval_verbose_defaults_to_the_algorithm_verbosity(tmp_path, capsys):
+    """``None`` follows ``verbose``, so existing runs stay silent."""
+    train(
+        _merged_eval_cfg(
+            tmp_path,
+            total_timesteps=400,
+            eval_freq=200,
+            verbose=0,
+        )
+    )
+
+    assert "[eval_info]" not in capsys.readouterr().out
+
+
 def test_no_merge_without_headline_selection(tmp_path):
     """Without headline selection the reward stream owns selection.
 
