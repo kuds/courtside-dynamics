@@ -890,3 +890,107 @@ def test_run_summary_reports_task_metric_selected_best_model(tmp_path):
     assert ">=3 25.0%" in text
     # The reward-series best line is still reported for context.
     assert "2.000 +/- 0.000 (at 75,000 steps)" in text
+
+
+def _merged_eval_cfg(tmp_path, **overrides):
+    """A tiny headline-selection run with the final-config eval stream on."""
+    cfg_kwargs = dict(
+        env_fn=lambda: BallBalanceEnv(episode_len=12),
+        algo="SAC",
+        total_timesteps=600,
+        log_dir=str(tmp_path),
+        n_envs=1,
+        seed=0,
+        eval_freq=200,
+        checkpoint_freq=0,
+        video_freq=0,
+        record_video=False,
+        normalize_obs=False,
+        n_eval_episodes=2,
+        info_dict_eval=True,
+        headline_key="steps_alive",
+        final_info_eval=True,
+        model_kwargs={"learning_starts": 16, "buffer_size": 500},
+    )
+    cfg_kwargs.update(overrides)
+    return TrainConfig(**cfg_kwargs)
+
+
+def test_final_info_eval_owns_evaluations_npz_when_reward_stream_retired(
+    tmp_path,
+):
+    """One stream, one rollout, same artifact.
+
+    The reward EvalCallback and the final-config info-eval roll the SAME
+    distribution (the recipe's eval_env_overrides), and under headline
+    selection the reward stream is reporting-only. Retiring it must not
+    cost the ``evaluations.npz`` artifact every downstream reader expects.
+    """
+    import json
+
+    import numpy as np
+
+    train(_merged_eval_cfg(tmp_path))
+
+    payload = np.load(tmp_path / "metrics" / "evaluations.npz")
+    assert set(payload.files) >= {"timesteps", "results", "ep_lengths"}
+    # Rectangular: one row per evaluation, one column per episode.
+    assert payload["results"].ndim == 2
+    assert payload["results"].shape[0] == payload["timesteps"].shape[0]
+    assert payload["results"].shape == payload["ep_lengths"].shape
+    assert payload["results"].shape[0] >= 1
+    # n_eval_episodes // 2 == 1, floored to the retired stream's budget
+    # (reward_eval_episodes defaults to n_eval_episodes == 2).
+    assert payload["results"].shape[1] == 2
+    assert (payload["ep_lengths"] > 0).all()
+
+    # Both stream sizes are now part of the run's provenance snapshot.
+    config = json.load(open(tmp_path / "config.json"))
+    assert "reward_eval_episodes" in config["train_config"]
+    assert "final_eval_episodes" in config["train_config"]
+
+
+def test_final_eval_episodes_sizes_the_merged_stream(tmp_path):
+    import numpy as np
+
+    train(_merged_eval_cfg(tmp_path, final_eval_episodes=3))
+
+    payload = np.load(tmp_path / "metrics" / "evaluations.npz")
+    assert payload["results"].shape[1] == 3
+
+
+def test_evaluations_npz_stays_readable_by_the_learning_plots(tmp_path):
+    """notebook_utils reads this artifact by name; keep the contract."""
+    from courtside_dynamics.notebook_utils import locate_artifact
+
+    train(_merged_eval_cfg(tmp_path))
+    assert locate_artifact(tmp_path, "evaluations") is not None
+
+
+def test_final_eval_episodes_requires_the_final_info_eval_stream(tmp_path):
+    cfg = _merged_eval_cfg(
+        tmp_path, final_info_eval=False, final_eval_episodes=4
+    )
+    with pytest.raises(ValueError, match="requires info_dict_eval and"):
+        train(cfg)
+
+
+def test_final_eval_episodes_rejects_non_positive(tmp_path):
+    cfg = _merged_eval_cfg(tmp_path, final_eval_episodes=0)
+    with pytest.raises(
+        ValueError, match="final_eval_episodes must be a positive integer"
+    ):
+        train(cfg)
+
+
+def test_reward_eval_stream_survives_without_the_final_info_eval(tmp_path):
+    """Nothing to merge into: EvalCallback keeps owning evaluations.npz."""
+    import numpy as np
+
+    train(
+        _merged_eval_cfg(
+            tmp_path, final_info_eval=False, reward_eval_episodes=1
+        )
+    )
+    payload = np.load(tmp_path / "metrics" / "evaluations.npz")
+    assert payload["results"].shape[1] == 1
