@@ -110,9 +110,20 @@ class _FakeEntropyOptimizer:
 
 
 class _FakeAutoEntropyModel(_FakeOffPolicyModel):
-    """SAC with an auto-tuned temperature (log_ent_coef + its optimizer)."""
+    """SAC with an auto-tuned temperature (log_ent_coef + its optimizer).
 
-    def __init__(self, training_env, init_log_ent_coef: float = 0.0) -> None:
+    Shaped like the real thing in the way that matters here: SB3 keeps the
+    *configured* ``ent_coef`` string on the model and the live temperature
+    only in ``log_ent_coef``, so the two can disagree -- which is exactly
+    the case on a warm-started continuation.
+    """
+
+    def __init__(
+        self,
+        training_env,
+        init_log_ent_coef: float = 0.0,
+        ent_coef: str = "auto",
+    ) -> None:
         super().__init__(training_env)
         import torch as th
 
@@ -120,9 +131,11 @@ class _FakeAutoEntropyModel(_FakeOffPolicyModel):
             [init_log_ent_coef], requires_grad=True
         )
         self.ent_coef_optimizer = _FakeEntropyOptimizer()
+        self.ent_coef = ent_coef
 
     @property
-    def ent_coef(self) -> float:
+    def alpha(self) -> float:
+        """The live temperature, as ``train/ent_coef`` reports it."""
         return float(self.log_ent_coef.detach().exp().item())
 
 
@@ -697,19 +710,19 @@ def test_entropy_reset_restores_initial_temperature_on_advance():
 
         gate._on_training_start()
         assert gate._initial_log_ent_coef == pytest.approx(0.0)
-        assert model.ent_coef == pytest.approx(1.0)
+        assert model.alpha == pytest.approx(1.0)
 
         # Simulate a long stage that decays the temperature to ~1e-3 and
         # leaves Adam moment state behind.
         model.log_ent_coef.detach().fill_(float(np.log(9.2e-4)))
         model.ent_coef_optimizer.state["stale"] = object()
-        assert model.ent_coef == pytest.approx(9.2e-4, rel=1e-3)
+        assert model.alpha == pytest.approx(9.2e-4, rel=1e-3)
 
         info_eval.finish_eval({"bounce_count_ep_mean": 9.0})
         assert gate._on_step() is True
 
         assert gate.stage_index == 1
-        assert model.ent_coef == pytest.approx(1.0)
+        assert model.alpha == pytest.approx(1.0)
         # Clearing the moments matters as much as the value: Adam would
         # otherwise push the restored coefficient straight back down.
         assert model.ent_coef_optimizer.state == {}
@@ -734,7 +747,9 @@ def test_entropy_reset_keeps_gradients_flowing_through_log_ent_coef():
             advance_update_pause_steps=10,
             reset_entropy_on_advance=True,
         )
-        model = _FakeAutoEntropyModel(train_env, init_log_ent_coef=-3.9)
+        model = _FakeAutoEntropyModel(
+            train_env, init_log_ent_coef=-7.0, ent_coef="auto_0.02"
+        )
         gate.model = model  # type: ignore[assignment]
         gate._on_training_start()
 
@@ -745,7 +760,9 @@ def test_entropy_reset_keeps_gradients_flowing_through_log_ent_coef():
         # temperature optimizer's param group stays valid afterwards.
         assert model.log_ent_coef.requires_grad is True
         assert model.log_ent_coef.is_leaf is True
-        assert float(model.log_ent_coef.detach()[0]) == pytest.approx(-3.9)
+        assert float(model.log_ent_coef.detach()[0]) == pytest.approx(
+            float(np.log(0.02))
+        )
         # And a gradient can still reach it.
         model.log_ent_coef.exp().sum().backward()
         assert model.log_ent_coef.grad is not None
@@ -811,7 +828,7 @@ def test_entropy_reset_defaults_off_and_leaves_temperature_alone():
         assert gate._on_step() is True
 
         assert gate.stage_index == 1
-        assert model.ent_coef == pytest.approx(9.2e-4, rel=1e-3)
+        assert model.alpha == pytest.approx(9.2e-4, rel=1e-3)
         assert "stale" in model.ent_coef_optimizer.state
         assert gate._entropy_resets == 0
     finally:
@@ -993,6 +1010,212 @@ def test_pool_confirmation_samples_rejects_non_boolean():
             ValueError, match="pool_confirmation_samples must be a boolean"
         ):
             _gate(train_env, info_eval, pool_confirmation_samples="yes")
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_entropy_reset_against_a_real_sac_temperature_optimizer(tmp_path):
+    """The reset must work on SB3's actual SAC internals, not just a fake.
+
+    ``log_ent_coef`` is a leaf Tensor and ``ent_coef_optimizer`` is an Adam
+    whose ``state`` is keyed by that very tensor, so the reset has to
+    preserve param identity (or the optimizer would be updating a stale
+    object) while dropping the accumulated moments.
+    """
+    from stable_baselines3 import SAC
+
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        model = SAC(
+            "MlpPolicy",
+            train_env,
+            ent_coef="auto_0.02",
+            learning_starts=8,
+            buffer_size=200,
+            batch_size=8,
+            seed=0,
+            verbose=0,
+        )
+        # A short learn initializes the logger and accumulates Adam moment
+        # state on log_ent_coef, which is what a long stage leaves behind.
+        model.learn(total_timesteps=64)
+        assert len(model.ent_coef_optimizer.state) == 1
+
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            sustain_evals=1,
+            advance_update_pause_steps=32,
+            clear_replay_buffer_on_advance=True,
+            reset_entropy_on_advance=True,
+        )
+        gate.model = model  # type: ignore[assignment]
+        gate._on_training_start()
+        # Target comes from the configured ent_coef string, so it is
+        # exactly auto_0.02 even though the short learn already nudged the
+        # live tensor away from it.
+        assert gate._initial_log_ent_coef == pytest.approx(
+            float(np.log(0.02)), rel=1e-9
+        )
+        assert float(model.log_ent_coef.detach().exp()) != pytest.approx(
+            0.02, rel=1e-9
+        )
+
+        # Collapse the temperature the way a 1.4M-step stage does.
+        model.log_ent_coef.detach().fill_(float(np.log(9.2e-4)))
+
+        info_eval.finish_eval({"bounce_count_ep_mean": 9.0})
+        assert gate._on_step() is True
+
+        assert gate.stage_index == 1
+        assert float(model.log_ent_coef.detach().exp()) == pytest.approx(
+            0.02, rel=1e-5
+        )
+        assert len(model.ent_coef_optimizer.state) == 0
+        # The optimizer must still be pointed at the same tensor.
+        assert (
+            model.ent_coef_optimizer.param_groups[0]["params"][0]
+            is model.log_ent_coef
+        )
+        assert model.log_ent_coef.requires_grad is True
+        assert model.log_ent_coef.is_leaf is True
+        # Updates are paused, so gradient_steps is 0 and the restored
+        # temperature is what the learner resumes with.
+        assert model.gradient_steps == 0
+
+        # Training must resume cleanly and rebuild the moment state.
+        model.learn(total_timesteps=64, reset_num_timesteps=False)
+        assert np.isfinite(float(model.log_ent_coef.detach()))
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_entropy_reset_target_ignores_a_warm_started_collapse():
+    """A continuation inherits a collapsed alpha; the target must not.
+
+    ``train()`` deliberately transfers the source run's ``log_ent_coef``
+    so a fresh ``"auto"`` does not restart at 1.0, which means a warm
+    continuation begins already collapsed. Reading the live tensor at
+    training start would capture ~1e-3 and make every later reset restore
+    exactly the collapse it exists to undo.
+    """
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            sustain_evals=1,
+            advance_update_pause_steps=10,
+            reset_entropy_on_advance=True,
+        )
+        # Warm-started: the tensor already holds the inherited collapse.
+        model = _FakeAutoEntropyModel(
+            train_env,
+            init_log_ent_coef=float(np.log(9.2e-4)),
+            ent_coef="auto_0.02",
+        )
+        gate.model = model  # type: ignore[assignment]
+        gate._on_training_start()
+        assert gate._initial_log_ent_coef == pytest.approx(
+            float(np.log(0.02))
+        )
+
+        info_eval.finish_eval({"bounce_count_ep_mean": 9.0})
+        assert gate._on_step() is True
+        assert float(model.log_ent_coef.detach().exp()) == pytest.approx(0.02)
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [("auto", 1.0), ("auto_0.02", 0.02), ("auto_1.0", 1.0)],
+)
+def test_configured_ent_coef_init_parses_the_auto_forms(configured, expected):
+    from courtside_dynamics.callbacks.performance_gate import (
+        _configured_ent_coef_init,
+    )
+
+    class _M:
+        ent_coef = configured
+
+    assert _configured_ent_coef_init(_M()) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("configured", [0.02, "0.02", "auto_", "auto_x"])
+def test_configured_ent_coef_init_rejects_unparseable_forms(configured):
+    from courtside_dynamics.callbacks.performance_gate import (
+        _configured_ent_coef_init,
+    )
+
+    class _M:
+        ent_coef = configured
+
+    with pytest.raises((TypeError, ValueError)):
+        _configured_ent_coef_init(_M())
+
+
+def test_entropy_reset_value_overrides_the_configured_target():
+    """A continuation may not want "auto"'s 1.0 worth of exploration."""
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            sustain_evals=1,
+            advance_update_pause_steps=10,
+            reset_entropy_on_advance=True,
+            entropy_reset_value=0.05,
+        )
+        # ent_coef "auto" would resolve to 1.0; the override wins.
+        model = _FakeAutoEntropyModel(train_env, init_log_ent_coef=-7.0)
+        gate.model = model  # type: ignore[assignment]
+        gate._on_training_start()
+
+        info_eval.finish_eval({"bounce_count_ep_mean": 9.0})
+        assert gate._on_step() is True
+        assert float(model.log_ent_coef.detach().exp()) == pytest.approx(0.05)
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), True, "0.02"])
+def test_entropy_reset_value_rejects_invalid(bad):
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        with pytest.raises(ValueError, match="entropy_reset_value"):
+            _gate(
+                train_env,
+                info_eval,
+                reset_entropy_on_advance=True,
+                entropy_reset_value=bad,
+            )
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_entropy_reset_value_requires_the_reset_to_be_enabled():
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        with pytest.raises(
+            ValueError, match="requires reset_entropy_on_advance"
+        ):
+            _gate(train_env, info_eval, entropy_reset_value=0.02)
     finally:
         train_env.close()
         eval_env.close()

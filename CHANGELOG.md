@@ -28,7 +28,13 @@ are bit-identical and each can be adopted as its own single lever:
   noise itself: sampling spread lives in the policy's learned `log_std`
   and re-expands over the following gradient steps. Raises at training
   start when `ent_coef` is a fixed float, rather than being a silent
-  no-op.
+  no-op. The restore target is read from the **configured** `ent_coef`
+  string rather than the live tensor: a warm-started continuation
+  deliberately inherits the source run's collapsed `log_ent_coef`, so
+  sampling the tensor would restore precisely the collapse the reset
+  exists to undo. `entropy_reset_value` overrides that target when
+  `"auto"`'s 1.0 is more exploration than a mid-campaign continuation
+  wants.
 - `pool_confirmation_samples` folds `confirm_best`'s second batch into
   the promotion window. That batch is a full `n_eval_episodes` rollout on
   the current stage that the run already pays for and previously

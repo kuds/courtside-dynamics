@@ -1224,6 +1224,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                         "advance_update_pause_steps",
                         "clear_replay_buffer_on_advance",
                         "reset_entropy_on_advance",
+                        "entropy_reset_value",
                         "pool_confirmation_samples",
                     }
                 )
@@ -1250,6 +1251,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     ),
                     reset_entropy_on_advance=gate_spec.get(
                         "reset_entropy_on_advance", False
+                    ),
+                    entropy_reset_value=gate_spec.get(
+                        "entropy_reset_value"
                     ),
                     pool_confirmation_samples=gate_spec.get(
                         "pool_confirmation_samples", False

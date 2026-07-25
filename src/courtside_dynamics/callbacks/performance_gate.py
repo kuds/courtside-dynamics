@@ -43,6 +43,39 @@ _PROMOTION_RULES = ("consecutive", "window_mean")
 STAGE_CONTEXT_METRIC = "curriculum_stage_index"
 
 
+def _configured_ent_coef_init(model: Any) -> float:
+    """The initial alpha SAC's ``ent_coef`` string asks for.
+
+    SB3 keeps the constructor argument on ``model.ent_coef`` and parses it
+    in ``_setup_model``: ``"auto"`` starts the temperature at 1.0 and
+    ``"auto_<value>"`` at ``<value>``. Re-deriving it here -- rather than
+    sampling the live tensor -- is what makes the reset target independent
+    of whatever the temperature currently happens to be.
+    """
+    configured = getattr(model, "ent_coef", None)
+    if not isinstance(configured, str) or not configured.startswith("auto"):
+        raise TypeError(
+            "reset_entropy_on_advance requires a string ent_coef of the "
+            f"form 'auto' or 'auto_<init>', got {configured!r}"
+        )
+    if "_" not in configured:
+        return 1.0
+    _, _, raw = configured.partition("_")
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ValueError(
+            f"could not read the initial entropy coefficient from "
+            f"ent_coef={configured!r}"
+        ) from error
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(
+            f"the initial entropy coefficient in ent_coef={configured!r} "
+            f"must be finite and positive"
+        )
+    return value
+
+
 class PerformanceGatedEnvStagesCallback(BaseCallback):
     """Advance env attributes through stages as eval performance allows.
 
@@ -157,6 +190,20 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         ``log_ent_coef`` tensor and an ``ent_coef_optimizer``). A fixed
         float ``ent_coef`` has nothing to reset and raises at training
         start rather than silently doing nothing.
+
+        The restore target is read from the *configured* ``ent_coef``
+        string, not from the live tensor. This matters for the warm-start
+        continuation path: ``train()`` deliberately transfers the source
+        run's ``log_ent_coef`` so a fresh ``"auto"`` does not restart at
+        1.0, so a continuation begins already collapsed. Sampling the
+        tensor at training start would capture ~1e-3 and make every later
+        "reset" restore exactly the collapse it exists to undo.
+    entropy_reset_value:
+        Alpha to restore instead of the configured initial value. Requires
+        ``reset_entropy_on_advance=True``. Use it when the configured
+        ``"auto"`` initial value (1.0) is more exploration than a
+        mid-campaign continuation wants -- e.g. ``0.02`` to match the
+        exploration package the 0.11.0 bootstrap calibrated.
     extra_target_envs:
         Additional vectorized environments to keep in sync (the training
         env from ``self.training_env`` and ``info_eval.eval_env`` are
@@ -200,6 +247,7 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         clear_replay_buffer_on_advance: bool = False,
         pool_confirmation_samples: bool = False,
         reset_entropy_on_advance: bool = False,
+        entropy_reset_value: float | None = None,
         extra_target_envs: Sequence[VecEnv] = (),
         stage_bests_dir: str | None = None,
         stage_history_path: str | None = None,
@@ -251,6 +299,21 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
             raise ValueError("reset_entropy_on_advance must be a boolean")
         if not isinstance(pool_confirmation_samples, bool):
             raise ValueError("pool_confirmation_samples must be a boolean")
+        if entropy_reset_value is not None:
+            if (
+                isinstance(entropy_reset_value, bool)
+                or not isinstance(entropy_reset_value, numbers.Real)
+                or not np.isfinite(entropy_reset_value)
+                or entropy_reset_value <= 0.0
+            ):
+                raise ValueError(
+                    "entropy_reset_value must be a finite positive number"
+                )
+            if not reset_entropy_on_advance:
+                raise ValueError(
+                    "entropy_reset_value requires "
+                    "reset_entropy_on_advance=True"
+                )
         if clear_replay_buffer_on_advance and advance_update_pause_steps <= 0:
             raise ValueError(
                 "clear_replay_buffer_on_advance requires "
@@ -276,6 +339,9 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
             clear_replay_buffer_on_advance
         )
         self.reset_entropy_on_advance: bool = reset_entropy_on_advance
+        self.entropy_reset_value: float | None = (
+            None if entropy_reset_value is None else float(entropy_reset_value)
+        )
         self.pool_confirmation_samples: bool = pool_confirmation_samples
         self.info_eval: InfoDictEvalCallback = info_eval
         self.extra_target_envs: tuple[VecEnv, ...] = tuple(extra_target_envs)
@@ -393,9 +459,6 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                     "a resettable 'replay_buffer'"
                 )
         if self.reset_entropy_on_advance:
-            # Nothing has trained yet, so the current coefficient IS the
-            # configured initial value -- capture it as the restore
-            # target instead of re-parsing the ``ent_coef`` string.
             log_ent_coef = getattr(self.model, "log_ent_coef", None)
             optimizer = getattr(self.model, "ent_coef_optimizer", None)
             if log_ent_coef is None or optimizer is None:
@@ -407,8 +470,18 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                     "no temperature state to restore, so the reset would "
                     "silently do nothing"
                 )
+            # Resolve the target from the CONFIGURED ent_coef, not from
+            # the live tensor. A warm-started continuation deliberately
+            # inherits the source run's collapsed log_ent_coef (train.py
+            # transfers it so a fresh "auto" does not restart at 1.0), so
+            # reading the tensor here would capture ~1e-3 and make every
+            # later "reset" restore the collapse it exists to undo.
             self._initial_log_ent_coef = float(
-                log_ent_coef.detach().reshape(-1)[0].item()
+                np.log(
+                    self.entropy_reset_value
+                    if self.entropy_reset_value is not None
+                    else _configured_ent_coef_init(self.model)
+                )
             )
         self._stage_entry_timestep = int(self.num_timesteps)
         self._apply_stage()

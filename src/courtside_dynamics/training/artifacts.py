@@ -323,6 +323,9 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
                     "reset_entropy_on_advance": cfg.performance_gate.get(
                         "reset_entropy_on_advance", False
                     ),
+                    "entropy_reset_value": cfg.performance_gate.get(
+                        "entropy_reset_value"
+                    ),
                     "pool_confirmation_samples": cfg.performance_gate.get(
                         "pool_confirmation_samples", False
                     ),
