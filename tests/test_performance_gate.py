@@ -92,6 +92,30 @@ class _FakeOffPolicyModel(_FakeModel):
         self.num_timesteps = 0
 
 
+class _FakeEntropyOptimizer:
+    """Adam-shaped: the gate only clears accumulated moment state."""
+
+    def __init__(self) -> None:
+        self.state: dict[str, object] = {}
+
+
+class _FakeAutoEntropyModel(_FakeOffPolicyModel):
+    """SAC with an auto-tuned temperature (log_ent_coef + its optimizer)."""
+
+    def __init__(self, training_env, init_log_ent_coef: float = 0.0) -> None:
+        super().__init__(training_env)
+        import torch as th
+
+        self.log_ent_coef = th.tensor(
+            [init_log_ent_coef], requires_grad=True
+        )
+        self.ent_coef_optimizer = _FakeEntropyOptimizer()
+
+    @property
+    def ent_coef(self) -> float:
+        return float(self.log_ent_coef.detach().exp().item())
+
+
 STAGES = (
     {"serve_vy_max": 1.1, "serve_speed_jitter": 0.2},
     {"serve_vy_max": 1.4, "serve_speed_jitter": 0.3},
@@ -635,6 +659,151 @@ def test_gate_copies_run_config_into_stage_archives(tmp_path):
 
         copied = tmp_path / "stage_bests" / "stage_00" / "config.json"
         assert copied.read_text() == run_config.read_text()
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_entropy_reset_restores_initial_temperature_on_advance():
+    """A collapsed alpha is restored, and its optimizer moments dropped.
+
+    Run 20260721_004722 ended at ent_coef 9.2e-4 and never re-inflated
+    after a promotion; the policy then met each new geometry nearly
+    deterministic.
+    """
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            sustain_evals=1,
+            advance_update_pause_steps=10,
+            reset_entropy_on_advance=True,
+        )
+        model = _FakeAutoEntropyModel(train_env, init_log_ent_coef=0.0)
+        gate.model = model  # type: ignore[assignment]
+
+        gate._on_training_start()
+        assert gate._initial_log_ent_coef == pytest.approx(0.0)
+        assert model.ent_coef == pytest.approx(1.0)
+
+        # Simulate a long stage that decays the temperature to ~1e-3 and
+        # leaves Adam moment state behind.
+        model.log_ent_coef.detach().fill_(float(np.log(9.2e-4)))
+        model.ent_coef_optimizer.state["stale"] = object()
+        assert model.ent_coef == pytest.approx(9.2e-4, rel=1e-3)
+
+        info_eval.finish_eval({"bounce_count_ep_mean": 9.0})
+        assert gate._on_step() is True
+
+        assert gate.stage_index == 1
+        assert model.ent_coef == pytest.approx(1.0)
+        # Clearing the moments matters as much as the value: Adam would
+        # otherwise push the restored coefficient straight back down.
+        assert model.ent_coef_optimizer.state == {}
+        assert gate._entropy_resets == 1
+        # The restore must survive the update pause it is paired with.
+        assert gate._update_pause_until == 10
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_entropy_reset_keeps_gradients_flowing_through_log_ent_coef():
+    """The reset writes through .detach(), so the leaf stays trainable."""
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            sustain_evals=1,
+            advance_update_pause_steps=10,
+            reset_entropy_on_advance=True,
+        )
+        model = _FakeAutoEntropyModel(train_env, init_log_ent_coef=-3.9)
+        gate.model = model  # type: ignore[assignment]
+        gate._on_training_start()
+
+        info_eval.finish_eval({"bounce_count_ep_mean": 9.0})
+        assert gate._on_step() is True
+
+        # Writing through .detach() keeps the same trainable leaf, so the
+        # temperature optimizer's param group stays valid afterwards.
+        assert model.log_ent_coef.requires_grad is True
+        assert model.log_ent_coef.is_leaf is True
+        assert float(model.log_ent_coef.detach()[0]) == pytest.approx(-3.9)
+        # And a gradient can still reach it.
+        model.log_ent_coef.exp().sum().backward()
+        assert model.log_ent_coef.grad is not None
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_entropy_reset_requires_an_auto_tuned_coefficient():
+    """A fixed float ent_coef has nothing to restore -- fail, never no-op."""
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            advance_update_pause_steps=10,
+            reset_entropy_on_advance=True,
+        )
+        # No log_ent_coef / ent_coef_optimizer: SAC with ent_coef=0.02.
+        gate.model = _FakeOffPolicyModel(train_env)  # type: ignore[assignment]
+        with pytest.raises(TypeError, match="auto-tuned entropy coefficient"):
+            gate._on_training_start()
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_entropy_reset_rejects_non_boolean():
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        with pytest.raises(
+            ValueError, match="reset_entropy_on_advance must be a boolean"
+        ):
+            _gate(train_env, info_eval, reset_entropy_on_advance=1)
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_entropy_reset_defaults_off_and_leaves_temperature_alone():
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            sustain_evals=1,
+            advance_update_pause_steps=10,
+        )
+        model = _FakeAutoEntropyModel(train_env, init_log_ent_coef=0.0)
+        gate.model = model  # type: ignore[assignment]
+        gate._on_training_start()
+        assert gate._initial_log_ent_coef is None
+
+        model.log_ent_coef.detach().fill_(float(np.log(9.2e-4)))
+        model.ent_coef_optimizer.state["stale"] = object()
+        info_eval.finish_eval({"bounce_count_ep_mean": 9.0})
+        assert gate._on_step() is True
+
+        assert gate.stage_index == 1
+        assert model.ent_coef == pytest.approx(9.2e-4, rel=1e-3)
+        assert "stale" in model.ent_coef_optimizer.state
+        assert gate._entropy_resets == 0
     finally:
         train_env.close()
         eval_env.close()
