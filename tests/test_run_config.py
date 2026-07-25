@@ -655,6 +655,10 @@ class TestStarterConfigs:
         from courtside_dynamics.run_config import available_run_configs
 
         catalog = available_run_configs()
+        prefixes = [recipe.name_prefix for recipe in RECIPES.values()]
+        assert len(prefixes) == len(set(prefixes)), (
+            "recipe name_prefix values must be unique"
+        )
         assert set(catalog) == set(RECIPES)
         # And no orphan TOMLs ship without a recipe to consume them.
         package_dir = next(iter(catalog.values())).parent

@@ -14,7 +14,8 @@ new env is one entry in :data:`RECIPES`; the notebook needs no edits.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -707,15 +708,18 @@ RECIPES: dict[str, Recipe] = {
             # could advance while keeping its contacts near the same
             # shallow x position. The replacement ladder below slides the
             # entire fence backward, preserving adjacent overlap but
-            # removing the all-stage common refuge. A 200-episode-per-cell
-            # sweep on 2026-07-23 passed all static, feasibility,
-            # learnability, monotonicity, and telemetry checks.
+            # removing the all-stage common refuge. This fixed-origin
+            # production baseline passed its 200-episode-per-cell sweep
+            # on 2026-07-23. A separately named aligned recipe preserves
+            # this control while the serve-origin hypothesis is tested.
             "paddle_x_fence": (-2.7, 0.3),
             "paddle_start_x": -1.6,
             # Serve energy co-moves with depth via the gate (5.2 -> 7.0)
-            # so the ball reliably reaches the deeper paddle; the flat
-            # serve (lob 0) keeps contact at face height — lofted serves
-            # sail over the fixed-height face (sweep iteration 1).
+            # so the ball reliably reaches the deeper paddle. This
+            # production baseline keeps its serve origin fixed at 1.0.
+            # The flat serve (lob 0) keeps contact at face height —
+            # lofted serves sail over the fixed-height face (sweep
+            # iteration 1).
             "serve_start_x": 1.0,
             "serve_speed": 5.2,
             "serve_lob": 0.0,
@@ -738,11 +742,13 @@ RECIPES: dict[str, Recipe] = {
             # stage-0 defaults would score the easiest geometry for the
             # whole run and silently inflate apparent competence.
             # "Deepest stage reached" is not expressible with the
-            # final-eval machinery; the fixed goal task is also the
-            # yardstick that stays comparable across runs. Must equal
+            # final-eval machinery. Within one recipe this fixed goal
+            # task is comparable across runs; cross-recipe comparison
+            # requires evaluation on both serve geometries. Must equal
             # the last performance_gate stage (pinned by test).
             "paddle_x_fence": (-4.7, -3.0),
             "paddle_start_x": -3.9,
+            "serve_start_x": 1.0,
             "serve_speed": 7.0,
         },
         default_total_timesteps=6_000_000,
@@ -819,26 +825,31 @@ RECIPES: dict[str, Recipe] = {
                     {
                         "paddle_x_fence": (-2.7, 0.3),
                         "paddle_start_x": -1.6,
+                        "serve_start_x": 1.0,
                         "serve_speed": 5.2,
                     },
                     {
                         "paddle_x_fence": (-3.2, -0.8),
                         "paddle_start_x": -2.1,
+                        "serve_start_x": 1.0,
                         "serve_speed": 5.5,
                     },
                     {
                         "paddle_x_fence": (-3.7, -1.6),
                         "paddle_start_x": -2.7,
+                        "serve_start_x": 1.0,
                         "serve_speed": 6.0,
                     },
                     {
                         "paddle_x_fence": (-4.2, -2.4),
                         "paddle_start_x": -3.3,
+                        "serve_start_x": 1.0,
                         "serve_speed": 6.5,
                     },
                     {
                         "paddle_x_fence": (-4.7, -3.0),
                         "paddle_start_x": -3.9,
+                        "serve_start_x": 1.0,
                         "serve_speed": 7.0,
                     },
                 ),
@@ -975,6 +986,53 @@ RECIPES: dict[str, Recipe] = {
         ),
     ),
 }
+
+
+_ALIGNED_DEPTH_SERVE_ORIGINS = (1.0, 0.69, 0.34, -0.01, -0.35)
+
+
+def _make_aligned_depth_curriculum(base: Recipe) -> Recipe:
+    """Build the experimental serve-aligned arm without mutating its control."""
+    env_kwargs = deepcopy(base.env_kwargs)
+    extra_cfg = deepcopy(base.extra_cfg)
+    gate = extra_cfg["performance_gate"]
+    base_stages = gate["stages"]
+    if len(base_stages) != len(_ALIGNED_DEPTH_SERVE_ORIGINS):
+        raise ValueError(
+            "aligned serve-origin schedule must match the baseline stage count"
+        )
+    gate["stages"] = tuple(
+        {**stage, "serve_start_x": serve_start_x}
+        for stage, serve_start_x in zip(
+            base_stages,
+            _ALIGNED_DEPTH_SERVE_ORIGINS,
+            strict=True,
+        )
+    )
+    eval_env_overrides = {
+        **deepcopy(base.eval_env_overrides),
+        "serve_start_x": _ALIGNED_DEPTH_SERVE_ORIGINS[-1],
+    }
+    return replace(
+        base,
+        env_kwargs=env_kwargs,
+        eval_env_overrides=eval_env_overrides,
+        name_prefix="wall_ball_depth_curriculum_aligned",
+        extra_cfg=extra_cfg,
+        description=(
+            "EXPERIMENTAL treatment for WallBallDepthCurriculum: the same "
+            "open-scoring depth ladder with stage-specific serve origins "
+            "that align first-bounce position to paddle start. Preserve "
+            "WallBallDepthCurriculum as the fixed-origin control; this arm "
+            "requires scripted certification and a paired stage-1 A/B "
+            "before any full 6M pilot."
+        ),
+    )
+
+
+RECIPES["WallBallDepthCurriculumAligned"] = _make_aligned_depth_curriculum(
+    RECIPES["WallBallDepthCurriculum"]
+)
 
 
 # Quick-test overrides applied on top of the recipe defaults so a notebook
