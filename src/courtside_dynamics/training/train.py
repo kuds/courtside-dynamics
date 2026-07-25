@@ -385,6 +385,16 @@ class TrainConfig:
         per-rollout training table is also streamed to stdout (useful on
         long Colab runs). Independent of the CSV/TensorBoard logging that
         is always on.
+    eval_verbose:
+        Verbosity for the info-dict evaluation streams only, so a run
+        can print one progress line per *evaluation* without SB3's
+        per-rollout table. ``None`` (default) follows ``verbose``.
+        Motivation: headline selection retired the reward
+        ``EvalCallback``, and with it the only periodic progress a run
+        printed; SB3's own table is not a substitute because SAC logs
+        it every ``log_interval`` (4) episodes -- thousands of tables
+        over a multi-million-step run. Set ``eval_verbose=1`` with
+        ``verbose=0`` for a heartbeat at ``eval_freq`` cadence.
     phase_key / phase_labels:
         Forwarded to ``InfoDictEvalCallback`` so envs with a state
         machine get per-phase time-fraction logs.
@@ -504,6 +514,7 @@ class TrainConfig:
     normalize_obs_excluded_indices: tuple[int, ...] = ()
     policy: str = "MlpPolicy"
     verbose: int = 0
+    eval_verbose: int | None = None
     model_kwargs: dict = field(default_factory=dict)
     warm_start: WarmStartConfig | None = None
     csv_header: Sequence[str] | None = None
@@ -959,6 +970,13 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         # one.
         headline_selection = bool(cfg.info_dict_eval and cfg.headline_key)
 
+        # Evaluation-stream verbosity is decoupled from the algorithm's
+        # so a run can get one line per evaluation without SB3's
+        # per-rollout table; None follows cfg.verbose.
+        eval_verbose = (
+            cfg.verbose if cfg.eval_verbose is None else cfg.eval_verbose
+        )
+
         reward_eval_episodes = cfg.n_eval_episodes
         if cfg.reward_eval_episodes is not None:
             if (
@@ -1206,6 +1224,11 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     cfg.info_eval_survival_thresholds
                 ),
                 csv_path=artifact_path(cfg.log_dir, "eval_info_csv"),
+                # Headline selection retired the reward EvalCallback,
+                # and with it the only periodic progress line a run
+                # printed. Forward the evaluation verbosity so
+                # `eval_verbose=1` restores a per-evaluation heartbeat.
+                verbose=eval_verbose,
                 **selection_kwargs,
             )
             callbacks.append(info_eval_callback)
@@ -1320,6 +1343,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                         csv_path=artifact_path(
                             cfg.log_dir, "eval_info_final_csv"
                         ),
+                        # Same heartbeat on the goal-task stream; the
+                        # callback's log_prefix keeps the two lines
+                        # apart in the cell output.
+                        verbose=eval_verbose,
                     )
                 )
         elif cfg.performance_gate is not None or cfg.final_info_eval:

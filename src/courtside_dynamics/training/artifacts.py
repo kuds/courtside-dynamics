@@ -233,6 +233,7 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "n_envs": cfg.n_envs,
             "seed": cfg.seed,
             "verbose": cfg.verbose,
+            "eval_verbose": cfg.eval_verbose,
             "eval_freq": cfg.eval_freq,
             "checkpoint_freq": cfg.checkpoint_freq,
             "video_freq": cfg.video_freq,

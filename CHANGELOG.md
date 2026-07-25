@@ -74,6 +74,19 @@ across three rollout passes becomes 60 across two. Ten more episodes buys
 a 6× larger sample on the campaign's target metric; set
 `final_eval_episodes` explicitly to trade it back for wall clock.
 
+Retiring the reward `EvalCallback` also removed the only periodic
+progress a run printed, leaving a multi-hour job silent apart from stage
+advances and the run-ending line. New `eval_verbose` restores it on the
+info-eval streams alone, **default off** (`None` follows `verbose`):
+`eval_verbose = 1` prints one line per evaluation per stream — step,
+episodes, mean reward, episode length, curriculum stage, and the
+selection metric — prefixed with the stream's `log_prefix` so the
+matched and final-config lines stay apart. It is deliberately separate
+from `verbose`, which drives SB3's per-rollout table: SAC emits that
+every `log_interval` (4) episodes, thousands of tables over a
+multi-million-step run, so it is not a usable substitute for progress at
+`eval_freq` cadence.
+
 Selection, the gate, `best_model.zip`, `best_model_meta.json`, and the
 per-stage `stage_bests/` archive are all driven by the matched stream and
 are unchanged.
