@@ -299,6 +299,82 @@ contain the patch needed to reconstruct that state independently. A final
 certification artifact must run from a clean committed revision (or archive
 the exact patch and relevant dependency environment).
 
+## 2026-07-25 replication on calibration seeds 0–199
+
+A second paired sweep was run at 200 episodes per cell on seeds **0–199**,
+from a **clean committed revision** (`89dbe61`, `git_dirty: false`, empty
+tracked-diff hash) — the first sweep in this campaign to satisfy that part
+of the reproducibility requirement stated below. The reports regenerate
+from the recorded revision, command, and `seed_range` field, so the 2.5 MB
+raw JSONs are deliberately not vendored. Item 5 of the contract is still
+unmet, however: both artifacts record `calibration: null`, because the
+tool refuses a calibration range that overlaps the held-out range and
+here the two coincide.
+
+**These are calibration seeds, not certification.** Range 0–199 is the same
+range the exploratory `oracle_charge_gap` timing search used. Results here
+are therefore biased *in the oracle's favour* and must not be quoted as
+held-out feasibility.
+
+Oracle ≥2-return rate, with Wilson 95% intervals (successes/200):
+
+| stage | aligned (0–199) | baseline (0–199) | aligned (1000–1199) | baseline (1000–1199) |
+|---:|---:|---:|---:|---:|
+| 0 | 94.0% [89.8, 96.5] | 94.0% [89.8, 96.5] | 95.5% | 95.5% |
+| 1 | 98.5% [95.7, 99.5] | 96.0% [92.3, 98.0] | 96.0% | 95.5% |
+| 2 | 93.5% [89.2, 96.2] | 92.0% [87.4, 95.0] | 94.0% | 94.0% |
+| 3 | **85.5%** [80.0, 89.7] | 94.0% [89.8, 96.5] | **84.5%** | 92.5% |
+| 4 | **63.5%** [56.6, 69.9] | 95.0% [91.0, 97.3] | **60.0%** | **89.0%** |
+
+Stage 0 is identical across ladders (188/200 both), confirming the negative
+control holds. The aligned landing contract passes again: mean offsets
+0.001–0.049 m against the 0.10 m bar, with 100% of individual landings
+inside ±0.30 m at stages 0–3 and 99.5% at stage 4. Baseline offsets grow
+0.001 → 1.399 m as before.
+
+Two conclusions follow that the single 1000–1199 sweep could not support:
+
+1. **The aligned deep-stage deficit is robust, not seed noise.** Stage 4
+   scores 60.0% and 63.5% on two disjoint 200-episode seed sets — 27 to 30
+   points below the bar, with intervals excluding any plausible 90% target.
+   Stage 3 replicates at 84.5% and 85.5%.
+2. **The baseline's stage-4 near-miss was seed noise.** It scored 89.0%
+   (178/200) on 1000–1199 and 95.0% (190/200) on 0–199. The bar sits inside
+   that spread, so the earlier one-point miss should not be read as a
+   baseline defect. On these seeds the fixed-origin ladder passes every
+   criterion with no failures recorded.
+
+The failure mode is a clean split. At stage 4 the aligned oracle's 73
+failures are overwhelmingly missed returns (65 double bounce, 8 out of
+bounds), while the baseline fails only 10 times at all; its 182
+out-of-bounds terminations are mostly completed rallies (173) that ran out
+of court *after* the required returns. Aligned out-of-bounds terminations
+are likewise mostly successes (72 of 80), so the raw cause counts must not
+be read as failure counts.
+
+**The attribution is confounded, and in the baseline's favour.** The
+oracle's per-stage timing (`oracle_run_up=1.1` at stage 0, and
+`oracle_charge_gap` 1.0/1.0/1.8/1.7 at stages 1–4) arrived at commit
+`24223f4`, when every stage still served from `serve_start_x=1.0`; `3fd9fb3`
+added the aligned ladder by changing **only** `serve_start_x` and left
+every probe value untouched. `BASELINE_STAGES` then derives from
+`ALIGNED_STAGES` by overwriting the origin, so both arms today run a
+controller calibrated for a ball landing 1.0–1.4 m in front of the paddle.
+Under alignment the ball lands at the paddle's feet — a different
+interception problem the charge timing was never re-derived for.
+
+The honest reading is therefore weaker than a single-lever attribution:
+the deep-stage loss is *associated with* the serve-origin change, but an
+unknown share of it is stale controller timing rather than geometric
+infeasibility. Deriving a placement-fair oracle on calibration seeds and
+re-running is a precondition for any causal claim; that work is sequenced
+as Phase A of `plan_wall_ball_aligned_deep_stages.md`.
+
+The crude controller remains mixed and placement-coupled (aligned higher
+at stages 1, 2, and 4 — 95.5/90.0/19.5% against 73.0/69.0/14.0% — and
+lower at stage 3, 46.0% against 58.5%), so it still carries no weight in
+either direction.
+
 ## Strengthened calibration contract
 
 The existing sweep certifies feasibility (oracle ≥2 returns on at least 90%
