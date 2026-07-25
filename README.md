@@ -146,6 +146,7 @@ available recipe keys are:
 - `WallBallBaseline`
 - `WallBallBootstrap` (historical — superseded by `WallBallDepthCurriculum`)
 - `WallBallDepthCurriculum`
+- `WallBallDepthCurriculumAligned` (experimental serve-origin treatment)
 - `HumanoidTennisStage0Intercept`
 - `HumanoidTennisStage1AnchoredReturn`
 - `HumanoidTennisStage2RandomizedReturn`
