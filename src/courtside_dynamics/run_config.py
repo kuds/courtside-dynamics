@@ -179,6 +179,7 @@ _GATE_OPTIONAL_KEYS = (
     "advance_update_pause_steps",
     "clear_replay_buffer_on_advance",
     "reset_entropy_on_advance",
+    "pool_confirmation_samples",
 )
 
 

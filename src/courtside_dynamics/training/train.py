@@ -1153,6 +1153,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                         "advance_update_pause_steps",
                         "clear_replay_buffer_on_advance",
                         "reset_entropy_on_advance",
+                        "pool_confirmation_samples",
                     }
                 )
                 if unknown_gate_keys:
@@ -1178,6 +1179,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     ),
                     reset_entropy_on_advance=gate_spec.get(
                         "reset_entropy_on_advance", False
+                    ),
+                    pool_confirmation_samples=gate_spec.get(
+                        "pool_confirmation_samples", False
                     ),
                     info_eval=info_eval_callback,
                     # Per-stage champion archive + history report:

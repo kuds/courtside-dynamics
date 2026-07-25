@@ -290,6 +290,14 @@ class InfoDictEvalCallback(BaseCallback):
         # increasing completion counter, for consumers that react to
         # evaluations (e.g. performance-gated curriculum callbacks).
         self.last_metrics: dict[str, float] | None = None
+        # The confirmation batch's metrics when ``confirm_best`` re-sampled
+        # a candidate on the most recent evaluation, else None. Exposed so
+        # a consumer can pool that second independent sample instead of
+        # discarding it (see PerformanceGatedEnvStagesCallback's
+        # ``pool_confirmation_samples``): it is a full
+        # ``n_eval_episodes`` batch on the same distribution, already
+        # paid for.
+        self.last_confirmation_metrics: dict[str, float] | None = None
         self.completed_evals = 0
         # (score, guard values) for the most recent evaluations, sized to
         # the degenerate-signal window.
@@ -318,6 +326,9 @@ class InfoDictEvalCallback(BaseCallback):
         metrics = self._collect_metrics()
         self._merge_context(metrics)
         self.last_metrics = dict(metrics)
+        # Cleared per evaluation so a consumer never pools a stale
+        # confirmation from an earlier eval.
+        self.last_confirmation_metrics = None
         self.completed_evals += 1
 
         logger = self.logger
@@ -631,6 +642,12 @@ class InfoDictEvalCallback(BaseCallback):
             # with 30-episode evals a single lucky episode moves an
             # episode-mean by 1/30, enough to win a strict comparison.
             confirmation = self._collect_metrics()
+            self._merge_context(confirmation)
+            # Published whether or not the candidate survives: as
+            # evidence about the *policy's* current performance the batch
+            # is valid either way, and a gate pooling it must not see a
+            # sample set that depends on the selection outcome.
+            self.last_confirmation_metrics = dict(confirmation)
             confirm_score = self._score_of(confirmation)
             if self._improves(confirm_score, self._best_score):
                 # Bank the weaker of the two samples -- under the same

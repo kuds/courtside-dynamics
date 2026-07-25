@@ -1114,3 +1114,79 @@ def test_info_dict_eval_archive_best_copies_the_best_triple(tmp_path):
         assert callback_no_path.archive_best(str(tmp_path / "x")) is None
     finally:
         eval_env.close()
+
+
+def test_confirmation_batch_is_published_for_pooling(tmp_path, monkeypatch):
+    """``last_confirmation_metrics`` exposes the second batch.
+
+    It is a full ``n_eval_episodes`` rollout on the same distribution that
+    the run already paid for; the performance gate can pool it into the
+    promotion window instead of discarding it.
+    """
+    import json
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    cb = InfoDictEvalCallback(
+        eval_env=object(),
+        best_metric_keys=("bounce_count_ep_mean",),
+        best_model_save_path=str(tmp_path),
+        confirm_best=True,
+        best_metric_min_delta=0.5 / 30,
+    )
+    cb.model = _FakeSavableModel(action_dim=3)
+    cb.model.get_vec_normalize_env = lambda: None  # type: ignore[attr-defined]
+
+    # First evaluation: accepted unconfirmed, so there is no second batch.
+    cb.num_timesteps = 100
+    assert cb._update_best_and_maybe_stop({"bounce_count_ep_mean": 1.0})
+    assert cb.last_confirmation_metrics is None
+
+    # A confirmed improvement publishes the confirmation batch.
+    monkeypatch.setattr(
+        cb, "_collect_metrics", lambda: {"bounce_count_ep_mean": 1.2}
+    )
+    cb.num_timesteps = 200
+    assert cb._update_best_and_maybe_stop({"bounce_count_ep_mean": 1.3})
+    assert cb.last_confirmation_metrics == {"bounce_count_ep_mean": 1.2}
+    with open(tmp_path / "best_model_meta.json") as stream:
+        assert json.load(stream)["timestep"] == 200
+
+    # A *rejected* candidate still publishes its batch: as evidence about
+    # the policy it is valid either way, and a pooling gate must not see a
+    # sample set that depends on the selection outcome.
+    monkeypatch.setattr(
+        cb, "_collect_metrics", lambda: {"bounce_count_ep_mean": 0.2}
+    )
+    cb.num_timesteps = 300
+    assert cb._update_best_and_maybe_stop({"bounce_count_ep_mean": 1.9})
+    assert cb.last_confirmation_metrics == {"bounce_count_ep_mean": 0.2}
+    with open(tmp_path / "best_model_meta.json") as stream:
+        assert json.load(stream)["timestep"] == 200
+
+
+def test_confirmation_slot_is_cleared_on_every_evaluation():
+    """A stale confirmation must never be pooled into a later decision."""
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.envs import WallBallEnv
+
+    eval_env = make_vec_env(lambda: WallBallEnv(episode_len=30), n_envs=1)
+    try:
+        cb = InfoDictEvalCallback(
+            eval_env=eval_env,
+            n_eval_episodes=1,
+            eval_freq=1,
+            success_key="bounce_count",
+        )
+        cb.model = _FakeSavableModel(action_dim=3)
+        cb.model.get_vec_normalize_env = lambda: None  # type: ignore[attr-defined]
+        cb.n_calls = 1
+        cb.last_confirmation_metrics = {"stale": 1.0}
+
+        assert cb._on_step() is True
+        assert cb.completed_evals == 1
+        assert cb.last_confirmation_metrics is None
+    finally:
+        eval_env.close()

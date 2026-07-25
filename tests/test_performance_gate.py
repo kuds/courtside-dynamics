@@ -39,6 +39,7 @@ class _FakeInfoEval:
         self.eval_env = eval_env
         self.completed_evals = 0
         self.last_metrics: dict[str, float] | None = None
+        self.last_confirmation_metrics: dict[str, float] | None = None
         self.selection_resets = 0
         self.context_metrics: dict[str, float] = {}
         # (destination, selection_resets at call time): the second slot
@@ -61,8 +62,17 @@ class _FakeInfoEval:
     def set_context_metric(self, name: str, value: float) -> None:
         self.context_metrics[name] = float(value)
 
-    def finish_eval(self, metrics: dict[str, float]) -> None:
+    def finish_eval(
+        self,
+        metrics: dict[str, float],
+        confirmation: dict[str, float] | None = None,
+    ) -> None:
         self.last_metrics = dict(metrics)
+        # Mirrors InfoDictEvalCallback: the confirmation slot is cleared
+        # on every evaluation, so a gate can never pool a stale batch.
+        self.last_confirmation_metrics = (
+            None if confirmation is None else dict(confirmation)
+        )
         self.completed_evals += 1
 
 
@@ -804,6 +814,185 @@ def test_entropy_reset_defaults_off_and_leaves_temperature_alone():
         assert model.ent_coef == pytest.approx(9.2e-4, rel=1e-3)
         assert "stale" in model.ent_coef_optimizer.state
         assert gate._entropy_resets == 0
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def _pooling_gate(train_env, info_eval, **overrides):
+    kwargs = dict(
+        sustain_evals=2,
+        promotion_rule="window_mean",
+        pool_confirmation_samples=True,
+    )
+    kwargs.update(overrides)
+    return _gate(train_env, info_eval, **kwargs)
+
+
+def test_pooled_confirmation_averages_both_batches_into_the_window():
+    """The confirmation batch is a paid-for second sample, not noise.
+
+    Run 20260724_152530 promoted stage 0 on a window mean of 3.011
+    against a 3.0 bar while confirmation batches sat unused.
+    """
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _pooling_gate(train_env, info_eval)
+        gate._on_training_start()
+
+        # Primary 1.5 with a confirmation of 0.9 pools to 1.2, which is
+        # below the 1.3 bar -- the unpooled 1.5 would have counted as a
+        # clean pass.
+        info_eval.finish_eval(
+            {"bounce_count_ep_mean": 1.5},
+            confirmation={"bounce_count_ep_mean": 0.9},
+        )
+        assert gate._on_step() is True
+        assert list(gate._metric_window) == [pytest.approx(1.2)]
+        assert list(gate._window_samples) == [2]
+        assert gate.stage_index == 0
+
+        # A second pooled eval of 1.5/1.5 gives a window mean of
+        # (1.2 + 1.5) / 2 = 1.35, clearing the 1.3 bar.
+        info_eval.finish_eval(
+            {"bounce_count_ep_mean": 1.5},
+            confirmation={"bounce_count_ep_mean": 1.5},
+        )
+        assert gate._on_step() is True
+        assert gate.stage_index == 1
+        # The window is evidence for the *departing* stage, so both it
+        # and its sample counts reset on the advance.
+        assert list(gate._metric_window) == []
+        assert list(gate._window_samples) == []
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_pooled_window_is_recorded_before_the_advance_clears_it():
+    """The departing stage's history row keeps the promotion evidence."""
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _pooling_gate(train_env, info_eval, sustain_evals=2)
+        gate._on_training_start()
+
+        info_eval.finish_eval(
+            {"bounce_count_ep_mean": 2.0},
+            confirmation={"bounce_count_ep_mean": 2.0},
+        )
+        assert gate._on_step() is True
+        info_eval.finish_eval({"bounce_count_ep_mean": 2.0})
+        assert gate._on_step() is True
+
+        assert gate.stage_index == 1
+        row = gate._stage_history[0]
+        assert row["promoted"] is True
+        assert row["promotion_window"] == [
+            pytest.approx(2.0),
+            pytest.approx(2.0),
+        ]
+        assert row["promotion_window_samples"] == [2, 1]
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_pooling_disabled_ignores_the_confirmation_batch():
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env, info_eval, sustain_evals=1, promotion_rule="window_mean"
+        )
+        gate._on_training_start()
+
+        info_eval.finish_eval(
+            {"bounce_count_ep_mean": 1.5},
+            confirmation={"bounce_count_ep_mean": 0.1},
+        )
+        assert gate._on_step() is True
+        # Pooling off: the 0.1 confirmation is ignored, so 1.5 clears the
+        # 1.3 bar on a 1-eval window and promotes.
+        assert gate.stage_index == 1
+        assert gate._stage_history[0]["promotion_window"] == [
+            pytest.approx(1.5)
+        ]
+        assert gate._stage_history[0]["promotion_window_samples"] == [1]
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_pooling_tolerates_a_confirmation_missing_the_gate_metric():
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _pooling_gate(train_env, info_eval, sustain_evals=1)
+        gate._on_training_start()
+
+        info_eval.finish_eval(
+            {"bounce_count_ep_mean": 1.5},
+            confirmation={"something_else": 4.0},
+        )
+        assert gate._on_step() is True
+        # A confirmation without the gate metric contributes nothing and
+        # must not be counted as a second sample.
+        assert gate.stage_index == 1
+        assert gate._stage_history[0]["promotion_window"] == [
+            pytest.approx(1.5)
+        ]
+        assert gate._stage_history[0]["promotion_window_samples"] == [1]
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_stage_history_records_window_sample_counts(tmp_path):
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    history = tmp_path / "curriculum_stages.json"
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _pooling_gate(
+            train_env,
+            info_eval,
+            sustain_evals=1,
+            stage_history_path=str(history),
+        )
+        gate._on_training_start()
+
+        info_eval.finish_eval(
+            {"bounce_count_ep_mean": 2.0},
+            confirmation={"bounce_count_ep_mean": 2.0},
+        )
+        assert gate._on_step() is True
+
+        payload = json.loads(history.read_text())
+        assert payload["pool_confirmation_samples"] is True
+        assert payload["reset_entropy_on_advance"] is False
+        row = payload["stages"][0]
+        assert row["promotion_window"] == [pytest.approx(2.0)]
+        assert row["promotion_window_samples"] == [2]
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_pool_confirmation_samples_rejects_non_boolean():
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        with pytest.raises(
+            ValueError, match="pool_confirmation_samples must be a boolean"
+        ):
+            _gate(train_env, info_eval, pool_confirmation_samples="yes")
     finally:
         train_env.close()
         eval_env.close()

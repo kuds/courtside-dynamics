@@ -318,6 +318,9 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
                     "reset_entropy_on_advance": cfg.performance_gate.get(
                         "reset_entropy_on_advance", False
                     ),
+                    "pool_confirmation_samples": cfg.performance_gate.get(
+                        "pool_confirmation_samples", False
+                    ),
                     "stages": [
                         dict(stage)
                         for stage in cfg.performance_gate["stages"]
