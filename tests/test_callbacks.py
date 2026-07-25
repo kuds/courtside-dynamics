@@ -1190,3 +1190,37 @@ def test_confirmation_slot_is_cleared_on_every_evaluation():
         assert cb.last_confirmation_metrics is None
     finally:
         eval_env.close()
+
+
+def test_info_dict_eval_refuses_a_multi_worker_eval_env():
+    """Worker 0 only is aggregated, so a bigger env must fail loudly.
+
+    The rollout loop reads ``infos[0]``/``rewards[0]``; extra workers
+    would be stepped but never measured, and the metrics would silently
+    describe one worker's episodes.
+    """
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.envs import WallBallEnv
+
+    eval_env = make_vec_env(lambda: WallBallEnv(episode_len=20), n_envs=4)
+    try:
+        with pytest.raises(ValueError, match="num_envs=1"):
+            InfoDictEvalCallback(eval_env=eval_env, n_eval_episodes=1)
+    finally:
+        eval_env.close()
+
+
+def test_info_dict_eval_accepts_a_single_worker_eval_env():
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.envs import WallBallEnv
+
+    eval_env = make_vec_env(lambda: WallBallEnv(episode_len=20), n_envs=1)
+    try:
+        cb = InfoDictEvalCallback(eval_env=eval_env, n_eval_episodes=1)
+        assert cb.eval_env is eval_env
+    finally:
+        eval_env.close()

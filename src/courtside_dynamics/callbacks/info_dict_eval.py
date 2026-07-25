@@ -227,6 +227,21 @@ class InfoDictEvalCallback(BaseCallback):
         degenerate_min_evals: int = 0,
     ) -> None:
         super().__init__(verbose)
+        # The rollout loop reads infos[0]/rewards[0] and counts episodes
+        # from worker 0 only. A multi-worker eval env would still be
+        # stepped in full but three quarters of its work would go
+        # unrecorded, and the metrics would silently describe one worker
+        # -- so refuse it rather than quietly mismeasure. Vectorizing
+        # evaluation means rewriting this loop, not passing a bigger env.
+        # ``getattr`` because callers legitimately pass a stub env in
+        # tests that exercise selection without rolling anything.
+        eval_num_envs = getattr(eval_env, "num_envs", None)
+        if eval_num_envs is not None and eval_num_envs != 1:
+            raise ValueError(
+                f"eval_env must be single-worker (num_envs=1), got "
+                f"{eval_num_envs}: this callback aggregates worker 0 only, "
+                f"so extra workers would be stepped but not measured"
+            )
         self.eval_env = eval_env
         self.n_eval_episodes = n_eval_episodes
         self.eval_freq = eval_freq

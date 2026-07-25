@@ -81,7 +81,15 @@ Reporting and provenance:
 - `config.json` now records `reward_eval_episodes` and
   `final_eval_episodes`. Both were absent from the hand-maintained
   `train_config` block, so a run's artifacts could not say whether its
-  reward stream rolled 5 episodes or 30.
+  reward stream rolled 5 episodes or 30. A new test pins that the block
+  covers every `TrainConfig` field except the four code-valued ones and
+  the two recorded at top level, so the next field cannot drift the same
+  way.
+- `InfoDictEvalCallback` now rejects a multi-worker `eval_env`. Its
+  rollout loop reads `infos[0]`/`rewards[0]` and counts episodes from
+  worker 0 only, so extra workers were stepped but never measured — a
+  silent mismeasurement, and the reason vectorizing evaluation is a
+  rewrite of that loop rather than a bigger env.
 
 Metrics era: unchanged for the matched stream and for `eval_info.csv`.
 `evaluations.npz` keeps its schema but its rows come from a different

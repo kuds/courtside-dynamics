@@ -1041,3 +1041,45 @@ def test_no_merge_without_headline_selection(tmp_path):
 
     payload = np.load(tmp_path / "metrics" / "evaluations.npz")
     assert payload["results"].shape[1] == 4
+
+
+def test_config_json_records_every_train_config_data_field(tmp_path):
+    """``config.json``'s ``train_config`` block is hand-maintained.
+
+    A new ``TrainConfig`` field is therefore silently absent from every
+    run's provenance snapshot until someone remembers to add it --
+    ``reward_eval_episodes`` was missing for its whole life, so a run's
+    artifacts could not say whether its reward stream rolled 5 episodes or
+    30. Pin the coverage so the next field cannot drift the same way.
+    """
+    import dataclasses
+
+    # The only fields deliberately absent from the block.
+    code_valued = {"env_fn", "eval_env_fn", "extra_callbacks", "info_row_fn"}
+    recorded_at_top_level = {"recipe_name", "run_config_file"}
+
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=8),
+        log_dir=str(tmp_path),
+    )
+    write_run_config(cfg, str(tmp_path))
+    payload = json.loads((tmp_path / "config.json").read_text())
+
+    expected = {
+        field.name
+        for field in dataclasses.fields(TrainConfig)
+    } - code_valued - recorded_at_top_level
+    recorded = set(payload["train_config"])
+
+    missing = expected - recorded
+    assert not missing, (
+        f"TrainConfig fields absent from config.json's train_config block: "
+        f"{sorted(missing)}. Add them to artifacts.write_run_config, or to "
+        f"this test's exclusion sets with a reason."
+    )
+    # Nothing derived should be smuggled in either -- the block should be
+    # exactly the run's configuration.
+    assert not recorded - expected, sorted(recorded - expected)
+    # The excluded-but-real fields must still be recorded somewhere.
+    for name in recorded_at_top_level:
+        assert name in payload

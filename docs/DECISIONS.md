@@ -250,12 +250,15 @@ training at ~350-step episodes — and up to ~112% overhead on evals that
 trigger a confirmation. `InfoDictEvalCallback` was already a strict
 superset of the reward evaluator (it collects per-episode returns for its
 own reward tie-break), so the duplicate is retired and the final-config
-stream owns `evaluations.npz`. **Still open:** all eval envs are built
-`n_envs=1` (`train.py`), so evaluation runs batch-1 and serial while
-training runs 8-wide; the callback also hardcodes `infos[0]`/`rewards[0]`
-with no `num_envs == 1` guard, so a vectorized eval env would silently
-count only worker 0. Vectorizing eval is the real wall-clock lever and
-needs that guard plus a multi-env rollout loop.
+stream owns `evaluations.npz`. 0.20.0 also makes the single-worker
+requirement explicit: the rollout loop reads `infos[0]`/`rewards[0]` and
+counted worker 0 only, so a multi-worker eval env was stepped in full and
+three quarters of it went unmeasured — now rejected at construction.
+**Still open:** all eval envs are built `n_envs=1` (`train.py`), so
+evaluation runs batch-1 and serial while training runs 8-wide. That is the
+real wall-clock lever (~21,000 serial eval steps per 25,000 training steps
+at the 0.20.0 episode counts), and claiming it means rewriting the rollout
+loop to aggregate every worker — not passing a bigger env.
 
 ### `config.json`'s `train_config` is a hand-maintained allowlist — *partially implemented (0.20.0)*
 `artifacts.py` enumerates the fields to serialize by hand, so a new
@@ -263,9 +266,13 @@ needs that guard plus a multi-env rollout loop.
 snapshot until someone remembers to add it. `reward_eval_episodes` — set
 to 5 by two recipes and directly changing how much evidence a run's
 reward stream collects — was missing for its whole life. 0.20.0 records
-it and `final_eval_episodes`. **Still open:** no test asserts the block
-covers every `TrainConfig` field, so the next field will drift the same
-way.
+it and `final_eval_episodes`, and a test now pins that the block covers
+every field except the four code-valued ones (`env_fn`, `eval_env_fn`,
+`extra_callbacks`, `info_row_fn`) and the two recorded at top level
+(`recipe_name`, `run_config_file`) — in both directions, so a derived
+value cannot be smuggled into the block either. Adding a field without
+recording it is now a test failure rather than a discovery made months
+later while reading a run.
 
 ### `final_stage_index` reports the departing stage mid-run — *open (P3)*
 `_write_stage_history` reads `self._stage_index` but is called from
