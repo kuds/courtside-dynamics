@@ -60,7 +60,12 @@ def _configured_ent_coef_init(model: Any) -> float:
         )
     if "_" not in configured:
         return 1.0
-    _, _, raw = configured.partition("_")
+    # Mirror SB3's own parse (``float(self.ent_coef.split("_")[1])``)
+    # exactly. ``partition`` would hand "auto_1_0" the tail "1_0", which
+    # float() reads as 10.0 via Python's numeric underscores while SB3
+    # initializes at 1.0 -- a restore target that silently disagrees with
+    # what the run actually started from.
+    raw = configured.split("_")[1]
     try:
         value = float(raw)
     except ValueError as error:
@@ -146,26 +151,6 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         would have SAC immediately optimizing against a near-empty
         buffer -- and a model exposing ``replay_buffer`` (both checked
         loudly).
-    pool_confirmation_samples:
-        When ``True``, an evaluation whose ``confirm_best`` batch ran
-        contributes the *mean of both batches* to the promotion window
-        instead of the first batch alone. The confirmation is a second
-        independent ``n_eval_episodes`` rollout on the same distribution
-        that the run already paid for and previously discarded from the
-        promotion decision, so pooling roughly doubles the evidence
-        behind those entries for free. Both batches use
-        ``n_eval_episodes``, so the equal-weight mean is the exact
-        pooled estimate.
-
-        Motivation: run 20260724_152530 promoted stage 0 on a window
-        mean of 3.011 against a 3.0 bar -- a 0.4% margin -- while
-        confirmation batches from the same window sat unused.
-
-        The window entries recorded in the stage-history report stay
-        "the values the gate actually compared"; a sibling
-        ``promotion_window_samples`` list records how many batches backed
-        each one, so a pooled window is still readable next to an
-        unpooled run's.
     reset_entropy_on_advance:
         When ``True``, every stage advance restores SAC's auto-tuned
         entropy temperature to the value it was initialized with and
@@ -245,7 +230,6 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         promotion_rule: str = "consecutive",
         advance_update_pause_steps: int = 0,
         clear_replay_buffer_on_advance: bool = False,
-        pool_confirmation_samples: bool = False,
         reset_entropy_on_advance: bool = False,
         entropy_reset_value: float | None = None,
         extra_target_envs: Sequence[VecEnv] = (),
@@ -297,8 +281,6 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
             )
         if not isinstance(reset_entropy_on_advance, bool):
             raise ValueError("reset_entropy_on_advance must be a boolean")
-        if not isinstance(pool_confirmation_samples, bool):
-            raise ValueError("pool_confirmation_samples must be a boolean")
         if entropy_reset_value is not None:
             if (
                 isinstance(entropy_reset_value, bool)
@@ -342,7 +324,6 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         self.entropy_reset_value: float | None = (
             None if entropy_reset_value is None else float(entropy_reset_value)
         )
-        self.pool_confirmation_samples: bool = pool_confirmation_samples
         self.info_eval: InfoDictEvalCallback = info_eval
         self.extra_target_envs: tuple[VecEnv, ...] = tuple(extra_target_envs)
         self._stage_index: int = 0
@@ -351,10 +332,6 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         # Rolling metric window for the "window_mean" rule; cleared on
         # every advance and on any evaluation missing the metric.
         self._metric_window: deque[float] = deque(maxlen=sustain_evals)
-        # How many evaluation batches backed each window entry (1, or 2
-        # when a confirmation batch was pooled in). Same maxlen so the
-        # two deques stay index-aligned.
-        self._window_samples: deque[int] = deque(maxlen=sustain_evals)
         # End of the current post-advance update pause (None = not
         # paused) and the gradient_steps value to restore when it ends.
         self._update_pause_until: int | None = None
@@ -419,14 +396,6 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
             logger.record(
                 "curriculum/gate_window_mean",
                 sum(self._metric_window) / len(self._metric_window),
-            )
-        if self.pool_confirmation_samples and self._window_samples:
-            # Episodes behind the current promotion decision, in units of
-            # n_eval_episodes -- the quantity the gate's standard error
-            # actually scales with.
-            logger.record(
-                "curriculum/gate_window_batches",
-                float(sum(self._window_samples)),
             )
         if self._update_pause_until is not None:
             logger.record(
@@ -525,12 +494,6 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                 "evals": self._stage_eval_count,
                 "promoted": promoted,
                 "promotion_window": [float(v) for v in self._metric_window],
-                # Batches behind each window entry: 1, or 2 where a
-                # confirmation batch was pooled in. Keeps a pooled
-                # window comparable with an unpooled run's.
-                "promotion_window_samples": [
-                    int(n) for n in self._window_samples
-                ],
                 "streak": self._streak,
                 "best": best_meta,
             }
@@ -553,7 +516,6 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                 self.clear_replay_buffer_on_advance
             ),
             "reset_entropy_on_advance": self.reset_entropy_on_advance,
-            "pool_confirmation_samples": self.pool_confirmation_samples,
             "stage_count": len(self.stages),
             "final_stage_index": self._stage_index,
             "stages": self._stage_history,
@@ -630,21 +592,16 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                 "reset_entropy_on_advance: the model no longer exposes "
                 "'log_ent_coef'/'ent_coef_optimizer'"
             )
-        with_no_grad = getattr(log_ent_coef, "detach", None)
-        if with_no_grad is not None:
-            log_ent_coef.detach().fill_(self._initial_log_ent_coef)
-        else:  # pragma: no cover - duck-typed fallback
-            log_ent_coef.data.fill_(self._initial_log_ent_coef)
+        # ``detach()`` shares storage with the leaf, so this writes the
+        # value in place without replacing the tensor the optimizer's
+        # param group points at.
+        log_ent_coef.detach().fill_(self._initial_log_ent_coef)
         # Same parameter object, so the optimizer keeps its param group;
         # only the accumulated moments go.
         optimizer.state.clear()
         self._entropy_resets += 1
 
-    def _promotion_earned(
-        self,
-        metrics: Mapping[str, Any],
-        confirmation: Mapping[str, Any] | None = None,
-    ) -> bool:
+    def _promotion_earned(self, metrics: Mapping[str, Any]) -> bool:
         """Update the sustain state with a fresh eval; True when mastered."""
         value = metrics.get(self.metric_key)
         if value is None:
@@ -652,18 +609,8 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
             # mastery under either rule: restart the evidence window.
             self._streak = 0
             self._metric_window.clear()
-            self._window_samples.clear()
             return False
         resolved = float(value)
-        samples = 1
-        if confirmation is not None:
-            confirmed = confirmation.get(self.metric_key)
-            if confirmed is not None:
-                # Both batches are n_eval_episodes on the same
-                # distribution, so the equal-weight mean is the exact
-                # pooled estimate over 2 * n_eval_episodes episodes.
-                resolved = (resolved + float(confirmed)) / 2.0
-                samples = 2
         # The streak is maintained under both rules -- it drives the
         # "consecutive" decision and stays a logged diagnostic under
         # "window_mean". The metric window is likewise kept under both:
@@ -674,7 +621,6 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         # for consecutive-rule gates too.
         self._streak = self._streak + 1 if resolved >= self.threshold else 0
         self._metric_window.append(resolved)
-        self._window_samples.append(samples)
         if self.promotion_rule == "consecutive":
             return self._streak >= self.sustain_evals
         if len(self._metric_window) < self.sustain_evals:
@@ -689,13 +635,8 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         self._seen_evals = self.info_eval.completed_evals
         self._stage_eval_count += 1
         metrics = self.info_eval.last_metrics or {}
-        confirmation = (
-            getattr(self.info_eval, "last_confirmation_metrics", None)
-            if self.pool_confirmation_samples
-            else None
-        )
         if (
-            self._promotion_earned(metrics, confirmation)
+            self._promotion_earned(metrics)
             and self._stage_index < len(self.stages) - 1
         ):
             # Archive the departing stage's champion and close its
@@ -707,7 +648,6 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
             self._stage_eval_count = 0
             self._streak = 0
             self._metric_window.clear()
-            self._window_samples.clear()
             self._apply_stage()
             # Scores from different stage distributions are not
             # comparable: without this reset, a best banked on an easier

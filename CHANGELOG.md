@@ -7,15 +7,15 @@ versions. Newest releases first.
 
 ## 0.20.0
 
-Three curriculum-harness changes, all aimed at the depth campaign's
-dominant cost: per-stage promotion price, not total budget. Runs
+Curriculum-harness changes aimed at the depth campaign's dominant cost:
+per-stage promotion price, not total budget. Runs
 `20260721_004722` (3M steps, reached stage 2 of 4) and
 `20260724_152530` (6M budget, still on stage 1 at 2.55M) place the same
 ladder position at twice the compute, so what binds is the cost of each
 promotion.
 
-Two new `performance_gate` keys, both **default off**, so existing runs
-are bit-identical and each can be adopted as its own single lever:
+One new `performance_gate` key, **default off**, so existing runs are
+bit-identical:
 
 - `reset_entropy_on_advance` restores SAC's auto-tuned entropy
   temperature to its initial value on every stage advance and clears the
@@ -35,13 +35,20 @@ are bit-identical and each can be adopted as its own single lever:
   exists to undo. `entropy_reset_value` overrides that target when
   `"auto"`'s 1.0 is more exploration than a mid-campaign continuation
   wants.
-- `pool_confirmation_samples` folds `confirm_best`'s second batch into
-  the promotion window. That batch is a full `n_eval_episodes` rollout on
-  the current stage that the run already pays for and previously
-  discarded from the gate, which only ever saw the first batch. Run
-  `20260724_152530` promoted stage 0 on a window mean of 3.011 against a
-  3.0 bar — a 0.4% margin — with confirmation batches from that same
-  window unused.
+
+`InfoDictEvalCallback` now publishes `last_confirmation_metrics` (cleared
+per evaluation) so `confirm_best`'s second batch is observable instead of
+vanishing except for the copy in `best_model_meta.json`.
+
+A `pool_confirmation_samples` gate switch that folded that batch into the
+promotion window was **built and then rejected** — see `docs/DECISIONS.md`.
+The batch is conditionally sampled (it only runs when the primary batch
+beat the running best), so averaging it in regresses exactly the high
+draws toward the mean while leaving low draws alone. That biases the
+window downward and silently raises the bar, the one thing run 1's review
+said not to do. Simulated at the campaign's own numbers it cost **+27
+evaluations ≈ +666k env steps per promotion** in the slow-climb regime
+Run A is actually in.
 
 Evaluation streams are consolidated. Under headline-metric selection the
 reward `EvalCallback` and the final-config info-eval stream roll the
@@ -73,11 +80,10 @@ are unchanged.
 
 Reporting and provenance:
 
-- `curriculum_stages.json` gains `promotion_window_samples` (batches
-  behind each window entry, so a pooled window stays readable next to an
-  unpooled run's) and records both new gate switches;
-  `curriculum/gate_window_batches` and `curriculum/entropy_resets` are
-  new TensorBoard series.
+- `curriculum_stages.json` records `reset_entropy_on_advance` (additive:
+  existing readers are unaffected, but the file is not byte-identical to
+  a 0.19.0 run's) and `curriculum/entropy_resets` is a new TensorBoard
+  series.
 - `config.json` now records `reward_eval_episodes` and
   `final_eval_episodes`. Both were absent from the hand-maintained
   `train_config` block, so a run's artifacts could not say whether its

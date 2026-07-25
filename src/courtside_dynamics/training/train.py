@@ -1225,7 +1225,6 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                         "clear_replay_buffer_on_advance",
                         "reset_entropy_on_advance",
                         "entropy_reset_value",
-                        "pool_confirmation_samples",
                     }
                 )
                 if unknown_gate_keys:
@@ -1254,9 +1253,6 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     ),
                     entropy_reset_value=gate_spec.get(
                         "entropy_reset_value"
-                    ),
-                    pool_confirmation_samples=gate_spec.get(
-                        "pool_confirmation_samples", False
                     ),
                     info_eval=info_eval_callback,
                     # Per-stage champion archive + history report:

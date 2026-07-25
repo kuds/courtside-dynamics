@@ -225,6 +225,30 @@ which by then is nearly gone (see the entropy entry above). This is a
 **third** promotion-shock mechanism alongside the two already recorded
 (stale replay buffer, unobservable fence).
 
+### Don't pool the `confirm_best` batch into the promotion window — *built, then rejected (0.20.0)*
+Tempting and wrong. `confirm_best` re-rolls a full `n_eval_episodes` batch
+on the current stage before dethroning a best, and the gate never saw it,
+so folding it into the promotion window looks like free evidence — the
+switch was written, tested, and reverted before shipping. The flaw: that
+batch is **conditionally sampled**. It only runs when the primary batch
+beat the running best, so pooling averages a deliberately-selected *high*
+draw with an independent one (regressing it toward the mean) while leaving
+low draws untouched. The window mean is therefore biased downward, which
+silently *raises* the bar by an unquantified amount — precisely what run
+1's review forbade ("do not lower the bar; de-noise the estimator
+instead", and raising it invisibly is worse). Simulated at the campaign's
+own numbers (true mean climbing toward a 3.0 bar, per-episode std 2.0,
+n=30, 3-eval window mean, `min_delta` 0.5/30): mean window entry
+**3.005 → 2.954** (bias −0.046), and evaluations-to-promotion **41.8 →
+47.6** on a fast climb and **132 → 159** on a slow one — **+27 evals ≈
++666k env steps per promotion** in the regime Run A is actually in, on a
+campaign whose binding constraint *is* steps-per-promotion. **Lesson:**
+extra episodes only reduce variance when whether you collect them is
+independent of what the first sample said. The honest way to buy gate
+evidence is unconditional — raise `n_eval_episodes` or `sustain_evals`,
+or pair the episode set (next entry). `last_confirmation_metrics` is still
+published as diagnostic surface; nothing consumes it for decisions.
+
 ### Unpaired evaluation is the root of the gate noise — *open (P1)*
 `InfoDictEvalCallback` calls `self.eval_env.reset()` with no seed and
 never re-seeds (`info_dict_eval.py`), so **every evaluation draws a fresh

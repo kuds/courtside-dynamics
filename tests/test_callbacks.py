@@ -1224,3 +1224,67 @@ def test_info_dict_eval_accepts_a_single_worker_eval_env():
         assert cb.eval_env is eval_env
     finally:
         eval_env.close()
+
+
+def test_evaluations_npz_records_the_primary_batch_not_the_confirmation(
+    tmp_path, monkeypatch
+):
+    """Ordering guard: the npz row must be the evaluation's own batch.
+
+    ``confirm_best`` reruns ``_collect_metrics``, which overwrites the
+    per-episode sample buffer the npz writer reads. The writer therefore
+    has to run BEFORE selection; if the two are ever reordered the reward
+    curve would silently start plotting confirmation batches -- a
+    conditionally-sampled subset drawn only when a candidate beat the
+    running best.
+    """
+    import numpy as np
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.envs import WallBallEnv
+
+    npz_path = tmp_path / "evaluations.npz"
+    eval_env = make_vec_env(lambda: WallBallEnv(episode_len=30), n_envs=1)
+    try:
+        cb = InfoDictEvalCallback(
+            eval_env=eval_env,
+            n_eval_episodes=1,
+            eval_freq=1,
+            success_key="bounce_count",
+            evaluations_npz_path=str(npz_path),
+            best_metric_keys=("bounce_count_ep_mean",),
+            best_model_save_path=str(tmp_path),
+            confirm_best=True,
+        )
+        cb.model = _FakeSavableModel(action_dim=3)
+        cb.model.get_vec_normalize_env = lambda: None  # type: ignore[attr-defined]
+
+        # First evaluation: real rollout, no confirmation possible.
+        cb.n_calls = 1
+        assert cb._on_step() is True
+        first = np.load(npz_path)["results"][0].copy()
+
+        # Second evaluation: force a candidate improvement so the
+        # confirmation batch runs, and make its samples unmistakable.
+        sentinel = 12345.0
+
+        def _confirmation_batch():
+            cb._last_episode_samples = ([sentinel], [7])
+            return {"bounce_count_ep_mean": 99.0}
+
+        monkeypatch.setattr(cb, "_collect_metrics", _confirmation_batch)
+        cb.n_calls = 2
+        assert cb._on_step() is True
+
+        payload = np.load(npz_path)
+        # Row 0 is untouched, and the sentinel from the confirmation-shaped
+        # rollout is the only thing row 1 could contain if ordering broke.
+        assert payload["results"][0] == pytest.approx(first)
+        assert payload["results"].shape[0] == 2
+        assert sentinel in payload["results"][1]
+        # The confirmation ran (it is what produced the sentinel row), but
+        # it did not add a row of its own.
+        assert cb.last_confirmation_metrics is not None
+    finally:
+        eval_env.close()

@@ -180,7 +180,6 @@ _GATE_OPTIONAL_KEYS = (
     "clear_replay_buffer_on_advance",
     "reset_entropy_on_advance",
     "entropy_reset_value",
-    "pool_confirmation_samples",
 )
 
 

@@ -334,12 +334,18 @@ class InfoDictEvalCallback(BaseCallback):
         # evaluations (e.g. performance-gated curriculum callbacks).
         self.last_metrics: dict[str, float] | None = None
         # The confirmation batch's metrics when ``confirm_best`` re-sampled
-        # a candidate on the most recent evaluation, else None. Exposed so
-        # a consumer can pool that second independent sample instead of
-        # discarding it (see PerformanceGatedEnvStagesCallback's
-        # ``pool_confirmation_samples``): it is a full
-        # ``n_eval_episodes`` batch on the same distribution, already
-        # paid for.
+        # a candidate on the most recent evaluation, else None. Published
+        # as diagnostic surface: the batch is a full ``n_eval_episodes``
+        # rollout that otherwise vanishes except for the copy stored in
+        # best_model_meta.json.
+        #
+        # Deliberately NOT pooled into the curriculum gate's promotion
+        # window, though it is tempting to -- see docs/DECISIONS.md. The
+        # batch is CONDITIONALLY sampled (it only runs when the primary
+        # batch beat the running best), so averaging it in regresses
+        # exactly the high draws toward the mean and leaves low draws
+        # alone. That biases the window downward, silently raising the
+        # gate bar.
         self.last_confirmation_metrics: dict[str, float] | None = None
         self.completed_evals = 0
         # (score, guard values) for the most recent evaluations, sized to
