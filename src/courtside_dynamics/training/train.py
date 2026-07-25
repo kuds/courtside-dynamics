@@ -440,24 +440,23 @@ class TrainConfig:
         about as many env steps as the 3M training steps themselves.
         ``None`` (default) keeps ``n_eval_episodes``.
 
-        Superseded when ``final_info_eval`` is also on: the two streams
-        roll the *same* distribution, so the reward evaluator is retired
-        and its budget folded into the final-config stream (see
-        ``final_eval_episodes``). The value is still honored as a floor
-        on the merged stream's episode count.
+        Ignored when ``final_info_eval`` is also on: the two streams roll
+        the *same* distribution, so the reward evaluator is retired
+        entirely and ``final_eval_episodes`` sizes the surviving stream.
     final_eval_episodes:
         Episode count for the ``final_info_eval`` stream. ``None``
-        (default) keeps the historical ``n_eval_episodes // 2``, raised
-        to at least ``reward_eval_episodes`` when the reward evaluator
-        was folded in.
+        (default) resolves to the full ``n_eval_episodes`` when the reward
+        evaluator was merged into this stream, and to the historical
+        ``n_eval_episodes // 2`` reporting sample when both streams still
+        run.
 
-        Worth raising: this is the only stream that scores the campaign's
-        actual goal task during training, and at run 20260721_004722's
-        per-episode spread the 5-episode reward stream had a standard
-        error of ~0.8-1.1 bounces -- it could not resolve the transfer
-        curve (0.30 -> 0.98 -> 1.76) that the depth campaign exists to
-        buy. Merging the two streams pays for a good part of the
-        increase.
+        The full count is the right default for a merged stream because
+        it is then the *only* stream scoring the campaign's goal task
+        during training. At run 20260721_004722's per-episode spread the
+        old 5-episode reward stream had a standard error of ~0.8-1.1
+        bounces -- it could not resolve the transfer curve
+        (0.30 -> 0.98 -> 1.76) that the depth campaign exists to buy.
+        Set this explicitly to trade that resolution back for wall clock.
     final_info_eval:
         When ``True``, attach a second ``InfoDictEvalCallback`` running
         on the *unmodified* evaluation env (the recipe's
@@ -1009,12 +1008,21 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         )
         final_eval_episodes = cfg.final_eval_episodes
         if final_eval_episodes is None:
-            final_eval_episodes = max(1, cfg.n_eval_episodes // 2)
             if merge_reward_eval_into_final:
-                # Absorb the retired stream's budget instead of losing it.
-                final_eval_episodes = max(
-                    final_eval_episodes, reward_eval_episodes
-                )
+                # One stream now scores the goal task, so give it the full
+                # episode budget rather than the // 2 reporting sample the
+                # split streams used. The old reward stream's 5 episodes
+                # had a standard error of ~0.8-1.1 bounces at run
+                # 20260721_004722's per-episode spread -- it could not
+                # resolve the 0.30 -> 0.98 -> 1.76 transfer curve at all.
+                # Costs ~10 episodes per evaluation over the two streams
+                # it replaces, for a 6x larger sample on the campaign's
+                # actual target metric.
+                final_eval_episodes = cfg.n_eval_episodes
+            else:
+                # Two streams still split the work: keep the historical
+                # reporting-sample size so unmerged runs are unchanged.
+                final_eval_episodes = max(1, cfg.n_eval_episodes // 2)
 
         on_new_best: BaseCallback | None = None
         if use_vec_normalize and not headline_selection:

@@ -48,12 +48,18 @@ there. It is now retired and the final-config stream owns
 and one rollout pass fewer per evaluation; for run `20260724_152530`'s
 config the three streams cost 50 episodes per 25k training steps.
 
-New `final_eval_episodes` sizes that stream, defaulting to the historical
-`n_eval_episodes // 2` raised to the retired stream's budget so no
-evidence is lost. Worth raising: it is the only stream scoring the goal
-task during training, and at 5 episodes its standard error was ~0.8–1.1
-bounces — too noisy to resolve the 0.30 → 0.98 → 1.76 transfer curve the
-campaign exists to buy.
+New `final_eval_episodes` sizes that stream. It defaults to the **full
+`n_eval_episodes`** when the merge happens — 30 for the depth recipe,
+against the 5 + 15 the two split streams used — because the survivor is
+then the only stream scoring the goal task during training. At 5 episodes
+that estimate had a standard error of ~0.8–1.1 bounces, too noisy to
+resolve the 0.30 → 0.98 → 1.76 transfer curve the campaign exists to buy.
+Runs that keep both streams are unchanged (`n_eval_episodes // 2`).
+
+Net eval cost per 25k training steps for the depth recipe: 50 episodes
+across three rollout passes becomes 60 across two. Ten more episodes buys
+a 6× larger sample on the campaign's target metric; set
+`final_eval_episodes` explicitly to trade it back for wall clock.
 
 Selection, the gate, `best_model.zip`, `best_model_meta.json`, and the
 per-stage `stage_bests/` archive are all driven by the matched stream and

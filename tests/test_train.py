@@ -939,8 +939,9 @@ def test_final_info_eval_owns_evaluations_npz_when_reward_stream_retired(
     assert payload["results"].shape[0] == payload["timesteps"].shape[0]
     assert payload["results"].shape == payload["ep_lengths"].shape
     assert payload["results"].shape[0] >= 1
-    # n_eval_episodes // 2 == 1, floored to the retired stream's budget
-    # (reward_eval_episodes defaults to n_eval_episodes == 2).
+    # A merged stream is the only one scoring the goal task, so it gets
+    # the FULL n_eval_episodes -- not the // 2 reporting sample the split
+    # streams used.
     assert payload["results"].shape[1] == 2
     assert (payload["ep_lengths"] > 0).all()
 
@@ -994,3 +995,49 @@ def test_reward_eval_stream_survives_without_the_final_info_eval(tmp_path):
     )
     payload = np.load(tmp_path / "metrics" / "evaluations.npz")
     assert payload["results"].shape[1] == 1
+
+
+def test_merged_stream_gets_the_full_episode_budget(tmp_path):
+    """A merged stream is sized by n_eval_episodes, not the // 2 sample.
+
+    Mirrors the depth recipe's shape (n_eval_episodes 30 with
+    reward_eval_episodes 5): the retired reward stream's small budget must
+    NOT cap the surviving stream, because that stream is then the only one
+    scoring the campaign's goal task. The old split sizing would have
+    given max(n // 2, reward_eval_episodes) = 2 here.
+    """
+    import numpy as np
+
+    train(
+        _merged_eval_cfg(
+            tmp_path,
+            n_eval_episodes=4,
+            reward_eval_episodes=1,
+            total_timesteps=400,
+            eval_freq=200,
+        )
+    )
+
+    payload = np.load(tmp_path / "metrics" / "evaluations.npz")
+    assert payload["results"].shape[1] == 4
+
+
+def test_no_merge_without_headline_selection(tmp_path):
+    """Without headline selection the reward stream owns selection.
+
+    It must keep running and keep writing evaluations.npz at the full
+    n_eval_episodes, even with the final-config stream also attached.
+    """
+    import numpy as np
+
+    cfg = _merged_eval_cfg(
+        tmp_path,
+        n_eval_episodes=4,
+        headline_key=None,  # no headline selection -> no merge
+        total_timesteps=400,
+        eval_freq=200,
+    )
+    train(cfg)
+
+    payload = np.load(tmp_path / "metrics" / "evaluations.npz")
+    assert payload["results"].shape[1] == 4
