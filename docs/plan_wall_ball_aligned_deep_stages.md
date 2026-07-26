@@ -44,6 +44,16 @@ before treating that as causal.
    currently all-or-nothing. Nothing has measured the interior.
 3. **Whether alignment helps SAC at all.** Only the stage-1 training A/B
    answers this, and it is unrun.
+4. **Whether the gate's bar and the sweep's bar describe the same task.**
+   The sweep certifies feasibility as "oracle completes ≥2 returns on
+   ≥90% of serves"; the gate promotes on "mean `bounce_count_ep_mean`
+   ≥ 3.0". Run `20260725_171747` showed these can disagree sharply: it
+   spent 3.2M steps and 128 evaluations at stage 2 — which the sweep
+   certifies at 93.5% — without a single evaluation reaching 2.9, while
+   the oracle's own mean at that stage is 2.43. A rung can be feasible
+   by the sweep's definition and unpromotable by the gate's. Any ladder
+   change from Phase B must be checked against **both** bars, not just
+   the sweep's. See `wall_ball_aligned_patience_review.md`.
 
 ## Seed ledger
 
@@ -214,6 +224,12 @@ rather than the historical 6M default:
   in `20260721_004722` and 1.65M in `20260724_152530`. Five stages at that
   spread projects to roughly **6–8M steps**, so the historical 6M default
   is the optimistic end of the range rather than a safe ceiling.
+- That projection is now known to be optimistic in a second way: stage 2
+  is not merely expensive, it did not complete at all. Run
+  `20260725_171747` spent 3.2M steps and 128 evaluations there without
+  promoting, so no stage-2 cost figure exists — only a lower bound that
+  already exceeds stages 0 and 1 combined. Do not size a pilot on the
+  assumption that later rungs cost what the early ones did.
 - At the measured ~90 FPS on one L4 that is about 18.5–24.7 h of wall
   clock, and no single session has yet demonstrated the upper end. Budget
   against a confirmed session ceiling or implement checkpoint-resume first.
@@ -254,12 +270,16 @@ Stop and report rather than continuing if:
 | E — full pilot | ~19–25 GPU-hours, session ceiling permitting | on C, D |
 
 Phases A–C are cheap enough to complete before committing any GPU time,
-which is the point. The aligned ladder has already consumed one 11h15m
-run — `20260724_152530`, whose `curriculum_stages.json` records
-`serve_start_x` 1.0 / 0.69 / 0.34, i.e. the aligned origins — started
-despite the starter config's own header warning that the stage-3/4 oracle
-fails the ≥90% bar. That run stalled at stage 2 and never reached the
-unplayable rungs, so deep-stage infeasibility does not explain its
-outcome; the cost was incurred without the cheap check having been run
-first. Minutes of scripted sweep can price a ladder that GPU-hours
-cannot.
+which is the point. The aligned ladder has already consumed two runs
+totalling **31 GPU-hours** — `20260724_152530` (11h15m) and
+`20260725_171747` (20h16m), both recording `serve_start_x`
+1.0 / 0.69 / 0.34 in `curriculum_stages.json`, i.e. the aligned origins —
+started despite the starter config's own header warning that the
+stage-3/4 oracle fails the ≥90% bar. Both stalled at stage 2 and neither
+reached the unplayable rungs, so deep-stage infeasibility does not
+explain either outcome. The cost was incurred without the cheap checks
+having been run first, and the second run's 20 hours went to answering a
+question — "is patience the constraint?" — that a distribution of the
+first run's stage-2 evaluations would have made much cheaper. Minutes of
+scripted sweep, and a look at an existing eval distribution, can price
+what GPU-hours cannot.
