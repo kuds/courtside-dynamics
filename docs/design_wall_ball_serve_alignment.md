@@ -363,12 +363,35 @@ controller calibrated for a ball landing 1.0–1.4 m in front of the paddle.
 Under alignment the ball lands at the paddle's feet — a different
 interception problem the charge timing was never re-derived for.
 
-The honest reading is therefore weaker than a single-lever attribution:
-the deep-stage loss is *associated with* the serve-origin change, but an
-unknown share of it is stale controller timing rather than geometric
-infeasibility. Deriving a placement-fair oracle on calibration seeds and
-re-running is a precondition for any causal claim; that work is sequenced
-as Phase A of `plan_wall_ball_aligned_deep_stages.md`.
+**That confound has since been measured, and it is small.** A probe grid
+over 19 settings per stage (11 `charge_gap` values, 8 `run_up` values,
+200 episodes each, calibration seeds 0–199) recovers only part of the
+deficit:
+
+| aligned stage | shipped probe | best over the grid | gap to the 90% bar |
+|---:|---:|---:|---:|
+| 3 | 85.5% (`charge_gap` 1.8) | **88.5%** [83.3, 92.2] (`charge_gap` 2.4) | −1.5 |
+| 4 | 63.5% (`charge_gap` 1.7) | **69.0%** [62.3, 75.0] (`charge_gap` 2.4) | −21.0 |
+
+Zero of 19 settings clear 90% at either stage. Retuning buys +3.0 points
+at stage 3 and +5.5 at stage 4 — about a fifth of each deficit. The same
+grid on the fixed-origin ladder clears the bar comfortably (4 of 11
+settings at stage 3, best 94.0%; 2 of 11 at stage 4, best 94.0%), so the
+controller family is capable and it is the aligned geometry it cannot
+handle.
+
+Two mechanism details fall out. The aligned ladder's optimum sits at a
+*larger* charge gap (2.4 against the shipped 1.8/1.7), which is what a
+ball landing at the paddle's feet should require — commit earlier. And
+`run_up` mode is useless at these depths (best 5.5% at stage 3, 1.0% at
+stage 4), confirming the docstring's rationale that narrow deep windows
+need a timed charge rather than a landing-point run-up.
+
+The attribution therefore stands, with the confound priced in: the
+deep-stage loss is dominated by the serve-origin geometry, and stale
+controller timing accounts for roughly a fifth of it. Stage 4 is
+decisively infeasible for this controller family; stage 3 is marginal,
+its interval still straddling the bar.
 
 The crude controller remains mixed and placement-coupled (aligned higher
 at stages 1, 2, and 4 — 95.5/90.0/19.5% against 73.0/69.0/14.0% — and

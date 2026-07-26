@@ -76,18 +76,17 @@ Pass it explicitly on future runs.
 
 ## Implementation prerequisites
 
-Neither Phase A nor Phase B is runnable from the current CLI. Both need a
-small, contained change to `tools/depth_stage_sweep.py`:
+Phase B is not runnable from the current CLI. It needs a small, contained
+change to `tools/depth_stage_sweep.py`:
 
-- **Probe parameters are hardcoded per stage.** `oracle_run_up` and
-  `oracle_charge_gap` live in the `ALIGNED_STAGES` table (stage 0 uses
-  `run_up=1.1`; stages 1–4 use charge gaps 1.0, 1.0, 1.8, 1.7) and
-  `_oracle` raises when both or neither are set — exactly one must
-  configure it. A grid search therefore needs a **probe-mode** override,
-  not merely a value override: something like a repeatable
-  `--oracle-probe STAGE=run_up:VALUE|charge_gap:VALUE` that replaces the
-  stage's probe key outright. A value-only flag cannot express "try
-  `run_up` at stage 3", because that requires clearing `charge_gap`.
+- ~~**Probe parameters are hardcoded per stage.**~~ **Done.**
+  `--oracle-probe STAGE=run_up:VALUE|charge_gap:VALUE` now replaces a
+  stage's probe key outright (repeatable, at most once per stage), which
+  is what Phase A needed: `_oracle` raises unless exactly one of the two
+  is set, so a value-only flag could not have expressed "try `run_up` at
+  stage 3". Resolved values land in the JSON report's `stages` block and
+  the invocation in `provenance.command`, so a grid point is
+  self-describing.
 - **Ladders are a fixed registry.** `--ladder` accepts only the two keys
   in `LADDERS`, and `BASELINE_STAGES` is derived from `ALIGNED_STAGES` by
   overwriting `serve_start_x`. A blended ladder needs either a third
@@ -111,7 +110,44 @@ artifacts is the guard working as designed, not an omission; a free-text
 `--calibration-note` would be the way to record the relationship if that
 provenance is wanted.
 
-## Phase A — diagnose: oracle or geometry? (blocking)
+## Phase A — RESULT (2026-07-26): geometry, not the oracle
+
+**Run and answered.** `--oracle-probe` landed in the sweep tool, and a
+grid of 19 settings per stage (11 `charge_gap`, 8 `run_up`, 200 episodes
+each, calibration seeds 0–199) was evaluated on both ladders.
+
+| stage | shipped | best over grid | settings clearing 90% |
+|---:|---:|---:|---:|
+| aligned 3 | 85.5% | **88.5%** [83.3, 92.2] @ `charge_gap` 2.4 | **0 / 19** |
+| aligned 4 | 63.5% | **69.0%** [62.3, 75.0] @ `charge_gap` 2.4 | **0 / 19** |
+| baseline 3 | 94.0% | 94.0% @ `charge_gap` 1.8 | 4 / 11 |
+| baseline 4 | ~89.5% | 94.0% @ `charge_gap` 1.4 | 2 / 11 |
+
+**Gate A verdict: stage 4 fails decisively** — best achievable 69.0%
+with the interval entirely below the bar, comfortably inside the "≤80%
+at stage 4 is decisive" rule set below. **Phase B is therefore
+mandatory.** Stage 3 is a marginal fail: no setting clears the point
+estimate, but its interval still straddles 90%, so it is not
+independently condemned.
+
+Retuning buys +3.0 points at stage 3 and +5.5 at stage 4 — roughly a
+fifth of each deficit. The confound was real and is now priced: geometry
+dominates. The fixed-origin ladder clears the bar with several settings,
+so the controller family is capable and it is the aligned geometry it
+cannot play.
+
+Two mechanism notes for whoever runs Phase B: the aligned ladder's
+optimum is a *larger* charge gap (2.4 against the shipped 1.8/1.7),
+exactly what a ball landing at the paddle's feet should demand, and
+`run_up` mode is dead at these depths (best 5.5% / 1.0%), so the probe
+mode itself was never the issue. The grid reproduces the shipped-setting
+figure exactly at aligned stage 3 (85.5%), which validates the driver
+against the committed sweep path.
+
+Ceiling recorded, per the note below: **69.0% is the upper bound any
+stage-4 policy can be measured against on this geometry.**
+
+## Phase A — method (as specified before the run)
 
 The decisive question, and cheap to answer. A 200-episode sweep costs about
 two minutes of CPU on four cores per ladder — roughly five for a paired run

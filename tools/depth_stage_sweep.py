@@ -104,6 +104,72 @@ LADDERS = {
     "baseline": BASELINE_STAGES,
 }
 
+#: ``--oracle-probe`` mode names mapped to the stage keys they replace.
+#: ``_oracle`` accepts exactly one of the two, so an override swaps the
+#: stage's probe key outright rather than setting a value beside it.
+_ORACLE_PROBE_KEYS = {
+    "run_up": "oracle_run_up",
+    "charge_gap": "oracle_charge_gap",
+}
+
+
+def _parse_oracle_probe(values, stage_count):
+    """Parse ``--oracle-probe STAGE=MODE:VALUE`` into ``{stage: (mode, value)}``.
+
+    Exists so a calibration grid can be driven from the CLI without
+    editing the stage tables: the probe parameters ship hardcoded per
+    stage, and the aligned ladder inherited them unchanged from the
+    fixed-origin geometry they were tuned against.
+    """
+    overrides: dict[int, tuple[str, float]] = {}
+    for raw in values or ():
+        stage_part, separator, spec = raw.partition("=")
+        mode, mode_separator, value_part = spec.partition(":")
+        if not (separator and mode_separator) or mode not in _ORACLE_PROBE_KEYS:
+            raise SystemExit(
+                "--oracle-probe expects STAGE=run_up:VALUE or "
+                f"STAGE=charge_gap:VALUE, got {raw!r}"
+            )
+        try:
+            stage_index = int(stage_part)
+            value = float(value_part)
+        except ValueError:
+            raise SystemExit(
+                "--oracle-probe needs an integer stage and a float value, "
+                f"got {raw!r}"
+            ) from None
+        if not 0 <= stage_index < stage_count:
+            raise SystemExit(
+                f"--oracle-probe stage {stage_index} is outside the ladder's "
+                f"0..{stage_count - 1}"
+            )
+        if stage_index in overrides:
+            raise SystemExit(
+                f"--oracle-probe given more than once for stage {stage_index}"
+            )
+        if not np.isfinite(value) or value <= 0.0:
+            raise SystemExit(
+                f"--oracle-probe value must be positive and finite, got {raw!r}"
+            )
+        overrides[stage_index] = (mode, value)
+    return overrides
+
+
+def _apply_oracle_probe(stages, overrides):
+    """Return ``stages`` with probe overrides applied, tables left intact."""
+    if not overrides:
+        return stages
+    resolved = []
+    for index, stage in enumerate(stages):
+        stage = dict(stage)
+        if index in overrides:
+            mode, value = overrides[index]
+            for key in _ORACLE_PROBE_KEYS.values():
+                stage.pop(key, None)
+            stage[_ORACLE_PROBE_KEYS[mode]] = value
+        resolved.append(stage)
+    return resolved
+
 POLICIES = ("parked", "crude", "oracle", "volley_probe")
 LANDING_MEAN_TOLERANCE = 0.10
 LANDING_WINDOW = 0.30
@@ -821,6 +887,18 @@ def _parse_args():
         ),
     )
     parser.add_argument(
+        "--oracle-probe",
+        action="append",
+        metavar="STAGE=MODE:VALUE",
+        help=(
+            "override one stage's oracle probe, e.g. '3=charge_gap:1.4' or "
+            "'4=run_up:0.9'. The oracle takes exactly one of run_up / "
+            "charge_gap, so this replaces the stage's probe key outright. "
+            "Repeatable, at most once per stage; the resolved values are "
+            "recorded in the JSON report's stages block"
+        ),
+    )
+    parser.add_argument(
         "--calibration-seed-start",
         type=int,
         help="first seed used to tune controller parameters, if any",
@@ -844,6 +922,9 @@ def main() -> int:
     json_output = args.json_output
     ladder_name = args.ladder
     stages = LADDERS[ladder_name]
+    stages = _apply_oracle_probe(
+        stages, _parse_oracle_probe(args.oracle_probe, len(stages))
+    )
     require_alignment = ladder_name == "aligned"
     if episodes < 1:
         raise SystemExit("episodes-per-cell must be a positive integer")

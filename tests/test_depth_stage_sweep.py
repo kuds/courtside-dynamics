@@ -15,6 +15,7 @@ from tools.depth_stage_sweep import (
     LANDING_WINDOW,
     STAGES,
     TELEMETRY_KEYS,
+    _apply_oracle_probe,
     _episode_telemetry,
     _landing_alignment_failures,
     _landing_statistics,
@@ -22,6 +23,7 @@ from tools.depth_stage_sweep import (
     _paddle_contact_before_first_floor,
     _parked,
     _parked_invariant_failures,
+    _parse_oracle_probe,
     _validate_ladder,
     _wilson_interval,
     _write_json_report,
@@ -311,6 +313,60 @@ def test_sweep_oracle_requires_one_stage_probe_mode():
         _oracle(obs, (-4.7, -3.0))
     with pytest.raises(ValueError, match="exactly one"):
         _oracle(obs, (-4.7, -3.0), run_up=1.4, charge_gap=1.7)
+
+
+def test_oracle_probe_override_replaces_the_stage_probe_mode():
+    """A grid search must be able to switch probe mode, not just its value.
+
+    ``_oracle`` accepts exactly one of run_up / charge_gap, so overriding
+    run_up at a charge_gap stage has to clear the other key outright.
+    """
+    overrides = _parse_oracle_probe(
+        ["3=run_up:0.9", "4=charge_gap:2.4"], len(ALIGNED_STAGES)
+    )
+    assert overrides == {3: ("run_up", 0.9), 4: ("charge_gap", 2.4)}
+
+    resolved = _apply_oracle_probe(ALIGNED_STAGES, overrides)
+    # Stage 3 ships charge_gap; the override must swap the key, not add one.
+    assert resolved[3]["oracle_run_up"] == 0.9
+    assert "oracle_charge_gap" not in resolved[3]
+    assert resolved[4]["oracle_charge_gap"] == 2.4
+    assert "oracle_run_up" not in resolved[4]
+    # Untouched stages keep their shipped probe, and the module tables are
+    # never mutated -- a later ladder lookup must not inherit the override.
+    assert resolved[0]["oracle_run_up"] == ALIGNED_STAGES[0]["oracle_run_up"]
+    assert ALIGNED_STAGES[3]["oracle_charge_gap"] == 1.8
+    assert "oracle_run_up" not in ALIGNED_STAGES[3]
+    assert BASELINE_STAGES[3]["oracle_charge_gap"] == 1.8
+
+
+@pytest.mark.parametrize(
+    "spec, message",
+    [
+        ("9=charge_gap:1.4", "outside the ladder"),
+        ("3=bogus:1.4", "expects STAGE="),
+        ("3charge_gap1.4", "expects STAGE="),
+        ("3=charge_gap:x", "integer stage and a float"),
+        ("3=charge_gap:-1", "positive and finite"),
+        ("3=charge_gap:0", "positive and finite"),
+        ("3=charge_gap:nan", "positive and finite"),
+    ],
+)
+def test_oracle_probe_override_rejects_malformed_specs(spec, message):
+    with pytest.raises(SystemExit, match=message):
+        _parse_oracle_probe([spec], len(ALIGNED_STAGES))
+
+
+def test_oracle_probe_override_rejects_a_repeated_stage():
+    with pytest.raises(SystemExit, match="more than once"):
+        _parse_oracle_probe(
+            ["3=charge_gap:1.4", "3=run_up:0.9"], len(ALIGNED_STAGES)
+        )
+
+
+def test_oracle_probe_override_is_a_no_op_when_unset():
+    assert _apply_oracle_probe(ALIGNED_STAGES, {}) is ALIGNED_STAGES
+    assert _parse_oracle_probe(None, len(ALIGNED_STAGES)) == {}
 
 
 def test_sweep_static_validation_rejects_each_shortcut_shape():
