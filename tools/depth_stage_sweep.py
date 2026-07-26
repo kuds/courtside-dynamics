@@ -14,8 +14,16 @@ Pass criteria (all blocking except where noted):
    overlaps, and there is no position shared by every stage.
 2. Serve alignment: for the aligned candidate, the policy-independent
    first-floor-bounce distribution has an absolute mean offset from the
-   paddle start of <=0.10 m, with >=95% of landings within +/-0.30 m. The
-   known-misaligned baseline is measured as a non-blocking comparison.
+   stage's declared landing target of <=0.10 m, with >=95% of landings
+   within +/-0.30 m. The target is the paddle start for the fully
+   aligned ladder and ``(1 - lambda) * (1.0 - aligned)`` metres in front
+   of it under ``--serve-origin-blend``. Note this makes the criterion a
+   self-consistency check -- "the serve lands where this configuration
+   says it will" -- not a test of alignment itself: it passes equally at
+   blend 0.0 and 1.0, so it cannot be cited as evidence for one blend
+   over another. ``mean_offset_from_start`` carries the physical
+   distance. The known-misaligned baseline is measured as a non-blocking
+   comparison.
 3. Hold-start invariance: the parked controller makes no ball contact and
    completes no return.
 4. Within-stage monotonicity: parked < crude < oracle mean reward.

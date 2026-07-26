@@ -208,10 +208,13 @@ decay**: everything down to 0.251 m in front of the deep paddle passes,
 and 0.184 m fails by 8 points. The paddle needs roughly a quarter of a
 metre of approach room, and full alignment removes it.
 
-Feasibility is also not monotonic in λ. Both endpoints are worse at the
-deep stages than the interior: λ = 0.75 beats the fixed origin at stage 3
-(99.0% against 94.0%) and matches it at stage 4. Dropping the ball
-somewhat in front of the paddle is better than either extreme.
+Feasibility looks non-monotonic in λ on calibration — the interior scores
+above both endpoints at the deep stages — but note these are
+argmax-selected cells at n = 200, and Phase C later showed 3–5 point
+calibration-to-held-out swings are routine. Held-out, λ = 0.75 and the
+fixed origin are statistically indistinguishable on oracle feasibility.
+The interior's advantage over the endpoints should be read as "does not
+cost feasibility", not as "improves it".
 
 **Recommended freeze for Phase C: λ = 0.75, not the maximum-passing
 0.85.** Two reasons. λ = 0.75 carries real margin (96.0% at stage 4
@@ -263,7 +266,84 @@ leaving it as a permanent open question.
 *(Outcome: λ = 0.85 was the largest passing value and λ = 0.75 is the
 recommended freeze. The ladder-redesign branch is not needed.)*
 
-## Phase C — freeze and certify
+## Phase C — RESULT (2026-07-26): certified, but a null against the control
+
+**λ = 0.75 certifies.** Frozen probes (stage 0 `run_up` 1.1, stages 1–2
+`charge_gap` 1.0, stage 3 2.8, stage 4 2.4), held-out seeds 2000–2199,
+200 episodes per cell, clean revision `9b960ea`, calibration range
+declared. All eight blocking criteria pass.
+
+| stage | candidate λ=0.75 | control (shipped probes) | control (own argmax probes) |
+|---:|---:|---:|---:|
+| 0 | 94.5% [90.4, 96.9] | 94.5% | 94.5% |
+| 1 | 96.5% [93.0, 98.3] | 94.0% | 94.0% |
+| 2 | 96.5% [93.0, 98.3] | 93.5% | 93.5% |
+| 3 | 96.5% [93.0, 98.3] | 92.5% | 92.5% |
+| 4 | 94.5% [90.4, 96.9] | 94.0% | **89.0% — fails** |
+
+**The candidate is NOT demonstrably better than the control.** The arms
+share seeds, so the comparison is paired, and exact McNemar per stage
+gives p = 1.00, 0.302, 0.146, 0.115, 1.00. Every difference is
+consistent with zero; the eye-catching 96.5% vs 92.5% at stage 3 is a
+14-vs-6 discordant split. Stage 0 is bit-identical between arms (zero
+discordant pairs) and carries no information at all. The defensible
+statement is **"no regression detected, and λ = 0.75 clears the bar with
+Wilson lower bounds of 90.4–93.0%"** — not superiority.
+
+**The winner's curse is directly visible here, and it is large.** Giving
+the control an equivalent tuning pass makes it *worse*: its own
+calibration argmax at stage 4 (`charge_gap` 1.4, 94.0% on calibration)
+drops to **89.0% held-out and fails**, while the stale shipped 1.7
+passes at 94.0%. Calibration-to-held-out swings of 3–5 points are
+routine at n = 200, which is the same order as every margin discussed in
+Phases A–C. Treat all calibration rankings accordingly.
+
+**What genuinely separates the arms is the crude controller, not the
+oracle.** Paired McNemar on the placement-blind reflex: stage 1 p =
+2.0e-4, stage 2 p = 5.9e-12, stage 3 p = 4.4e-4, stage 4 p = 1.8e-22
+(113 vs 11 discordant, +51 points). `_crude` takes no probe arguments,
+so this is unconfounded by tuning. But it is one hand-written reflex,
+not a learner: the honest reading is **"reward is reachable without
+placement skill under the blend, because the ball lands ~1.0 m closer to
+where the paddle already is"** — a proxy for exploration density, not
+evidence of learnability. Only a training run can establish the latter.
+
+**New finding — the blend changes the task's option set.** The
+non-blocking volley probe goes from 0% contact / 0% opening volley at
+control stage 4 and 62% / 38% at control stage 3 to **100% / 100% at
+every candidate stage**. Under λ = 0.75 a pre-bounce opening volley
+becomes geometrically reachable at all depths, and `rally_style` is
+`open`, so it is legal. That is a change in task character an RL agent
+may exploit instead of the intended post-bounce rally, and it should be
+settled before a pilot.
+
+**Gate C: pass, with the scope stated.** What is certified is that a
+stage-calibrated scripted oracle clears the 90% two-return bar at every
+stage under λ = 0.75 on 200 unseen seeds, and that serve landings fall
+where the blend declares. It says nothing about SAC's sample efficiency
+or curriculum transfer. Caveats to carry forward:
+
+- The gate is a point-estimate floor, not a confidence statement. Under
+  Bonferroni across five stages the lower bounds at stages 0 and 4 fall
+  to 89.5%, so *simultaneous* 95% coverage above 90% is not established.
+- The five stages reuse one 200-seed block; they are correlated draws,
+  not five independent replications.
+- The held-out run discharges selection bias only for λ = 0.75's own
+  rates. The *ranking* of 0.75 above 0.5, 0.8 and 0.85 remains
+  contaminated — roughly 187 n=200 oracle cells were evaluated across
+  Phases A and B before it was chosen.
+- λ = 0.85 was never run held-out. It was not frozen because its
+  stage-4 calibration point estimate of 91.0% carried a Wilson lower
+  bound of 86.2%, i.e. it never cleared with margin — not because of any
+  extrapolated calibration-to-held-out drop.
+- The alignment contract is a self-consistency check, not an alignment
+  discriminator: it passes identically at blend 0.0 and 1.0.
+- The calibration artifacts (Phases A and B) carry no `seed_range` or
+  git hash and were produced from an uncommitted tree; the certification
+  artifact declares only `phase_b_grid.json`. Re-emit them with
+  provenance before publishing anything that leans on them.
+
+## Phase C — method (as specified before the run)
 
 Once controller parameters and `lambda` are frozen and committed:
 

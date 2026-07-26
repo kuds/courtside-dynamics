@@ -400,11 +400,26 @@ aligned ladder. Everything up to λ = 0.85 clears 90% at every stage;
 λ = 0.90 fails stage 4 at 82%. The collapse is a sharp threshold in
 landing distance rather than a gradual decay — 0.251 m in front of the
 deep paddle passes, 0.184 m does not — so the paddle needs roughly a
-quarter-metre of approach room that full alignment removes. Feasibility
-is also non-monotonic: λ = 0.75 beats the fixed origin at stage 3 (99.0%
-against 94.0%) while cutting the stage-4 landing gap from 1.399 m to
-0.386 m. The design's premise — that moving the serve origin with depth
-is worth testing — is intact; only its most extreme setting is not.
+quarter-metre of approach room that full alignment removes. λ = 0.75 was
+then frozen and certified on held-out seeds 2000–2199 from a clean
+revision: oracle 94.5 / 96.5 / 96.5 / 96.5 / 94.5%, all eight blocking
+criteria passing, with the stage-4 landing gap cut from 1.399 m to
+0.370 m.
+
+Two honest qualifications on that certification. It is **not** a
+demonstration that the blend beats the fixed origin: the arms share
+seeds, and paired McNemar per stage gives p = 1.00 / 0.30 / 0.15 / 0.12
+/ 1.00, so oracle feasibility is a null. What does separate them is the
+placement-blind crude controller (stage 4: 60.5% against 9.5%, paired
+p < 1e-21), which says reward becomes reachable without placement skill
+when the ball lands a metre closer to the paddle — a proxy for
+exploration density, not proof of learnability. And the blend makes a
+pre-bounce opening volley geometrically reachable at every depth (volley
+probe 0% → 100% contact at stage 4), a change in task character worth
+settling before a pilot.
+
+The design's premise — that moving the serve origin with depth is worth
+testing — is intact; only its most extreme setting is not.
 
 The crude controller remains mixed and placement-coupled (aligned higher
 at stages 1, 2, and 4 — 95.5/90.0/19.5% against 73.0/69.0/14.0% — and
