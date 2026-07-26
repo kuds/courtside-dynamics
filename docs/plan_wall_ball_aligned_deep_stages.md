@@ -308,14 +308,38 @@ placement skill under the blend, because the ball lands ~1.0 m closer to
 where the paddle already is"** — a proxy for exploration density, not
 evidence of learnability. Only a training run can establish the latter.
 
-**New finding — the blend changes the task's option set.** The
-non-blocking volley probe goes from 0% contact / 0% opening volley at
-control stage 4 and 62% / 38% at control stage 3 to **100% / 100% at
-every candidate stage**. Under λ = 0.75 a pre-bounce opening volley
-becomes geometrically reachable at all depths, and `rally_style` is
-`open`, so it is legal. That is a change in task character an RL agent
-may exploit instead of the intended post-bounce rally, and it should be
-settled before a pilot.
+**The blend changes the task's option set — but the new option is a dead
+end.** The non-blocking volley probe goes from 0% contact / 0% opening
+volley at control stage 4 and 62% / 38% at control stage 3 to **100% /
+100% at every candidate stage**, so under λ = 0.75 a pre-bounce opening
+volley becomes geometrically reachable at all depths.
+
+It is also *scoreable* in principle: `wall_ball.py:1339-1348` gates a
+completed return on `_paddle_hit_since_last_wall` and, under
+`rally_style = "open"`, accepts a pre-bounce hit. So the scoring does not
+exclude volleys by definition.
+
+It excludes them empirically. A stateful volley-then-rally controller —
+intercept the serve pre-bounce, then fall back to the calibrated oracle —
+scores **zero completed returns in 200/200 episodes** at λ = 0.75 stages
+3 and 4, and at λ = 1.00 stage 4, against 2.29–2.35 mean returns for the
+same oracle without the volley. Every one of those 600 episodes ends in a
+double bounce, and since `bounce_count` increments only on a wall contact
+that follows a paddle hit, a score of exactly zero means **the volleyed
+ball never reaches the wall at all**.
+
+The sweep's own `_volley_probe` could not have shown this: it parks after
+the volley by design ("do not intentionally mount a post-bounce rally"),
+so its 0% was an artifact of the probe, not a measurement of the
+strategy.
+
+**Verdict: not a shortcut.** An agent that learns to volley scores
+nothing and eats the −1.0 double-bounce penalty every episode, so the
+reward gradient points away from it. This does not block a recipe change.
+Caveat: one hand-written volley controller, 200 seeds per cell; a
+cleverer volley aim might convert where this one does not, though
+0-for-600 with the ball never reaching the wall is not a marginal
+result.
 
 **Gate C: pass, with the scope stated.** What is certified is that a
 stage-calibrated scripted oracle clears the 90% two-return bar at every

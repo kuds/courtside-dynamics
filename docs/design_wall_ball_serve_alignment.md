@@ -413,10 +413,14 @@ seeds, and paired McNemar per stage gives p = 1.00 / 0.30 / 0.15 / 0.12
 placement-blind crude controller (stage 4: 60.5% against 9.5%, paired
 p < 1e-21), which says reward becomes reachable without placement skill
 when the ball lands a metre closer to the paddle — a proxy for
-exploration density, not proof of learnability. And the blend makes a
+exploration density, not proof of learnability. The blend also makes a
 pre-bounce opening volley geometrically reachable at every depth (volley
-probe 0% → 100% contact at stage 4), a change in task character worth
-settling before a pilot.
+probe 0% → 100% contact at stage 4), which under `rally_style = "open"`
+is scoreable in principle — but a volley-then-rally controller scores
+**zero completed returns in 200/200 episodes** at λ = 0.75 stages 3 and
+4, every one ending in a double bounce with the volleyed ball never
+reaching the wall. The new option is a dead end, so it does not gate the
+ladder change.
 
 The design's premise — that moving the serve origin with depth is worth
 testing — is intact; only its most extreme setting is not.
