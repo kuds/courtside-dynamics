@@ -5,6 +5,57 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## 0.21.0
+
+Two changes to both depth recipes, aimed at the two defects the
+2026-07-26 measurement pass identified. **Neither learning curves nor
+saved policies are comparable with any earlier depth run.**
+
+`gamma` 0.99 → 0.995, pinned in `model_kwargs`. Entropy stays on SB3
+auto — this is a one-lever change. The exchange cadence in this task
+measures 117–135 env steps on the calibrated oracle, so the SB3 default
+prices the next completed return at `0.99^130 ≈ 0.27` of the one already
+banked and the third at `≈ 0.07`. A policy that stops trying after
+exchange two is behaving optimally under that discount, which is a
+mechanical candidate for the ~2.0–2.4 plateau every depth run has hit.
+The only run in this project that ever produced a long rally — WallBall
+`20260713_192636`, `bounce_count_ep_mean` **12.30**, 13 exchanges with
+zero floor bounces, every episode timing out rather than dying — used
+gamma 0.995. That run appears nowhere in this changelog or in
+`docs/`, and `lessons_learned.md`'s "five healthy runs bracket the same
+~3.2–3.4 ceiling … the binding constraint is capability" omits it.
+gamma was tested once before, in 0.13.0, bundled with the falsified
+weak-return retry and reverted with it, so it has never been evaluated
+alone.
+
+`n_eval_episodes` 30 → 60 on the matched/selection stream, with
+`final_eval_episodes` pinned at 30 and `best_metric_min_delta`
+0.5/30 → 0.5/60. Promotion is a threshold crossing on a noisy statistic:
+per-episode `bounce_count` sd is ~0.87, so a 30-episode batch has sd
+~0.16 and a 3-eval window ~0.092 — and runs `20260724_152530` /
+`20260725_171747` cleared the 3.0 bar at stage 1 by **0.011**, about a
+tenth of a standard error. 60 episodes cut the window sd to ~0.065.
+
+The threshold itself is deliberately unchanged. An earlier reading of
+this evidence proposed lowering it, on the grounds that the sweep's
+`ds._oracle` averages only 2.25–2.57 at every stage. That oracle is not
+a feasibility ceiling: a predictive controller driving the *same* three
+slide actuators scores **4.39** at stage 0 (max 8, ≥5 in 40% of
+episodes, 49/200 episodes still alive at the 750-step cap). 3.0 is
+reachable; the defect was the measurement, not the bar. The flat
+~2.4-across-stages curve is likewise an artifact — each stage's oracle
+probe is tuned individually and criterion 7 rejects any stage scoring
+more than 1.5× its predecessor, so under one uniform controller the
+stages read 4.39 / 2.85 / 1.52 at s0 / s2 / s4.
+
+Cost: eval episodes per cycle go 60 → 90 (+50%). The three eval streams
+already cost about as many env steps as training itself, so expect
+throughput to fall roughly 15–20%; budget wall clock accordingly.
+
+Metrics era: `bounce_count_ep_mean` keeps its meaning and gets less
+noisy, but promotion *timing* is not comparable with 30-episode runs,
+and no reward-bearing quantity is comparable across the gamma change.
+
 ## 0.20.0
 
 Curriculum-harness changes aimed at the depth campaign's dominant cost:

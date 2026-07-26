@@ -756,10 +756,20 @@ RECIPES: dict[str, Recipe] = {
         extra_cfg={
             "n_envs": 8,
             "early_stop_patience": 20,
-            # model_kwargs deliberately empty: SB3 defaults (auto
-            # entropy, gamma 0.99) are what every run that learned the
-            # task used (lesson 5); the campaign's capacity and reward
-            # probes both came back null, so nothing else is earned.
+            # gamma 0.995, and ONLY gamma: SB3's auto entropy stays.
+            # The exchange cadence in this task is 117-135 env steps
+            # (measured on the calibrated oracle), and at the SB3
+            # default 0.99 the next return is worth 0.99^130 ~ 0.27 of
+            # the one in hand and the third ~0.07 -- the agent cannot
+            # see across an exchange, so cashing out at exchange 2 is
+            # optimal under the discount it is given. The only run that
+            # ever produced a long rally in this project
+            # (WallBall 20260713_192636, bounce_count_ep_mean 12.30 --
+            # absent from every doc, see wall_ball_aligned_patience_review)
+            # used gamma 0.995. The one prior attempt shipped it bundled
+            # with the falsified weak-return retry and was reverted with
+            # it (CHANGELOG 0.13.0), so it has never been tested alone.
+            "model_kwargs": {"gamma": 0.995},
             "success_key": "bounce_count",
             # Success mirrors the gate bar: a sustained three-exchange
             # rally is what earns the next depth stage.
@@ -769,7 +779,24 @@ RECIPES: dict[str, Recipe] = {
                 "bounce_count_ep_mean",
                 "bounce_count_ep_ge_5_rate",
             ),
-            "best_metric_min_delta": 0.5 / 30,
+            # Promotion is a threshold crossing on a noisy statistic, so
+            # the gate's precision is what decides it. Per-episode
+            # bounce_count sd is ~0.87, giving a 30-episode batch sd of
+            # ~0.16 and a 3-eval window sd of ~0.092 -- against which
+            # runs 20260724_152530 / 20260725_171747 cleared the 3.0 bar
+            # at stage 1 by 0.011, about a tenth of a standard error. 60
+            # episodes cut the window sd to ~0.065. Deliberately NOT a
+            # lower threshold: 3.0 is demonstrably reachable (a
+            # predictive controller on these same actuators scores 4.39
+            # at stage 0), so the defect was the measurement, not the bar.
+            "n_eval_episodes": 60,
+            # Pin the goal-task stream at its 0.20.0 size. It follows
+            # n_eval_episodes under the merge, and letting it double
+            # would be paid on a run whose eval streams already cost
+            # about as many env steps as training itself.
+            "final_eval_episodes": 30,
+            # Half the 1/60 granularity, per best_metric_min_delta's docs.
+            "best_metric_min_delta": 0.5 / 60,
             "confirm_best_eval": True,
             "early_stop_degenerate_evals": 5,
             "degenerate_guard_keys": ("paddle_hit_count_ep_mean",),
