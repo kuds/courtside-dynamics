@@ -393,6 +393,19 @@ controller timing accounts for roughly a fifth of it. Stage 4 is
 decisively infeasible for this controller family; stage 3 is marginal,
 its interval still straddling the bar.
 
+**But full alignment is not the only option, and the hypothesis
+survives.** A follow-on blend study (`plan_wall_ball_aligned_deep_stages.md`,
+Phase B) interpolated the serve origins between the fixed origin and the
+aligned ladder. Everything up to λ = 0.85 clears 90% at every stage;
+λ = 0.90 fails stage 4 at 82%. The collapse is a sharp threshold in
+landing distance rather than a gradual decay — 0.251 m in front of the
+deep paddle passes, 0.184 m does not — so the paddle needs roughly a
+quarter-metre of approach room that full alignment removes. Feasibility
+is also non-monotonic: λ = 0.75 beats the fixed origin at stage 3 (99.0%
+against 94.0%) while cutting the stage-4 landing gap from 1.399 m to
+0.386 m. The design's premise — that moving the serve origin with depth
+is worth testing — is intact; only its most extreme setting is not.
+
 The crude controller remains mixed and placement-coupled (aligned higher
 at stages 1, 2, and 4 — 95.5/90.0/19.5% against 73.0/69.0/14.0% — and
 lower at stage 3, 46.0% against 58.5%), so it still carries no weight in

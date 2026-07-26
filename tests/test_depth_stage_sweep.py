@@ -16,6 +16,7 @@ from tools.depth_stage_sweep import (
     STAGES,
     TELEMETRY_KEYS,
     _apply_oracle_probe,
+    _blend_serve_origins,
     _episode_telemetry,
     _landing_alignment_failures,
     _landing_statistics,
@@ -149,7 +150,9 @@ def test_landing_statistics_report_raw_offset_distribution():
     assert _landing_statistics([], -2.1) == {
         "observed": 0,
         "landing_mean": None,
+        "target_offset": 0.0,
         "mean_offset": None,
+        "mean_offset_from_start": None,
         "offset_std": None,
         "offset_p05": None,
         "offset_median": None,
@@ -271,9 +274,10 @@ def test_json_report_preserves_exact_paired_per_seed_outcomes(tmp_path):
     )
 
     report = json.loads(output.read_text())
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["ladder"] == {
         "name": "aligned",
+        "serve_origin_blend": None,
         "paired_variant": "baseline",
         "pairing_key": "wall-ball-serve-alignment:7:8",
         "stage_zero_equivalent": True,
@@ -313,6 +317,78 @@ def test_sweep_oracle_requires_one_stage_probe_mode():
         _oracle(obs, (-4.7, -3.0))
     with pytest.raises(ValueError, match="exactly one"):
         _oracle(obs, (-4.7, -3.0), run_up=1.4, charge_gap=1.7)
+
+
+def test_serve_origin_blend_endpoints_reproduce_both_ladders_exactly():
+    """The blend must be a no-op at both ends, bit-for-bit.
+
+    Written as a lerp rather than 1.0 + blend * (aligned - 1.0) precisely
+    so blend 1.0 does not drift off the aligned table by float error.
+    """
+    baseline = _blend_serve_origins(ALIGNED_STAGES, 0.0)
+    aligned = _blend_serve_origins(ALIGNED_STAGES, 1.0)
+
+    assert [s["serve_start_x"] for s in baseline] == [
+        s["serve_start_x"] for s in BASELINE_STAGES
+    ]
+    assert [s["serve_start_x"] for s in aligned] == [
+        s["serve_start_x"] for s in ALIGNED_STAGES
+    ]
+    # The fully aligned arm targets the paddle start itself, so its
+    # declared offset is exactly zero and the contract is unchanged.
+    assert all(s["landing_target_offset"] == 0.0 for s in aligned)
+    # The fixed origin declares the full gap it leaves in front.
+    assert baseline[4]["landing_target_offset"] == pytest.approx(1.35)
+    assert baseline[0]["landing_target_offset"] == pytest.approx(0.0)
+    # Tables are never mutated.
+    assert "landing_target_offset" not in ALIGNED_STAGES[4]
+    assert ALIGNED_STAGES[4]["serve_start_x"] == -0.35
+
+
+def test_serve_origin_blend_interpolates_origin_and_target_together():
+    half = _blend_serve_origins(ALIGNED_STAGES, 0.5)
+    assert [s["serve_start_x"] for s in half] == pytest.approx(
+        [1.0, 0.845, 0.67, 0.495, 0.325]
+    )
+    # Landing moves one-for-one with the origin, so a half blend leaves
+    # half the fixed-origin gap in front of the paddle.
+    assert [s["landing_target_offset"] for s in half] == pytest.approx(
+        [0.0, 0.155, 0.33, 0.505, 0.675]
+    )
+    assert _blend_serve_origins(ALIGNED_STAGES, None) is ALIGNED_STAGES
+
+
+def test_landing_contract_measures_against_the_declared_target():
+    """A blended candidate is gated at its own target, not paddle_start_x."""
+    # Landings sitting 0.70 m in front of a start at -2.70.
+    landings = [-2.0, -2.0, -2.0, -2.0]
+
+    against_start = _landing_statistics(landings, -2.70)
+    assert against_start["mean_offset"] == pytest.approx(0.70)
+    assert against_start["target_offset"] == 0.0
+    # Would fail the contract if the target were the paddle start.
+    assert _landing_alignment_failures(
+        {**against_start, "stage": 2, "episodes": 4,
+         "pre_bounce_contact_episodes": 0},
+        require_alignment=True,
+    )
+
+    against_target = _landing_statistics(landings, -2.70, 0.70)
+    assert against_target["mean_offset"] == pytest.approx(0.0)
+    assert against_target["target_offset"] == pytest.approx(0.70)
+    # The physical distance from the paddle survives the retarget.
+    assert against_target["mean_offset_from_start"] == pytest.approx(0.70)
+    assert against_target["within_window"] == 1.0
+    assert not _landing_alignment_failures(
+        {**against_target, "stage": 2, "episodes": 4,
+         "pre_bounce_contact_episodes": 0},
+        require_alignment=True,
+    )
+
+
+def test_landing_statistics_rejects_a_nonfinite_target():
+    with pytest.raises(ValueError, match="target_offset must be finite"):
+        _landing_statistics([-2.0], -2.7, float("nan"))
 
 
 def test_oracle_probe_override_replaces_the_stage_probe_mode():

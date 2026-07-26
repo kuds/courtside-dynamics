@@ -45,6 +45,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from multiprocessing import Pool
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 
@@ -96,6 +97,12 @@ BASELINE_STAGES = [
     {**stage, "serve_start_x": 1.0}
     for stage in ALIGNED_STAGES
 ]
+
+#: The aligned ladder's serve origins, i.e. the far end of the blend that
+#: ``--serve-origin-blend`` interpolates from the fixed origin 1.0.
+_ALIGNED_SERVE_ORIGINS: tuple[float, ...] = tuple(
+    cast(float, stage["serve_start_x"]) for stage in ALIGNED_STAGES
+)
 
 # Backward-compatible alias for imports that predate explicit variants.
 STAGES = ALIGNED_STAGES
@@ -167,6 +174,51 @@ def _apply_oracle_probe(stages, overrides):
             for key in _ORACLE_PROBE_KEYS.values():
                 stage.pop(key, None)
             stage[_ORACLE_PROBE_KEYS[mode]] = value
+        resolved.append(stage)
+    return resolved
+
+
+#: Stage keys that configure the sweep rather than the environment. They
+#: are stripped before ``WallBallEnv`` construction.
+PROBE_ONLY_STAGE_KEYS = (
+    "oracle_run_up",
+    "oracle_charge_gap",
+    "landing_target_offset",
+)
+
+
+def _env_kwargs(stage):
+    """Strip sweep-only keys so the rest can construct ``WallBallEnv``."""
+    kwargs = dict(stage)
+    for key in PROBE_ONLY_STAGE_KEYS:
+        kwargs.pop(key, None)
+    return kwargs
+
+
+def _blend_serve_origins(stages, blend):
+    """Interpolate serve origins between the fixed origin and the aligned ladder.
+
+    ``serve_start_x(lambda) = 1.0 + lambda * (aligned - 1.0)``, so
+    ``lambda = 0`` reproduces the fixed-origin baseline and ``lambda = 1``
+    the aligned ladder. The serve landing moves one-for-one with the
+    origin, so the declared landing target for an interior blend is
+    ``(1 - lambda) * (1.0 - aligned)`` metres in front of the paddle
+    start -- the alignment contract is measured against that target
+    rather than against ``paddle_start_x``, which only describes the
+    fully aligned arm.
+    """
+    if blend is None:
+        return stages
+    resolved = []
+    for stage, aligned_origin in zip(
+        stages, _ALIGNED_SERVE_ORIGINS, strict=True
+    ):
+        stage = dict(stage)
+        # Written as a lerp rather than 1.0 + blend * (aligned - 1.0) so the
+        # endpoints are exact: blend 1.0 must reproduce the aligned ladder
+        # bit-for-bit, and blend 0.0 the fixed origin.
+        stage["serve_start_x"] = (1.0 - blend) * 1.0 + blend * aligned_origin
+        stage["landing_target_offset"] = (1.0 - blend) * (1.0 - aligned_origin)
         resolved.append(stage)
     return resolved
 
@@ -383,8 +435,16 @@ def _episode_telemetry(info):
     return values, (), tuple(errors)
 
 
-def _landing_statistics(landing_x, paddle_start_x):
-    """Summarize first-bounce x offsets from the configured paddle start."""
+def _landing_statistics(landing_x, paddle_start_x, target_offset=0.0):
+    """Summarize first-bounce x offsets from the stage's declared target.
+
+    ``target_offset`` is how far in front of ``paddle_start_x`` the
+    landing is *meant* to fall. It is 0.0 for the fully aligned ladder,
+    which is what the contract was originally written against; an
+    interior ``--serve-origin-blend`` declares a positive target so the
+    same tolerance band can gate it. ``mean_offset_from_start`` keeps the
+    physical picture (distance from the paddle) regardless of target.
+    """
     values = np.asarray(landing_x, dtype=np.float64)
     if values.ndim != 1:
         raise ValueError("landing_x must be one-dimensional")
@@ -392,13 +452,17 @@ def _landing_statistics(landing_x, paddle_start_x):
         raise ValueError("landing_x must contain only finite values")
     if not np.isfinite(paddle_start_x):
         raise ValueError("paddle_start_x must be finite")
+    if not np.isfinite(target_offset):
+        raise ValueError("target_offset must be finite")
 
     count = int(values.size)
     if count == 0:
         return dict(
             observed=0,
             landing_mean=None,
+            target_offset=float(target_offset),
             mean_offset=None,
+            mean_offset_from_start=None,
             offset_std=None,
             offset_p05=None,
             offset_median=None,
@@ -409,12 +473,16 @@ def _landing_statistics(landing_x, paddle_start_x):
             within_window=None,
         )
 
-    offsets = values - float(paddle_start_x)
+    offsets = values - (float(paddle_start_x) + float(target_offset))
     p05, median, p95 = np.quantile(offsets, (0.05, 0.50, 0.95))
     return dict(
         observed=count,
         landing_mean=float(values.mean()),
+        target_offset=float(target_offset),
         mean_offset=float(offsets.mean()),
+        mean_offset_from_start=float(
+            (values - float(paddle_start_x)).mean()
+        ),
         offset_std=float(offsets.std()),
         offset_p05=float(p05),
         offset_median=float(median),
@@ -528,7 +596,7 @@ def _job(args):
     stage = dict(stage_spec)
     run_up = stage.pop("oracle_run_up", None)
     charge_gap = stage.pop("oracle_charge_gap", None)
-    env = WallBallEnv(**{**BASE, **stage})
+    env = WallBallEnv(**{**BASE, **_env_kwargs(stage)})
     fence = stage["paddle_x_fence"]
     parked_action = _parked(stage["paddle_start_x"])
     counts: list[int] = []
@@ -671,9 +739,8 @@ def _landing_job(args):
     from courtside_dynamics.envs import WallBallEnv
 
     stage = dict(stage_spec)
-    stage.pop("oracle_run_up", None)
-    stage.pop("oracle_charge_gap", None)
-    env = WallBallEnv(**{**BASE, **stage})
+    target_offset = stage.get("landing_target_offset", 0.0)
+    env = WallBallEnv(**{**BASE, **_env_kwargs(stage)})
     parked_action = _parked(stage["paddle_start_x"])
     landing_x: list[float] = []
     episode_results: list[dict] = []
@@ -739,7 +806,9 @@ def _landing_job(args):
         stage=stage_idx,
         episodes=episodes,
         pre_bounce_contact_episodes=pre_bounce_contact_episodes,
-        **_landing_statistics(landing_x, stage["paddle_start_x"]),
+        **_landing_statistics(
+            landing_x, stage["paddle_start_x"], target_offset
+        ),
         samples=episode_results,
     )
 
@@ -755,6 +824,7 @@ def _write_json_report(
     ladder_name="aligned",
     stages=None,
     require_alignment=True,
+    serve_origin_blend=None,
     calibration_seed_start=None,
     calibration_episodes=None,
     calibration_artifact=None,
@@ -774,9 +844,10 @@ def _write_json_report(
             artifact=calibration_artifact,
         )
     payload = dict(
-        schema_version=2,
+        schema_version=3,
         ladder=dict(
             name=ladder_name,
+            serve_origin_blend=serve_origin_blend,
             paired_variant=(
                 "baseline" if ladder_name == "aligned" else "aligned"
             ),
@@ -887,6 +958,19 @@ def _parse_args():
         ),
     )
     parser.add_argument(
+        "--serve-origin-blend",
+        type=float,
+        metavar="LAMBDA",
+        help=(
+            "interpolate serve origins between the fixed origin (0.0) and "
+            "the aligned ladder (1.0), i.e. 1.0 + LAMBDA * (aligned - 1.0). "
+            "The landing contract is then measured against the target the "
+            "blend declares, (1 - LAMBDA) * (1.0 - aligned) metres in front "
+            "of the paddle start, instead of against paddle_start_x. "
+            "Requires --ladder aligned"
+        ),
+    )
+    parser.add_argument(
         "--oracle-probe",
         action="append",
         metavar="STAGE=MODE:VALUE",
@@ -922,9 +1006,24 @@ def main() -> int:
     json_output = args.json_output
     ladder_name = args.ladder
     stages = LADDERS[ladder_name]
+    blend = args.serve_origin_blend
+    if blend is not None:
+        if ladder_name != "aligned":
+            raise SystemExit(
+                "--serve-origin-blend interpolates from the aligned ladder; "
+                "use --ladder aligned (blend 0.0 is the baseline)"
+            )
+        if not np.isfinite(blend) or not 0.0 <= blend <= 1.0:
+            raise SystemExit(
+                "--serve-origin-blend must be between 0.0 and 1.0 inclusive"
+            )
+        stages = _blend_serve_origins(stages, blend)
     stages = _apply_oracle_probe(
         stages, _parse_oracle_probe(args.oracle_probe, len(stages))
     )
+    # A blend declares its own landing target, so the contract stays
+    # blocking for it rather than being switched off for anything that is
+    # not the fully aligned ladder.
     require_alignment = ladder_name == "aligned"
     if episodes < 1:
         raise SystemExit("episodes-per-cell must be a positive integer")
@@ -1084,6 +1183,7 @@ def main() -> int:
             ladder_name=ladder_name,
             stages=stages,
             require_alignment=require_alignment,
+            serve_origin_blend=blend,
             calibration_seed_start=args.calibration_seed_start,
             calibration_episodes=args.calibration_episodes,
             calibration_artifact=args.calibration_artifact,

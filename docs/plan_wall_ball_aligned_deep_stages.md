@@ -174,7 +174,55 @@ Recording the *ceiling* matters even when the gate passes: it is the upper
 bound any learned policy could reach, and the campaign has repeatedly
 mistaken a task ceiling for a training problem.
 
-## Phase B — parametric offset study
+## Phase B — RESULT (2026-07-26): partial alignment works
+
+**Run and answered, and the answer is positive.** `--serve-origin-blend`
+landed alongside a landing contract that measures against the target a
+blend declares. Nine λ values were swept on calibration seeds 0–199, 200
+episodes per cell, retuning the oracle's charge gap at each point (six
+values per deep stage) because Phase A showed the optimum shifts with
+geometry.
+
+| λ | stage 3 best | stage 4 best | stage-4 landing in front of paddle | verdict |
+|---:|---:|---:|---:|:--|
+| 0.00 (fixed origin) | 94.0% @2.8 | 94.0% @1.4 | 1.399 m | pass |
+| 0.25 | 95.5% @1.2 | 91.0% @1.4 | 1.061 m | pass |
+| 0.50 | 96.5% @1.2 | 96.5% @2.4 | 0.724 m | pass |
+| **0.75** | **99.0% @2.8** | **96.0% @2.4** | **0.386 m** | **pass** |
+| 0.80 | 97.5% @2.4 | 91.0% @2.4 | 0.319 m | pass |
+| 0.85 | 98.0% @2.8 | 91.0% @2.4 | 0.251 m | pass |
+| 0.90 | 95.5% @2.8 | **82.0%** @2.4 | 0.184 m | fail |
+| 0.95 | 93.0% @2.4 | **81.0%** @2.4 | 0.116 m | fail |
+| 1.00 (fully aligned) | 88.5% @2.4 | **69.0%** @2.4 | 0.049 m | fail |
+
+Stages 0–2 pass at every λ (94.0% / 93.5–98.5% / 92.0–98.0%); stage 0 is
+λ-invariant by construction and holds at 94.0% throughout, so the
+negative control survives the new lever.
+
+**Gate B verdict: the largest λ clearing 90% at every stage is 0.85.**
+Partial alignment is viable, and Phase B's pessimistic framing was
+wrong — the ladder does not need redesigning.
+
+The failure is a **sharp threshold in landing distance, not a gradual
+decay**: everything down to 0.251 m in front of the deep paddle passes,
+and 0.184 m fails by 8 points. The paddle needs roughly a quarter of a
+metre of approach room, and full alignment removes it.
+
+Feasibility is also not monotonic in λ. Both endpoints are worse at the
+deep stages than the interior: λ = 0.75 beats the fixed origin at stage 3
+(99.0% against 94.0%) and matches it at stage 4. Dropping the ball
+somewhat in front of the paddle is better than either extreme.
+
+**Recommended freeze for Phase C: λ = 0.75, not the maximum-passing
+0.85.** Two reasons. λ = 0.75 carries real margin (96.0% at stage 4
+against 91.0%), and the charge gap at each point was chosen as the best
+of six on the *same* calibration seeds, so every rate in the table above
+is optimistically biased by that selection. A configuration sitting one
+point above the bar on calibration data is not a safe thing to certify.
+Frozen probe values at λ = 0.75: stage 0 `run_up` 1.1, stages 1–2
+`charge_gap` 1.0, stage 3 `charge_gap` 2.8, stage 4 `charge_gap` 2.4.
+
+## Phase B — method (as specified before the run)
 
 Only alignment's *target* is in question, not alignment itself. The current
 ladder aims the first bounce at `paddle_start_x`; the baseline leaves it up
@@ -193,9 +241,14 @@ ladder. Sweep `lambda` in {0.25, 0.5, 0.75} — at 0.5 the origins are
 stage the oracle ≥2 rate, the mean landing offset, and the within-±0.30 m
 fraction.
 
-The landing contract must be **non-blocking** during this study: interior
-blends will not satisfy a ±0.30 m band that assumes full alignment, and
-that is the point. Report it; do not gate on it.
+~~The landing contract must be **non-blocking** during this study.~~
+**Superseded by the implementation.** Rather than switching the contract
+off, `_landing_statistics` now takes the target a blend declares —
+`(1 − λ) × (1.0 − aligned)` metres in front of the paddle start — so the
+same ±0.10 m mean tolerance and ±0.30 m / 95% window gate an interior
+blend meaningfully. Every λ in the study passed it (worst mean deviation
+from target 0.049 m, minimum within-window 99.5%), which also confirms
+the landing really does move one-for-one with the serve origin.
 
 **Gate B.** Identify the largest `lambda` whose oracle clears 90% at every
 stage. If `lambda = 0.25` already fails, alignment is incompatible with the
@@ -206,6 +259,9 @@ is a separate design change, not a parameter choice.
 An honest possible outcome is that no `lambda > 0` clears the bar. That
 result is worth having: it closes the serve-origin lever cleanly instead of
 leaving it as a permanent open question.
+
+*(Outcome: λ = 0.85 was the largest passing value and λ = 0.75 is the
+recommended freeze. The ladder-redesign branch is not needed.)*
 
 ## Phase C — freeze and certify
 
