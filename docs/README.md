@@ -8,6 +8,8 @@ Docs here fall into three kinds, distinguished so a living reference is never
 mistaken for a point-in-time snapshot:
 
 - **Living** — kept current with the code (specs, the decisions journal).
+- **Proposed** — a design whose work has *not* shipped. Describes intended
+  future behavior, so nothing in it may be read as a description of the code.
 - **Implemented design** — a proposal whose work has shipped; retained as
   historical rationale, superseded by the code and the journal for current
   behavior.
@@ -22,6 +24,8 @@ mistaken for a point-in-time snapshot:
 | [`humanoid_env_review.md`](humanoid_env_review.md) | Review snapshot | `main`@`0d294f2`, v0.7.0, 2026-07-13 | Deep review of the humanoid tennis environment and shared infrastructure (rules, curriculum, promotion gate, training, video, learning feasibility). |
 | [`wall_ball_baseline_review.md`](wall_ball_baseline_review.md) | Review snapshot | `cdb17d4`, v0.9.0, 2026-07-14/16 (+ addenda) | Post-mortems of two WallBallBaseline SAC runs: the "one-and-done" and "never-touches-the-ball" failures, geometry calibration, and the 0.11.0 bootstrap package. |
 | [`design_wall_ball_checkpoint_selection_audit.md`](design_wall_ball_checkpoint_selection_audit.md) | Review snapshot | run `20260727_004014`, v0.21.0, 2026-07-27 | Paired re-scoring of four checkpoints on the goal geometry with 200 fresh seeds. Refutes the claim that the run selected the wrong checkpoint, records the second winner's-curse instance, and pins the seed ledger. |
+
+| [`design_wall_ball_paddle_orientation.md`](design_wall_ball_paddle_orientation.md) | **Proposed** (not implemented) | v0.22.0, 2026-07-27 | Actuating paddle pitch/yaw: verified MuJoCo change, the action/observation/entropy ripples, why pitch precedes yaw, and the scripted-oracle gate. Explicitly blocked on the depth ladder working first. |
 
 > The table above is incomplete — several depth-campaign documents
 > (`design_wall_ball_depth_curriculum.md`, `design_wall_ball_serve_alignment.md`,
