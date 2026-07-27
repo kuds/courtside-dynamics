@@ -177,6 +177,30 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### An argmax over a logged eval stream is a hypothesis, not a result — *characteristic*
+Second occurrence in this campaign, so it is a pattern rather than a
+mishap. Run `20260727_004014`'s unsynced goal-geometry stream made the
+late-run region look better than the selected checkpoint (8-eval trailing
+means: 1.163 at the selected 4,650,000 vs 1.283 at 5,750,000 and 1.254 at
+6,000,000), and the run was called wrong for having selected on
+matched-stage geometry. Re-scored on **200 fresh paired seeds**
+(`design_wall_ball_checkpoint_selection_audit.md`), `final_model` came
+back **worse** (−0.080, t = −1.80) and the best candidate was not
+significant (+0.085, t = +1.62, p ≈ 0.11 before any multiplicity
+correction). The trailing means had been computed from a 30-episode
+estimator over the same 240 evaluations the maximum was drawn from. The
+first occurrence is in `plan_wall_ball_aligned_deep_stages.md`: a control
+arm's calibration argmax (94.0%) fell to 89.0% held-out and failed while
+the stale shipped value passed at 94.0%. *Rule: re-score the candidate
+region on seeds no selection has touched, pair the arms on identical
+seeds, report the paired statistic, and size the re-score against the
+effect claimed — 3–5 point calibration-to-held-out swings at n = 200 are
+routine here, which is the same order as every margin that has mattered.*
+Two useful side effects of that audit: `best_model.zip` **stands** (no
+re-selection), and four checkpoints spanning 1.35M steps all landing at
+1.07–1.30 returns is direct evidence the depth plateau is structural, not
+a choice-of-snapshot artifact.
+
 ### Per-stage promotion price, not total budget, is what binds the depth campaign — *characteristic*
 Run `20260721_004722` reached stage 2 of 4 on 3M steps; run
 `20260724_152530` was still on stage 1 at 2.55M of a 6M budget, with
@@ -209,7 +233,15 @@ to re-expand entropy — sampling spread lives in the policy's learned
 `log_std` and re-expands over subsequent gradient steps, so expect a ramp,
 not a step.
 
-### A sliding fence turns a growing slab of the action range into a zero-gradient plateau — *characteristic*
+**Default-on for both depth recipes from 0.22.0.** The lever shipped in
+0.20.0 and was then never exercised: run `20260727_004014` finished with
+`train/ent_coef` at **0.0011** after 97 evaluations on stage 3, so every
+one of its three advances still handed new geometry a policy with no
+exploration budget. Legal there because `model_kwargs` pins only `gamma`,
+leaving SB3's `ent_coef` on `"auto"` — a recipe that pins a float
+coefficient cannot use this key.
+
+### A sliding fence turns a growing slab of the action range into a zero-gradient plateau — *characteristic; remediated (0.22.0)*
 `_action_to_controls` clamps the *target*, not the mapping
 (`wall_ball.py:1097-1105`) — correct, and it keeps action semantics fixed
 across stages. The consequence, unrecorded until now: with
@@ -224,6 +256,22 @@ has no gradient pointing deeper — it can only escape on action noise,
 which by then is nearly gone (see the entropy entry above). This is a
 **third** promotion-shock mechanism alongside the two already recorded
 (stale replay buffer, unobservable fence).
+
+**Remediated in 0.22.0**, after run `20260727_004014` paid the predicted
+price (three promotions, then 97 evaluations stalled on stage 3). Two
+independent re-derivations reproduced the band above to the digit, which
+is worth noting only because the mechanism was already on record here and
+was rediscovered from the run data rather than read off this entry —
+*check this journal before re-deriving.* The fix has two halves.
+`paddle_home_x` became a property whose setter recomputes
+`_control_home[0]`: it had been a plain attribute, so a stage that moved
+it was a **silent no-op** (`set_wrapper_attr(..., force=False)` reports
+success for any existing attribute) — cardinal rule 1, again. Each stage
+now pivots the map on its own fence midpoint, holding the live band
+roughly flat (0.49 / 0.43 / 0.42 / 0.48 / 0.63) instead of collapsing
+0.67 → 0.28. `paddle_x_target_range` is untouched, so action *scale*
+still never drifts across stages — the property this entry was written to
+protect survives.
 
 ### Don't pool the `confirm_best` batch into the promotion window — *built, then rejected (0.20.0)*
 Tempting and wrong. `confirm_best` re-rolls a full `n_eval_episodes` batch

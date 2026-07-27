@@ -118,6 +118,26 @@ improved; the mean compresses while the tail moves. *Rule: pair the
 capped eval with the 50-seed long-horizon audit — it is the sensitive
 instrument for tail effects.*
 
+**13a. An argmax over a logged eval stream is not evidence; it is the
+noise you selected on.**
+Twice now a margin taken from a max-over-evaluations has failed to
+replicate on fresh seeds. In the serve-alignment sweep a control arm's
+calibration argmax (94.0%) fell to 89.0% held-out and failed, while the
+stale shipped value passed at 94.0%
+(`plan_wall_ball_aligned_deep_stages.md`). In the checkpoint audit
+(`design_wall_ball_checkpoint_selection_audit.md`) the late-run region
+looked +0.09 returns better than the selected checkpoint on 8-eval
+trailing means of a 30-episode estimator, drawn from the same 240
+evaluations the maximum came from; on 200 fresh paired seeds
+`final_model` was **worse** (−0.080, t = −1.80) and the best candidate
+was not significant (+0.085, t = +1.62). Both times the number was
+computed over the same draws it was selected from. *Rule: a ranking
+taken from logged evaluations is a hypothesis, never a result. Re-score
+the candidate region on seeds no selection has touched, pair the arms on
+identical seeds, and report the paired statistic — and size the re-score
+against the effect claimed, because at n = 200 a 3–5 point
+calibration-to-held-out swing is routine here.*
+
 ## Engineering
 
 **14. Silent no-ops are the default failure mode; make everything fail
