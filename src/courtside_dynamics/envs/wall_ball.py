@@ -202,6 +202,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         serve_vy_max: float = 1.8,
         paddle_hit_bonus: float = 0.25,
         track_shaping_scale: float = 0.5,
+        return_shaping_scale: float = 0.0,
         out_of_bounds_penalty: float = 1.0,
         double_bounce_penalty: float = 1.0,
         stall_penalty: float = 1.0,
@@ -237,6 +238,10 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             )
         if not np.isfinite(paddle_home_x):
             raise ValueError("paddle_home_x must be finite")
+        if not np.isfinite(return_shaping_scale) or return_shaping_scale < 0:
+            raise ValueError(
+                "return_shaping_scale must be finite and non-negative"
+            )
         if (
             not np.isfinite(style_violation_penalty)
             or style_violation_penalty < 0.0
@@ -367,6 +372,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             paddle_x_fence=resolved_fence,
             court_style=court_style,
             wall_reward_increment=float(wall_reward_increment),
+            return_shaping_scale=float(return_shaping_scale),
             **kwargs,
         )
 
@@ -390,6 +396,18 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.serve_vy_max = float(serve_vy_max)
         self.paddle_hit_bonus = float(paddle_hit_bonus)
         self.track_shaping_scale = float(track_shaping_scale)
+        # Dense credit on the *outgoing* leg (paddle hit -> wall). The
+        # incoming leg has always been shaped; the outgoing one had no
+        # dense signal at all, so "how hard/straight did I hit it" was
+        # carried by a single sparse +1 about 50 steps later. Run
+        # 20260727_004014's long-horizon audit measured the consequence:
+        # a 1.5 m/s pop-up that lands short pays exactly what a 17 m/s
+        # drive pays, and 6 of 63 legal hits never reached the wall.
+        # Like track shaping this is potential-based on distance and
+        # joins ``_pending_shaping``, so it is refunded unless the cycle
+        # completes -- a shot that drifts wallward and dies banks
+        # nothing. Default 0.0 keeps every other recipe byte-identical.
+        self.return_shaping_scale = float(return_shaping_scale)
         self.out_of_bounds_penalty = float(out_of_bounds_penalty)
         self.double_bounce_penalty = float(double_bounce_penalty)
         self.stall_penalty = float(stall_penalty)
@@ -524,6 +542,10 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # flight produces dense shaping signal.
         self._returning = False
         self._prev_paddle_to_ball: float | None = None
+        # Mirror of ``_prev_paddle_to_ball`` for the outgoing leg. Held
+        # at None whenever ``_returning`` is True, so the first outgoing
+        # step always establishes its own baseline.
+        self._prev_ball_to_wall: float | None = None
         # Refundable advances paid during the current rally cycle (last
         # completed gated wall contact -> next one). Both are paid
         # immediately but clawed back if the cycle ends any way other
@@ -634,6 +656,10 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._paddle_x_origin = float(
             self.data.body("paddle_head").xpos[0] - x_joint.qpos[0]
         )
+        # World x of the wall body, cached for the outgoing-leg shaping.
+        # Only differences of (wall_x - ball_x) are ever used, so the
+        # body-centre-vs-face offset cancels and never needs modelling.
+        self._wall_x = float(self.data.body("wall").xpos[0])
         physical_world_range = (
             self._paddle_x_origin + float(self._control_low[0]),
             self._paddle_x_origin + float(self._control_high[0]),
@@ -797,6 +823,47 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                     f"world-space range {world_range}, got {fence}"
                 )
         self._paddle_x_fence = fence
+
+    @property
+    def paddle_home_x(self) -> float:
+        """World x that a zero x-action maps to (the action map's pivot).
+
+        A plain attribute until 0.22.0, which made a curriculum stage
+        that moved it a **silent no-op**: ``_control_home[0]`` is derived
+        once during setup, and ``set_wrapper_attr(..., force=False)``
+        reports success for any existing attribute, so the gate would
+        advance while the action map stayed pinned to the old pivot.
+        Run 20260727_004014 hit the consequence -- with home at -1.7 and
+        the final fence at (-4.7, -3.0), 71.7% of the x action range
+        collapsed onto the fence's front edge. The setter keeps the
+        derived control pivot in step so a stage may re-centre it.
+        """
+        return self._paddle_home_x
+
+    @paddle_home_x.setter
+    def paddle_home_x(self, value: float) -> None:
+        home = float(value)
+        if not np.isfinite(home):
+            raise ValueError("paddle_home_x must be finite")
+        # Both guards read attributes that do not exist yet on the first
+        # assignment inside __init__; the constructor performs the same
+        # range check and the first pivot computation itself.
+        target_range = getattr(self, "paddle_x_target_range", None)
+        if target_range is not None:
+            tolerance = 1e-9
+            if not (
+                target_range[0] - tolerance
+                <= home
+                <= target_range[1] + tolerance
+            ):
+                raise ValueError(
+                    "paddle_home_x must lie inside paddle_x_target_range; "
+                    f"got home {home} and range {target_range}"
+                )
+        self._paddle_home_x = home
+        control_home = getattr(self, "_control_home", None)
+        if control_home is not None:
+            control_home[0] = home - self._paddle_x_origin
 
     # Court markings (see assets/wall_ball.xml), all render-only sites.
     # The preset-dependent diagnostic markers are rewritten from the
@@ -1553,6 +1620,13 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # would otherwise poison the reward and the pending total.
         ball_pos = np.array(self.data.joint("ball_x").qpos[:3])
         paddle_head_pos = np.array(self.data.body("paddle_head").xpos)
+        # Clearing the outgoing baseline on every incoming step is what
+        # keeps the two windows from leaking into each other: whichever
+        # step flips ``_returning`` to False finds it None and starts a
+        # fresh potential, so no reset bookkeeping is needed at the four
+        # sites that flip the flag.
+        if self._returning:
+            self._prev_ball_to_wall = None
         if (
             self._returning
             and style_violation_reason is None
@@ -1569,6 +1643,28 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                     rew_shaping += delta
                     self._pending_shaping += delta
                 self._prev_paddle_to_ball = dist
+        elif (
+            not self._returning
+            and style_violation_reason is None
+            and not double_bounce_latched
+            and self.return_shaping_scale > 0.0
+        ):
+            # Outgoing leg: same potential-based form, on the ball's
+            # remaining gap to the wall. A pop-up closes that gap slowly
+            # or not at all, a drive closes it fast; and because the
+            # advance joins ``_pending_shaping`` it is refunded unless
+            # the ball actually completes the return, so drifting
+            # wallward and dying on the floor still banks nothing.
+            gap = float(self._wall_x - ball_pos[0])
+            if np.isfinite(gap):
+                if self._prev_ball_to_wall is not None:
+                    delta = self.return_shaping_scale * (
+                        self._prev_ball_to_wall - gap
+                    )
+                    reward += delta
+                    rew_shaping += delta
+                    self._pending_shaping += delta
+                self._prev_ball_to_wall = gap
 
         if event_this_step:
             self._steps_since_event = 0

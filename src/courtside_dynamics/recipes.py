@@ -697,11 +697,28 @@ RECIPES: dict[str, Recipe] = {
             # recoverable_bounce_*) carries over.
             "rally_style": "open",
             # The action mapping stays pinned to the full physical
-            # workspace for the entire run so action semantics never
-            # drift across stages; each stage confines *position* with
-            # paddle_x_fence instead.
-            "paddle_home_x": -1.7,
+            # workspace for the entire run so action *scale* never
+            # drifts across stages; each stage confines position with
+            # paddle_x_fence instead. What each stage does move is the
+            # map's pivot (paddle_home_x), because a fixed pivot outside
+            # a receded fence throws most of the action range away: run
+            # 20260727_004014 finished with home -1.7 against a
+            # (-4.7, -3.0) fence, where 71.7% of the x range -- all of
+            # action 0 and the entire positive half -- clamped onto the
+            # fence's front edge. Holding the pivot at each fence's
+            # midpoint keeps the usable share roughly flat (0.52, 0.48,
+            # 0.49, 0.54, 0.66) instead of collapsing 0.67 -> 0.28.
+            "paddle_home_x": -1.25,
             "paddle_x_target_range": (-4.7, 0.3),
+            # Dense credit on the outgoing leg; see WallBallEnv's
+            # return_shaping_scale. Deliberately much smaller than
+            # track_shaping_scale (0.5): the outgoing gap is metres wide,
+            # and the 20260727 audit found incoming shaping already
+            # crowding out the flat +1 wall payment (57% -> 73% of the
+            # per-cycle reward as the fence recedes). 0.15 adds about
+            # +1.0 per completed return -- comparable to the wall, not
+            # dominant.
+            "return_shaping_scale": 0.15,
             # Stage-0 geometry — volley range, where striking is easy.
             # Run 20260722_124613 exposed a flaw in the original ladder:
             # every stage shared a front-court interval, so the policy
@@ -712,7 +729,23 @@ RECIPES: dict[str, Recipe] = {
             # production baseline passed its 200-episode-per-cell sweep
             # on 2026-07-23. A separately named aligned recipe preserves
             # this control while the serve-origin hypothesis is tested.
-            "paddle_x_fence": (-2.7, 0.3),
+            #
+            # 0.22.0 holds every fence 2.1 m wide instead of letting it
+            # narrow 3.0 -> 1.7 with depth. Return pace is set by the
+            # paddle's forward speed at contact, which needs runway: a
+            # swept probe on the old goal fence scored 0 completed
+            # returns from 0.0-0.4 m of travel, 1 from 0.6-0.9 m, and
+            # 2-3 from 1.2-1.6 m. The old ladder left exactly 0.9 m at
+            # the goal, so 100% of audited episodes returned the serve
+            # and then had no runway to re-load -- the measured cause of
+            # the 1.14-return plateau. Every stage now clears >= 1.3 m.
+# 2.1 m is the widest constant width that still leaves the
+# ladder without an all-stage refuge: the fence travels 2.4 m
+# back (-2.3 -> -4.7), so any width >= 2.4 would hand every
+# stage a shared front-court interval again -- the exact flaw
+# run 20260722_124613 exposed. 2.1 keeps a 0.3 m separation,
+# matching the ladder it replaces.
+            "paddle_x_fence": (-2.3, -0.2),
             "paddle_start_x": -1.6,
             # Serve energy co-moves with depth via the gate (5.2 -> 7.0)
             # so the ball reliably reaches the deeper paddle. This
@@ -746,8 +779,9 @@ RECIPES: dict[str, Recipe] = {
             # task is comparable across runs; cross-recipe comparison
             # requires evaluation on both serve geometries. Must equal
             # the last performance_gate stage (pinned by test).
-            "paddle_x_fence": (-4.7, -3.0),
+            "paddle_x_fence": (-4.7, -2.6),
             "paddle_start_x": -3.9,
+            "paddle_home_x": -3.65,
             "serve_start_x": 1.0,
             "serve_speed": 7.0,
         },
@@ -848,34 +882,51 @@ RECIPES: dict[str, Recipe] = {
                 "promotion_rule": "window_mean",
                 "advance_update_pause_steps": 50_000,
                 "clear_replay_buffer_on_advance": True,
+                # Run 20260727_004014 promoted three times and then sat
+                # on stage 3 for 97 evaluations with train/ent_coef at
+                # 0.0011 -- effectively deterministic. Every advance was
+                # dropping a policy with no exploration budget into new
+                # geometry. This lever was added in 0.20.0 for exactly
+                # that failure and had never been exercised; it is legal
+                # here because model_kwargs pins only gamma, leaving
+                # SB3's ent_coef on "auto".
+                "reset_entropy_on_advance": True,
+                # Each stage: fence 2.1 m wide (constant), paddle_home_x
+                # on the fence midpoint, and >= 1.3 m of runway between
+                # paddle_start_x and the fence's front edge.
                 "stages": (
                     {
-                        "paddle_x_fence": (-2.7, 0.3),
+                        "paddle_x_fence": (-2.3, -0.2),
                         "paddle_start_x": -1.6,
+                        "paddle_home_x": -1.25,
                         "serve_start_x": 1.0,
                         "serve_speed": 5.2,
                     },
                     {
-                        "paddle_x_fence": (-3.2, -0.8),
+                        "paddle_x_fence": (-2.9, -0.8),
                         "paddle_start_x": -2.1,
+                        "paddle_home_x": -1.85,
                         "serve_start_x": 1.0,
                         "serve_speed": 5.5,
                     },
                     {
-                        "paddle_x_fence": (-3.7, -1.6),
+                        "paddle_x_fence": (-3.5, -1.4),
                         "paddle_start_x": -2.7,
+                        "paddle_home_x": -2.45,
                         "serve_start_x": 1.0,
                         "serve_speed": 6.0,
                     },
                     {
-                        "paddle_x_fence": (-4.2, -2.4),
+                        "paddle_x_fence": (-4.1, -2.0),
                         "paddle_start_x": -3.3,
+                        "paddle_home_x": -3.05,
                         "serve_start_x": 1.0,
                         "serve_speed": 6.5,
                     },
                     {
-                        "paddle_x_fence": (-4.7, -3.0),
+                        "paddle_x_fence": (-4.7, -2.6),
                         "paddle_start_x": -3.9,
+                        "paddle_home_x": -3.65,
                         "serve_start_x": 1.0,
                         "serve_speed": 7.0,
                     },
