@@ -5,6 +5,68 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## 0.22.0
+
+Four changes to both depth recipes, all aimed at defects the
+`20260727_004014` post-mortem measured directly. That run promoted three
+times (a first — the previous best reached stage 1) but plateaued on the
+goal task at **1.14 completed returns**: its 50-episode long-horizon
+audit landed the serve in 100% of episodes, a second ball in 10%, a
+third in 2%, and ended every single episode in a double bounce.
+**Neither learning curves nor saved policies are comparable with any
+earlier depth run.**
+
+**Constant 2.1 m fence, ≥1.3 m of runway at every stage.** Return pace is
+set by the paddle's forward speed at contact, and that speed needs
+runway. A swept probe on the old goal fence scored 0 completed returns
+from 0.0–0.4 m of forward travel, 1 from 0.6–0.9 m, and 2–3 from
+1.2–1.6 m. The old ladder narrowed the fence 3.0 → 1.7 m as it receded
+and left exactly 0.9 m at the goal — enough for one good shot and no
+re-load, which is precisely the 100%-then-fail signature the audit
+found. Fences now hold a constant 2.1 m and every stage clears 1.3 m.
+2.1 m is the widest constant width that keeps the ladder free of an
+all-stage refuge: the fence travels 2.4 m back (−2.3 → −4.7), so any
+width ≥ 2.4 would hand every stage a shared front-court interval again —
+the flaw run `20260722_124613` exposed. The 0.3 m separation matches the
+ladder it replaces, and `paddle_start_x` is unchanged at every stage.
+
+**`paddle_home_x` is a live property, re-centred per stage.** It is the
+pivot of the normalized x action map, and it was a plain attribute — so a
+stage that moved it was a silent no-op (`_control_home` is derived once
+during setup, and `set_wrapper_attr(..., force=False)` reports success
+for any existing attribute). With the pivot pinned at −1.7 against the
+old goal fence, 71.7% of the x action range — all of action 0 and the
+entire positive half — clamped onto the fence's front edge. Each stage
+now sets the pivot to its fence midpoint, holding the usable action
+share roughly flat (0.49, 0.43, 0.42, 0.48, 0.63) instead of collapsing
+0.67 → 0.28. `paddle_x_target_range` is untouched, so action *scale*
+still never drifts across stages.
+
+**`return_shaping_scale` = 0.15 (new env kwarg, default 0.0).** The
+outgoing leg had no dense reward at all: `accept_paddle_hit` closes the
+tracking window and only wall contact reopens it, so "how hard did I hit
+it" rode on one sparse +1 about 50 steps later. Measured consequence — a
+1.5 m/s pop-up (which the fixed 10° face pitch sends mostly *upward*)
+paid exactly what a 17 m/s drive paid, and 6 of 63 legal hits never
+reached the wall. The new term is potential-based on the ball's
+remaining gap to the wall and joins `_pending_shaping`, so it is
+refunded unless the return actually completes. Deliberately far below
+`track_shaping_scale` (0.5): the incoming term already crowds out the
+flat +1 wall payment (57% → 73% of per-cycle reward as the fence
+recedes), and 0.15 adds ~1.0 per completed return rather than dominating.
+
+**`reset_entropy_on_advance` = True.** The run finished with
+`train/ent_coef` at 0.0011 — effectively deterministic — after sitting on
+stage 3 for 97 evaluations. Every advance had been dropping a policy
+with no exploration budget into new geometry. The lever was added in
+0.20.0 for exactly this failure and had never been exercised; it is
+legal here because `model_kwargs` pins only `gamma`, leaving SB3's
+`ent_coef` on `"auto"`.
+
+Not changed: `serve_speed` still co-moves with depth (5.2 → 7.0), so
+depth and ball speed remain confounded. `wall_reward_increment` stays at
+0.0. Both are the next levers if the goal-task number stays flat.
+
 ## 0.21.0
 
 Two changes to both depth recipes, aimed at the two defects the

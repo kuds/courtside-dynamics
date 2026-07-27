@@ -21,6 +21,14 @@ mistaken for a point-in-time snapshot:
 | [`design_court_and_config_updates.md`](design_court_and_config_updates.md) | Implemented design | 0.13.0 | Design for the WallBallBaseline recalibration, notebook auto-resolution of run configs, and the tennis-court replay style. Shipped in 0.13.0. |
 | [`humanoid_env_review.md`](humanoid_env_review.md) | Review snapshot | `main`@`0d294f2`, v0.7.0, 2026-07-13 | Deep review of the humanoid tennis environment and shared infrastructure (rules, curriculum, promotion gate, training, video, learning feasibility). |
 | [`wall_ball_baseline_review.md`](wall_ball_baseline_review.md) | Review snapshot | `cdb17d4`, v0.9.0, 2026-07-14/16 (+ addenda) | Post-mortems of two WallBallBaseline SAC runs: the "one-and-done" and "never-touches-the-ball" failures, geometry calibration, and the 0.11.0 bootstrap package. |
+| [`design_wall_ball_checkpoint_selection_audit.md`](design_wall_ball_checkpoint_selection_audit.md) | Review snapshot | run `20260727_004014`, v0.21.0, 2026-07-27 | Paired re-scoring of four checkpoints on the goal geometry with 200 fresh seeds. Refutes the claim that the run selected the wrong checkpoint, records the second winner's-curse instance, and pins the seed ledger. |
+
+> The table above is incomplete — several depth-campaign documents
+> (`design_wall_ball_depth_curriculum.md`, `design_wall_ball_serve_alignment.md`,
+> `lessons_learned.md`, `plan_wall_ball_aligned_deep_stages.md`,
+> `wall_ball_aligned_patience_review.md`,
+> `wall_ball_depth_curriculum_run1_review.md`,
+> `design_revert_and_run_layout.md`) are not yet listed.
 
 ## Adding a new document
 

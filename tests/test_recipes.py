@@ -7,6 +7,7 @@ run of that env. These tests materialize each recipe for real.
 """
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from courtside_dynamics.recipes import (
@@ -540,11 +541,14 @@ def test_wall_ball_recipe_preserves_original_open_setup():
     [
         ("WallBallVolley", "volley", -1.7, (-4.7, 0.3)),
         ("WallBallBaseline", "one_bounce", -2.7, (-3.2, -1.6)),
-        ("WallBallDepthCurriculum", "open", -1.7, (-4.7, 0.3)),
+        # The depth recipes re-centre the pivot per stage (0.22.0), so
+        # env_kwargs carries stage 0's midpoint rather than the shared
+        # -1.7; the mapping range stays pinned to the full workspace.
+        ("WallBallDepthCurriculum", "open", -1.25, (-4.7, 0.3)),
         (
             "WallBallDepthCurriculumAligned",
             "open",
-            -1.7,
+            -1.25,
             (-4.7, 0.3),
         ),
     ],
@@ -772,11 +776,11 @@ def test_wall_ball_depth_curriculum_walks_the_fence_back():
 
     fences = [stage["paddle_x_fence"] for stage in stages]
     assert fences == [
-        (-2.7, 0.3),
-        (-3.2, -0.8),
-        (-3.7, -1.6),
-        (-4.2, -2.4),
-        (-4.7, -3.0),
+        (-2.3, -0.2),
+        (-2.9, -0.8),
+        (-3.5, -1.4),
+        (-4.1, -2.0),
+        (-4.7, -2.6),
     ]
     backs = [back for back, _ in fences]
     fronts = [front for _, front in fences]
@@ -816,8 +820,45 @@ def test_wall_ball_depth_curriculum_walks_the_fence_back():
     assert gate["promotion_rule"] == "window_mean"
     assert gate["advance_update_pause_steps"] == 50_000
     assert gate["clear_replay_buffer_on_advance"] is True
+    # Run 20260727_004014 stalled on stage 3 with ent_coef at 0.0011;
+    # every advance had been handing new geometry a deterministic policy.
+    assert gate["reset_entropy_on_advance"] is True
     assert recipe.extra_cfg["final_info_eval"] is True
     assert recipe.extra_cfg["reward_eval_episodes"] == 5
+
+
+def test_wall_ball_depth_curriculum_keeps_runway_and_pivot_at_every_stage():
+    """Return pace comes from paddle speed at contact, and speed needs
+    runway. The pre-0.22.0 ladder narrowed the fence 3.0 -> 1.7 m while
+    receding, leaving 0.9 m of travel at the goal -- a probe sweep scored
+    0 completed returns below 0.4 m, 1 at 0.6-0.9 m and 2-3 at 1.2-1.6 m,
+    and run 20260727_004014 duly returned the serve in 100% of audited
+    episodes and a second ball in 10%. Hold the width constant, keep
+    every stage above the 1.2 m knee, and keep the action map's pivot on
+    the fence midpoint so the usable action share stops collapsing.
+    """
+    for name in ("WallBallDepthCurriculum", "WallBallDepthCurriculumAligned"):
+        recipe = RECIPES[name]
+        stages = recipe.extra_cfg["performance_gate"]["stages"]
+        widths = {
+            round(front - back, 6)
+            for back, front in (s["paddle_x_fence"] for s in stages)
+        }
+        assert widths == {2.1}, f"{name} fence width drifts: {widths}"
+        for index, stage in enumerate(stages):
+            back, front = stage["paddle_x_fence"]
+            runway = front - stage["paddle_start_x"]
+            assert runway >= 1.2, f"{name} stage {index} runway {runway}"
+            midpoint = (back + front) / 2.0
+            assert stage["paddle_home_x"] == pytest.approx(midpoint), (
+                f"{name} stage {index} pivot off the fence midpoint"
+            )
+        # The unsynced goal evaluator must stay equal to the last stage,
+        # pivot included, or it scores a geometry no stage ever trained.
+        last = stages[-1]
+        overrides = recipe.eval_env_overrides
+        for key in ("paddle_x_fence", "paddle_start_x", "paddle_home_x"):
+            assert overrides[key] == last[key], f"{name} eval drift on {key}"
 
 
 @pytest.mark.parametrize(
@@ -898,7 +939,7 @@ def test_wall_ball_depth_curriculum_config_builds_and_stages_apply(
     eval_env = cfg.eval_env_fn()
     try:
         assert env.rally_style == "open"
-        assert env.paddle_x_fence == (-2.7, 0.3)
+        assert env.paddle_x_fence == (-2.3, -0.2)
         assert env.serve_start_x == 1.0
         assert env.serve_speed == 5.2
         assert eval_env.serve_start_x == final_serve_start_x
@@ -911,8 +952,18 @@ def test_wall_ball_depth_curriculum_config_builds_and_stages_apply(
                 assert hasattr(env, key)
                 setattr(env, key, value)
         env.reset(seed=0)
-        assert env.paddle_x_fence == (-4.7, -3.0)
+        assert env.paddle_x_fence == (-4.7, -2.6)
         assert env.serve_start_x == final_serve_start_x
+        # Applying a stage must move the action map's pivot, not just
+        # the public attribute: until 0.22.0 paddle_home_x was a plain
+        # attribute, so a stage that set it left _control_home stale and
+        # the gate advanced against an unchanged mapping.
+        assert env.paddle_home_x == -3.65
+        zero_action_x = (
+            env._action_to_controls(np.zeros(3, dtype=np.float32))[0]
+            + env._paddle_x_origin
+        )
+        assert zero_action_x == pytest.approx(-3.65)
     finally:
         env.close()
         eval_env.close()

@@ -3708,3 +3708,201 @@ class TestWallBallEscalatingWallReward:
                 clone.close()
         finally:
             env.close()
+
+
+class TestPaddleHomeIsALiveMappingPivot:
+    """``paddle_home_x`` is the pivot of the normalized x action map.
+
+    It was a plain attribute until 0.22.0, which made a curriculum stage
+    that moved it a silent no-op: ``_control_home`` is derived once
+    during setup, and ``set_wrapper_attr(..., force=False)`` reports
+    success for any attribute that already exists. Run 20260727_004014
+    paid for it -- the gate advanced to a (-4.7, -3.0) fence while the
+    pivot stayed at -1.7, so 71.7% of the x action range (all of action
+    0 and the whole positive half) clamped onto the fence's front edge.
+    """
+
+    @staticmethod
+    def _zero_action_x(env):
+        return float(
+            env._action_to_controls(np.zeros(3, dtype=np.float32))[0]
+            + env._paddle_x_origin
+        )
+
+    def _deep_env(self, **kwargs):
+        return WallBallEnv(
+            paddle_home_x=-1.7,
+            paddle_x_target_range=(-4.7, 0.3),
+            paddle_x_fence=(-4.7, -2.6),
+            paddle_start_x=-3.9,
+            **kwargs,
+        )
+
+    def test_assignment_moves_the_mapping_not_just_the_attribute(self):
+        env = self._deep_env()
+        try:
+            # Pivot outside the fence: action 0 lands on the clamp.
+            assert self._zero_action_x(env) == pytest.approx(-2.6)
+            env.paddle_home_x = -3.65
+            assert self._zero_action_x(env) == pytest.approx(-3.65)
+        finally:
+            env.close()
+
+    def test_gate_path_moves_the_mapping(self):
+        """``set_wrapper_attr`` is how PerformanceGatedEnvStagesCallback
+        applies a stage; it must reach the same setter."""
+        env = self._deep_env()
+        try:
+            env.set_wrapper_attr("paddle_home_x", -3.65, force=False)
+            assert env.paddle_home_x == -3.65
+            assert self._zero_action_x(env) == pytest.approx(-3.65)
+        finally:
+            env.close()
+
+    @staticmethod
+    def _usable_action_share(home, fence):
+        """Fraction of the normalized x action range landing inside the
+        fence rather than clamped onto one of its edges."""
+        env = WallBallEnv(
+            paddle_home_x=home,
+            paddle_x_target_range=(-4.7, 0.3),
+            paddle_x_fence=fence,
+            paddle_start_x=-3.9,
+        )
+        try:
+            xs = np.array([
+                float(
+                    env._action_to_controls(
+                        np.array([a, 0.0, 0.0], dtype=np.float32)
+                    )[0]
+                    + env._paddle_x_origin
+                )
+                for a in np.linspace(-1.0, 1.0, 4001)
+            ])
+            low, high = fence
+            return float(((xs > low + 1e-9) & (xs < high - 1e-9)).mean())
+        finally:
+            env.close()
+
+    def test_recentring_restores_usable_action_range(self):
+        # What run 20260727_004014 actually shipped: pivot pinned at
+        # -1.7 against the old, narrow goal fence.
+        assert self._usable_action_share(
+            -1.7, (-4.7, -3.0)
+        ) == pytest.approx(0.283, abs=0.01)
+        # Widening the fence alone recovers only part of it, because the
+        # pivot is still outside the fence.
+        assert self._usable_action_share(
+            -1.7, (-4.7, -2.6)
+        ) == pytest.approx(0.350, abs=0.01)
+        # Re-centring the pivot on the wider fence is what restores it.
+        assert self._usable_action_share(
+            -3.65, (-4.7, -2.6)
+        ) == pytest.approx(0.633, abs=0.01)
+
+    def test_rejects_nonfinite_and_out_of_range(self):
+        env = self._deep_env()
+        try:
+            with pytest.raises(ValueError, match="paddle_home_x"):
+                env.paddle_home_x = float("nan")
+            with pytest.raises(ValueError, match="paddle_x_target_range"):
+                env.paddle_home_x = -9.0
+            # A rejected assignment must not have moved the mapping.
+            assert self._zero_action_x(env) == pytest.approx(-2.6)
+        finally:
+            env.close()
+
+    def test_constructor_value_survives_pickle(self):
+        """Only the *constructed* pivot round-trips.
+
+        Pickling rebuilds the env from its recorded constructor kwargs,
+        so no runtime mutation survives -- true of ``paddle_x_fence`` and
+        ``serve_speed`` long before this property existed, and pinned
+        here so nobody reads the setter as making stage state durable.
+        The gate never relies on it: SubprocVecEnv pickles the env
+        *factory*, and stages are applied inside each worker via
+        ``env_method("set_wrapper_attr", ...)``.
+        """
+        import pickle
+
+        env = WallBallEnv(
+            paddle_home_x=-3.65,
+            paddle_x_target_range=(-4.7, 0.3),
+            paddle_x_fence=(-4.7, -2.6),
+            paddle_start_x=-3.9,
+        )
+        try:
+            env.paddle_home_x = -3.0
+            clone = pickle.loads(pickle.dumps(env))
+            try:
+                assert clone.paddle_home_x == -3.65
+                assert self._zero_action_x(clone) == pytest.approx(-3.65)
+            finally:
+                clone.close()
+        finally:
+            env.close()
+
+
+class TestReturnShapingScale:
+    """Dense credit on the outgoing leg (paddle hit -> wall).
+
+    The incoming leg has always been shaped; the outgoing one had none,
+    so "how hard did I hit it" rode on a single sparse +1 about 50 steps
+    later. Run 20260727_004014's long-horizon audit measured the result:
+    6 of 63 legal hits never reached the wall, and a 1.5 m/s pop-up paid
+    exactly what a 17 m/s drive paid.
+    """
+
+    @staticmethod
+    def _outgoing(scale, ball_vx, steps=12):
+        env = WallBallEnv(
+            return_shaping_scale=scale,
+            paddle_x_fence=(-4.7, -2.6),
+            paddle_start_x=-3.9,
+        )
+        try:
+            env.reset(seed=0)
+            env._returning = False
+            env._paddle_hit_since_last_wall = True
+            env._prev_ball_to_wall = None
+            env.data.joint("ball_x").qpos[:3] = [-2.0, 0.0, 1.0]
+            env.data.joint("ball_x").qvel[:3] = [ball_vx, 0.0, 0.5]
+            shaping = 0.0
+            for _ in range(steps):
+                _, _, terminated, truncated, info = env.step(
+                    np.zeros(3, dtype=np.float32)
+                )
+                shaping += float(info.get("rew_shaping", 0.0))
+                if terminated or truncated:
+                    break
+            return shaping, float(env._pending_shaping)
+        finally:
+            env.close()
+
+    def test_default_is_off(self):
+        assert WallBallEnv.__init__.__defaults__ is not None
+        env = WallBallEnv()
+        try:
+            assert env.return_shaping_scale == 0.0
+        finally:
+            env.close()
+        assert self._outgoing(0.0, 16.0)[0] == 0.0
+
+    def test_pace_is_rewarded(self):
+        slow, _ = self._outgoing(0.15, 1.5)
+        fast, _ = self._outgoing(0.15, 16.0)
+        assert 0.0 < slow < fast
+        # The drive closes an order of magnitude more gap per step.
+        assert fast > 5 * slow
+
+    def test_advance_is_refundable(self):
+        """It must join ``_pending_shaping`` so a shot that drifts
+        wallward and then dies banks nothing."""
+        shaping, pending = self._outgoing(0.15, 16.0)
+        assert pending == pytest.approx(shaping)
+
+    def test_rejects_invalid(self):
+        with pytest.raises(ValueError, match="return_shaping_scale"):
+            WallBallEnv(return_shaping_scale=-0.1)
+        with pytest.raises(ValueError, match="return_shaping_scale"):
+            WallBallEnv(return_shaping_scale=float("nan"))
