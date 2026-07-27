@@ -299,6 +299,137 @@ contain the patch needed to reconstruct that state independently. A final
 certification artifact must run from a clean committed revision (or archive
 the exact patch and relevant dependency environment).
 
+## 2026-07-25 replication on calibration seeds 0–199
+
+A second paired sweep was run at 200 episodes per cell on seeds **0–199**,
+from a **clean committed revision** (`89dbe61`, `git_dirty: false`, empty
+tracked-diff hash) — the first sweep in this campaign to satisfy that part
+of the reproducibility requirement stated below. The reports regenerate
+from the recorded revision, command, and `seed_range` field, so the 2.5 MB
+raw JSONs are deliberately not vendored. Item 5 of the contract is still
+unmet, however: both artifacts record `calibration: null`, because the
+tool refuses a calibration range that overlaps the held-out range and
+here the two coincide.
+
+**These are calibration seeds, not certification.** Range 0–199 is the same
+range the exploratory `oracle_charge_gap` timing search used. Results here
+are therefore biased *in the oracle's favour* and must not be quoted as
+held-out feasibility.
+
+Oracle ≥2-return rate, with Wilson 95% intervals (successes/200):
+
+| stage | aligned (0–199) | baseline (0–199) | aligned (1000–1199) | baseline (1000–1199) |
+|---:|---:|---:|---:|---:|
+| 0 | 94.0% [89.8, 96.5] | 94.0% [89.8, 96.5] | 95.5% | 95.5% |
+| 1 | 98.5% [95.7, 99.5] | 96.0% [92.3, 98.0] | 96.0% | 95.5% |
+| 2 | 93.5% [89.2, 96.2] | 92.0% [87.4, 95.0] | 94.0% | 94.0% |
+| 3 | **85.5%** [80.0, 89.7] | 94.0% [89.8, 96.5] | **84.5%** | 92.5% |
+| 4 | **63.5%** [56.6, 69.9] | 95.0% [91.0, 97.3] | **60.0%** | **89.0%** |
+
+Stage 0 is identical across ladders (188/200 both), confirming the negative
+control holds. The aligned landing contract passes again: mean offsets
+0.001–0.049 m against the 0.10 m bar, with 100% of individual landings
+inside ±0.30 m at stages 0–3 and 99.5% at stage 4. Baseline offsets grow
+0.001 → 1.399 m as before.
+
+Two conclusions follow that the single 1000–1199 sweep could not support:
+
+1. **The aligned deep-stage deficit is robust, not seed noise.** Stage 4
+   scores 60.0% and 63.5% on two disjoint 200-episode seed sets — 27 to 30
+   points below the bar, with intervals excluding any plausible 90% target.
+   Stage 3 replicates at 84.5% and 85.5%.
+2. **The baseline's stage-4 near-miss was seed noise.** It scored 89.0%
+   (178/200) on 1000–1199 and 95.0% (190/200) on 0–199. The bar sits inside
+   that spread, so the earlier one-point miss should not be read as a
+   baseline defect. On these seeds the fixed-origin ladder passes every
+   criterion with no failures recorded.
+
+The failure mode is a clean split. At stage 4 the aligned oracle's 73
+failures are overwhelmingly missed returns (65 double bounce, 8 out of
+bounds), while the baseline fails only 10 times at all; its 182
+out-of-bounds terminations are mostly completed rallies (173) that ran out
+of court *after* the required returns. Aligned out-of-bounds terminations
+are likewise mostly successes (72 of 80), so the raw cause counts must not
+be read as failure counts.
+
+**The attribution is confounded, and in the baseline's favour.** The
+oracle's per-stage timing (`oracle_run_up=1.1` at stage 0, and
+`oracle_charge_gap` 1.0/1.0/1.8/1.7 at stages 1–4) arrived at commit
+`24223f4`, when every stage still served from `serve_start_x=1.0`; `3fd9fb3`
+added the aligned ladder by changing **only** `serve_start_x` and left
+every probe value untouched. `BASELINE_STAGES` then derives from
+`ALIGNED_STAGES` by overwriting the origin, so both arms today run a
+controller calibrated for a ball landing 1.0–1.4 m in front of the paddle.
+Under alignment the ball lands at the paddle's feet — a different
+interception problem the charge timing was never re-derived for.
+
+**That confound has since been measured, and it is small.** A probe grid
+over 19 settings per stage (11 `charge_gap` values, 8 `run_up` values,
+200 episodes each, calibration seeds 0–199) recovers only part of the
+deficit:
+
+| aligned stage | shipped probe | best over the grid | gap to the 90% bar |
+|---:|---:|---:|---:|
+| 3 | 85.5% (`charge_gap` 1.8) | **88.5%** [83.3, 92.2] (`charge_gap` 2.4) | −1.5 |
+| 4 | 63.5% (`charge_gap` 1.7) | **69.0%** [62.3, 75.0] (`charge_gap` 2.4) | −21.0 |
+
+Zero of 19 settings clear 90% at either stage. Retuning buys +3.0 points
+at stage 3 and +5.5 at stage 4 — about a fifth of each deficit. The same
+grid on the fixed-origin ladder clears the bar comfortably (4 of 11
+settings at stage 3, best 94.0%; 2 of 11 at stage 4, best 94.0%), so the
+controller family is capable and it is the aligned geometry it cannot
+handle.
+
+Two mechanism details fall out. The aligned ladder's optimum sits at a
+*larger* charge gap (2.4 against the shipped 1.8/1.7), which is what a
+ball landing at the paddle's feet should require — commit earlier. And
+`run_up` mode is useless at these depths (best 5.5% at stage 3, 1.0% at
+stage 4), confirming the docstring's rationale that narrow deep windows
+need a timed charge rather than a landing-point run-up.
+
+The attribution therefore stands, with the confound priced in: the
+deep-stage loss is dominated by the serve-origin geometry, and stale
+controller timing accounts for roughly a fifth of it. Stage 4 is
+decisively infeasible for this controller family; stage 3 is marginal,
+its interval still straddling the bar.
+
+**But full alignment is not the only option, and the hypothesis
+survives.** A follow-on blend study (`plan_wall_ball_aligned_deep_stages.md`,
+Phase B) interpolated the serve origins between the fixed origin and the
+aligned ladder. Everything up to λ = 0.85 clears 90% at every stage;
+λ = 0.90 fails stage 4 at 82%. The collapse is a sharp threshold in
+landing distance rather than a gradual decay — 0.251 m in front of the
+deep paddle passes, 0.184 m does not — so the paddle needs roughly a
+quarter-metre of approach room that full alignment removes. λ = 0.75 was
+then frozen and certified on held-out seeds 2000–2199 from a clean
+revision: oracle 94.5 / 96.5 / 96.5 / 96.5 / 94.5%, all eight blocking
+criteria passing, with the stage-4 landing gap cut from 1.399 m to
+0.370 m.
+
+Two honest qualifications on that certification. It is **not** a
+demonstration that the blend beats the fixed origin: the arms share
+seeds, and paired McNemar per stage gives p = 1.00 / 0.30 / 0.15 / 0.12
+/ 1.00, so oracle feasibility is a null. What does separate them is the
+placement-blind crude controller (stage 4: 60.5% against 9.5%, paired
+p < 1e-21), which says reward becomes reachable without placement skill
+when the ball lands a metre closer to the paddle — a proxy for
+exploration density, not proof of learnability. The blend also makes a
+pre-bounce opening volley geometrically reachable at every depth (volley
+probe 0% → 100% contact at stage 4), which under `rally_style = "open"`
+is scoreable in principle — but a volley-then-rally controller scores
+**zero completed returns in 200/200 episodes** at λ = 0.75 stages 3 and
+4, every one ending in a double bounce with the volleyed ball never
+reaching the wall. The new option is a dead end, so it does not gate the
+ladder change.
+
+The design's premise — that moving the serve origin with depth is worth
+testing — is intact; only its most extreme setting is not.
+
+The crude controller remains mixed and placement-coupled (aligned higher
+at stages 1, 2, and 4 — 95.5/90.0/19.5% against 73.0/69.0/14.0% — and
+lower at stage 3, 46.0% against 58.5%), so it still carries no weight in
+either direction.
+
 ## Strengthened calibration contract
 
 The existing sweep certifies feasibility (oracle ≥2 returns on at least 90%

@@ -828,8 +828,14 @@ def test_wall_ball_depth_curriculum_uses_open_scoring_and_defaults(
     recipe_name,
 ):
     """Open scoring, emergent style: no one_bounce fault taxonomy or
-    bootstrap shaping may leak in, and model_kwargs stays empty (SB3
-    auto entropy -- lesson 5; capacity and reward probes were null)."""
+    bootstrap shaping may leak in, and model_kwargs pins gamma ONLY.
+
+    model_kwargs was empty until the exchange cadence was measured at
+    117-135 env steps, which prices the next return at 0.99^130 ~ 0.27
+    under SB3's default gamma. gamma 0.995 is now pinned; entropy must
+    stay on SB3 auto, because the 20260717 A/B showed a fixed
+    ent_coef 0.02 leaves the policy never touching the ball.
+    """
     recipe = RECIPES[recipe_name]
     kwargs = recipe.env_kwargs
 
@@ -844,7 +850,17 @@ def test_wall_ball_depth_curriculum_uses_open_scoring_and_defaults(
         "wall_reward_increment",
     ):
         assert banned not in kwargs, banned
-    assert "model_kwargs" not in recipe.extra_cfg
+    # gamma is pinned; nothing else may be. In particular ent_coef must
+    # stay absent so SB3's auto entropy tuning survives.
+    assert recipe.extra_cfg["model_kwargs"] == {"gamma": 0.995}
+    # The gate decides promotion by crossing a threshold on a noisy
+    # statistic, so its sample size is load-bearing: 30 episodes gave a
+    # 3-eval window sd of ~0.092 against a bar these runs cleared by
+    # 0.011. The goal-task stream stays pinned at 30 so eval cost does
+    # not double with it.
+    assert recipe.extra_cfg["n_eval_episodes"] == 60
+    assert recipe.extra_cfg["final_eval_episodes"] == 30
+    assert recipe.extra_cfg["best_metric_min_delta"] == pytest.approx(0.5 / 60)
     # Canonical scoring pins the ladder's FINAL stage: the final-config
     # evaluator, milestone videos, and the long-horizon audit build from
     # eval_env_overrides unsynced by the gate, so an empty dict would
