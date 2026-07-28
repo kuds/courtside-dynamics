@@ -276,7 +276,61 @@ sliding-fence ladder with the goal-fence serve-origin curriculum]
 
 ## 7. Pre-registered next Colab run (6M steps, GPU)
 
-[RUN CONFIG + SUCCESS CRITERIA]
+**Launch** (`notebooks/sb3_training.ipynb`, one L4):
+
+```
+ENV         = "WallBallGoalServeCurriculum"
+ALGO        = None            # recipe default: SAC
+SEED        = 0               # campaign convention; n=1 caveat stands
+QUICK_TEST  = False
+CONFIG_FILE = "auto"          # materializes the packaged starter
+                              # wall_ball_goal_serve_curriculum.toml
+```
+
+Everything else is the recipe: 6M steps, n_envs 8, gamma 0.995 (only
+pinned model kwarg; SB3 auto-entropy untouched), eval_freq 25k with
+n_eval_episodes 60 matched + 30 goal-stream episodes, patience 20,
+gate = serve-origin rungs (0.2 → 1.0) at threshold 2.5 window-mean-3,
+`stage_eval_budget` 40 with forced advance, startup certification at
+seeds 30000+ (expected verdict: pass — held-out precedent above). At
+the measured ~85-90 FPS this is ~18.5-19.5h of wall clock — inside the
+longest demonstrated session (20h16m), but checkpoint cadence 250k
+means a session death loses at most ~45 min.
+
+**Pre-registered success criteria** (decided before launch; evaluate
+at run end against the run's own artifacts):
+
+1. **Primary:** goal-task stream (`eval_info_final.csv`,
+   `bounce_count_ep_mean` at the true serve) reaches a 3-eval window
+   mean **≥ 2.0** at any point — ~1.75× the all-time best (1.14) on
+   the identical eval task. Stretch: ≥ 3.0 (the campaign's rally
+   definition).
+2. **Structural health:** no rung residency exceeds 40 evaluations
+   (guard-enforced by construction — verify `curriculum_stages.json`
+   shows ≤ 2 forced advances (`advance_reason:
+   "stage_eval_budget"`); more than 2 means the 2.5 scheduler bar is
+   still miscalibrated and the review's gate section needs revisiting,
+   whatever the primary shows.
+3. **No zero-contact collapse:** goal-stream `paddle_hit_count_ep_mean`
+   > 0 at every evaluation after 250k (the 0.22.0 failure signature).
+4. **Long-horizon audit** (50 seeds, 5000-step cap, true goal task):
+   mean completed returns ≥ 3.0 **or** ≥5-return survival ≥ 20%
+   (vs 2.12 / 14% for the best ladder policy at goal-adjacent
+   geometry).
+5. **Comparability guard:** the goal eval task is byte-identical to
+   `WallBallDepthCurriculum`'s (`eval_env_overrides` produce the same
+   env; pinned by test), so 1-4 compare directly against the ladder
+   history.
+
+**Pre-registered escalation if the primary fails** (goal window mean
+plateaus < 2.0 with the staleness guard keeping rungs moving): the
+landing-point observation feature (obs 23 → 26; its "de-noised
+stage-2+ stall" trigger has now fired twice) measured against this
+run's plateau — NOT further reward or gate tuning (lesson 19), and
+NOT a return to fence ladders. If instead the run stalls at rung 0-1
+with goal-stream ≥ 2.0 never approached, treat the serve-origin axis
+as falsified for SAC-learnability and test the observation feature
+plus `episode_len` economics in separate pre-registered arms.
 
 ## 8. Seed ledger update
 

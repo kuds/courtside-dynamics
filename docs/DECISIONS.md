@@ -86,7 +86,71 @@ below are an instance of one of these.
 
 Source: [`wall_ball_baseline_review.md`](wall_ball_baseline_review.md) (runs from
 2026-07-14, reviewed at `cdb17d4`/v0.9.0, with addenda through the 0.11.0
-package). See also `CHANGELOG.md` 0.9.0 → 0.13.0.
+package). See also `CHANGELOG.md` 0.9.0 → 0.13.0. Depth-campaign entries
+below distill [`wall_ball_rally_diagnosis_20260728_review.md`](wall_ball_rally_diagnosis_20260728_review.md).
+
+### The sliding-fence depth ladder is retired; the curriculum axis is the serve origin — *implemented (0.24.0)*
+Three ladder generations (0.15/0.19-0.21/0.22) stalled the same way: a flat
+`bounce_count_ep_mean >= 3.0` bar that **no scripted reference reaches at any
+rung** (~70 controller configurations swept in the diagnosis, best 2.70;
+held-out oracle means 2.47-2.89) and that four multi-million-step learned
+runs plateaued 0.2-0.9 below at every rung past stage 0 (0.22.0 stage 1:
+201 evals, best 2.82, still climbing at 6M; 0.19-aligned stage 2: 0 of 128
+evals >= 2.9). Meanwhile each promotion moved the serve landing +0.35 m —
+above the measured ~0.25 m approach-room threshold — so every rung swapped
+the receive task at the exact moment the 0.22.0 advance package deleted the
+buffer and re-randomized the policy (measured cost: train reward below
+untrained levels for ~250k steps and not back to pre-advance level until
+~5.3M of a 6M run). The replacement (`WallBallGoalServeCurriculum`) trains
+at the goal fence from step one — the constant-width 0.22.0 fence had
+already restored crude learnability there (80-84% placement-blind
+two-return rate vs 9.5-16% on the retired narrow fence), which no run ever
+saw because none trained past stage 1 — and anneals only the serve origin
+(landing steps 0.2 m, entry at the crude-learnability peak). Rungs change
+the reset distribution, never the dynamics, so promotions carry no
+replay/entropy/action-map shock by construction. **Lesson:** put the
+curriculum on the axis that (a) actually controls the binding skill
+(receive geometry, measured) and (b) leaves replayed experience valid
+across rungs; a curriculum axis that changes dynamics taxes every
+promotion with off-policy staleness.
+
+### A promotion bar must be calibrated against references on the rung it gates — *implemented (0.24.0)*
+The 3.0 bar was calibrated once, on the retired 0.21 stage 0 (a predictive
+controller scored 4.39 there), then inherited by geometries where the
+scripted ceiling is ~2.5-2.9 and SAC's own multi-million-step asymptotes
+are 2.1-2.8. The standing "do not lower the bar on scripted-oracle evidence
+alone" rule was honored: the new recipe's 2.5 is a *new* gate justified by
+the joint scripted+learned pattern above, sits inside the lead-oracle band
+measured per rung (2.41-2.69 held-out), and is explicitly a **scheduler**
+(paces an anneal whose rungs cost nothing to enter), not a mastery
+definition — the campaign's rally bar stays 3.0 in `success_threshold`.
+Note the arithmetic that made 3.0 unreachable-in-practice: at the goal
+cadence (~125 steps/exchange, measured) `episode_len = 750` caps an episode
+at ~5 returns, so 3.0 demands ~60% of the physical cap sustained across a
+3x60-episode window.
+
+### Promotion staleness needs its own clock — *implemented (0.24.0)*
+Run `20260727_233859` sat on stage 1 for 201 evaluations (~5M steps) with
+no mechanism able to notice: early stopping watches best-model improvement
+(and noise kept resetting it via a `best_metric_min_delta` ~1/13 of a batch
+SE), while promotion staleness was unmonitored. `stage_eval_budget` on the
+gate now bounds a non-final stage's residency: `"stop"` ends the run (the
+right default when the bar is load-bearing), `"advance"` force-promotes
+with `advance_reason: "stage_eval_budget"` recorded in
+`curriculum_stages.json` (the right choice when rungs are benign
+reset-distribution shifts and the anneal must complete inside the budget).
+
+### Scripted probes must lead the intercept, and their gaps are seed-sensitive — *implemented (0.24.0)*
+The 0.21-era certification probes tracked the ball's current y/z while
+charging; on the constant-width ladder that scores 36%/70% two-return rates
+at stages 0/3 — probe defects indistinguishable from geometry defects until
+recalibrated. The `lead_charge` mode (same commit trigger, ballistic y/z
+lead at the closing-speed intercept) clears 90% everywhere; gaps were
+frozen at n=200 by rate-with-margin rather than raw argmax (calibration
+argmaxes shed 3-5 points held-out here, twice measured), then certified
+once on held-out seeds 3000-3099 at 95-100%. Startup certification runs 30
+episodes/cell, not 10: a 0.90 floor against true rates of 92-98% flips on
+one unlucky seed at n=10.
 
 ### The 0.11.0 bootstrap package — a strictly monotone competence ladder — *implemented (0.11.0)*
 The fix for the flat `-1` valley. On the stage-0 serve (n=120) the ladder now
