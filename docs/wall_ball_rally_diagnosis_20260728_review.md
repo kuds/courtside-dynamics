@@ -80,15 +80,22 @@ conclusions. The final artifacts bear that out and sharpen two numbers:
   **5.25-6M bins** — the advance package plus stage-1's harder receive
   cost the run ~4.3M steps of net regression, and it was still
   climbing when the budget ended (stage-1 best 2.82 vs the 3.0 bar).
-- One promotion in 6M steps; 181+ evaluations on stage 1 with no
-  mechanism able to notice the staleness.
+- One promotion in 6M steps; the final `curriculum_stages.json`
+  records stage 1 at entry 975k → exit 6,000,000 with **201
+  evaluations, promoted: false**, best selection 2.817 (confirmation
+  2.617) banked at literally the run's last evaluation — a run ended
+  by its budget while still improving against a bar it never
+  approached, with no mechanism able to notice the staleness.
 
 ### 1.2 The rest of the corpus, one line each
 
-- `20260727_004014` (0.21.0): three promotions, 97-eval stage-3 stall,
-  goal plateau 1.14; four checkpoints spanning 1.35M steps all score
-  1.07-1.30 at the goal — the plateau is structural, not a
-  checkpoint-selection artifact (`design_wall_ball_checkpoint_selection_audit.md`).
+- `20260727_004014` (0.21.0): stage exits 800k / 1.7M / 3.0M, then
+  stage 3 for its remaining 3.0M steps — final `curriculum_stages.json`
+  records **120 evaluations, promoted: false, final window
+  [2.37, 2.55, 2.45]** against the 3.0 bar. Goal plateau 1.14; four
+  checkpoints spanning 1.35M steps all score 1.07-1.30 at the goal —
+  the plateau is structural, not a checkpoint-selection artifact
+  (`design_wall_ball_checkpoint_selection_audit.md`).
 - `20260724_152530` / `20260725_171747` (aligned arm, 0.19/0.20
   fences): a clean single-variable patience experiment; stage 2's bar
   is unreachable — 0 of 128 evaluations ≥ 2.9, best 3-eval window
@@ -100,11 +107,21 @@ conclusions. The final artifacts bear that out and sharpen two numbers:
 - `WallBallBaseline` era: the fixed mid-depth lane (−3.2, −1.6)
   plateaued at 3.2-3.4 eval bounces across five healthy runs; budget,
   capacity, and reward magnitude all falsified as levers
-  (`lessons_learned.md` 8, 19).
+  (`lessons_learned.md` 8, 19). Corpus note: **`WallBallBootstrap`
+  has no runs in Drive at all** — a title search over the training
+  archive returns nothing, so the bootstrap recipe (already marked
+  HISTORICAL) contributed calibration ideas, never training evidence.
 - `WallBall 20260713_192636`: the only 12-bounce rally ever recorded
-  in this project — gamma 0.995, 1.5M steps, eval reward rising to ~54
-  at 1.375M and still high at end. Long rallies are inside SAC's reach
-  when the geometry cooperates. [VERIFY config when Drive fetch lands]
+  in this project. Config verified from the run's `config.json`: the
+  *legacy* WallBall task (v0.8.0, 22-dim obs, no fence, receive at the
+  fixed −1.7 home column), SAC with gamma 0.995, fixed `ent_coef`
+  0.02, buffer 2M, 1.5M steps; eval reward rose to ~54 by 1.375M and
+  held. Two readings matter for this diagnosis: gamma 0.995 was
+  present in the one long-rally run (the depth recipes' 0.21.0 choice
+  is corroborated), and rally-chaining is demonstrably inside SAC's
+  reach — on a task whose serve lands at the paddle's ready column.
+  The campaign's missing skill has always been the deep *receive*, not
+  the rally.
 
 ## 2. Fresh measurements on the live geometry
 
@@ -264,7 +281,12 @@ sliding-fence ladder with the goal-fence serve-origin curriculum]
    pass their blocking criteria on the constant-width ladder. The
    remaining advisory warnings (no reference reaches 3.0; +0.35 m
    landing jumps at every transition) are true findings, not probe
-   defects, and are part of §3's evidence.
+   defects, and are part of §3's evidence. Note the
+   `WallBallDepthCurriculumAligned` recipe inherits these probes and
+   its startup certification is *expected to fail* feasibility at its
+   deep stages (~80-87% measured) — that is the certifier correctly
+   reporting the aligned deep geometry Phase A already falsified, and
+   any aligned pilot remains blocked on certification regardless.
 2. **`stage_eval_budget` staleness guard** on the performance gate
    (`"stop"` or `"advance"` action) — closes P4's unbounded-stall
    failure mode.
@@ -339,15 +361,172 @@ plus `episode_len` economics in separate pre-registered arms.
 | 0-199 | burned | reused as calibration only: lead-charge gap grids (stages and goal rungs, n=100-200), controller-variant battery |
 | 1000-1199 | burned | reused as calibration only: landing probes, stock-probe verification, goal-fence λ sweep (n=100) |
 | 2000-2199 | burned | (unchanged; 2026-07-26 certification) |
-| **3000-3099** | **burned 2026-07-28** | held-out certification of the frozen lead-charge probes on the 0.22.0 ladder (this PR); inspected |
-| 3100-3199 | clean | reserved |
+| **3000-3099** | **burned 2026-07-28** | held-out certification of the frozen lead-charge probes on the 0.22.0 ladder (this PR). Inspected twice — once by an intermediate probe candidate (gaps 1.0/1.4 at stages 1/3), once by the frozen set (0.8/1.2); the frozen gaps were chosen from n=200 calibration (seeds 0-199) before any 3000-3099 inspection, so the held-out property holds, but the range must not be reused |
+| **3100-3199** | **burned 2026-07-28** | held-out certification of the `WallBallGoalServeCurriculum` rungs (100 eps/cell; all blocking criteria pass, zero warnings) |
+| 4000-4199 | clean | reserved — the next untouched block; do not open until a frozen configuration needs certifying |
 | 5000-5029, 6000-6039, 10000-10049, 20000-20199 | burned | (unchanged) |
 | 30000+ | reserved | startup certification only (runtime) |
 | **50000-50199** | **burned 2026-07-28** | S1/S2 final-model cross-evaluations on common seeds |
 
 ## Appendix A: pre-registration (verbatim)
 
-[PREREGISTRATION]
+```
+# Pre-registration: local experiment battery, 2026-07-28
+
+Written BEFORE any experiment below was run. Environment: 4-core CPU,
+SB3 SAC, repo v0.23.0 @ 52438b0, branch
+claude/wall-ball-curriculum-diagnosis-0j8pjz. Measured throughput:
+env-only 6486 steps/s single-thread; SAC n_envs=8, 1 torch thread,
+533 env-steps/s (24k-step probe, learning_starts=1000).
+
+Local SAC arms use n_envs=8. AMENDED BEFORE LAUNCH (after a 30k-step
+smoke on throwaway seed 999, before any registered arm ran): the repo's
+train() sets gradient_steps=-1 (true 1:1 update ratio — the ratio every
+Colab run used), which measures at ~71 env-steps/s locally; a 1:1
+13-arm battery does not fit the budget. All local arms therefore use
+model_kwargs gradient_steps=4 (a 1:2 update ratio), identical across
+every arm. CPU arms are NEVER compared to Colab runs — only to their
+paired local siblings (common seed, identical config except the
+treatment variable). Horizons resized to fit: S1 400k steps/arm,
+2 pairs (seeds 101, 102); S2 500k steps/arm, 3 seeds. Decision rules
+adjusted for 2 S1 pairs: "alignment helps" requires pooled mean
+delta-AUC >= +0.25 with BOTH pairs positive (mirrored for "hurts");
+S1 AUC window becomes evals 125k..400k; S2 primary window becomes
+evals 300k..500k.
+
+## Seed ledger plan
+
+- Scripted probe CALIBRATION reuses burned ranges 0-199 and 1000-1199
+  (burned = unusable as held-out; fine for calibration/diagnostics).
+- Held-out certification of any frozen probe/ladder configuration:
+  seeds 3000-3099 (from the clean 3000-3199 block; 3100-3199 stays
+  clean). This burn will be registered in the review doc.
+- Post-hoc cross-evaluation of trained A/B arms on common seeds:
+  50000-50199 (previously unused namespace; registered as burned).
+- Startup certification keeps its reserved 30000+ block; not touched
+  by hand here.
+- SAC training seeds (a different namespace from env eval seeds):
+  S1 pairs use 101, 102, 103; S2 triples use 201, 202, 203.
+
+## P: scripted probe battery (calibration seeds, exploratory)
+
+P1. Serve-landing offset per current-ladder stage (parked paddle,
+    100 eps/stage, seeds 1000-1099): verify review 20260727_233859's
+    -0.01/+0.34/+0.69/+1.07/+1.42 m ladder.
+P2. Certification-module controllers (parked/crude/oracle with the
+    recipe's stock probes) on the live 5-stage table, 100 eps/cell,
+    seeds 1000-1099: verify oracle means ~1.51/2.47/2.40/1.86/2.20 and
+    the stage-0/3 feasibility failures.
+P3. Improved oracle (ballistic lead while charging) calibrated per
+    stage on seeds 0-199; report best per-stage mean bounce + >=2 rate.
+    Purpose: recalibrate startup-certification probes so the ladder the
+    next run trains is certified by a credible reference, and measure
+    whether ANY scripted reference clears the 3.0 promotion bar
+    per stage.
+P4. Goal-fence serve-origin blend sweep: fence (-4.7,-2.6), start -3.9,
+    home -3.65, serve 7.0, serve_start_x = 1.0 + lambda*(-1.35) for
+    lambda in {0, 0.25, 0.5, 0.75, 0.9, 1.0}; oracle (stock + improved)
+    and crude cells, 100 eps, seeds 1000-1099 + 0-99 replication.
+    Purpose: feasibility/learnability map for a fixed-goal-fence
+    serve-origin curriculum on the CURRENT (2.1 m) fence — all prior
+    blend numbers are from the retired 0.21 fences.
+P5. Exchange cadence at the goal fence (steps between completed
+    returns, improved oracle): verify ~130.
+
+No pass/fail bars for P1/P2/P5 (verification). P3/P4 feed design; the
+frozen configuration that ships gets a held-out certification on
+3000-3099 with the standard blocking criteria (oracle >=2 on >=90% of
+serves per rung; crude >0%; monotone parked<crude<oracle; landing
+contract where declared).
+
+## S1: Phase D stage-1 alignment A/B (local adaptation)
+
+The pre-registered Phase D design (design_wall_ball_serve_alignment.md)
+specifies checkpoint-forked continuations with 1.5M-step horizons and
+8-24 pairs on GPU. That is out of local budget. Local adaptation =
+its pre-registered cold-start fallback, shrunk: independently seeded
+cold-start pairs with common seeds, fixed horizon, restricted-time
+outcomes. This cannot authorize a full aligned-ladder pilot by itself
+(the design note's go rule is not evaluable at this scale); it CAN
+answer directionally whether stage-1 serve alignment helps early SAC
+learning, which is what the structural verdict needs.
+
+- Arms: fixed single-stage gate at the 0.22.0 stage-1 geometry
+  (fence (-2.9,-0.8), start -2.1, home -1.85, serve 5.5).
+  Baseline serve_start_x=1.0; aligned serve_start_x=0.69.
+- Config: WallBallDepthCurriculum recipe, performance_gate replaced by
+  the single stage; ladder_certification=None; record_video=False;
+  n_eval_episodes=30; final_info_eval=True with final_eval_episodes=10
+  (goal-task transfer diagnostic); eval_freq=25k; gamma 0.995 (recipe);
+  early_stop_patience=None (fixed horizon); 500,000 steps/arm;
+  3 pairs, seeds 101/102/103 shared within pair.
+- PRIMARY outcome: paired difference (aligned - baseline) in
+  matched-stream AUC = mean of bounce_count_ep_mean over evals at
+  125k..500k inclusive.
+  Decision rule: "alignment helps stage 1" if pooled mean delta >=
+  +0.25 bounces AND >=2 of 3 pairs positive. "Alignment hurts" if
+  <= -0.25 AND >=2 of 3 negative. Else inconclusive.
+- SECONDARY (reported with the primary, no substitution): first
+  timestep with 3-eval window mean >= 2.0 on the matched stream;
+  final-model 2x2 cross-eval (both arms x both stage-1 serve origins)
+  on common seeds 50000-50099, mean bounce_count; goal-task transfer
+  stream level.
+- Caveat pre-declared: matched streams score different serve origins,
+  so the primary conflates task ease with learning speed — that is the
+  campaign-relevant quantity (each arm gates on its own geometry), and
+  the 2x2 cross-eval carries the mechanism reading.
+
+## S2: goal-fence structure A/B/C (the structural-verdict experiment)
+
+Question: at the campaign goal geometry (fence (-4.7,-2.6), start -3.9,
+home -3.65, serve 7.0), which training distribution gives SAC a
+learnable task: the true serve, an aligned-blend serve, or a mixture?
+
+- Common: single-stage gate at goal fence; 600,000 steps/arm; 3 seeds
+  201/202/203 x 3 conditions (paired via common seed); eval_freq 25k.
+  AMENDED BEFORE LAUNCH (no arm had run): instead of a matched
+  training-distribution stream + separate goal stream, every S2 arm
+  carries ONE identical evaluation stream — the true goal task
+  (serve_start_x=1.0), n_eval_episodes=30 — by omitting serve_start_x
+  from the single gate stage so the matched evaluator keeps the
+  recipe's eval override. This makes selection and the outcome stream
+  identical across conditions; arm B/C skill on their own training
+  serves is recovered post-hoc in the cross-eval instead.
+- Conditions (differ ONLY in training-serve origin):
+  A "direct": serve_start_x = 1.0 (the true goal task).
+  B "aligned75": serve_start_x = -0.0125 (lambda=0.75; landing ~0.39 m
+    ahead of paddle start).
+  C "mixture": serve_start_x drawn per episode uniformly from
+    {1.0, 0.6625, 0.325, -0.0125} (lambda in {0,.25,.5,.75}).
+- PRIMARY outcome: per-condition goal-task learning signal = mean of
+  the goal-stream bounce_count_ep_mean over evals at 350k..600k, paired
+  across common seeds.
+  Decision rules (pre-registered):
+  1. "Goal task directly learnable with current shaping" if condition A
+     reaches pooled primary >= 1.0 OR shows a monotone rise with final
+     3-eval window >= 1.0 in >=2 of 3 seeds.
+  2. "Serve-origin curriculum dominates" if (B or C) beats A on the
+     pooled primary by >= +0.3 bounces with >=2 of 3 pairs agreeing
+     in sign.
+  3. If all conditions are flat at ~0 goal-task contact by 600k, the
+     serve-origin lever is insufficient at the goal fence and the
+     structural verdict must consider observation/geometry levers
+     instead (landing-point feature; episode economics).
+- SECONDARY: matched-stream levels (B's matched stream reads skill at
+  lambda=0.75); contact rate (paddle_hit_count_ep_mean) on the final
+  stream — separates "never reaches the ball" from "reaches but cannot
+  rally"; final-model cross-eval at the true goal on common seeds
+  50100-50199.
+
+## Explicitly out of scope locally
+
+Full-length (6M) runs; any comparison of local arms to Colab runs; any
+gate-threshold change justified only by scripted-oracle evidence
+(standing 0.21.0 decision — bar changes require either learned-policy
+evidence or a redesigned gate whose bars are certified per rung by
+references AND validated against learned behavior).
+```
+
 
 ## Appendix B: artifacts and reproduction
 
