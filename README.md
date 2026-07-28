@@ -335,6 +335,42 @@ contact semantics, rally rules, fixed-stage curriculum and promotion metrics,
 SB3 training and callbacks, run artifacts, and notebook helpers. Rendering is
 also smoke-tested when a display or virtual framebuffer is available.
 
+### Ladder sweeps on GitHub Actions
+
+[`.github/workflows/ladder-sweep.yml`](.github/workflows/ladder-sweep.yml)
+runs `tools/depth_stage_sweep.py` on a hosted runner, dispatched from the
+Actions tab ("Ladder sweep" → "Run workflow"). It is manual-only: a
+calibration sweep is not caused by a code change the way the `ci.yml`
+checks are.
+
+The inputs map straight onto the script's arguments — `ladder`, `episodes`,
+`seed_start`, and a free-form `extra_args` for the candidate-ladder flags
+(`--serve-origin-blend`, `--oracle-probe`). The workflow validates none of
+them itself, deliberately: the script's `argparse` and the
+`WallBallDepthCurriculum` recipe stay the only source of truth on what is
+valid, and a second copy of the ladder list in YAML is exactly the drift
+that shipped the 0.22.0 ladder uncertified.
+
+Each run uploads `report.json` and the console log as an artifact and
+prints the verdict to the run summary. Both happen on failure too —
+`depth_stage_sweep.py` exits 1 when a ladder fails certification, which is
+the result you dispatched the run to learn, not a broken build. **While the
+release ladder fails certification, every dispatch of it is a red run by
+design**; read the summary, not the checkmark.
+
+Timing, measured on 4 cores with `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1`:
+about 3.7s fixed plus 1.25s per episode-cell, so the default 200 eps/cell
+takes ~4.2 minutes and 1000 stays near 21. Hosted runners are ample for
+this; the job's 120-minute timeout is a hang detector rather than a budget.
+The pinning is as mandatory here as it is for `pytest -n` above — the sweep
+fans out over `multiprocessing.Pool`, and unpinned workers oversubscribe
+the same way.
+
+One limit is worth knowing in advance: GitHub only offers the "Run
+workflow" button for `workflow_dispatch` workflows that exist on the
+**default branch**, so this file has to reach `main` before it can be
+dispatched at all.
+
 ### Repository layout
 
 ```text

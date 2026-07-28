@@ -1,0 +1,124 @@
+name: Ladder sweep
+
+# Manual-only. A calibration sweep is not caused by a code change, so it
+# does not belong on push/pull_request the way ci.yml's checks do -- you
+# run it when you want a ladder measured, with the parameters you want.
+#
+# Every input is passed through to tools/depth_stage_sweep.py verbatim.
+# This file deliberately carries no copy of the ladder names, the stage
+# table, or the recipe list: the script's argparse and the
+# WallBallDepthCurriculum recipe are the single source of truth on what
+# is valid, and a second copy in YAML is exactly the drift that shipped
+# the 0.22.0 ladder uncertified (review 20260727_233859). An invalid
+# input fails in Python, with Python's error message.
+on:
+  workflow_dispatch:
+    inputs:
+      ladder:
+        description: "release | aligned | baseline"
+        type: string
+        default: release
+      episodes:
+        description: Episodes per stage/controller cell
+        type: string
+        default: "200"
+      seed_start:
+        description: First held-out seed (blank = the recipe spec's seed_start)
+        type: string
+        default: ""
+      extra_args:
+        description: >-
+          Extra flags, candidate ladders only, e.g. "--serve-origin-blend 0.5"
+          or "--oracle-probe 3=charge_gap:1.4"
+        type: string
+        default: ""
+
+# No concurrency group, deliberately. ci.yml cancels superseded runs
+# because a newer commit makes an older lint result irrelevant; here two
+# dispatches are two experiments, and cancelling one because another
+# started would throw away measurement time.
+
+jobs:
+  sweep:
+    name: ${{ inputs.ladder }} ladder / ${{ inputs.episodes }} eps per cell
+    runs-on: ubuntu-latest
+    # Measured on 4 cores with the pinning below: ~3.7s fixed plus ~1.25s
+    # per episode-cell, so the default 200 eps/cell lands at ~4.2 minutes
+    # and even 1000 stays near 21. Two hours is therefore a hang detector,
+    # not a budget -- and it leaves room under the 6h ceiling at which
+    # hosted runners hard-kill a job with no chance to upload anything.
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - run: python -m pip install --upgrade pip
+
+      # The train extra, even though this sweep never builds a model: the
+      # release path imports courtside_dynamics.training.ladder_certification,
+      # and importing that submodule executes the package __init__, which
+      # imports train.py -> stable-baselines3 (train.py:34).
+      - run: pip install -e ".[train]"
+
+      - name: Run sweep
+        env:
+          # depth_stage_sweep.py fans out over multiprocessing.Pool. Left
+          # unpinned, every worker's BLAS grabs all cores and the pool
+          # thrashes -- the same oversubscription that turned pytest -n 2
+          # into a >3x REGRESSION on these runners (see ci.yml's pytest
+          # step). Not optional here for the same reason it is not
+          # optional there.
+          OMP_NUM_THREADS: 1
+          MKL_NUM_THREADS: 1
+          # Inputs go through the environment rather than being
+          # interpolated into the script body, so a dispatched value is
+          # data to the shell, never code.
+          LADDER: ${{ inputs.ladder }}
+          EPISODES: ${{ inputs.episodes }}
+          SEED_START: ${{ inputs.seed_start }}
+          EXTRA_ARGS: ${{ inputs.extra_args }}
+        run: |
+          mkdir -p sweep-out
+          set -o pipefail
+          # $EXTRA_ARGS is intentionally unquoted so several flags split
+          # into several argv entries. Word splitting does not re-evaluate
+          # metacharacters, so this stays arguments-to-the-script.
+          python tools/depth_stage_sweep.py \
+            "$EPISODES" \
+            sweep-out/report.json \
+            --ladder "$LADDER" \
+            ${SEED_START:+--seed-start "$SEED_START"} \
+            $EXTRA_ARGS \
+            2>&1 | tee sweep-out/console.log
+
+      # always(): the script exits 1 when a ladder FAILS certification,
+      # and that is a result worth reading, not a broken build. A red run
+      # whose report was discarded would be the worst of both.
+      - name: Publish verdict to the run summary
+        if: always()
+        env:
+          LADDER: ${{ inputs.ladder }}
+          EPISODES: ${{ inputs.episodes }}
+        run: |
+          {
+            echo "## \`$LADDER\` ladder — $EPISODES episodes per cell"
+            echo
+            echo '```'
+            tail -n 200 sweep-out/console.log 2>/dev/null \
+              || echo "(the sweep produced no output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-${{ inputs.ladder }}-${{ inputs.episodes }}eps-run${{ github.run_number }}
+          path: sweep-out/
+          if-no-files-found: warn
+          retention-days: 90
