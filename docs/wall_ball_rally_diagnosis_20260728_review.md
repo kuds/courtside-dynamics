@@ -40,25 +40,32 @@ exactly −1.0, everything after 3.4M at or below −0.688.
    and learnable (crude placement-blind play completes ≥2 returns in
    80-84% of serves on the current constant-width goal fence; local
    cold SAC gets goal-task contact and returns within 100k steps).
-2. **Structural verdict: replace the sliding-fence depth ladder.** The
-   fence dimension is the wrong curriculum axis: moving it changes the
-   *dynamics* (target clamping), which is what makes every promotion
-   pay the replay/entropy/action-map taxes, and its difficulty enters
-   through a serve-receipt geometry the fence itself never fixes. The
-   replacement trains **at the goal fence from step one** and anneals
-   the only variable the campaign ever measured to control receive
-   difficulty: the serve origin (landing point). No dynamics change
-   between rungs ⇒ no replay wipe, no entropy reset, no update pause,
-   no action-map drift, and the final rung *is* the goal task.
-3. **What the experiments showed** (pre-registered; see appendix):
-   [S1/S2 RESULTS]
+2. **Structural verdict: retire the ladder and train the goal task
+   directly.** The fence dimension was the wrong curriculum axis:
+   moving it changes the *dynamics* (target clamping), which is what
+   makes every promotion pay the replay/entropy/action-map taxes,
+   while its difficulty enters through a serve-receipt geometry the
+   fence itself never fixes — and the 0.22.0 constant-width fence had
+   already removed the goal task's learnability collapse, unnoticed,
+   because the ladder blocked every run from training there. A
+   serve-origin curriculum (the measured receive-difficulty axis, with
+   dynamics-preserving rungs) was designed, certified, and then beaten
+   by plain direct training in the pre-registered structure A/B/C.
+3. **What the experiments showed** (pre-registered; §4): at the goal
+   fence, cold local SAC learns the TRUE goal serve directly —
+   held-out 100-seed cross-eval 2.03/2.71 completed returns at 500k
+   local steps vs the campaign's all-time 1.14 — with a serve-origin
+   mixture no better (2.27) and an aligned-serve entry rung strictly
+   worse (1.09-1.51 held-out, near-zero zero-shot goal transfer for
+   most of training). The Phase D stage-1 alignment A/B: [S1 RESULTS].
 4. **Shipped in this PR:** recalibrated startup-certification probes
    (lead-charge oracle; held-out 95-100% ≥2 at every stage of the
    0.22.0 ladder — `--ladder release` now passes), a
    promotion-staleness guard (`stage_eval_budget`), the
-   `WallBallGoalServeCurriculum` recipe implementing the replacement,
-   a parameterized `wall_ball_oracle_action`, and the pre-registered
-   6M-step Colab run config.
+   **`WallBallGoalRally`** recipe implementing the verdict (the goal
+   task as the whole task; evaluation ≡ training ≡ the historical goal
+   metric), a parameterized `wall_ball_oracle_action`, and the
+   pre-registered 6M-step Colab run config.
 
 ## 1. What the final artifacts say (verified)
 
@@ -269,8 +276,40 @@ gamma 0.995, 23-dim obs, no videos, no certification pass.
 
 ## 5. Structural verdict
 
-[VERDICT — to be finalized from S1/S2; drafted per §2-3: replace the
-sliding-fence ladder with the goal-fence serve-origin curriculum]
+**The 5-stage sliding-fence ladder, hard-gated on
+`bounce_count_ep_mean ≥ 3.0` over 3×60-episode windows, is the wrong
+structure and is retired.** Its three load-bearing assumptions each
+failed on measurement:
+
+1. *"Deep play must be approached gradually"* — false on the current
+   geometry. The 0.22.0 constant-width fence restored goal-task
+   learnability (§2.3); the pre-registered S2 experiment then showed
+   cold SAC learning the true goal task directly, faster than any
+   curriculum variant, and beating the ladder's all-time goal transfer
+   by ~2x within 500k local steps (§4).
+2. *"Matched-stage mastery transfers to the goal"* — never held above
+   38% of the target level in three generations, and held at exactly
+   zero in 0.22.0 (§3-P3).
+3. *"The 3.0 bar identifies mastery worth promoting"* — the bar
+   exceeds both the scripted reference band (≤2.7 across ~70
+   configurations) and every learned asymptote past stage 0
+   (2.1-2.8 across four multi-million-step exposures), so its actual
+   behavior is to park runs forever at the first rung whose ceiling
+   is below it (§3-P1, §3-P4).
+
+The tested alternatives rank: **direct-at-goal ≥ serve-origin mixture
+> aligned-serve entry rung >> any fence ladder**. Per the
+pre-registered decision rules, no curriculum earns its complexity:
+the replacement recipe (`WallBallGoalRally`) is the goal task itself,
+with the campaign's certification/artifact machinery retained via a
+single-stage gate that cannot promote. The serve-origin axis remains
+the right *contingency* — it is measured, certified (its 6-rung
+ladder passed held-out certification with zero warnings), and its
+implementation notes are preserved in this doc — but it ships only if
+the direct run's pre-registered escalation fires. Reverse curricula,
+mixed-stage sampling over fences, soft fence transitions, and
+per-stage bars were all considered and are all dominated by "just
+train the goal task" on the current evidence.
 
 ## 6. What ships in this PR
 
@@ -290,7 +329,17 @@ sliding-fence ladder with the goal-fence serve-origin curriculum]
 2. **`stage_eval_budget` staleness guard** on the performance gate
    (`"stop"` or `"advance"` action) — closes P4's unbounded-stall
    failure mode.
-3. **`WallBallGoalServeCurriculum` recipe** [DETAILS AFTER VERDICT].
+3. **`WallBallGoalRally` recipe** — the verdict implemented: train
+   the depth ladder's final stage as the whole task (fence
+   (−4.7, −2.6), start −3.9, home −3.65, serve origin 1.0, speed
+   7.0), gamma 0.995, open scoring, `return_shaping_scale` 0.15, no
+   curriculum, no advance package. Evaluation equals training equals
+   the historical goal task, so every prior goal number stays
+   directly comparable. The single-stage gate keeps stage stamping,
+   `curriculum_stages.json`, and startup certification (geometry
+   certified held-out twice: 96%/91% oracle ≥2 rates on seeds
+   3000-3099 / 3100-3199); its informational 3.0 bar turns
+   `curriculum/gate_window_mean` into the campaign-goal marker.
 4. **`wall_ball_oracle_action` mapping parameterized** (was hardcoded
    to the retired −1.7 pivot; defaults preserve the legacy `WallBall`
    contract).
@@ -301,58 +350,62 @@ sliding-fence ladder with the goal-fence serve-origin curriculum]
 **Launch** (`notebooks/sb3_training.ipynb`, one L4):
 
 ```
-ENV         = "WallBallGoalServeCurriculum"
+ENV         = "WallBallGoalRally"
 ALGO        = None            # recipe default: SAC
 SEED        = 0               # campaign convention; n=1 caveat stands
 QUICK_TEST  = False
 CONFIG_FILE = "auto"          # materializes the packaged starter
-                              # wall_ball_goal_serve_curriculum.toml
+                              # wall_ball_goal_rally.toml
 ```
 
-Everything else is the recipe: 6M steps, n_envs 8, gamma 0.995 (only
-pinned model kwarg; SB3 auto-entropy untouched), eval_freq 25k with
-n_eval_episodes 60 matched + 30 goal-stream episodes, patience 20,
-gate = serve-origin rungs (0.2 → 1.0) at threshold 2.5 window-mean-3,
-`stage_eval_budget` 40 with forced advance, startup certification at
-seeds 30000+ (expected verdict: pass — held-out precedent above). At
-the measured ~85-90 FPS this is ~18.5-19.5h of wall clock — inside the
-longest demonstrated session (20h16m), but checkpoint cadence 250k
+Everything else is the recipe: 6M steps at the goal task itself,
+n_envs 8, gamma 0.995 (only pinned model kwarg; SB3 auto-entropy
+untouched), eval_freq 25k with a 60-episode goal-task selection stream
+(plus the 5-episode reward stream for `evaluations.npz`), patience 20,
+single-stage gate (never promotes; startup certification at seeds
+30000+, expected verdict: pass — held-out precedent above). At the
+measured ~85-90 FPS this is ~18.5-19.5h of wall clock — inside the
+longest demonstrated session (20h16m), and checkpoint cadence 250k
 means a session death loses at most ~45 min.
 
 **Pre-registered success criteria** (decided before launch; evaluate
 at run end against the run's own artifacts):
 
-1. **Primary:** goal-task stream (`eval_info_final.csv`,
-   `bounce_count_ep_mean` at the true serve) reaches a 3-eval window
-   mean **≥ 2.0** at any point — ~1.75× the all-time best (1.14) on
-   the identical eval task. Stretch: ≥ 3.0 (the campaign's rally
-   definition).
-2. **Structural health:** no rung residency exceeds 40 evaluations
-   (guard-enforced by construction — verify `curriculum_stages.json`
-   shows ≤ 2 forced advances (`advance_reason:
-   "stage_eval_budget"`); more than 2 means the 2.5 scheduler bar is
-   still miscalibrated and the review's gate section needs revisiting,
-   whatever the primary shows.
-3. **No zero-contact collapse:** goal-stream `paddle_hit_count_ep_mean`
+1. **Primary:** the goal-task selection stream
+   (`eval_info.csv`, `bounce_count_ep_mean`; this recipe's matched
+   stream IS the goal task) reaches a 3-eval window mean **≥ 2.0** at
+   any point — ~1.75× the all-time best (1.14) on the identical eval
+   task, and the level the local direct arms reached within 500k
+   CPU-ratio steps. Stretch: ≥ 3.0 sustained
+   (`curriculum/gate_window_mean` ≥ 3.0 — the campaign's rally
+   definition, met).
+2. **No zero-contact collapse:** goal-stream `paddle_hit_count_ep_mean`
    > 0 at every evaluation after 250k (the 0.22.0 failure signature).
-4. **Long-horizon audit** (50 seeds, 5000-step cap, true goal task):
+3. **Long-horizon audit** (50 seeds, 5000-step cap, true goal task):
    mean completed returns ≥ 3.0 **or** ≥5-return survival ≥ 20%
    (vs 2.12 / 14% for the best ladder policy at goal-adjacent
    geometry).
-5. **Comparability guard:** the goal eval task is byte-identical to
-   `WallBallDepthCurriculum`'s (`eval_env_overrides` produce the same
-   env; pinned by test), so 1-4 compare directly against the ladder
-   history.
+4. **Comparability guard:** the goal eval task is byte-identical to
+   `WallBallDepthCurriculum`'s (`eval_env_overrides` equal; pinned by
+   test), so 1-3 compare directly against the ladder history.
 
-**Pre-registered escalation if the primary fails** (goal window mean
-plateaus < 2.0 with the staleness guard keeping rungs moving): the
-landing-point observation feature (obs 23 → 26; its "de-noised
-stage-2+ stall" trigger has now fired twice) measured against this
-run's plateau — NOT further reward or gate tuning (lesson 19), and
-NOT a return to fence ladders. If instead the run stalls at rung 0-1
-with goal-stream ≥ 2.0 never approached, treat the serve-origin axis
-as falsified for SAC-learnability and test the observation feature
-plus `episode_len` economics in separate pre-registered arms.
+**Pre-registered escalation if the primary fails:**
+
+- *Failure signature "reaches but cannot rally"* (contact healthy,
+  window mean plateaus in [1.0, 2.0) with a de-noised estimator): the
+  landing-point observation feature (obs 23 → 26; its "de-noised
+  stall" trigger has now fired twice) measured against this run's
+  plateau — NOT further reward or gate tuning (lesson 19), and NOT a
+  return to fence ladders.
+- *Failure signature "cannot receive"* (contact rate degrading toward
+  the 0.22.0 zero-contact signature, or window mean < 1.0): activate
+  the serve-origin contingency — the certified 6-rung goal-fence
+  serve ladder documented in §2.3/§5 (held-out certification with
+  zero warnings; implementation preserved in this PR's history) —
+  since that signature would mean the local arms' receive learning
+  did not survive the 1:1-ratio/GPU transfer.
+- Either way, a second seed of whichever configuration ran is the
+  standing next step before any further design change (lesson 7).
 
 ## 8. Seed ledger update
 

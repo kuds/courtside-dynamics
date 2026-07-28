@@ -1151,94 +1151,86 @@ RECIPES["WallBallDepthCurriculumAligned"] = _make_aligned_depth_curriculum(
 )
 
 
-def _make_goal_serve_curriculum(base: Recipe) -> Recipe:
-    """Build the goal-fence serve-origin curriculum (0.24.0).
+def _make_goal_rally(base: Recipe) -> Recipe:
+    """Build the direct goal-task recipe (0.24.0) — no curriculum at all.
 
     The 2026-07-28 diagnosis review's structural replacement for the
     sliding-fence depth ladder. Three runs of that ladder (0.19-0.22)
     stalled below a flat 3.0 bar that no scripted reference reaches at
     any rung, and every promotion paid a measured tax: a +0.35 m
-    serve-landing jump (the receive task changes more per rung than the
-    threshold the serve-alignment campaign found survivable), plus --
-    because a fence slide changes the *dynamics* via target clamping --
-    the replay-wipe/entropy-reset/action-map machinery whose one
-    exercised instance cost run 20260727_233859 ~4.3M of 6M steps.
+    serve-landing jump plus -- because a fence slide changes the
+    *dynamics* via target clamping -- the replay-wipe/entropy-reset/
+    action-map machinery whose one exercised instance cost run
+    20260727_233859 ~4.3M of 6M steps. Meanwhile the 0.22.0
+    constant-width goal fence had already made the goal task itself
+    learnable (crude placement-blind two-return rate 80-84%, vs
+    9.5-16% on the retired fence) -- and no run ever trained there,
+    because the ladder was in the way.
 
-    This recipe trains at the campaign-goal fence from step one and
-    anneals the one variable measured to control receive difficulty:
-    the serve origin (the landing point moves 1:1 with it). Stages
-    change ONLY the reset distribution, never the dynamics, so there is
-    nothing for a promotion to shock: no replay clear, no update pause,
-    no entropy reset, no pivot drift, and the final rung IS the goal
-    task. Feasibility per rung (lead_charge 3.0 oracle, n=200
-    calibration seeds 0-199): >=91.5% two-return rate everywhere, means
-    2.41-2.67; crude learnability 80-94.5%, peaking at the entry rung.
+    The pre-registered goal-fence structure A/B/C (diagnosis review
+    S2: direct vs aligned-serve vs serve-origin mixture, paired
+    common-seed local SAC) answered the remaining question: the true
+    goal serve is directly learnable from a cold start, fastest of the
+    three conditions (held-out 100-seed cross-eval: direct 2.03/2.71
+    completed returns at 500k local steps vs the campaign's all-time
+    Colab best of 1.14; mixture 2.27 -- no better; aligned-only
+    1.09-1.51 -- worse). Per the pre-registered decision rules, no
+    serve curriculum earns its complexity: this recipe trains the
+    canonical goal task from the first step, and evaluation equals
+    training.
 
-    Gate calibration: threshold 2.5 is a *scheduler* bar sitting at the
-    scripted-reference band (2.41-2.67) rather than the depth ladder's
-    3.0 mastery bar, which four multi-million-step runs plateaued
-    0.2-0.9 below at every rung past stage 0. The standing "do not
-    lower the bar on scripted evidence alone" decision is about that
-    ladder's bar; this is a new gate whose purpose is to pace an anneal
-    whose rungs cost nothing to enter, backstopped by
-    ``stage_eval_budget`` -- a rung that stalls 40 evaluations (~1M
-    steps) is force-advanced rather than parking the run (advance_reason
-    is recorded, so an unearned rung is auditable, and the run always
-    reaches the true goal task with budget to spend).
+    The single-stage gate never promotes; it exists so the run keeps
+    the campaign's artifact contract (stage-context stamping,
+    curriculum_stages.json, and startup certification of the training
+    geometry -- certified held-out twice: 96% oracle two-return rate on
+    seeds 3000-3099, 91% on 3100-3199). The 3.0 threshold is purely
+    informational: curriculum/gate_window_mean crossing it in
+    TensorBoard IS the campaign goal being met.
     """
     env_kwargs = deepcopy(base.env_kwargs)
     extra_cfg = deepcopy(base.extra_cfg)
     goal = dict(base.extra_cfg["performance_gate"]["stages"][-1])
-    # Train at the goal geometry from step one; only the serve origin
-    # anneals. Entry origin 0.2 lands the serve ~0.6 m in front of the
-    # paddle start (lambda ~0.6 of the alignment blend) -- the measured
-    # crude-learnability peak; full alignment (landing at the paddle's
-    # feet) stays dead per Phase B's approach-room threshold.
+    # Train ON the campaign-goal task: the depth ladder's final stage,
+    # which is also this recipe's (identical) evaluation task.
     env_kwargs.update(goal)
-    env_kwargs["serve_start_x"] = 0.2
-    # Serve-origin rungs: landing steps of 0.2 m, under the 0.25 m
-    # approach-room threshold measured in the serve-alignment campaign.
-    stages = tuple(
-        {"serve_start_x": origin} for origin in (0.2, 0.4, 0.6, 0.8, 1.0)
-    )
+    stages = (dict(goal),)
     extra_cfg["performance_gate"] = {
         "metric_key": "bounce_count_ep_mean",
-        "threshold": 2.5,
+        "threshold": 3.0,
         "sustain_evals": 3,
         "promotion_rule": "window_mean",
-        "stage_eval_budget": 40,
-        "stage_eval_budget_action": "advance",
         "stages": stages,
     }
     extra_cfg["ladder_certification"] = {
         "episodes": 30,
         "seed_start": 30_000,
-        "oracle_probes": tuple({"lead_charge": 3.0} for _ in stages),
+        "oracle_probes": ({"lead_charge": 3.0},),
     }
-    # The recipe-level success bar keeps the campaign meaning of
-    # "sustained rally" for cross-run comparability of ge_3 rates.
-    extra_cfg["success_threshold"] = 3.0
-    eval_env_overrides = dict(stages[-1])
+    # Training and evaluation are the same distribution, so the second
+    # info-eval stream would duplicate the matched one; the reward
+    # EvalCallback (5 episodes) keeps evaluations.npz alive instead.
+    extra_cfg["final_info_eval"] = False
+    extra_cfg["final_eval_episodes"] = None
+    eval_env_overrides = dict(goal)
     return replace(
         base,
         env_kwargs=env_kwargs,
         eval_env_overrides=eval_env_overrides,
-        name_prefix="wall_ball_goal_serve_curriculum",
+        name_prefix="wall_ball_goal_rally",
         extra_cfg=extra_cfg,
         description=(
-            "Rally at the campaign-goal geometry from step one: the "
-            "constant goal fence (-4.7, -2.6) at serve speed 7.0, with a "
-            "performance-gated serve-origin anneal (landing walked from "
-            "~0.6 m in front of the paddle back to the true serve) "
-            "replacing the retired sliding-fence depth ladder. Stages "
-            "move only the reset distribution, so promotions carry no "
-            "replay/entropy/action-map shock, and the final rung is the "
-            "goal task itself."
+            "Train the campaign-goal task directly: open-scoring rallies "
+            "at the constant goal fence (-4.7, -2.6), paddle start -3.9, "
+            "serve origin 1.0, serve speed 7.0 — the depth ladder's final "
+            "stage as the whole task, replacing the retired sliding-fence "
+            "curriculum. Paired local A/B evidence (diagnosis review "
+            "2026-07-28): direct training here beats every curriculum "
+            "variant tested and the ladder's all-time goal transfer."
         ),
     )
 
 
-RECIPES["WallBallGoalServeCurriculum"] = _make_goal_serve_curriculum(
+RECIPES["WallBallGoalRally"] = _make_goal_rally(
     RECIPES["WallBallDepthCurriculum"]
 )
 

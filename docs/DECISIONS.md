@@ -89,7 +89,7 @@ Source: [`wall_ball_baseline_review.md`](wall_ball_baseline_review.md) (runs fro
 package). See also `CHANGELOG.md` 0.9.0 → 0.13.0. Depth-campaign entries
 below distill [`wall_ball_rally_diagnosis_20260728_review.md`](wall_ball_rally_diagnosis_20260728_review.md).
 
-### The sliding-fence depth ladder is retired; the curriculum axis is the serve origin — *implemented (0.24.0)*
+### The sliding-fence depth ladder is retired; the goal task is trained directly — *implemented (0.24.0)*
 Three ladder generations (0.15/0.19-0.21/0.22) stalled the same way: a flat
 `bounce_count_ep_mean >= 3.0` bar that **no scripted reference reaches at any
 rung** (~70 controller configurations swept in the diagnosis, best 2.70;
@@ -101,32 +101,39 @@ above the measured ~0.25 m approach-room threshold — so every rung swapped
 the receive task at the exact moment the 0.22.0 advance package deleted the
 buffer and re-randomized the policy (measured cost: train reward below
 untrained levels for ~250k steps and not back to pre-advance level until
-~5.3M of a 6M run). The replacement (`WallBallGoalServeCurriculum`) trains
-at the goal fence from step one — the constant-width 0.22.0 fence had
-already restored crude learnability there (80-84% placement-blind
-two-return rate vs 9.5-16% on the retired narrow fence), which no run ever
-saw because none trained past stage 1 — and anneals only the serve origin
-(landing steps 0.2 m, entry at the crude-learnability peak). Rungs change
-the reset distribution, never the dynamics, so promotions carry no
-replay/entropy/action-map shock by construction. **Lesson:** put the
-curriculum on the axis that (a) actually controls the binding skill
-(receive geometry, measured) and (b) leaves replayed experience valid
-across rungs; a curriculum axis that changes dynamics taxes every
-promotion with off-policy staleness.
+~5.3M of a 6M run). The replacement (`WallBallGoalRally`) trains the
+goal task directly — the constant-width 0.22.0 fence had already restored
+crude learnability there (80-84% placement-blind two-return rate vs
+9.5-16% on the retired narrow fence), which no run ever saw because none
+trained past stage 1. A serve-origin curriculum (the one axis measured to
+control receive difficulty, with rungs that change only the reset
+distribution) was designed, certified, and then *tested against direct
+training* in the pre-registered paired local SAC A/B/C: direct goal-task
+training won — 2.03/2.71 completed returns on 100 held-out seeds at 500k
+local steps (all-time ladder best: 1.14 from 6M Colab steps), with a
+serve-origin mixture no better (2.27) and an aligned-serve entry rung
+strictly worse on goal skill (1.09-1.51, and near-zero zero-shot transfer
+for most of training). **Two lessons:** (1) when a curriculum's guard
+rails outlive the hazard they guarded (the 0.22.0 geometry fix removed
+the goal-task learnability collapse), the curriculum itself becomes the
+obstacle — re-test the direct task after any geometry change; (2) if a
+curriculum axis is ever needed again, pick one that leaves replayed
+experience valid across rungs (reset-distribution changes, not dynamics
+changes) — the fence axis taxed every promotion with off-policy
+staleness by construction.
 
 ### A promotion bar must be calibrated against references on the rung it gates — *implemented (0.24.0)*
 The 3.0 bar was calibrated once, on the retired 0.21 stage 0 (a predictive
 controller scored 4.39 there), then inherited by geometries where the
 scripted ceiling is ~2.5-2.9 and SAC's own multi-million-step asymptotes
 are 2.1-2.8. The standing "do not lower the bar on scripted-oracle evidence
-alone" rule was honored: the new recipe's 2.5 is a *new* gate justified by
-the joint scripted+learned pattern above, sits inside the lead-oracle band
-measured per rung (2.41-2.69 held-out), and is explicitly a **scheduler**
-(paces an anneal whose rungs cost nothing to enter), not a mastery
-definition — the campaign's rally bar stays 3.0 in `success_threshold`.
-Note the arithmetic that made 3.0 unreachable-in-practice: at the goal
-cadence (~125 steps/exchange, measured) `episode_len = 750` caps an episode
-at ~5 returns, so 3.0 demands ~60% of the physical cap sustained across a
+alone" rule was honored: no bar was lowered — the gated ladder was retired
+outright, and `WallBallGoalRally`'s single-stage gate keeps 3.0 as a purely
+informational campaign-goal marker (`curriculum/gate_window_mean` crossing
+it in TensorBoard) that can never gate anything. Note the arithmetic that
+made 3.0 unreachable-in-practice as a *promotion* bar: at the goal cadence
+(~125 steps/exchange, measured) `episode_len = 750` caps an episode at ~5
+returns, so 3.0 demands ~60% of the physical cap sustained across a
 3x60-episode window.
 
 ### Promotion staleness needs its own clock — *implemented (0.24.0)*

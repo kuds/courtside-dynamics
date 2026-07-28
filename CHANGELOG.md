@@ -14,28 +14,32 @@ observation, action, or reward changes: **saved policies and
 existing recipes are untouched; a new recipe replaces the depth ladder
 as the campaign's production configuration.
 
-**`WallBallGoalServeCurriculum` — the structural replacement for the
-sliding-fence depth ladder.** Three ladder generations stalled below a
-flat 3.0 promotion bar that no scripted reference reaches at any rung
-(~70 controller configurations, best 2.7) and that four
-multi-million-step runs plateaued 0.2–0.9 under everywhere past
-stage 0, while each promotion bought a measured +0.35 m serve-landing
-jump and (in 0.22.0) an advance package whose one exercised instance
-cost ~4.3M of 6M steps. The new recipe trains at the campaign-goal
-geometry (fence (−4.7, −2.6), start −3.9, serve 7.0) from step one —
-where the constant-width 0.22.0 fence work already restored crude
-learnability (80–84% placement-blind two-return rate vs 9.5–16% on the
-retired fence) — and anneals only the serve origin (0.2 → 1.0 in
-0.2 m landing steps, entry at the measured crude-learnability peak).
-Rungs change the reset distribution, never the dynamics: no replay
-clear, no update pause, no entropy reset, no pivot drift, and the
-final rung is the goal task itself. Gate: `bounce_count_ep_mean ≥ 2.5`
-(a scheduler bar at the scripted-reference band, not the ladder's 3.0
-mastery bar), window-mean over 3×60-episode evals, backstopped by the
-new staleness budget. Held-out certification (seeds 3100-3199, 100
-eps/cell): every rung passes every blocking criterion with zero
-advisory warnings — the campaign's first fully clean ladder
-certification. Paired local SAC A/B evidence in the review doc.
+**`WallBallGoalRally` — the structural replacement for the
+sliding-fence depth ladder is no curriculum at all.** Three ladder
+generations stalled below a flat 3.0 promotion bar that no scripted
+reference reaches at any rung (~70 controller configurations, best
+2.7) and that four multi-million-step runs plateaued 0.2–0.9 under
+everywhere past stage 0, while each promotion bought a measured
++0.35 m serve-landing jump and (in 0.22.0) an advance package whose
+one exercised instance cost ~4.3M of 6M steps. Meanwhile the
+constant-width 0.22.0 fence work had already made the goal task itself
+learnable (crude placement-blind two-return rate 80–84% vs 9.5–16% on
+the retired fence) — and no run ever trained there, because the
+ladder was in the way. The pre-registered paired local SAC structure
+A/B/C (direct vs aligned-serve vs serve-origin mixture, common seeds;
+review doc §4) settled the rest: direct goal-task training scores
+2.03/2.71 completed returns on 100 held-out seeds at 500k local steps
+— versus 1.14 all-time from any 6M ladder run — with the mixture no
+better (2.27) and aligned-only worse (1.09–1.51). The recipe
+therefore trains the depth ladder's final stage AS the whole task
+(fence (−4.7, −2.6), start −3.9, serve origin 1.0, speed 7.0;
+evaluation equals training equals the historical goal task, so every
+prior goal number stays comparable). A single-stage gate that can
+never promote keeps stage stamping, `curriculum_stages.json`, and
+startup certification (training geometry certified held-out twice:
+96% / 91% oracle two-return rates on seed blocks 3000-3099 /
+3100-3199); its informational 3.0 bar makes
+`curriculum/gate_window_mean` crossing 3.0 the campaign-goal marker.
 
 **`stage_eval_budget` promotion-staleness guard** on
 `PerformanceGatedEnvStagesCallback` (and the gate spec): a non-final

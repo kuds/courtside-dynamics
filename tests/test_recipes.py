@@ -489,7 +489,7 @@ def test_training_notebook_preserves_curriculum_recipe_defaults():
         "WallBallBaseline",
         "WallBallDepthCurriculum",
         "WallBallDepthCurriculumAligned",
-        "WallBallGoalServeCurriculum",
+        "WallBallGoalRally",
     ],
 )
 def test_wall_ball_headline_metric_is_rally_count(env_name, tmp_path):
@@ -515,7 +515,7 @@ def test_wall_ball_headline_metric_is_rally_count(env_name, tmp_path):
         "WallBallBaseline",
         "WallBallDepthCurriculum",
         "WallBallDepthCurriculumAligned",
-        "WallBallGoalServeCurriculum",
+        "WallBallGoalRally",
     ],
 )
 def test_wall_ball_recipe_uses_simplified_paddle_interface(env_name, tmp_path):
@@ -1038,87 +1038,69 @@ def test_wall_ball_bootstrap_is_marked_historical():
     assert "WallBallDepthCurriculum" in description
 
 
-def test_goal_serve_curriculum_trains_at_the_goal_and_anneals_only_the_serve():
-    """The 0.24.0 structural replacement for the depth ladder: constant
-    campaign-goal geometry, serve-origin-only rungs, no advance package
-    (rungs change the reset distribution, not the dynamics), and a
-    forced-advance staleness budget so the anneal always completes."""
-    recipe = RECIPES["WallBallGoalServeCurriculum"]
+def test_goal_rally_trains_the_goal_task_directly():
+    """The 0.24.0 structural replacement for the depth ladder: the
+    campaign-goal task IS the whole task. No curriculum, no advance
+    package; the single-stage gate exists for artifact/certification
+    parity with the gated corpus and can never promote."""
+    recipe = RECIPES["WallBallGoalRally"]
     depth = RECIPES["WallBallDepthCurriculum"]
     goal = dict(depth.extra_cfg["performance_gate"]["stages"][-1])
 
-    # Training geometry IS the campaign goal from step one.
-    for key in ("paddle_x_fence", "paddle_start_x", "paddle_home_x",
-                "serve_speed"):
-        assert recipe.env_kwargs[key] == goal[key], key
-    # Entry rung: landing ~0.6 m in front of the paddle (the measured
-    # crude-learnability peak), never full alignment (Phase B's
-    # approach-room threshold).
-    assert recipe.env_kwargs["serve_start_x"] == 0.2
+    # Training geometry and serve ARE the campaign goal.
+    for key, value in goal.items():
+        assert recipe.env_kwargs[key] == value, key
+    assert recipe.env_kwargs["serve_start_x"] == 1.0
 
     gate = recipe.extra_cfg["performance_gate"]
     stages = gate["stages"]
-    # Rungs move ONLY the serve origin, in 0.2 m landing steps (under
-    # the 0.25 m approach-room threshold), ending at the true serve.
-    assert [dict(s) for s in stages] == [
-        {"serve_start_x": v} for v in (0.2, 0.4, 0.6, 0.8, 1.0)
-    ]
-    assert stages[0]["serve_start_x"] == recipe.env_kwargs["serve_start_x"]
+    assert [dict(s) for s in stages] == [goal]
+    # Evaluation equals training equals the depth ladder's goal task,
+    # so every historical goal number remains directly comparable.
+    assert recipe.eval_env_overrides == dict(goal)
+    assert recipe.eval_env_overrides == depth.eval_env_overrides
 
-    # Scheduler bar at the scripted-reference band, not the depth
-    # ladder's 3.0 mastery bar; window-mean over 3x60 episodes.
-    assert gate["threshold"] == 2.5
+    # The 3.0 bar is informational on a single-stage gate (nothing to
+    # promote to); it marks the campaign goal in gate_window_mean.
+    assert gate["threshold"] == 3.0
     assert gate["promotion_rule"] == "window_mean"
-    assert gate["sustain_evals"] == 3
-    assert recipe.extra_cfg["n_eval_episodes"] == 60
-
-    # No advance package: nothing changes in the dynamics on a rung
-    # promotion, so there is nothing for it to shock.
     assert "clear_replay_buffer_on_advance" not in gate
     assert "advance_update_pause_steps" not in gate
     assert "reset_entropy_on_advance" not in gate
+    assert "stage_eval_budget" not in gate
 
-    # Staleness budget degrades the gate to earned-or-scheduled: a rung
-    # can stall at most 40 evals (~1M steps) before a recorded forced
-    # advance -- the run always reaches the true goal serve.
-    assert gate["stage_eval_budget"] == 40
-    assert gate["stage_eval_budget_action"] == "advance"
-
-    # Final scoring is the true goal task and equals the last rung
-    # (same invariant the depth recipes pin).
-    assert recipe.eval_env_overrides == dict(stages[-1])
-    assert recipe.eval_env_overrides == {"serve_start_x": 1.0}
-
-    # Startup certification covers every rung with the lead-charge
-    # oracle from the reserved 30000+ block.
+    # Startup certification sweeps the (one) training geometry with the
+    # recalibrated lead-charge probe from the reserved 30000+ block.
     cert = recipe.extra_cfg["ladder_certification"]
-    assert len(cert["oracle_probes"]) == len(stages)
-    for probe in cert["oracle_probes"]:
-        assert set(probe) == {"lead_charge"}
+    assert list(cert["oracle_probes"]) == [{"lead_charge": 3.0}]
     assert cert["seed_start"] >= 30_000
+    assert cert["episodes"] == 30
 
-    # The campaign's rally definition stays 3.0 for cross-run
-    # comparability of success/ge_3 metrics; only the gate bar moved.
+    # Train == eval distribution: the duplicate final info stream is
+    # off, and the 5-episode reward evaluator owns evaluations.npz.
+    assert recipe.extra_cfg["final_info_eval"] is False
+    assert recipe.extra_cfg["final_eval_episodes"] is None
+    assert recipe.extra_cfg["reward_eval_episodes"] == 5
+
+    assert recipe.extra_cfg["n_eval_episodes"] == 60
     assert recipe.extra_cfg["success_threshold"] == 3.0
     assert recipe.extra_cfg["model_kwargs"] == {"gamma": 0.995}
 
 
-def test_goal_serve_curriculum_config_builds_and_rungs_apply(tmp_path):
-    cfg = build_train_config(
-        "WallBallGoalServeCurriculum", log_dir=str(tmp_path)
-    )
+def test_goal_rally_config_builds_and_gate_stage_applies(tmp_path):
+    cfg = build_train_config("WallBallGoalRally", log_dir=str(tmp_path))
     env = cfg.env_fn()
     eval_env = cfg.eval_env_fn()
     try:
-        assert env.unwrapped.paddle_x_fence == (-4.7, -2.6)
-        assert env.unwrapped.serve_start_x == 0.2
-        # Rung application is a plain reset-distribution attribute set.
-        env.unwrapped.serve_start_x = 0.6
-        assert env.unwrapped.serve_start_x == 0.6
-        # The evaluator rolls the true goal serve at the same geometry.
-        assert eval_env.unwrapped.serve_start_x == 1.0
-        assert eval_env.unwrapped.paddle_x_fence == (-4.7, -2.6)
-        assert eval_env.unwrapped.serve_speed == 7.0
+        for e in (env, eval_env):
+            assert e.unwrapped.paddle_x_fence == (-4.7, -2.6)
+            assert e.unwrapped.paddle_start_x == -3.9
+            assert e.unwrapped.paddle_home_x == -3.65
+            assert e.unwrapped.serve_start_x == 1.0
+            assert e.unwrapped.serve_speed == 7.0
+        # Action mapping stays pinned to the full workspace, pivoted on
+        # the goal fence midpoint (the 0.22.0 usable-share fix).
+        assert env.unwrapped.paddle_x_target_range == (-4.7, 0.3)
     finally:
         env.close()
         eval_env.close()
