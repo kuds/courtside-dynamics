@@ -87,6 +87,31 @@ def test_validate_ladder_geometry_flags_the_known_failure_modes():
     assert lc.validate_ladder_geometry([]) == ["ladder has no stages"]
 
 
+def test_validate_ladder_geometry_skips_geometry_free_stages():
+    """Gate stages are attribute-arbitrary (serve-only ladders exist)."""
+    serve_only = [{"serve_speed": 4.0}, {"serve_speed": 5.0}]
+    assert lc.validate_ladder_geometry(serve_only) == []
+    # A mixed ladder still checks the stages that declare geometry.
+    mixed = [{"serve_speed": 4.0}, {**STAGE_0, "paddle_start_x": 5.0}]
+    assert any(
+        "outside fence" in f for f in lc.validate_ladder_geometry(mixed)
+    )
+
+
+def test_apply_stage_records_setter_rejection_instead_of_raising():
+    """A rejecting property setter is a finding, not an abort."""
+    env = _tiny_env_fn()
+    try:
+        applied, failures = lc.apply_stage(
+            env, {"paddle_x_fence": (-9.0, -8.0)}
+        )
+        assert len(failures) == 1
+        assert "rejected value" in failures[0]
+        assert "paddle_x_fence" not in applied
+    finally:
+        env.close()
+
+
 def test_apply_stage_verifies_existence_and_round_trip():
     env = _tiny_env_fn()
     try:
@@ -228,6 +253,98 @@ def test_run_startup_certification_rejects_bad_specs(tmp_path):
         )
 
 
+def test_probe_stage_count_mismatch_records_a_skip_not_a_crash(tmp_path):
+    """The documented continuation workflow shrinks the gate wholesale
+    while the recipe's full probe table survives the merge — advisory
+    certification must skip with a report, not refuse to train."""
+    cfg = SimpleNamespace(
+        env_fn=_tiny_env_fn,
+        performance_gate={
+            "metric_key": "bounce_count_ep_mean",
+            "threshold": 3.0,
+            "sustain_evals": 3,
+            "stages": (STAGE_0, STAGE_1),
+        },
+        ladder_certification={
+            "oracle_probes": (
+                {"run_up": 1.1},
+                {"charge_gap": 1.0},
+                {"charge_gap": 1.0},
+                {"charge_gap": 1.8},
+                {"charge_gap": 1.7},
+            ),
+        },
+    )
+    out = tmp_path / "r.json"
+    report = lc.run_startup_certification(cfg, str(out))
+    assert report["skipped"] is True
+    assert report["passed"] is False
+    assert "5 oracle probe(s) for 2 gate stage(s)" in report["failures"][0]
+    assert json.loads(out.read_text())["skipped"] is True
+    # ...but enforce still turns the skip into a hard stop.
+    cfg.ladder_certification = {
+        **cfg.ladder_certification, "enforce": True,
+    }
+    with pytest.raises(RuntimeError, match="certification skipped"):
+        lc.run_startup_certification(cfg, str(out))
+
+
+def test_missing_oracle_probes_is_a_contextual_error(tmp_path):
+    cfg = SimpleNamespace(
+        env_fn=_tiny_env_fn,
+        performance_gate={
+            "metric_key": "m", "threshold": 1.0, "sustain_evals": 1,
+            "stages": (STAGE_0,),
+        },
+        ladder_certification={"episodes": 5},
+    )
+    with pytest.raises(ValueError, match="oracle_probes"):
+        lc.run_startup_certification(cfg, str(tmp_path / "r.json"))
+
+
+def test_toml_layer_validates_ladder_certification_at_load(tmp_path):
+    """Broken specs fail at load with the file named (repo cardinal
+    rule: no silent no-ops, no bare startup KeyErrors)."""
+    from courtside_dynamics.run_config import load_run_config
+
+    def write(body):
+        path = tmp_path / "run.toml"
+        path.write_text(body)
+        return path
+
+    good = write(
+        "[train.ladder_certification]\n"
+        "episodes = 5\n"
+        "oracle_probes = [{ run_up = 1.1 }, { charge_gap = 1.0 }]\n"
+    )
+    loaded = load_run_config(good)
+    assert loaded.train["ladder_certification"]["episodes"] == 5
+
+    disabled = write('[train]\nladder_certification = "none"\n')
+    assert load_run_config(disabled).train["ladder_certification"] is None
+
+    with pytest.raises(ValueError, match="did you mean 'oracle_probes'"):
+        load_run_config(write(
+            "[train.ladder_certification]\n"
+            "orace_probes = [{ run_up = 1.1 }]\n"
+        ))
+    with pytest.raises(ValueError, match="must define oracle_probes"):
+        load_run_config(write(
+            "[train.ladder_certification]\nepisodes = 5\n"
+        ))
+    with pytest.raises(ValueError, match="exactly one"):
+        load_run_config(write(
+            "[train.ladder_certification]\n"
+            "oracle_probes = [{ run_up = 1.1, charge_gap = 1.0 }]\n"
+        ))
+    with pytest.raises(ValueError, match="episodes must be an integer"):
+        load_run_config(write(
+            "[train.ladder_certification]\n"
+            "episodes = 0\n"
+            "oracle_probes = [{ run_up = 1.1 }]\n"
+        ))
+
+
 def test_run_startup_certification_enforce_raises_on_failure(tmp_path,
                                                              monkeypatch):
     monkeypatch.setattr(
@@ -308,7 +425,17 @@ def test_release_cli_certifies_the_live_recipe_stages(monkeypatch, tmp_path):
     assert json.loads((tmp_path / "release.json").read_text())["passed"]
 
 
-def test_release_cli_rejects_candidate_only_flags():
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"serve_origin_blend": 0.5},
+        {"oracle_probe": ["0=run_up:1.0"]},
+        {"calibration_seed_start": 100},
+        {"calibration_episodes": 50},
+        {"calibration_artifact": "x.json"},
+    ],
+)
+def test_release_cli_rejects_candidate_only_flags(override):
     from tools import depth_stage_sweep
 
     args = argparse.Namespace(
@@ -316,13 +443,15 @@ def test_release_cli_rejects_candidate_only_flags():
         json_output=None,
         seed_start=None,
         ladder="release",
-        serve_origin_blend=0.5,
+        serve_origin_blend=None,
         oracle_probe=None,
         calibration_seed_start=None,
         calibration_episodes=None,
         calibration_artifact=None,
     )
-    with pytest.raises(SystemExit, match="candidate ladders"):
+    for key, value in override.items():
+        setattr(args, key, value)
+    with pytest.raises(SystemExit):
         depth_stage_sweep._run_release_certification(args)
 
 

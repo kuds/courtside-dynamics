@@ -29,11 +29,18 @@ serve_speed_jitter = 0.5
 serve_vy_max = 2.0
 
 # To replace the depth ladder, uncomment ALL of the following —
-# performance_gate replaces wholesale, never merges — and re-run
-# tools/depth_stage_sweep.py with the new stage table first. A
-# CONTINUATION run (warm-started from a prior run's final model)
-# restarts the ladder at the reached stage by listing only the
-# remaining stages here:
+# performance_gate replaces wholesale, never merges. Since 0.23.0 the
+# run certifies its gate stages at startup (the old advice to re-run
+# tools/depth_stage_sweep.py by hand still works: --ladder release
+# runs the same certifier). A CONTINUATION run (warm-started from a
+# prior run's final model) restarts the ladder at the reached stage by
+# listing only the remaining stages here — then either restate
+# matching [train.ladder_certification] oracle_probes (one per listed
+# stage) or set ladder_certification = "none"; a probe/stage count
+# mismatch records a skipped certification instead of blocking the
+# run. Example stages below are rungs 0 and 4 of the 0.22.0
+# constant-width ladder (per-stage paddle_home_x is required — it is
+# the live action-map pivot):
 # [train.performance_gate]
 # metric_key = "bounce_count_ep_mean"
 # threshold = 3.0
@@ -41,13 +48,20 @@ serve_vy_max = 2.0
 # promotion_rule = "window_mean"          # mean of last 3 evals >= 3.0
 # advance_update_pause_steps = 50_000     # promotion warm-up: pause...
 # clear_replay_buffer_on_advance = true   # ...and drop stale-stage data
+# reset_entropy_on_advance = true
 # [[train.performance_gate.stages]]
-# paddle_x_fence = [-2.7, 0.3]
+# paddle_x_fence = [-2.3, -0.2]
 # paddle_start_x = -1.6
+# paddle_home_x = -1.25
 # serve_start_x = 1.0
 # serve_speed = 5.2
 # [[train.performance_gate.stages]]
-# paddle_x_fence = [-4.7, -3.0]
+# paddle_x_fence = [-4.7, -2.6]
 # paddle_start_x = -3.9
+# paddle_home_x = -3.65
 # serve_start_x = 1.0
 # serve_speed = 7.0
+# [train.ladder_certification]
+# episodes = 10
+# seed_start = 30_000
+# oracle_probes = [{ run_up = 1.1 }, { charge_gap = 1.7 }]

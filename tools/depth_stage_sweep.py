@@ -50,7 +50,10 @@ shipped uncertified precisely because the tables below still encoded
 the superseded 0.21 geometry; see review 20260727_233859). The
 ``aligned``/``baseline`` tables remain pinned to the 0.21-era
 candidates for reproducing the serve-alignment campaign's paired
-comparisons.
+comparisons. Until the probes are recalibrated for the constant-width
+geometry, a bare release run is EXPECTED to exit 1: with the stock
+probes the live ladder fails feasibility at stages 0/3 and the
+inversion detector at stage 1 (review 20260727_233859).
 """
 from __future__ import annotations
 
@@ -1045,11 +1048,17 @@ def _run_release_certification(args) -> int:
             "recipe's ladder_certification spec (use --ladder aligned "
             "or baseline)"
         )
-    if args.calibration_seed_start is not None or args.calibration_artifact:
+    if (
+        args.calibration_seed_start is not None
+        or args.calibration_episodes is not None
+        or args.calibration_artifact
+    ):
         raise SystemExit(
             "calibration provenance flags apply to the candidate ladders; "
             "the release path records provenance in the certifier report"
         )
+    if args.episodes < 1:
+        raise SystemExit("episodes-per-cell must be a positive integer")
     from courtside_dynamics.recipes import RECIPES
     from courtside_dynamics.training.ladder_certification import (
         certify_ladder,
@@ -1064,6 +1073,8 @@ def _run_release_certification(args) -> int:
         if args.seed_start is not None
         else int(spec["seed_start"])
     )
+    if seed_start < 0:
+        raise SystemExit("--seed-start must be a non-negative integer")
 
     def env_fn():
         # The exact constructor a training run's env_fn uses; stage

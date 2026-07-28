@@ -113,9 +113,15 @@ _POLICIES = ("parked", "crude", "oracle")
 def _map_action_x(
     target_x: float, home: float, mapping: tuple[float, float]
 ) -> float:
-    """Invert the env's asymmetric x action map for a world-x target."""
+    """Invert the env's asymmetric x action map for a world-x target.
+
+    A stage may legally pivot ``paddle_home_x`` onto a mapping endpoint
+    (the env accepts it and degrades gracefully), which zeroes one
+    half-span; the floor keeps the inversion finite so certification
+    measures such a ladder instead of crashing on it.
+    """
     span = (mapping[1] - home) if target_x >= home else (home - mapping[0])
-    return float(np.clip((target_x - home) / span, -1.0, 1.0))
+    return float(np.clip((target_x - home) / max(span, 1e-9), -1.0, 1.0))
 
 
 def _parked_action(
@@ -219,16 +225,25 @@ def validate_ladder_geometry(stages: Sequence[Mapping[str, Any]]) -> list[str]:
     if not stages:
         return ["ladder has no stages"]
 
+    # Gate stages are attribute-arbitrary (a serve-only ladder like
+    # WallBallBootstrap's never mentions the fence); geometry checks
+    # apply only to stages that actually declare geometry, and the
+    # cross-stage checks only when every stage does.
     failures = []
     fences = []
     for i, stage in enumerate(stages):
-        back, front = stage["paddle_x_fence"]
-        start = stage["paddle_start_x"]
+        fence = stage.get("paddle_x_fence")
+        start = stage.get("paddle_start_x")
+        if fence is None or start is None:
+            continue
+        back, front = fence
         fences.append((back, front))
         if not back <= start <= front:
             failures.append(
                 f"stage {i}: start {start} is outside fence ({back}, {front})"
             )
+    if len(fences) != len(stages):
+        return failures
 
     for i, (left, right) in enumerate(zip(fences[:-1], fences[1:], strict=True)):
         if max(left[0], right[0]) >= min(left[1], right[1]):
@@ -294,8 +309,17 @@ def apply_stage(env: Any, stage: Mapping[str, Any]) -> tuple[dict, list[str]]:
                 "would raise on advance (or silently no-op pre-0.20 style)"
             )
             continue
-        setattr(target, key, value)
-        read_back = getattr(target, key)
+        try:
+            setattr(target, key, value)
+            read_back = getattr(target, key)
+        except Exception as exc:  # noqa: BLE001 — a rejecting property
+            # setter is a *finding* about this ladder, not a reason to
+            # abort the advisory report ("never raises on a failed
+            # criterion").
+            failures.append(
+                f"stage attribute {key!r} rejected value {value!r}: {exc}"
+            )
+            continue
         applied[key] = _jsonable(read_back)
         if not _values_match(read_back, value):
             failures.append(
@@ -731,10 +755,50 @@ def format_report(report: Mapping[str, Any]) -> str:
     lines.append(
         "LADDER CERTIFICATION: "
         + ("all blocking criteria passed" if report["passed"] else
-           f"{len(report['failures'])} blocking failure(s) — see "
-           "reports/ladder_certification.json")
+           f"{len(report['failures'])} blocking failure(s) recorded in "
+           "the certification report")
     )
     return "\n".join(lines)
+
+
+def _write_report(output_path: str, report: Mapping[str, Any]) -> None:
+    parent = os.path.dirname(output_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    temporary = output_path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+        handle.write("\n")
+    os.replace(temporary, output_path)
+
+
+def _skipped_report(
+    reason: str,
+    gate: Mapping[str, Any],
+    episodes: int,
+    seed_start: int,
+) -> dict[str, Any]:
+    """A report shell for a certification that could not run at all."""
+    return {
+        "schema": 1,
+        "skipped": True,
+        "provenance": {
+            "courtside_dynamics": courtside_dynamics.__version__,
+            "python": platform.python_version(),
+            "numpy": np.__version__,
+            "timestamp_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+            "episodes_per_cell": episodes,
+            "seed_start": seed_start,
+        },
+        "gate": {
+            "metric_key": gate.get("metric_key"),
+            "threshold": gate.get("threshold"),
+        },
+        "stages": [],
+        "failures": [reason],
+        "warnings": [],
+        "passed": False,
+    }
 
 
 def run_startup_certification(cfg: Any, output_path: str) -> dict[str, Any]:
@@ -758,28 +822,45 @@ def run_startup_certification(cfg: Any, output_path: str) -> dict[str, Any]:
         raise ValueError(
             "ladder_certification requires a performance_gate with stages"
         )
+    if "oracle_probes" not in spec:
+        raise ValueError(
+            "ladder_certification spec must set oracle_probes (one "
+            '{"run_up": x} or {"charge_gap": y} table per gate stage), or '
+            'be set to "none" in the TOML to disable certification'
+        )
 
+    episodes = int(spec.get("episodes", DEFAULT_EPISODES))
+    seed_start = int(spec.get("seed_start", DEFAULT_SEED_START))
     stages = [dict(stage) for stage in gate["stages"]]
-    report = certify_ladder(
-        cfg.env_fn,
-        stages,
-        episodes=int(spec.get("episodes", DEFAULT_EPISODES)),
-        seed_start=int(spec.get("seed_start", DEFAULT_SEED_START)),
-        oracle_probes=[dict(p) for p in spec["oracle_probes"]],
-        gate_metric_key=gate.get("metric_key"),
-        gate_threshold=gate.get("threshold"),
-        max_episode_steps=spec.get("max_episode_steps"),
-    )
+    probes = [dict(p) for p in spec["oracle_probes"]]
+    if len(probes) != len(stages):
+        # The documented continuation workflow replaces the gate
+        # wholesale with only the remaining stages while the recipe's
+        # full probe table survives the merge. That is a legitimate
+        # config, not a typo — record the skip instead of refusing to
+        # train ("advisory by default" must hold for shape mismatches).
+        report = _skipped_report(
+            f"certification skipped: {len(probes)} oracle probe(s) for "
+            f"{len(stages)} gate stage(s); align "
+            "[train.ladder_certification] oracle_probes with the "
+            'overridden gate, or set ladder_certification = "none"',
+            gate,
+            episodes,
+            seed_start,
+        )
+    else:
+        report = certify_ladder(
+            cfg.env_fn,
+            stages,
+            episodes=episodes,
+            seed_start=seed_start,
+            oracle_probes=probes,
+            gate_metric_key=gate.get("metric_key"),
+            gate_threshold=gate.get("threshold"),
+            max_episode_steps=spec.get("max_episode_steps"),
+        )
 
-    parent = os.path.dirname(output_path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    temporary = output_path + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=2)
-        handle.write("\n")
-    os.replace(temporary, output_path)
-
+    _write_report(output_path, report)
     print(format_report(report))
     if spec.get("enforce") and not report["passed"]:
         raise RuntimeError(
