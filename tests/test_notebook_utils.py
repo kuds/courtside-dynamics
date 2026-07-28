@@ -11,13 +11,17 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import inspect
 import json
 
 import numpy as np
 from gymnasium import Env
 from gymnasium.spaces import Box
 
+from courtside_dynamics.envs.wall_ball import WallBallEnv
 from courtside_dynamics.notebook_utils import (
+    _LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS,
+    _PRE_TABLE_WALL_BALL_CONSTRUCTOR_KEYS,
     _rollout_wall_ball_seed,
     _summarize_wall_ball_episodes,
     _wall_ball_constructor_kwargs_match,
@@ -249,6 +253,72 @@ def test_wall_ball_constructor_comparison_accepts_only_omitted_new_defaults():
         {**legacy_training, "rally_style": "one_bounce"},
         {**evaluated_defaults, "rally_style": "one_bounce"},
     )
+
+
+def test_pre_0_22_run_configs_still_match_a_current_wall_ball_env():
+    """0.22.0's ``return_shaping_scale`` must not orphan older checkpoints.
+
+    Every depth post-mortem compares a run against its predecessor, which
+    means re-scoring a checkpoint trained before the kwarg existed. Its
+    recorded config has no such key while a freshly built env reports the
+    0.0 default, and without a registration that one-key difference blocks
+    ``evaluate_best_wall_ball`` outright.
+    """
+    pre_0_22_training = {
+        "episode_len": 750,
+        "min_force": 20.0,
+        "track_shaping_scale": 0.5,
+        "wall_reward_increment": 0.0,
+    }
+
+    assert _wall_ball_constructor_kwargs_match(
+        pre_0_22_training,
+        {**pre_0_22_training, "return_shaping_scale": 0.0},
+    )
+    # Shaping that is actually switched on is a genuine scoring difference
+    # and must still be rejected.
+    assert not _wall_ball_constructor_kwargs_match(
+        pre_0_22_training,
+        {**pre_0_22_training, "return_shaping_scale": 0.15},
+    )
+
+
+def test_every_wall_ball_constructor_kwarg_is_accounted_for():
+    """A new ``WallBallEnv`` kwarg cannot ship unregistered.
+
+    ``return_shaping_scale`` shipped in 0.22.0 without an entry in
+    ``_LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS``, which silently blocked the
+    long-horizon re-evaluation of every earlier checkpoint. The table is a
+    hand-maintained mirror of the constructor, so mirror drift is the
+    failure mode to close, not the single missing key.
+    """
+    parameters = inspect.signature(WallBallEnv.__init__).parameters
+    constructor_kwargs = {
+        name
+        for name, parameter in parameters.items()
+        if name != "self"
+        and parameter.kind
+        in (parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY)
+        and parameter.default is not parameter.empty
+    }
+    registered = set(_LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS)
+
+    unregistered = (
+        constructor_kwargs - registered - _PRE_TABLE_WALL_BALL_CONSTRUCTOR_KEYS
+    )
+    assert not unregistered, (
+        "WallBallEnv constructor kwargs are recorded in every run's "
+        "config.json, so a kwarg added after a run was recorded makes that "
+        "run's config differ from a freshly built env and blocks its "
+        f"long-horizon re-evaluation. Add {sorted(unregistered)} to "
+        "_LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS in notebook_utils.py, mapped "
+        "to the value that reproduces pre-existing behavior."
+    )
+    # Neither inventory may name a kwarg the constructor no longer accepts,
+    # and a kwarg belongs to exactly one of them.
+    assert registered <= constructor_kwargs
+    assert _PRE_TABLE_WALL_BALL_CONSTRUCTOR_KEYS <= constructor_kwargs
+    assert not registered & _PRE_TABLE_WALL_BALL_CONSTRUCTOR_KEYS
 
 
 def _wall_ball_row(

@@ -177,6 +177,29 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### A new env kwarg orphans every earlier checkpoint unless it is registered — *implemented (post-0.22.0)*
+`WallBallEnv`'s constructor kwargs are recorded in each run's
+`config.json` via `EzPickle`, and `evaluate_best_wall_ball` refuses to
+re-score a checkpoint whose recorded kwargs differ from a freshly built
+env — correctly, since scoring a policy under changed rules produces a
+meaningless number. The escape hatch is
+`_LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS` (`notebook_utils.py`), which
+says "absent from the old config **and** at this default in the new env
+⇒ not a difference." 0.10.0, 0.13.0 and 0.14.0 each registered their new
+kwargs there; **0.22.0's `return_shaping_scale` did not**, so every
+pre-0.22.0 config (30 keys) differed from a current env (31 keys) by one
+line reading `0.0` — off, i.e. exactly the old behavior — and the
+long-horizon audit raised on all of them. The cost lands precisely where
+it hurts: the 0.22.0 post-mortem's paired baseline is run
+`20260727_004014`, and re-scoring it was blocked. *Rule: the table is a
+hand-maintained mirror of the constructor, so guard the mirror, not the
+instance —* `test_every_wall_ball_constructor_kwarg_is_accounted_for`
+introspects `WallBallEnv.__init__` and fails with the offending kwarg
+named whenever one is registered in neither the table nor the frozen
+pre-table inventory. This is cardinal rule 1 in a new place: the check
+that silently blocked re-evaluation could not distinguish "different
+rules" from "we started writing down one more line."
+
 ### An argmax over a logged eval stream is a hypothesis, not a result — *characteristic*
 Second occurrence in this campaign, so it is a pattern rather than a
 mishap. Run `20260727_004014`'s unsynced goal-geometry stream made the

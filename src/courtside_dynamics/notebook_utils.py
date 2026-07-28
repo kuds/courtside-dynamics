@@ -820,7 +820,34 @@ _LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS: dict[str, Any] = {
     "court_style": "diagnostic",
     # Added in 0.14.0: 0.0 reproduces the flat +1 wall reward exactly.
     "wall_reward_increment": 0.0,
+    # Added in 0.22.0: 0.0 leaves the outgoing leg with no dense credit,
+    # which is exactly how every pre-0.22 run was scored.
+    "return_shaping_scale": 0.0,
 }
+
+# Constructor kwargs that predate this table and are therefore present in
+# every recorded run config. A new kwarg belongs in
+# ``_LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS`` instead -- see
+# ``test_every_wall_ball_constructor_kwarg_is_accounted_for``, which fails
+# when one is added to :class:`WallBallEnv` and registered in neither.
+_PRE_TABLE_WALL_BALL_CONSTRUCTOR_KEYS: frozenset[str] = frozenset(
+    {
+        "episode_len",
+        "min_force",
+        "serve_speed",
+        "serve_lob",
+        "serve_speed_jitter",
+        "serve_vy_min",
+        "serve_vy_max",
+        "paddle_hit_bonus",
+        "track_shaping_scale",
+        "out_of_bounds_penalty",
+        "double_bounce_penalty",
+        "stall_penalty",
+        "floor_bounce_min_speed",
+        "stall_steps",
+    }
+)
 
 
 def _canonicalize_constructor_value(value: Any) -> Any:
