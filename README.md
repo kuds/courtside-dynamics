@@ -276,15 +276,15 @@ configuration and diagnostic evidence needed to investigate training. Some
 artifacts appear only when their corresponding callback fires or feature is
 enabled.
 
-| Artifact | Contents |
+| Path | Contents |
 |---|---|
-| `config.json` | Serializable training settings, environment class/space/curriculum metadata, selected resolved SB3 settings, versions, device, Git SHA, and warm-start identities |
+| `config.json` | Resolved training settings, environment class/space/curriculum metadata, resolved SB3 settings, versions, device, Git SHA, and warm-start identities |
+| `run_config.toml` | Byte-exact copy of the TOML run config, when one was used |
 | `stage_summary.txt` | Final evaluation and, when scheduled evaluation ran, best evaluation, plus duration, throughput, device, and final training-health metrics |
-| `evaluations.npz` | Evaluation reward history when scheduled evaluation runs |
-| `eval_info.csv` | Aggregated info metrics when info-dictionary evaluation is enabled and runs |
-| `tensorboard/`, `tensorboard/progress.csv` | Live training scalars and their CSV mirror |
-| `monitor/`, `checkpoints/`, `videos/` | Episode returns and optional snapshots or rollout recordings |
-| `best_model.zip`, `best_vec_normalize.pkl` | Best checkpoint after evaluation and, when normalization is enabled, its matching statistics |
+| `model/` | The protected best pair (`best_model.zip`, `best_vec_normalize.pkl`) with `best_model_meta.json` binding them by sha256; the end-of-run `final_model.zip` and `vec_normalize.pkl`; and `stage_bests/`, one archived best per curriculum stage |
+| `metrics/` | `eval_info.csv` (matched-stage info metrics), `eval_info_final.csv` (the unsynced goal-task stream), `evaluations.npz`, `progress.csv`, and the `tensorboard/` and `monitor/` directories |
+| `checkpoints/`, `media/videos/` | Periodic snapshots and milestone rollout recordings |
+| `reports/` | `curriculum_stages.json` (per-stage entry/exit, promotion windows, per-stage bests), the held-out long-horizon audit (`best_model_long_horizon_eval.json` and its per-episode CSV), and the diagnostic plots |
 
 `courtside_dynamics.notebook_utils` can replay the stage summary, audit a run
 directory, explain missing optional artifacts, and plot learning, evaluation,
