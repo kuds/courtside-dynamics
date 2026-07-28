@@ -1,7 +1,15 @@
 # Design: WallBallDepthCurriculum — test serve-landing alignment
 
-Status: experimental implementation, revised 2026-07-24 after artifact and
-log audit. The branch preserves the fixed-origin production recipe, adds a
+Status: **closed 2026-07-28 — falsified.** The stage-1 training A/B this
+design pre-registered was run (as its cold-start fallback, locally
+scaled) and read "alignment hurts" under the pre-registered rule
+(pooled paired Δ −0.34, both pairs negative), with the 2×2 cross-eval
+showing baseline-trained policies dominating aligned-trained ones on
+both serve geometries; a parallel goal-fence experiment agreed. Per
+this document's own stop rule, the aligned arm is closed. Evidence and
+protocol: `wall_ball_rally_diagnosis_20260728_review.md` §4.
+Original status: experimental implementation, revised 2026-07-24 after
+artifact and log audit. The branch preserves the fixed-origin production recipe, adds a
 separately named aligned treatment, and contains paired validation
 instrumentation. The treatment is not yet certified for a full 6M retrain.
 This document reviews the run-2 sliding-ladder pilot

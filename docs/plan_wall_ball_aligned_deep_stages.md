@@ -1,6 +1,14 @@
 # Plan: resolve the aligned ladder's deep-stage feasibility
 
-Status: proposed, 2026-07-25. Scope is the stage-3/4 feasibility failure of
+Status: **closed 2026-07-28 — Phase D no-go fired.** Phase D (the
+stage-1 training A/B, run locally scaled per
+`wall_ball_rally_diagnosis_20260728_review.md` §4) favoured the
+baseline in both pairs, which is this plan's second no-go condition:
+"Phase D's A/B is indistinguishable or favours the baseline.
+Alignment does not help learning, and deep-stage feasibility work is
+moot." Phases A-C's results (the λ-blend feasibility map, the
+winner's-curse measurements, the seed-ledger discipline) remain valid
+reference material. Original status: proposed, 2026-07-25. Scope is the stage-3/4 feasibility failure of
 `WallBallDepthCurriculumAligned`. The design being executed is
 `design_wall_ball_serve_alignment.md`; this document sequences the work that
 its "Final recommendation" leaves open and adds the parametric study the

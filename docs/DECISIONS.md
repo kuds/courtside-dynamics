@@ -122,6 +122,21 @@ experience valid across rungs (reset-distribution changes, not dynamics
 changes) — the fence axis taxed every promotion with off-policy
 staleness by construction.
 
+### Serve alignment is falsified as a learning aid — easier receives train weaker policies — *closed (0.24.0)*
+The serve-alignment hypothesis (move the serve landing to the paddle so
+receive is easy; `design_wall_ball_serve_alignment.md`) was tested at both
+of its pre-registered sites in the diagnosis campaign's paired local SAC
+battery. Stage-1 A/B: pooled paired Δ −0.34 against alignment, both pairs
+negative, and the 2×2 cross-eval shows baseline-trained policies beating
+aligned-trained ones on BOTH serve geometries — including the aligned
+serve itself. Goal-fence A/B/C: the aligned-entry arm was the worst of
+three conditions on goal-task skill (held-out 1.09-1.51 vs 2.03-2.71 for
+direct training). Mechanism: approach-to-receive training generalizes
+down to easy receives; easy-receive training does not generalize up — the
+alignment removes exactly the skill the campaign needs. **Do not
+re-propose serve-origin alignment (full or partial) as a training aid;**
+the λ-blend feasibility maps remain valid as probe-calibration reference.
+
 ### A promotion bar must be calibrated against references on the rung it gates — *implemented (0.24.0)*
 The 3.0 bar was calibrated once, on the retired 0.21 stage 0 (a predictive
 controller scored 4.39 there), then inherited by geometries where the

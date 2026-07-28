@@ -57,7 +57,12 @@ exactly −1.0, everything after 3.4M at or below −0.688.
    local steps vs the campaign's all-time 1.14 — with a serve-origin
    mixture no better (2.27) and an aligned-serve entry rung strictly
    worse (1.09-1.51 held-out, near-zero zero-shot goal transfer for
-   most of training). The Phase D stage-1 alignment A/B: [S1 RESULTS].
+   most of training). The Phase D stage-1 alignment A/B read
+   **"alignment hurts"** under its pre-registered rule (pooled paired
+   Δ −0.34, both pairs negative), and the 2×2 cross-eval shows
+   baseline-trained policies dominating aligned-trained ones on BOTH
+   serve geometries — the never-trained aligned treatment is closed at
+   both of its pre-registered test sites.
 4. **Shipped in this PR:** recalibrated startup-certification probes
    (lead-charge oracle; held-out 95-100% ≥2 at every stage of the
    0.22.0 ladder — `--ladder release` now passes), a
@@ -268,7 +273,52 @@ gamma 0.995, 23-dim obs, no videos, no certification pass.
 
 ### S1 — Phase D stage-1 alignment A/B (2 pairs, 400k steps/arm)
 
-[S1 RESULTS]
+The pre-registered Phase D question — does stage-1 serve alignment
+help SAC learn — scaled to the local budget as its cold-start
+fallback: common-seed pairs, fixed 0.22.0 stage-1 geometry, baseline
+`serve_start_x` 1.0 vs aligned 0.69, each arm scored on its own
+matched stream (the campaign-relevant quantity: each arm gates on its
+own geometry).
+
+Primary (paired matched-stream AUC over evals 125-400k):
+
+| pair | baseline | aligned | Δ (aligned − baseline) |
+|---|---|---|---|
+| 101 | 1.73 | 1.11 | **−0.61** |
+| 102 | 1.01 | 0.94 | **−0.07** |
+
+Pooled Δ **−0.34** with both pairs negative → the pre-registered rule
+reads **"alignment hurts."** Secondary: baseline_101 was the only arm
+to reach a ≥2.0 3-eval window (at 375k); no aligned arm did — despite
+the aligned stage-1 serve being *scripted-easier* (crude two-return
+rate 94-95% vs 72-73%).
+
+The 2×2 cross-evaluation (final models × both stage-1 serve
+geometries, 100 common seeds 50000-50099, deterministic) shows
+dominance, and identifies the mechanism:
+
+| policy \\ eval serve | 1.0 (approach) | 0.69 (aligned) |
+|---|---|---|
+| base-trained 101 | **1.92** | **1.53** |
+| align-trained 101 | 0.91 | 1.35 |
+| base-trained 102 | **1.18** | **1.24** |
+| align-trained 102 | 0.66 | 1.00 |
+
+Baseline-trained policies beat aligned-trained policies on *both*
+geometries in *both* pairs — including on the aligned serve itself.
+Training with the approach-to-receive requirement generalizes down to
+the easy receive; training on the easy receive does not generalize up.
+Combined with S2's align75 result at the goal fence, the
+serve-alignment hypothesis (`design_wall_ball_serve_alignment.md`) is
+answered at both of its pre-registered test sites, in the same
+direction: **alignment does not help SAC learn — it removes exactly
+the skill the campaign needs.** Per the design note's own stop rule
+and `plan_wall_ball_aligned_deep_stages.md`'s no-go conditions, the
+aligned arm is closed: no full aligned pilot, and deep-stage
+feasibility work on it is moot. (Caveats: 2 pairs, 400k steps, 1:2
+update ratio — a directional local answer, not a GPU-scale
+replication; but both experiments, four arms, and eight cross-eval
+cells all point the same way.)
 
 ### S2 — goal-fence structure A/B/C (500k steps/arm; truncated to 4
 complete + 4 partial arms, see deviation note)
@@ -347,14 +397,17 @@ The tested alternatives rank: **direct-at-goal ≥ serve-origin mixture
 pre-registered decision rules, no curriculum earns its complexity:
 the replacement recipe (`WallBallGoalRally`) is the goal task itself,
 with the campaign's certification/artifact machinery retained via a
-single-stage gate that cannot promote. The serve-origin axis remains
-the right *contingency* — it is measured, certified (its 6-rung
-ladder passed held-out certification with zero warnings), and its
-implementation notes are preserved in this doc — but it ships only if
-the direct run's pre-registered escalation fires. Reverse curricula,
-mixed-stage sampling over fences, soft fence transitions, and
-per-stage bars were all considered and are all dominated by "just
-train the goal task" on the current evidence.
+single-stage gate that cannot promote. A serve-origin anneal was this
+review's own working replacement candidate — designed, certified
+(6-rung ladder, held-out, zero warnings), and then dropped when its
+mechanism failed both pre-registered tests (S1: easy-receive training
+generalizes *down*, not up; S2: the aligned entry was the worst
+condition). Reverse curricula, mixed-stage sampling over fences, soft
+fence transitions, and per-stage bars were all considered and are all
+dominated by "just train the goal task" on the current evidence. If a
+mixture is ever revisited, S2's mix condition (which always includes
+the true serve) is the only variant the data does not disfavor — it
+merely failed to beat direct.
 
 ## 6. What ships in this PR
 
@@ -443,12 +496,13 @@ at run end against the run's own artifacts):
   plateau — NOT further reward or gate tuning (lesson 19), and NOT a
   return to fence ladders.
 - *Failure signature "cannot receive"* (contact rate degrading toward
-  the 0.22.0 zero-contact signature, or window mean < 1.0): activate
-  the serve-origin contingency — the certified 6-rung goal-fence
-  serve ladder documented in §2.3/§5 (held-out certification with
-  zero warnings; implementation preserved in this PR's history) —
-  since that signature would mean the local arms' receive learning
-  did not survive the 1:1-ratio/GPU transfer.
+  the 0.22.0 zero-contact signature, or window mean < 1.0): that
+  would mean the local arms' receive learning did not survive the
+  1:1-ratio/GPU transfer. The tested-and-not-disfavored option is
+  S2's *mixture* (per-episode serve-origin mixture always including
+  the true serve — NOT an aligned-only rung, which both experiments
+  falsified), alongside the landing-point observation feature. Both
+  as separate pre-registered arms.
 - Either way, a second seed of whichever configuration ran is the
   standing next step before any further design change (lesson 7).
 
