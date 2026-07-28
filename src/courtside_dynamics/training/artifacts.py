@@ -335,6 +335,11 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
                 if cfg.performance_gate is not None
                 else None
             ),
+            "ladder_certification": (
+                dict(cfg.ladder_certification)
+                if cfg.ladder_certification is not None
+                else None
+            ),
             "final_info_eval": cfg.final_info_eval,
         },
     }
@@ -624,6 +629,7 @@ RUN_LAYOUT: dict[str, str] = {
     "best_long_eval": "reports/best_model_long_horizon_eval.json",
     "best_long_eval_episodes": "reports/best_model_long_horizon_episodes.csv",
     "curriculum_stages": "reports/curriculum_stages.json",
+    "ladder_certification": "reports/ladder_certification.json",
     # media/: replay footage.
     "best_model_video": "media/best_model.mp4",
     "videos_dir": "media/videos",
@@ -696,6 +702,9 @@ _CONDITIONAL_ARTIFACTS: frozenset[str] = frozenset(
         # Written only by performance-gated curriculum runs.
         "stage_bests_dir",
         "curriculum_stages",
+        # Written only by runs whose recipe opts into startup
+        # ladder certification.
+        "ladder_certification",
     }
 )
 

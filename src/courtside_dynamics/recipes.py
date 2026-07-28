@@ -706,8 +706,8 @@ RECIPES: dict[str, Recipe] = {
             # (-4.7, -3.0) fence, where 71.7% of the x range -- all of
             # action 0 and the entire positive half -- clamped onto the
             # fence's front edge. Holding the pivot at each fence's
-            # midpoint keeps the usable share roughly flat (0.52, 0.48,
-            # 0.49, 0.54, 0.66) instead of collapsing 0.67 -> 0.28.
+            # midpoint keeps the usable share roughly flat (0.49, 0.43,
+            # 0.42, 0.47, 0.63) instead of collapsing 0.67 -> 0.28.
             "paddle_home_x": -1.25,
             "paddle_x_target_range": (-4.7, 0.3),
             # Dense credit on the outgoing leg; see WallBallEnv's
@@ -930,6 +930,30 @@ RECIPES: dict[str, Recipe] = {
                         "serve_start_x": 1.0,
                         "serve_speed": 7.0,
                     },
+                ),
+            },
+            # Startup ladder certification (0.23.0): every run sweeps
+            # its own gate stages with the scripted reference cells
+            # before training and writes the verdict to
+            # reports/ladder_certification.json. Derived from the live
+            # performance_gate spec and env_fn, so there is no second
+            # stage table to go stale — the 0.22.0 ladder shipped
+            # uncertified because tools/depth_stage_sweep.py still
+            # encoded the retired geometry (review 20260727_233859).
+            # Probes are the 0.21-era per-index calibration; with them
+            # the current ladder is KNOWN to fail feasibility at stages
+            # 0 and 3 and the inversion detector at stage 1, so this
+            # stays advisory (enforce off) until the probes are
+            # recalibrated on the constant-width geometry.
+            "ladder_certification": {
+                "episodes": 10,
+                "seed_start": 30_000,
+                "oracle_probes": (
+                    {"run_up": 1.1},
+                    {"charge_gap": 1.0},
+                    {"charge_gap": 1.0},
+                    {"charge_gap": 1.8},
+                    {"charge_gap": 1.7},
                 ),
             },
             "final_info_eval": True,

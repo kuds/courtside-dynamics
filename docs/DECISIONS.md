@@ -177,6 +177,26 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### Certification artifacts must be derived from the live spec, never maintained in parallel — *implemented (0.23.0)*
+
+The 0.22.0 ladder shipped without a calibration sweep because
+`tools/depth_stage_sweep.py` carried its own copy of the stage tables and
+nothing forced that copy to track the recipe; the drift surfaced only when
+review `20260727_233859` re-swept the live geometry after a 17-hour run
+stalled at stage 1 (oracle clears the 3.0 bar at **no** stage; feasibility
+fails at stages 0 and 3). Evidence that parallel tables rot: the tool's
+pivot (−1.7) and fences were two releases stale, `wall_ball_oracle_action`
+still inverts the retired fixed-pivot map, and the recipe's own comment
+carried share numbers matching nothing. Since 0.23.0, gated runs
+self-certify at startup — stages read from `performance_gate`, envs built
+by the run's `env_fn`, verdict written to
+`reports/ladder_certification.json` — and stage-application integrity
+(attribute exists + round-trips) is a blocking criterion, closing the
+`paddle_home_x` silent-no-op class for good. Certification is advisory
+until the probes are recalibrated for the constant-width geometry:
+enforcing criteria that the stock probes are known to fail would brick
+legitimate runs.
+
 ### An argmax over a logged eval stream is a hypothesis, not a result — *characteristic*
 Second occurrence in this campaign, so it is a pattern rather than a
 mishap. Run `20260727_004014`'s unsynced goal-geometry stream made the
