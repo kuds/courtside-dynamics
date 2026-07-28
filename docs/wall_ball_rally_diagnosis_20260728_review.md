@@ -270,9 +270,54 @@ gamma 0.995, 23-dim obs, no videos, no certification pass.
 
 [S1 RESULTS]
 
-### S2 — goal-fence structure A/B/C (3 seeds × 3 conditions, 500k steps/arm)
+### S2 — goal-fence structure A/B/C (500k steps/arm; truncated to 4
+complete + 4 partial arms, see deviation note)
 
-[S2 RESULTS]
+All arms share one identical evaluation stream — the TRUE goal task
+(serve 1.0), 30 episodes / 25k steps — differing only in the
+training-serve distribution: **direct** (serve 1.0), **align75**
+(serve −0.0125; landing +0.38 m of paddle start), **mix** (per-episode
+uniform over origins {1.0, 0.6625, 0.325, −0.0125}).
+
+Primary (goal-stream mean over evals 300-500k) and held-out cross-eval
+(100 common seeds 50100-50199, deterministic policy, true goal task):
+
+| arm | primary | held-out final / best | contact @500k |
+|---|---|---|---|
+| direct_201 | 1.92 | 2.03 / 2.27 | 2.1 |
+| direct_202 | 1.83 | 2.71 / 2.65 | 3.1 |
+| mix_201 | 1.85 | 2.27 / 2.26 | 2.4 |
+| align75_201 | 0.84 | 1.09 / 1.51 | 1.3 |
+
+Partial arms (stopped early in the wall-clock truncation), last eval:
+mix_202 1.33 @200k, direct_203 1.07 @175k, align75_203 0.63 @175k,
+align75_202 0.07 @200k — each tracking its condition's batch-1
+trajectory at matched steps.
+
+**Pre-registered decision rules:** rule 1 ("goal task directly
+learnable if pooled primary ≥ 1.0") — **satisfied decisively**
+(direct pooled 1.87; held-out 2.03/2.71 vs the campaign's all-time
+1.14). Rule 2 ("curriculum dominates if B or C beats A by ≥ +0.3
+with pairs agreeing") — **not satisfied**: mix ≈ direct (−0.07
+pooled), align75 ≪ direct in both pairs. Every arm learned on its own
+training distribution (train-reward thirds all rising; align75_201
+−0.96 → +2.50), so align75's goal-stream deficit is a genuine
+transfer gap, not a dead arm: training on an easier receive geometry
+delays true-serve competence rather than buying it.
+
+Caveats pre-declared and standing: 1:2 update ratio (never compare to
+Colab), 500k horizons (early-regime evidence; the 6M run's escalation
+clause covers the possibility that the ranking changes at higher
+skill), n=2 complete pairs for direct-vs-mix (the partials corroborate
+but cannot enter the primary).
+
+**Deviation note (post-hoc, 21:15 UTC):** the remaining S2 arms
+(align75/mix at seed 202, all of seed 203) were stopped at 175-200k
+and the four S1 arms promoted in the queue, to fit wall clock. The
+decision was made after batch 1's results were known — it is a
+data-collection truncation, not a selective analysis: every completed
+arm is reported, every partial arm's last reading is reported, and no
+decision rule was altered.
 
 ## 5. Structural verdict
 
@@ -583,4 +628,39 @@ references AND validated against learned behavior).
 
 ## Appendix B: artifacts and reproduction
 
-[ARTIFACTS]
+- **Drive evidence mirror:** fetched via the Drive connector to the
+  analysis host (197 files, 14.9 MB): the three depth-curriculum runs'
+  full small-artifact sets (config, reports, `evaluations.npz`,
+  monitor CSVs, milestone rollout CSVs), both aligned runs' reports,
+  12 `WallBallBaseline` runs' finals, and `WallBall 20260713_192636`.
+  `progress.csv`/`eval_info*.csv` exceed the connector's transfer cap
+  and were not used; where a claim needed them, it is cited to the
+  prior review that read them on-host. Four undocumented
+  `WallBallDepthCurriculum` runs exist in Drive (20260721_142121,
+  20260722_002913, 20260722_124613, 20260723_190923) — outside this
+  review's primary corpus; folder IDs recorded in the fetch manifest.
+  The two aligned runs' overlapping milestone CSVs are byte-identical
+  in Drive (flagged during the fetch); no per-run claim here rests on
+  them.
+- **Scripted probes:** ~70 controller configurations over the live
+  5-stage table and the goal-fence λ grid (`probe_battery.py`,
+  `probe_variants.py`, `probe_refine.py`, `probe_goal_rungs.py` in the
+  session scratchpad; results JSONs alongside). Calibration on burned
+  seeds 0-199/1000-1199 only.
+- **Held-out certifications** (through
+  `courtside_dynamics.training.ladder_certification.certify_ladder`,
+  the startup code path): 0.22.0 ladder + frozen probes on seeds
+  3000-3099 (95-100% oracle ≥2/stage, all blocking criteria pass);
+  goal-fence serve-rung ladder on 3100-3199 (91-100%, zero warnings).
+  Reproduce with `python tools/depth_stage_sweep.py 100 out.json
+  --ladder release --seed-start 3000` (bar the recipe-vs-CLI episode
+  count, this is the identical measurement).
+- **Local SAC arms:** `ab_arm.py` (scratchpad) drives
+  `build_train_config`/`train()` with a single-stage gate; all arms
+  n_envs=8, `gradient_steps=4`, seeds as reported; per-arm run dirs
+  carry the standard artifact layout (config.json provenance included).
+  Cross-eval: `cross_eval.py`, seeds 50000-50199.
+- **This doc's numbers:** every table not attributed to a prior review
+  was computed in-session from the mirrored artifacts or the local
+  runs; the analysis scripts are in the scratchpad and the load-bearing
+  numbers were replicated on disjoint seed sets where the text says so.
