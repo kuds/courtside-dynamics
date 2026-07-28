@@ -940,20 +940,34 @@ RECIPES: dict[str, Recipe] = {
             # stage table to go stale — the 0.22.0 ladder shipped
             # uncertified because tools/depth_stage_sweep.py still
             # encoded the retired geometry (review 20260727_233859).
-            # Probes are the 0.21-era per-index calibration; with them
-            # the current ladder is KNOWN to fail feasibility at stages
-            # 0 and 3 and the inversion detector at stage 1, so this
-            # stays advisory (enforce off) until the probes are
-            # recalibrated on the constant-width geometry.
+            # Probes recalibrated for the constant-width geometry
+            # (0.24.0): a lead_charge gap grid on calibration seeds
+            # 0-99 (100 eps/cell), then a refinement pass at 200
+            # eps/cell on seeds 0-199 choosing per stage by >=2-return
+            # rate with margin over the 0.90 floor rather than the raw
+            # argmax (calibration argmaxes routinely shed 3-5 points
+            # held-out; see DECISIONS.md). Frozen at n=200:
+            # 92.5%/2.26, 97.0%/2.44, 98.0%/2.56, 96.5%/2.58,
+            # 95.0%/2.56 for stages 0-4. The stock 0.21-era probes
+            # ({run_up 1.1}, {charge_gap 1.0/1.0/1.8/1.7}) measured
+            # 36%/93%/94%/70%/93% on seeds 1000-1099 and fail
+            # feasibility at stages 0 and 3 plus monotonicity and the
+            # inversion detector at stage 0/1. Held-out verdict for the
+            # frozen set lives in the 2026-07-28 review doc (seeds
+            # 3000-3099, 100 eps/cell, run through this exact code
+            # path). 30 episodes/cell at startup (~0.2M env steps,
+            # under a minute) because the 0.90 feasibility floor sits
+            # close to the probes' true 92-98% rates: at 10 episodes a
+            # single unlucky seed flips the verdict.
             "ladder_certification": {
-                "episodes": 10,
+                "episodes": 30,
                 "seed_start": 30_000,
                 "oracle_probes": (
-                    {"run_up": 1.1},
-                    {"charge_gap": 1.0},
-                    {"charge_gap": 1.0},
-                    {"charge_gap": 1.8},
-                    {"charge_gap": 1.7},
+                    {"lead_charge": 3.0},
+                    {"lead_charge": 0.8},
+                    {"lead_charge": 1.0},
+                    {"lead_charge": 1.2},
+                    {"lead_charge": 3.0},
                 ),
             },
             "final_info_eval": True,
@@ -1133,6 +1147,98 @@ def _make_aligned_depth_curriculum(base: Recipe) -> Recipe:
 
 
 RECIPES["WallBallDepthCurriculumAligned"] = _make_aligned_depth_curriculum(
+    RECIPES["WallBallDepthCurriculum"]
+)
+
+
+def _make_goal_serve_curriculum(base: Recipe) -> Recipe:
+    """Build the goal-fence serve-origin curriculum (0.24.0).
+
+    The 2026-07-28 diagnosis review's structural replacement for the
+    sliding-fence depth ladder. Three runs of that ladder (0.19-0.22)
+    stalled below a flat 3.0 bar that no scripted reference reaches at
+    any rung, and every promotion paid a measured tax: a +0.35 m
+    serve-landing jump (the receive task changes more per rung than the
+    threshold the serve-alignment campaign found survivable), plus --
+    because a fence slide changes the *dynamics* via target clamping --
+    the replay-wipe/entropy-reset/action-map machinery whose one
+    exercised instance cost run 20260727_233859 ~4.3M of 6M steps.
+
+    This recipe trains at the campaign-goal fence from step one and
+    anneals the one variable measured to control receive difficulty:
+    the serve origin (the landing point moves 1:1 with it). Stages
+    change ONLY the reset distribution, never the dynamics, so there is
+    nothing for a promotion to shock: no replay clear, no update pause,
+    no entropy reset, no pivot drift, and the final rung IS the goal
+    task. Feasibility per rung (lead_charge 3.0 oracle, n=200
+    calibration seeds 0-199): >=91.5% two-return rate everywhere, means
+    2.41-2.67; crude learnability 80-94.5%, peaking at the entry rung.
+
+    Gate calibration: threshold 2.5 is a *scheduler* bar sitting at the
+    scripted-reference band (2.41-2.67) rather than the depth ladder's
+    3.0 mastery bar, which four multi-million-step runs plateaued
+    0.2-0.9 below at every rung past stage 0. The standing "do not
+    lower the bar on scripted evidence alone" decision is about that
+    ladder's bar; this is a new gate whose purpose is to pace an anneal
+    whose rungs cost nothing to enter, backstopped by
+    ``stage_eval_budget`` -- a rung that stalls 40 evaluations (~1M
+    steps) is force-advanced rather than parking the run (advance_reason
+    is recorded, so an unearned rung is auditable, and the run always
+    reaches the true goal task with budget to spend).
+    """
+    env_kwargs = deepcopy(base.env_kwargs)
+    extra_cfg = deepcopy(base.extra_cfg)
+    goal = dict(base.extra_cfg["performance_gate"]["stages"][-1])
+    # Train at the goal geometry from step one; only the serve origin
+    # anneals. Entry origin 0.2 lands the serve ~0.6 m in front of the
+    # paddle start (lambda ~0.6 of the alignment blend) -- the measured
+    # crude-learnability peak; full alignment (landing at the paddle's
+    # feet) stays dead per Phase B's approach-room threshold.
+    env_kwargs.update(goal)
+    env_kwargs["serve_start_x"] = 0.2
+    # Serve-origin rungs: landing steps of 0.2 m, under the 0.25 m
+    # approach-room threshold measured in the serve-alignment campaign.
+    stages = tuple(
+        {"serve_start_x": origin} for origin in (0.2, 0.4, 0.6, 0.8, 1.0)
+    )
+    extra_cfg["performance_gate"] = {
+        "metric_key": "bounce_count_ep_mean",
+        "threshold": 2.5,
+        "sustain_evals": 3,
+        "promotion_rule": "window_mean",
+        "stage_eval_budget": 40,
+        "stage_eval_budget_action": "advance",
+        "stages": stages,
+    }
+    extra_cfg["ladder_certification"] = {
+        "episodes": 30,
+        "seed_start": 30_000,
+        "oracle_probes": tuple({"lead_charge": 3.0} for _ in stages),
+    }
+    # The recipe-level success bar keeps the campaign meaning of
+    # "sustained rally" for cross-run comparability of ge_3 rates.
+    extra_cfg["success_threshold"] = 3.0
+    eval_env_overrides = dict(stages[-1])
+    return replace(
+        base,
+        env_kwargs=env_kwargs,
+        eval_env_overrides=eval_env_overrides,
+        name_prefix="wall_ball_goal_serve_curriculum",
+        extra_cfg=extra_cfg,
+        description=(
+            "Rally at the campaign-goal geometry from step one: the "
+            "constant goal fence (-4.7, -2.6) at serve speed 7.0, with a "
+            "performance-gated serve-origin anneal (landing walked from "
+            "~0.6 m in front of the paddle back to the true serve) "
+            "replacing the retired sliding-fence depth ladder. Stages "
+            "move only the reset distribution, so promotions carry no "
+            "replay/entropy/action-map shock, and the final rung is the "
+            "goal task itself."
+        ),
+    )
+
+
+RECIPES["WallBallGoalServeCurriculum"] = _make_goal_serve_curriculum(
     RECIPES["WallBallDepthCurriculum"]
 )
 

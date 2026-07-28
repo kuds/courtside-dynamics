@@ -217,6 +217,28 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         ``stage_bests/stage_NN/`` a valid legacy-flat-layout
         ``WarmStartConfig.source_run_dir`` -- continuations really can
         seed from any stage's champion without hand-assembling files.
+    stage_eval_budget:
+        When set to N, a stage that records N evaluations without
+        promoting exhausts its budget and triggers
+        ``stage_eval_budget_action``. Run ``20260727_233859`` sat on
+        stage 1 for 181 consecutive evaluations (~4.5M steps, 75% of
+        its budget) with nothing able to notice: early stopping tracks
+        best-model improvement, not promotion, and ordinary eval noise
+        kept resetting it. Promotion staleness needs its own clock.
+        The final stage is exempt -- it has nothing to promote to, and
+        ``early_stop_patience`` already governs terminal convergence.
+    stage_eval_budget_action:
+        ``"stop"`` (default) ends training when the budget exhausts --
+        the honest choice when a promotion bar is load-bearing and a
+        stall means the campaign's premise failed. ``"advance"`` forces
+        the promotion instead (recorded as ``promoted: false`` with
+        ``advance_reason: "stage_eval_budget"`` in the history), so a
+        ladder whose stages change only the reset distribution -- where
+        an under-mastered advance costs little and guarantees the
+        anneal completes inside the budget -- degrades to
+        earned-or-scheduled progression rather than silently parking.
+        A forced advance runs the exact advance package a gated one
+        does (selection reset, pause/clear/entropy as configured).
     """
 
     def __init__(
@@ -236,6 +258,8 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         stage_bests_dir: str | None = None,
         stage_history_path: str | None = None,
         run_config_path: str | None = None,
+        stage_eval_budget: int | None = None,
+        stage_eval_budget_action: str = "stop",
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose)
@@ -311,6 +335,27 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                 not isinstance(value, str) or not value.strip()
             ):
                 raise ValueError(f"{name} must be None or a non-empty string")
+        if stage_eval_budget is not None and (
+            isinstance(stage_eval_budget, bool)
+            or not isinstance(stage_eval_budget, int)
+            or stage_eval_budget < 1
+        ):
+            raise ValueError(
+                "stage_eval_budget must be None or a positive integer"
+            )
+        if (
+            stage_eval_budget is not None
+            and stage_eval_budget < sustain_evals
+        ):
+            raise ValueError(
+                "stage_eval_budget must be >= sustain_evals: a budget "
+                "smaller than the promotion window can never be earned"
+            )
+        if stage_eval_budget_action not in ("stop", "advance"):
+            raise ValueError(
+                "stage_eval_budget_action must be 'stop' or 'advance', "
+                f"got {stage_eval_budget_action!r}"
+            )
         self.stages: tuple[dict[str, Any], ...] = resolved_stages
         self.metric_key: str = metric_key
         self.threshold: float = float(threshold)
@@ -344,10 +389,15 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         self.stage_bests_dir: str | None = stage_bests_dir
         self.stage_history_path: str | None = stage_history_path
         self.run_config_path: str | None = run_config_path
+        self.stage_eval_budget: int | None = stage_eval_budget
+        self.stage_eval_budget_action: str = stage_eval_budget_action
         self._finalized: bool = False
         self._stage_entry_timestep: int = 0
         self._stage_eval_count: int = 0
         self._stage_history: list[dict[str, Any]] = []
+        # True once the current stage has exhausted stage_eval_budget
+        # (recorded on the history row either way; drives the stop).
+        self._budget_exhausted: bool = False
 
     @property
     def stage_index(self) -> int:
@@ -392,6 +442,7 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
             return
         logger.record("curriculum/stage_index", self._stage_index)
         logger.record("curriculum/stage_streak", self._streak)
+        logger.record("curriculum/stage_eval_count", self._stage_eval_count)
         if self.promotion_rule == "window_mean" and self._metric_window:
             logger.record(
                 "curriculum/gate_window_mean",
@@ -455,7 +506,9 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         self._stage_entry_timestep = int(self.num_timesteps)
         self._apply_stage()
 
-    def _close_stage_record(self, *, promoted: bool) -> None:
+    def _close_stage_record(
+        self, *, promoted: bool, advance_reason: str | None = None
+    ) -> None:
         """Archive the departing/final stage's best and append its history row.
 
         Must run BEFORE ``reset_selection_state`` on an advance: the
@@ -493,6 +546,11 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                 "exit_timestep": int(self.num_timesteps),
                 "evals": self._stage_eval_count,
                 "promoted": promoted,
+                # How the stage was left: "gate" (earned promotion),
+                # "stage_eval_budget" (forced advance on staleness), or
+                # None (training ended in this stage).
+                "advance_reason": advance_reason,
+                "stage_eval_budget_exhausted": self._budget_exhausted,
                 "promotion_window": [float(v) for v in self._metric_window],
                 "streak": self._streak,
                 "best": best_meta,
@@ -628,6 +686,81 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         window_mean = sum(self._metric_window) / len(self._metric_window)
         return window_mean >= self.threshold
 
+    def _advance_stage(self, reason: str) -> None:
+        """Advance one stage -- shared by gated and budget-forced paths."""
+        # Archive the departing stage's champion and close its
+        # history row while the window/streak still describe the
+        # promotion evidence and best_model.zip still holds it.
+        self._close_stage_record(
+            promoted=(reason == "gate"), advance_reason=reason
+        )
+        self._stage_index += 1
+        self._stage_entry_timestep = int(self.num_timesteps)
+        self._stage_eval_count = 0
+        self._streak = 0
+        self._metric_window.clear()
+        self._budget_exhausted = False
+        self._apply_stage()
+        # Scores from different stage distributions are not
+        # comparable: without this reset, a best banked on an easier
+        # stage permanently bars genuinely better later policies
+        # (measured ~0.6-0.7 bounce_count_ep_mean inflation between
+        # the narrowest and the full serve, ~40x the selection
+        # min_delta) and stale patience/flatness windows leak across
+        # the boundary.
+        self.info_eval.reset_selection_state()
+        # Promotion warm-up: drop stale-stage replay data and hold
+        # gradient updates until fresh-frontier transitions exist.
+        # Clearing is validated to imply a pause at construction;
+        # both attributes were validated at training start.
+        off_policy_model = cast("OffPolicyAlgorithm", self.model)
+        if self.clear_replay_buffer_on_advance:
+            assert off_policy_model.replay_buffer is not None
+            off_policy_model.replay_buffer.reset()
+        if self.advance_update_pause_steps > 0:
+            off_policy_model.gradient_steps = 0
+            self._update_pause_until = (
+                self.num_timesteps + self.advance_update_pause_steps
+            )
+        # After the pause is armed: gradient_steps == 0 freezes
+        # log_ent_coef too, so the restored temperature is what the
+        # learner resumes with rather than something the paused
+        # tuner immediately undoes.
+        if self.reset_entropy_on_advance:
+            self._reset_entropy_temperature()
+        if reason == "gate":
+            rule = (
+                f"{self.metric_key} held >= {self.threshold} for "
+                f"{self.sustain_evals} consecutive evaluations"
+                if self.promotion_rule == "consecutive"
+                else f"{self.metric_key} averaged >= {self.threshold} over "
+                f"the last {self.sustain_evals} evaluations"
+            )
+        else:
+            rule = (
+                f"stage_eval_budget ({self.stage_eval_budget} evaluations) "
+                f"exhausted without promotion; forced advance"
+            )
+        warmup = (
+            f" Warm-up: replay buffer "
+            f"{'cleared' if self.clear_replay_buffer_on_advance else 'kept'}, "
+            f"updates paused until {self._update_pause_until} steps."
+            if self.advance_update_pause_steps > 0
+            else ""
+        )
+        if self.reset_entropy_on_advance:
+            assert self._initial_log_ent_coef is not None
+            warmup += (
+                f" Entropy temperature restored to "
+                f"{np.exp(self._initial_log_ent_coef):.4g}."
+            )
+        print(
+            f"[PerformanceGatedEnvStagesCallback] advancing to stage "
+            f"{self._stage_index}/{len(self.stages) - 1} at "
+            f"{self.num_timesteps} steps: {rule}.{warmup}"
+        )
+        self._record()
+
     def _on_step(self) -> bool:
         self._maybe_resume_updates()
         if self.info_eval.completed_evals == self._seen_evals:
@@ -635,74 +768,29 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         self._seen_evals = self.info_eval.completed_evals
         self._stage_eval_count += 1
         metrics = self.info_eval.last_metrics or {}
+        promotion = self._promotion_earned(metrics)
+        on_final_stage = self._stage_index >= len(self.stages) - 1
+        if promotion and not on_final_stage:
+            self._advance_stage("gate")
+            return True
         if (
-            self._promotion_earned(metrics)
-            and self._stage_index < len(self.stages) - 1
+            not on_final_stage
+            and self.stage_eval_budget is not None
+            and self._stage_eval_count >= self.stage_eval_budget
         ):
-            # Archive the departing stage's champion and close its
-            # history row while the window/streak still describe the
-            # promotion evidence and best_model.zip still holds it.
-            self._close_stage_record(promoted=True)
-            self._stage_index += 1
-            self._stage_entry_timestep = int(self.num_timesteps)
-            self._stage_eval_count = 0
-            self._streak = 0
-            self._metric_window.clear()
-            self._apply_stage()
-            # Scores from different stage distributions are not
-            # comparable: without this reset, a best banked on an easier
-            # stage permanently bars genuinely better later policies
-            # (measured ~0.6-0.7 bounce_count_ep_mean inflation between
-            # the narrowest and the full serve, ~40x the selection
-            # min_delta) and stale patience/flatness windows leak across
-            # the boundary.
-            self.info_eval.reset_selection_state()
-            # Promotion warm-up: drop stale-stage replay data and hold
-            # gradient updates until fresh-frontier transitions exist.
-            # Clearing is validated to imply a pause at construction;
-            # both attributes were validated at training start.
-            off_policy_model = cast("OffPolicyAlgorithm", self.model)
-            if self.clear_replay_buffer_on_advance:
-                assert off_policy_model.replay_buffer is not None
-                off_policy_model.replay_buffer.reset()
-            if self.advance_update_pause_steps > 0:
-                off_policy_model.gradient_steps = 0
-                self._update_pause_until = (
-                    self.num_timesteps + self.advance_update_pause_steps
-                )
-            # After the pause is armed: gradient_steps == 0 freezes
-            # log_ent_coef too, so the restored temperature is what the
-            # learner resumes with rather than something the paused
-            # tuner immediately undoes.
-            if self.reset_entropy_on_advance:
-                self._reset_entropy_temperature()
-            rule = (
-                f"held >= {self.threshold} for {self.sustain_evals} "
-                f"consecutive evaluations"
-                if self.promotion_rule == "consecutive"
-                else f"averaged >= {self.threshold} over the last "
-                f"{self.sustain_evals} evaluations"
-            )
-            warmup = (
-                f" Warm-up: replay buffer "
-                f"{'cleared' if self.clear_replay_buffer_on_advance else 'kept'}, "
-                f"updates paused until {self._update_pause_until} steps."
-                if self.advance_update_pause_steps > 0
-                else ""
-            )
-            if self.reset_entropy_on_advance:
-                assert self._initial_log_ent_coef is not None
-                warmup += (
-                    f" Entropy temperature restored to "
-                    f"{np.exp(self._initial_log_ent_coef):.4g}."
-                )
+            self._budget_exhausted = True
+            if self.stage_eval_budget_action == "advance":
+                self._advance_stage("stage_eval_budget")
+                return True
             print(
-                f"[PerformanceGatedEnvStagesCallback] advancing to stage "
-                f"{self._stage_index}/{len(self.stages) - 1} at "
-                f"{self.num_timesteps} steps: {self.metric_key} {rule}."
-                f"{warmup}"
+                f"[PerformanceGatedEnvStagesCallback] stopping training at "
+                f"{self.num_timesteps} steps: stage {self._stage_index} "
+                f"recorded {self._stage_eval_count} evaluations without "
+                f"promoting (stage_eval_budget={self.stage_eval_budget}). "
+                f"Run 20260727_233859 burned ~4.5M steps in exactly this "
+                f"state with no guard."
             )
             self._record()
-        else:
-            self._record()
+            return False
+        self._record()
         return True

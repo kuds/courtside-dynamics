@@ -158,17 +158,27 @@ def _oracle_action(
     mapping: tuple[float, float],
     run_up: float | None,
     charge_gap: float | None,
+    lead_charge: float | None = None,
 ) -> np.ndarray:
     """Stage-calibrated feasibility probe (see the sweep tool's docstring).
 
     ``run_up`` pre-positions behind the predicted landing point and
     charges with a ballistic lead; ``charge_gap`` waits at the fence
-    back and commits once the ball is within that world-x gap. Exactly
-    one must be configured per stage.
+    back and commits once the ball is within that world-x gap, tracking
+    the ball's current y/z; ``lead_charge`` uses the same commit trigger
+    but aims the charge with the ballistic y/z lead at the
+    closing-speed intercept. Exactly one must be configured per stage.
+
+    ``lead_charge`` exists because review 20260727_233859 measured the
+    y/z-tracking charge arriving laterally wrong on the constant-width
+    geometry (stock probes fail the 90% feasibility floor at stages 0
+    and 3 of the 0.22.0 ladder); leading the intercept recovers >=90%
+    at every stage and is what the recalibrated recipe probes use.
     """
-    if (run_up is None) == (charge_gap is None):
+    if (run_up, charge_gap, lead_charge).count(None) != 2:
         raise ValueError(
-            "exactly one of run_up and charge_gap must configure the oracle"
+            "exactly one of run_up, charge_gap, and lead_charge must "
+            "configure the oracle"
         )
     ball_x, ball_y, ball_z = obs[0:3]
     vx, vy, vz = obs[3:6]
@@ -176,7 +186,26 @@ def _oracle_action(
     paddle_x = ball_x - obs[14]
     incoming = vx < -0.1
 
-    if charge_gap is not None:
+    if lead_charge is not None:
+        should_charge = (
+            incoming
+            and floor_bounce_count >= 1.0
+            and ball_x - paddle_x <= lead_charge
+        )
+        if should_charge:
+            target_x = fence[1]
+            t_hit = float(
+                np.clip((ball_x - paddle_x) / max(0.5, -vx + 2.5), 0.0, 1.2)
+            )
+            target_y = ball_y + vy * t_hit
+            target_z = max(
+                0.25, ball_z + vz * t_hit - 0.5 * _GRAVITY * t_hit**2
+            )
+        else:
+            target_x = fence[0]
+            target_y = ball_y
+            target_z = max(0.25, ball_z)
+    elif charge_gap is not None:
         should_charge = (
             incoming
             and floor_bounce_count >= 1.0
@@ -416,6 +445,7 @@ def _run_cell(
         parked = _parked_action(geometry["paddle_start_x"], home, mapping)
         run_up = probe.get("run_up")
         charge_gap = probe.get("charge_gap")
+        lead_charge = probe.get("lead_charge")
         step_budget = max_episode_steps or env.unwrapped.episode_len
 
         counts: list[int] = []
@@ -436,7 +466,8 @@ def _run_cell(
                     action = _crude_action(obs, fence, home, mapping)
                 elif policy == "oracle":
                     action = _oracle_action(
-                        obs, fence, home, mapping, run_up, charge_gap
+                        obs, fence, home, mapping, run_up, charge_gap,
+                        lead_charge,
                     )
                 else:
                     raise ValueError(f"unknown policy {policy!r}")
@@ -566,10 +597,10 @@ def certify_ladder(
             f"probes for {len(stages)} stages"
         )
     for index, probe in enumerate(oracle_probes):
-        if set(probe) not in ({"run_up"}, {"charge_gap"}):
+        if set(probe) not in ({"run_up"}, {"charge_gap"}, {"lead_charge"}):
             raise ValueError(
-                f"oracle_probes[{index}] must set exactly one of 'run_up' or "
-                f"'charge_gap', got {dict(probe)!r}"
+                f"oracle_probes[{index}] must set exactly one of 'run_up', "
+                f"'charge_gap', or 'lead_charge', got {dict(probe)!r}"
             )
 
     failures = list(validate_ladder_geometry(stages))
@@ -825,7 +856,8 @@ def run_startup_certification(cfg: Any, output_path: str) -> dict[str, Any]:
     if "oracle_probes" not in spec:
         raise ValueError(
             "ladder_certification spec must set oracle_probes (one "
-            '{"run_up": x} or {"charge_gap": y} table per gate stage), or '
+            '{"run_up": x}, {"charge_gap": y}, or {"lead_charge": z} '
+            "table per gate stage), or "
             'be set to "none" in the TOML to disable certification'
         )
 
