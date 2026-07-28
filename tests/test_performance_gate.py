@@ -1040,3 +1040,132 @@ def test_entropy_reset_value_requires_the_reset_to_be_enabled():
     finally:
         train_env.close()
         eval_env.close()
+
+
+def test_stage_eval_budget_stop_ends_training_and_records_history(tmp_path):
+    """A stalled non-final stage must stop the run once its evaluation
+    budget is spent: run 20260727_233859 sat on stage 1 for 181 evals
+    (~4.5M steps) with nothing able to notice."""
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            stage_eval_budget=3,
+            stage_history_path=str(tmp_path / "curriculum_stages.json"),
+        )
+        gate._on_training_start()
+        for i in range(2):
+            info_eval.finish_eval({"bounce_count_ep_mean": 0.5})
+            assert gate._on_step() is True, f"eval {i} within budget"
+        info_eval.finish_eval({"bounce_count_ep_mean": 0.5})
+        assert gate._on_step() is False  # budget exhausted -> stop
+        assert gate.stage_index == 0
+
+        gate._on_training_end()
+        rows = json.loads(
+            (tmp_path / "curriculum_stages.json").read_text()
+        )["stages"]
+        assert rows[0]["promoted"] is False
+        assert rows[0]["advance_reason"] is None
+        assert rows[0]["stage_eval_budget_exhausted"] is True
+        assert rows[0]["evals"] == 3
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_stage_eval_budget_advance_forces_promotion_with_reason(tmp_path):
+    """budget_action='advance' degrades the hard gate to
+    earned-or-scheduled: the stage advances with the full advance
+    package and the history row says it was not earned."""
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env,
+            info_eval,
+            stage_eval_budget=2,
+            stage_eval_budget_action="advance",
+            stage_history_path=str(tmp_path / "curriculum_stages.json"),
+        )
+        gate._on_training_start()
+        for _ in range(2):
+            info_eval.finish_eval({"bounce_count_ep_mean": 0.5})
+            assert gate._on_step() is True
+        assert gate.stage_index == 1
+        # The forced advance resets selection like an earned one.
+        assert info_eval.selection_resets == 1
+
+        # An earned promotion afterwards still records "gate".
+        for _ in range(2):
+            info_eval.finish_eval({"bounce_count_ep_mean": 5.0})
+            gate._on_step()
+        assert gate.stage_index == 2
+
+        gate._on_training_end()
+        rows = json.loads(
+            (tmp_path / "curriculum_stages.json").read_text()
+        )["stages"]
+        assert rows[0]["promoted"] is False
+        assert rows[0]["advance_reason"] == "stage_eval_budget"
+        assert rows[1]["promoted"] is True
+        assert rows[1]["advance_reason"] == "gate"
+        # A budget-forced advance must not leak the exhausted flag into
+        # the next stage's row.
+        assert rows[1]["stage_eval_budget_exhausted"] is False
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_stage_eval_budget_exempts_the_final_stage():
+    """The last stage has nothing to promote to; early_stop_patience
+    owns terminal convergence, so the budget must not end the run."""
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(
+            train_env, info_eval, sustain_evals=1, stage_eval_budget=2
+        )
+        gate._on_training_start()
+        # Ride earned promotions to the final stage.
+        for _ in range(2):
+            info_eval.finish_eval({"bounce_count_ep_mean": 5.0})
+            assert gate._on_step() is True
+        assert gate.stage_index == 2
+        # Far past the budget on the final stage: never stops.
+        for _ in range(5):
+            info_eval.finish_eval({"bounce_count_ep_mean": 0.0})
+            assert gate._on_step() is True
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    (
+        ({"stage_eval_budget": 0}, "positive integer"),
+        ({"stage_eval_budget": True}, "positive integer"),
+        ({"stage_eval_budget": 1}, ">= sustain_evals"),
+        (
+            {"stage_eval_budget": 5, "stage_eval_budget_action": "warn"},
+            "'stop' or 'advance'",
+        ),
+    ),
+)
+def test_stage_eval_budget_configuration_is_validated(overrides, match):
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        with pytest.raises(ValueError, match=match):
+            _gate(train_env, info_eval, **overrides)
+    finally:
+        train_env.close()
+        eval_env.close()

@@ -442,8 +442,9 @@ class TrainConfig:
     ladder_certification:
         Optional startup certification for the ``performance_gate``
         ladder (wall-ball recipes only), a mapping with keys
-        ``oracle_probes`` (required, one ``{"run_up": x}`` or
-        ``{"charge_gap": y}`` per stage) plus optional ``episodes``,
+        ``oracle_probes`` (required, one ``{"run_up": x}``,
+        ``{"charge_gap": y}``, or ``{"lead_charge": z}`` per stage)
+        plus optional ``episodes``,
         ``seed_start``, ``max_episode_steps``, and ``enforce``. Before
         any training env is vectorized, every gate stage is applied to
         a fresh ``env_fn()`` instance and swept with the scripted
@@ -1279,6 +1280,8 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                         "clear_replay_buffer_on_advance",
                         "reset_entropy_on_advance",
                         "entropy_reset_value",
+                        "stage_eval_budget",
+                        "stage_eval_budget_action",
                     }
                 )
                 if unknown_gate_keys:
@@ -1307,6 +1310,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     ),
                     entropy_reset_value=gate_spec.get(
                         "entropy_reset_value"
+                    ),
+                    stage_eval_budget=gate_spec.get("stage_eval_budget"),
+                    stage_eval_budget_action=gate_spec.get(
+                        "stage_eval_budget_action", "stop"
                     ),
                     info_eval=info_eval_callback,
                     # Per-stage champion archive + history report:

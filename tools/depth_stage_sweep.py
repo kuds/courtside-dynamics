@@ -50,10 +50,14 @@ shipped uncertified precisely because the tables below still encoded
 the superseded 0.21 geometry; see review 20260727_233859). The
 ``aligned``/``baseline`` tables remain pinned to the 0.21-era
 candidates for reproducing the serve-alignment campaign's paired
-comparisons. Until the probes are recalibrated for the constant-width
-geometry, a bare release run is EXPECTED to exit 1: with the stock
-probes the live ladder fails feasibility at stages 0/3 and the
-inversion detector at stage 1 (review 20260727_233859).
+comparisons. Since the 0.24.0 probe recalibration (lead_charge oracle,
+frozen on n=200 calibration and certified held-out on seeds 3000-3099
+at 95-100% >=2-return rates) a bare release run passes its blocking
+criteria; the advisory warnings it still prints — no scripted
+reference reaches the 3.0 promotion bar, and every adjacent stage
+jumps the serve landing by ~0.35 m — are real properties of the
+constant-width ladder, not probe defects (2026-07-28 diagnosis
+review).
 """
 from __future__ import annotations
 

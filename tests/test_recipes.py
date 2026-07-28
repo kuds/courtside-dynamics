@@ -489,6 +489,7 @@ def test_training_notebook_preserves_curriculum_recipe_defaults():
         "WallBallBaseline",
         "WallBallDepthCurriculum",
         "WallBallDepthCurriculumAligned",
+        "WallBallGoalRally",
     ],
 )
 def test_wall_ball_headline_metric_is_rally_count(env_name, tmp_path):
@@ -514,6 +515,7 @@ def test_wall_ball_headline_metric_is_rally_count(env_name, tmp_path):
         "WallBallBaseline",
         "WallBallDepthCurriculum",
         "WallBallDepthCurriculumAligned",
+        "WallBallGoalRally",
     ],
 )
 def test_wall_ball_recipe_uses_simplified_paddle_interface(env_name, tmp_path):
@@ -1034,3 +1036,71 @@ def test_wall_ball_bootstrap_is_marked_historical():
     description = RECIPES["WallBallBootstrap"].description
     assert "HISTORICAL" in description
     assert "WallBallDepthCurriculum" in description
+
+
+def test_goal_rally_trains_the_goal_task_directly():
+    """The 0.24.0 structural replacement for the depth ladder: the
+    campaign-goal task IS the whole task. No curriculum, no advance
+    package; the single-stage gate exists for artifact/certification
+    parity with the gated corpus and can never promote."""
+    recipe = RECIPES["WallBallGoalRally"]
+    depth = RECIPES["WallBallDepthCurriculum"]
+    goal = dict(depth.extra_cfg["performance_gate"]["stages"][-1])
+
+    # Training geometry and serve ARE the campaign goal.
+    for key, value in goal.items():
+        assert recipe.env_kwargs[key] == value, key
+    assert recipe.env_kwargs["serve_start_x"] == 1.0
+
+    gate = recipe.extra_cfg["performance_gate"]
+    stages = gate["stages"]
+    assert [dict(s) for s in stages] == [goal]
+    # Evaluation equals training equals the depth ladder's goal task,
+    # so every historical goal number remains directly comparable.
+    assert recipe.eval_env_overrides == dict(goal)
+    assert recipe.eval_env_overrides == depth.eval_env_overrides
+
+    # The 3.0 bar is informational on a single-stage gate (nothing to
+    # promote to); it marks the campaign goal in gate_window_mean.
+    assert gate["threshold"] == 3.0
+    assert gate["promotion_rule"] == "window_mean"
+    assert "clear_replay_buffer_on_advance" not in gate
+    assert "advance_update_pause_steps" not in gate
+    assert "reset_entropy_on_advance" not in gate
+    assert "stage_eval_budget" not in gate
+
+    # Startup certification sweeps the (one) training geometry with the
+    # recalibrated lead-charge probe from the reserved 30000+ block.
+    cert = recipe.extra_cfg["ladder_certification"]
+    assert list(cert["oracle_probes"]) == [{"lead_charge": 3.0}]
+    assert cert["seed_start"] >= 30_000
+    assert cert["episodes"] == 30
+
+    # Train == eval distribution: the duplicate final info stream is
+    # off, and the 5-episode reward evaluator owns evaluations.npz.
+    assert recipe.extra_cfg["final_info_eval"] is False
+    assert recipe.extra_cfg["final_eval_episodes"] is None
+    assert recipe.extra_cfg["reward_eval_episodes"] == 5
+
+    assert recipe.extra_cfg["n_eval_episodes"] == 60
+    assert recipe.extra_cfg["success_threshold"] == 3.0
+    assert recipe.extra_cfg["model_kwargs"] == {"gamma": 0.995}
+
+
+def test_goal_rally_config_builds_and_gate_stage_applies(tmp_path):
+    cfg = build_train_config("WallBallGoalRally", log_dir=str(tmp_path))
+    env = cfg.env_fn()
+    eval_env = cfg.eval_env_fn()
+    try:
+        for e in (env, eval_env):
+            assert e.unwrapped.paddle_x_fence == (-4.7, -2.6)
+            assert e.unwrapped.paddle_start_x == -3.9
+            assert e.unwrapped.paddle_home_x == -3.65
+            assert e.unwrapped.serve_start_x == 1.0
+            assert e.unwrapped.serve_speed == 7.0
+        # Action mapping stays pinned to the full workspace, pivoted on
+        # the goal fence midpoint (the 0.22.0 usable-share fix).
+        assert env.unwrapped.paddle_x_target_range == (-4.7, 0.3)
+    finally:
+        env.close()
+        eval_env.close()

@@ -86,7 +86,93 @@ below are an instance of one of these.
 
 Source: [`wall_ball_baseline_review.md`](wall_ball_baseline_review.md) (runs from
 2026-07-14, reviewed at `cdb17d4`/v0.9.0, with addenda through the 0.11.0
-package). See also `CHANGELOG.md` 0.9.0 → 0.13.0.
+package). See also `CHANGELOG.md` 0.9.0 → 0.13.0. Depth-campaign entries
+below distill [`wall_ball_rally_diagnosis_20260728_review.md`](wall_ball_rally_diagnosis_20260728_review.md).
+
+### The sliding-fence depth ladder is retired; the goal task is trained directly — *implemented (0.24.0)*
+Three ladder generations (0.15/0.19-0.21/0.22) stalled the same way: a flat
+`bounce_count_ep_mean >= 3.0` bar that **no scripted reference reaches at any
+rung** (~70 controller configurations swept in the diagnosis, best 2.70;
+held-out oracle means 2.47-2.89) and that four multi-million-step learned
+runs plateaued 0.2-0.9 below at every rung past stage 0 (0.22.0 stage 1:
+201 evals, best 2.82, still climbing at 6M; 0.19-aligned stage 2: 0 of 128
+evals >= 2.9). Meanwhile each promotion moved the serve landing +0.35 m —
+above the measured ~0.25 m approach-room threshold — so every rung swapped
+the receive task at the exact moment the 0.22.0 advance package deleted the
+buffer and re-randomized the policy (measured cost: train reward below
+untrained levels for ~250k steps and not back to pre-advance level until
+~5.3M of a 6M run). The replacement (`WallBallGoalRally`) trains the
+goal task directly — the constant-width 0.22.0 fence had already restored
+crude learnability there (80-84% placement-blind two-return rate vs
+9.5-16% on the retired narrow fence), which no run ever saw because none
+trained past stage 1. A serve-origin curriculum (the one axis measured to
+control receive difficulty, with rungs that change only the reset
+distribution) was designed, certified, and then *tested against direct
+training* in the pre-registered paired local SAC A/B/C: direct goal-task
+training won — 2.03/2.71 completed returns on 100 held-out seeds at 500k
+local steps (all-time ladder best: 1.14 from 6M Colab steps), with a
+serve-origin mixture no better (2.27) and an aligned-serve entry rung
+strictly worse on goal skill (1.09-1.51, and near-zero zero-shot transfer
+for most of training). **Two lessons:** (1) when a curriculum's guard
+rails outlive the hazard they guarded (the 0.22.0 geometry fix removed
+the goal-task learnability collapse), the curriculum itself becomes the
+obstacle — re-test the direct task after any geometry change; (2) if a
+curriculum axis is ever needed again, pick one that leaves replayed
+experience valid across rungs (reset-distribution changes, not dynamics
+changes) — the fence axis taxed every promotion with off-policy
+staleness by construction.
+
+### Serve alignment is falsified as a learning aid — easier receives train weaker policies — *closed (0.24.0)*
+The serve-alignment hypothesis (move the serve landing to the paddle so
+receive is easy; `design_wall_ball_serve_alignment.md`) was tested at both
+of its pre-registered sites in the diagnosis campaign's paired local SAC
+battery. Stage-1 A/B: pooled paired Δ −0.34 against alignment, both pairs
+negative, and the 2×2 cross-eval shows baseline-trained policies beating
+aligned-trained ones on BOTH serve geometries — including the aligned
+serve itself. Goal-fence A/B/C: the aligned-entry arm was the worst of
+three conditions on goal-task skill (held-out 1.09-1.51 vs 2.03-2.71 for
+direct training). Mechanism: approach-to-receive training generalizes
+down to easy receives; easy-receive training does not generalize up — the
+alignment removes exactly the skill the campaign needs. **Do not
+re-propose serve-origin alignment (full or partial) as a training aid;**
+the λ-blend feasibility maps remain valid as probe-calibration reference.
+
+### A promotion bar must be calibrated against references on the rung it gates — *implemented (0.24.0)*
+The 3.0 bar was calibrated once, on the retired 0.21 stage 0 (a predictive
+controller scored 4.39 there), then inherited by geometries where the
+scripted ceiling is ~2.5-2.9 and SAC's own multi-million-step asymptotes
+are 2.1-2.8. The standing "do not lower the bar on scripted-oracle evidence
+alone" rule was honored: no bar was lowered — the gated ladder was retired
+outright, and `WallBallGoalRally`'s single-stage gate keeps 3.0 as a purely
+informational campaign-goal marker (`curriculum/gate_window_mean` crossing
+it in TensorBoard) that can never gate anything. Note the arithmetic that
+made 3.0 unreachable-in-practice as a *promotion* bar: at the goal cadence
+(~125 steps/exchange, measured) `episode_len = 750` caps an episode at ~5
+returns, so 3.0 demands ~60% of the physical cap sustained across a
+3x60-episode window.
+
+### Promotion staleness needs its own clock — *implemented (0.24.0)*
+Run `20260727_233859` sat on stage 1 for 201 evaluations (~5M steps) with
+no mechanism able to notice: early stopping watches best-model improvement
+(and noise kept resetting it via a `best_metric_min_delta` ~1/13 of a batch
+SE), while promotion staleness was unmonitored. `stage_eval_budget` on the
+gate now bounds a non-final stage's residency: `"stop"` ends the run (the
+right default when the bar is load-bearing), `"advance"` force-promotes
+with `advance_reason: "stage_eval_budget"` recorded in
+`curriculum_stages.json` (the right choice when rungs are benign
+reset-distribution shifts and the anneal must complete inside the budget).
+
+### Scripted probes must lead the intercept, and their gaps are seed-sensitive — *implemented (0.24.0)*
+The 0.21-era certification probes tracked the ball's current y/z while
+charging; on the constant-width ladder that scores 36%/70% two-return rates
+at stages 0/3 — probe defects indistinguishable from geometry defects until
+recalibrated. The `lead_charge` mode (same commit trigger, ballistic y/z
+lead at the closing-speed intercept) clears 90% everywhere; gaps were
+frozen at n=200 by rate-with-margin rather than raw argmax (calibration
+argmaxes shed 3-5 points held-out here, twice measured), then certified
+once on held-out seeds 3000-3099 at 95-100%. Startup certification runs 30
+episodes/cell, not 10: a 0.90 floor against true rates of 92-98% flips on
+one unlucky seed at n=10.
 
 ### The 0.11.0 bootstrap package — a strictly monotone competence ladder — *implemented (0.11.0)*
 The fix for the flat `-1` valley. On the stage-0 serve (n=120) the ladder now

@@ -379,7 +379,9 @@ def test_recipe_spec_exists_covers_every_stage_and_serializes():
         stages = recipe.extra_cfg["performance_gate"]["stages"]
         assert len(spec["oracle_probes"]) == len(stages)
         for probe in spec["oracle_probes"]:
-            assert set(probe) in ({"run_up"}, {"charge_gap"})
+            assert set(probe) in (
+                {"run_up"}, {"charge_gap"}, {"lead_charge"}
+            )
         # Reserved probe block, disjoint from every burned ledger range.
         assert spec["seed_start"] >= 30_000
         json.dumps(spec)
@@ -507,3 +509,64 @@ def test_train_certifies_at_startup_and_records_the_artifact(tmp_path,
     config = json.loads((tmp_path / "config.json").read_text())
     recorded = config["train_config"]["ladder_certification"]
     assert recorded["episodes"] == 1
+
+
+def test_lead_charge_probe_mode_certifies_and_serializes():
+    """The recalibrated probe family: charge-gap trigger + ballistic
+    lead while charging. Review 20260727_233859 measured the stock
+    y/z-tracking charge failing the 90% feasibility floor at stages 0
+    and 3 of the constant-width ladder; the lead variant is what the
+    recipe's oracle_probes now use, so the certifier must accept it as
+    a first-class mode."""
+    report = lc.certify_ladder(
+        _tiny_env_fn,
+        [STAGE_0, STAGE_1],
+        episodes=1,
+        seed_start=lc.DEFAULT_SEED_START,
+        oracle_probes=[{"lead_charge": 3.0}, {"lead_charge": 0.8}],
+        gate_metric_key="bounce_count_ep_mean",
+        gate_threshold=3.0,
+        max_episode_steps=60,
+    )
+    assert len(report["stages"]) == 2
+    for stage in report["stages"]:
+        assert set(stage["oracle_probe"]) == {"lead_charge"}
+    json.dumps(report)
+
+
+def test_lead_charge_is_mutually_exclusive_with_other_modes():
+    with pytest.raises(ValueError, match="exactly one"):
+        lc.certify_ladder(
+            _tiny_env_fn,
+            [STAGE_0],
+            oracle_probes=[{"lead_charge": 3.0, "charge_gap": 1.0}],
+        )
+    with pytest.raises(ValueError, match="exactly one of run_up"):
+        lc._oracle_action(
+            __import__("numpy").zeros(23),
+            (-2.3, -0.2),
+            -1.25,
+            (-4.7, 0.3),
+            None,
+            1.0,
+            2.0,
+        )
+
+
+def test_lead_charge_leads_the_intercept_while_charging():
+    """While charging, the lead controller must aim at the ballistic
+    intercept, not the ball's current y — that lateral scramble is the
+    measured failure of the stock charge on the constant-width fences."""
+    import numpy as np
+
+    obs = np.zeros(23)
+    obs[0:3] = (-1.0, 0.6, 1.0)   # ball at x=-1.0, y=0.6, z=1.0
+    obs[3:6] = (-3.0, 1.0, 0.5)   # incoming, drifting +y
+    obs[13] = 1.0                 # post-bounce
+    obs[14] = -1.0 - (-2.1)       # paddle at start (dx = ball - paddle)
+    fence, home, mapping = (-2.9, -0.8), -1.85, (-4.7, 0.3)
+    lead = lc._oracle_action(obs, fence, home, mapping, None, None, 3.0)
+    track = lc._oracle_action(obs, fence, home, mapping, None, 3.0, None)
+    # Same commit decision (x identical), different lateral aim.
+    assert lead[0] == track[0]
+    assert lead[1] > track[1]  # leads the +y drift instead of tracking

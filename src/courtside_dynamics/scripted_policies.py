@@ -71,15 +71,32 @@ def ball_bounce_oracle_action(obs: np.ndarray) -> np.ndarray:
     return action
 
 
-def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
+def wall_ball_oracle_action(
+    obs: np.ndarray,
+    *,
+    paddle_home_x: float = -1.7,
+    paddle_x_target_range: tuple[float, float] = (-4.7, 0.3),
+) -> np.ndarray:
     """Intercept-and-swing target controller for :class:`WallBallEnv`.
 
     The three normalized actions are absolute position targets for the
     paddle's x/y/z slides. The face has a fixed 10-degree upward pitch
-    and is anchored at world ``(-1.7, 0, 1.2)``, so its position is
-    ``(-1.7 + slide_x_qpos, slide_y_qpos, 1.2 + slide_z_qpos)``.
-    Inverting that transform gives the physical qpos targets below; the
-    env's force-limited servo tracks them.
+    and is anchored at world ``(paddle_home_x, 0, 1.2)``, so its
+    position is ``(paddle_home_x + slide_x_qpos, slide_y_qpos,
+    1.2 + slide_z_qpos)``. Inverting that transform gives the physical
+    qpos targets below; the env's force-limited servo tracks them.
+
+    ``paddle_home_x`` / ``paddle_x_target_range`` MUST match the env's
+    live values — since 0.22.0 the depth-curriculum recipes re-pivot
+    the action map per stage, and review ``20260727_233859`` measured
+    this controller scoring ~0.5 bounces flat on that geometry because
+    it silently inverted the retired fixed ``-1.7`` map. The defaults
+    reproduce the legacy ``WallBall`` recipe this oracle was calibrated
+    for; on anything else pass the env's own ``paddle_home_x`` and
+    ``paddle_x_target_range``. (For gated ladders prefer the
+    stage-calibrated probes in
+    ``courtside_dynamics.training.ladder_certification``, which invert
+    the live map by construction.)
 
     Two behaviours, keyed on the ball's x velocity:
 
@@ -104,8 +121,10 @@ def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
 
     if inbound:
         # Ballistic lead to the home contact plane (roughly 5 cm in
-        # front of the face centred at world x=-1.7).
-        t_hit = max(0.0, (ball_x + 1.65) / max(0.1, -ball_vx))
+        # front of the face centred at world x=paddle_home_x).
+        t_hit = max(
+            0.0, (ball_x - (paddle_home_x + 0.05)) / max(0.1, -ball_vx)
+        )
         pred_y = ball_y + ball_vy * t_hit
         pred_z = (
             ball_z + ball_vz * t_hit - 0.5 * _WALL_BALL_GRAVITY * t_hit**2
@@ -131,9 +150,13 @@ def wall_ball_oracle_action(obs: np.ndarray) -> np.ndarray:
 
     targets = np.array([target_x, target_y, target_z], dtype=np.float64)
     # Invert WallBallEnv's piecewise mapping around the qpos=0 home
-    # target. Negative and positive spans differ for x/z.
-    negative_spans = np.array([3.0, 3.0, 0.9])
-    positive_spans = np.array([2.0, 3.0, 2.0])
+    # target. Negative and positive spans differ for x/z; the x spans
+    # derive from the live pivot and mapping range instead of the
+    # retired hardcoded (3.0, 2.0) pair.
+    x_negative_span = paddle_home_x - paddle_x_target_range[0]
+    x_positive_span = paddle_x_target_range[1] - paddle_home_x
+    negative_spans = np.array([max(x_negative_span, 1e-9), 3.0, 0.9])
+    positive_spans = np.array([max(x_positive_span, 1e-9), 3.0, 2.0])
     spans = np.where(targets >= 0.0, positive_spans, negative_spans)
     return np.clip(targets / spans, -1.0, 1.0).astype(np.float32)
 

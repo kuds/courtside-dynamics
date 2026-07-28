@@ -1,0 +1,28 @@
+# WallBallGoalRally — train the campaign-goal task directly: open
+# scoring at the constant goal fence [-4.7, -2.6], paddle start -3.9,
+# serve origin 1.0, serve speed 7.0. This replaces the retired
+# sliding-fence depth ladder: the 0.22.0 constant-width fence already
+# made the goal task learnable (crude two-return rate 80-84%), and the
+# paired local A/B in docs/wall_ball_rally_diagnosis_20260728_review.md
+# measured direct training here beating every curriculum variant tested
+# plus the ladder's all-time goal transfer (1.14). Training and
+# evaluation are the same task; the single-stage gate never promotes —
+# it keeps stage stamping, curriculum_stages.json, and the startup
+# certification of the training geometry (certified held-out at 96%/91%
+# oracle two-return rates on seed blocks 3000-3099 / 3100-3199).
+# curriculum/gate_window_mean >= 3.0 in TensorBoard IS the campaign
+# goal being met.
+# Usage: build_train_config("WallBallGoalRally", log_dir=..., config_file=<this file>)
+# Everything here matches the recipe today; edit a value to diverge.
+
+[train]
+total_timesteps = 6_000_000
+n_envs = 8
+early_stop_patience = 20  # evals without a new best before stopping
+
+[env]
+# Serve lateral spread and speed jitter as every depth-era run rolled
+# them; the geometry itself comes from the recipe (the gate's single
+# stage re-asserts it and the startup certification sweeps it).
+serve_speed_jitter = 0.5
+serve_vy_max = 2.0

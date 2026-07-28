@@ -940,20 +940,34 @@ RECIPES: dict[str, Recipe] = {
             # stage table to go stale — the 0.22.0 ladder shipped
             # uncertified because tools/depth_stage_sweep.py still
             # encoded the retired geometry (review 20260727_233859).
-            # Probes are the 0.21-era per-index calibration; with them
-            # the current ladder is KNOWN to fail feasibility at stages
-            # 0 and 3 and the inversion detector at stage 1, so this
-            # stays advisory (enforce off) until the probes are
-            # recalibrated on the constant-width geometry.
+            # Probes recalibrated for the constant-width geometry
+            # (0.24.0): a lead_charge gap grid on calibration seeds
+            # 0-99 (100 eps/cell), then a refinement pass at 200
+            # eps/cell on seeds 0-199 choosing per stage by >=2-return
+            # rate with margin over the 0.90 floor rather than the raw
+            # argmax (calibration argmaxes routinely shed 3-5 points
+            # held-out; see DECISIONS.md). Frozen at n=200:
+            # 92.5%/2.26, 97.0%/2.44, 98.0%/2.56, 96.5%/2.58,
+            # 95.0%/2.56 for stages 0-4. The stock 0.21-era probes
+            # ({run_up 1.1}, {charge_gap 1.0/1.0/1.8/1.7}) measured
+            # 36%/93%/94%/70%/93% on seeds 1000-1099 and fail
+            # feasibility at stages 0 and 3 plus monotonicity and the
+            # inversion detector at stage 0/1. Held-out verdict for the
+            # frozen set lives in the 2026-07-28 review doc (seeds
+            # 3000-3099, 100 eps/cell, run through this exact code
+            # path). 30 episodes/cell at startup (~0.2M env steps,
+            # under a minute) because the 0.90 feasibility floor sits
+            # close to the probes' true 92-98% rates: at 10 episodes a
+            # single unlucky seed flips the verdict.
             "ladder_certification": {
-                "episodes": 10,
+                "episodes": 30,
                 "seed_start": 30_000,
                 "oracle_probes": (
-                    {"run_up": 1.1},
-                    {"charge_gap": 1.0},
-                    {"charge_gap": 1.0},
-                    {"charge_gap": 1.8},
-                    {"charge_gap": 1.7},
+                    {"lead_charge": 3.0},
+                    {"lead_charge": 0.8},
+                    {"lead_charge": 1.0},
+                    {"lead_charge": 1.2},
+                    {"lead_charge": 3.0},
                 ),
             },
             "final_info_eval": True,
@@ -1133,6 +1147,90 @@ def _make_aligned_depth_curriculum(base: Recipe) -> Recipe:
 
 
 RECIPES["WallBallDepthCurriculumAligned"] = _make_aligned_depth_curriculum(
+    RECIPES["WallBallDepthCurriculum"]
+)
+
+
+def _make_goal_rally(base: Recipe) -> Recipe:
+    """Build the direct goal-task recipe (0.24.0) — no curriculum at all.
+
+    The 2026-07-28 diagnosis review's structural replacement for the
+    sliding-fence depth ladder. Three runs of that ladder (0.19-0.22)
+    stalled below a flat 3.0 bar that no scripted reference reaches at
+    any rung, and every promotion paid a measured tax: a +0.35 m
+    serve-landing jump plus -- because a fence slide changes the
+    *dynamics* via target clamping -- the replay-wipe/entropy-reset/
+    action-map machinery whose one exercised instance cost run
+    20260727_233859 ~4.3M of 6M steps. Meanwhile the 0.22.0
+    constant-width goal fence had already made the goal task itself
+    learnable (crude placement-blind two-return rate 80-84%, vs
+    9.5-16% on the retired fence) -- and no run ever trained there,
+    because the ladder was in the way.
+
+    The pre-registered goal-fence structure A/B/C (diagnosis review
+    S2: direct vs aligned-serve vs serve-origin mixture, paired
+    common-seed local SAC) answered the remaining question: the true
+    goal serve is directly learnable from a cold start, fastest of the
+    three conditions (held-out 100-seed cross-eval: direct 2.03/2.71
+    completed returns at 500k local steps vs the campaign's all-time
+    Colab best of 1.14; mixture 2.27 -- no better; aligned-only
+    1.09-1.51 -- worse). Per the pre-registered decision rules, no
+    serve curriculum earns its complexity: this recipe trains the
+    canonical goal task from the first step, and evaluation equals
+    training.
+
+    The single-stage gate never promotes; it exists so the run keeps
+    the campaign's artifact contract (stage-context stamping,
+    curriculum_stages.json, and startup certification of the training
+    geometry -- certified held-out twice: 96% oracle two-return rate on
+    seeds 3000-3099, 91% on 3100-3199). The 3.0 threshold is purely
+    informational: curriculum/gate_window_mean crossing it in
+    TensorBoard IS the campaign goal being met.
+    """
+    env_kwargs = deepcopy(base.env_kwargs)
+    extra_cfg = deepcopy(base.extra_cfg)
+    goal = dict(base.extra_cfg["performance_gate"]["stages"][-1])
+    # Train ON the campaign-goal task: the depth ladder's final stage,
+    # which is also this recipe's (identical) evaluation task.
+    env_kwargs.update(goal)
+    stages = (dict(goal),)
+    extra_cfg["performance_gate"] = {
+        "metric_key": "bounce_count_ep_mean",
+        "threshold": 3.0,
+        "sustain_evals": 3,
+        "promotion_rule": "window_mean",
+        "stages": stages,
+    }
+    extra_cfg["ladder_certification"] = {
+        "episodes": 30,
+        "seed_start": 30_000,
+        "oracle_probes": ({"lead_charge": 3.0},),
+    }
+    # Training and evaluation are the same distribution, so the second
+    # info-eval stream would duplicate the matched one; the reward
+    # EvalCallback (5 episodes) keeps evaluations.npz alive instead.
+    extra_cfg["final_info_eval"] = False
+    extra_cfg["final_eval_episodes"] = None
+    eval_env_overrides = dict(goal)
+    return replace(
+        base,
+        env_kwargs=env_kwargs,
+        eval_env_overrides=eval_env_overrides,
+        name_prefix="wall_ball_goal_rally",
+        extra_cfg=extra_cfg,
+        description=(
+            "Train the campaign-goal task directly: open-scoring rallies "
+            "at the constant goal fence (-4.7, -2.6), paddle start -3.9, "
+            "serve origin 1.0, serve speed 7.0 — the depth ladder's final "
+            "stage as the whole task, replacing the retired sliding-fence "
+            "curriculum. Paired local A/B evidence (diagnosis review "
+            "2026-07-28): direct training here beats every curriculum "
+            "variant tested and the ladder's all-time goal transfer."
+        ),
+    )
+
+
+RECIPES["WallBallGoalRally"] = _make_goal_rally(
     RECIPES["WallBallDepthCurriculum"]
 )
 

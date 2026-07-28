@@ -5,6 +5,73 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## 0.24.0
+
+The campaign diagnosis release
+(`docs/wall_ball_rally_diagnosis_20260728_review.md`). No physics,
+observation, action, or reward changes: **saved policies and
+`VecNormalize` statistics remain comparable with 0.22.0/0.23.0.** The
+existing recipes are untouched; a new recipe replaces the depth ladder
+as the campaign's production configuration.
+
+**`WallBallGoalRally` — the structural replacement for the
+sliding-fence depth ladder is no curriculum at all.** Three ladder
+generations stalled below a flat 3.0 promotion bar that no scripted
+reference reaches at any rung (~70 controller configurations, best
+2.7) and that four multi-million-step runs plateaued 0.2–0.9 under
+everywhere past stage 0, while each promotion bought a measured
++0.35 m serve-landing jump and (in 0.22.0) an advance package whose
+one exercised instance cost ~4.3M of 6M steps. Meanwhile the
+constant-width 0.22.0 fence work had already made the goal task itself
+learnable (crude placement-blind two-return rate 80–84% vs 9.5–16% on
+the retired fence) — and no run ever trained there, because the
+ladder was in the way. The pre-registered paired local SAC structure
+A/B/C (direct vs aligned-serve vs serve-origin mixture, common seeds;
+review doc §4) settled the rest: direct goal-task training scores
+2.03/2.71 completed returns on 100 held-out seeds at 500k local steps
+— versus 1.14 all-time from any 6M ladder run — with the mixture no
+better (2.27) and aligned-only worse (1.09–1.51). The recipe
+therefore trains the depth ladder's final stage AS the whole task
+(fence (−4.7, −2.6), start −3.9, serve origin 1.0, speed 7.0;
+evaluation equals training equals the historical goal task, so every
+prior goal number stays comparable). A single-stage gate that can
+never promote keeps stage stamping, `curriculum_stages.json`, and
+startup certification (training geometry certified held-out twice:
+96% / 91% oracle two-return rates on seed blocks 3000-3099 /
+3100-3199); its informational 3.0 bar makes
+`curriculum/gate_window_mean` crossing 3.0 the campaign-goal marker.
+
+**`stage_eval_budget` promotion-staleness guard** on
+`PerformanceGatedEnvStagesCallback` (and the gate spec): a non-final
+stage that records N evaluations without promoting either stops the
+run (`"stop"`, default — run `20260727_233859` burned ~4.5M steps in
+exactly that state with nothing able to notice) or force-advances
+(`"advance"`, recorded as `promoted: false` with
+`advance_reason: "stage_eval_budget"` in `curriculum_stages.json`, so
+an unearned rung is auditable). History rows gain `advance_reason` and
+`stage_eval_budget_exhausted` fields.
+
+**Startup-certification probes recalibrated for the constant-width
+geometry.** New `lead_charge` oracle probe mode (charge-gap trigger +
+ballistic y/z lead at the intercept while charging): the stock
+y/z-tracking charge failed the 90% feasibility floor at stages 0 and 3
+of the 0.22.0 ladder (36%/70% two-return rates). Frozen per-stage gaps
+(3.0/0.8/1.0/1.2/3.0, chosen at n=200 on calibration seeds 0-199 by
+rate-with-margin rather than raw argmax) certify held-out at
+95–100% per stage (seeds 3000-3099) — `tools/depth_stage_sweep.py
+--ladder release` and every gated run's startup certification now pass
+their blocking criteria. Startup episodes 10 → 30 (the 0.90 floor sits
+close to the probes' true rates; 10-episode verdicts flip on one
+seed). The remaining advisory warnings on the depth ladder — no
+scripted reference reaches its 3.0 bar; every adjacent stage jumps the
+serve landing by ~0.35 m — are true findings about that ladder.
+
+**`wall_ball_oracle_action` mapping parameterized.** It hardcoded the
+retired fixed −1.7 pivot and old spans, silently scoring ~0.5 bounces
+on any re-pivoted geometry (review 20260727_233859). New
+`paddle_home_x` / `paddle_x_target_range` kwargs derive the inversion;
+defaults preserve the legacy `WallBall` recipe contract byte-for-byte.
+
 ## 0.23.0
 
 Startup ladder certification. No physics, observation, action, reward,
