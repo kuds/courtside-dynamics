@@ -77,51 +77,13 @@ exact results can still vary across hardware and runtime stacks.
 | `CourtsideDynamics/WallBall` | Rally against a wall with a face-only paddle at a fixed 10° upward pitch, three target-controlled DoFs, and gated rewards. | Available |
 | `CourtsideDynamics/HumanoidTennisCoop` | Control two simulated Unitree G1 humanoids through one policy. | Available (experimental; free-standing default) |
 
-Registered environment IDs are unversioned as of package version 0.6.0; use
-the IDs in the table above. Every release since has changed the physics,
-observations, actions, or recipes in ways that determine which saved
-policies and statistics stay comparable across versions — see
+Environment IDs are unversioned — use the IDs in the table above.
+Releases routinely change physics, observations, actions, or recipes in
+ways that determine which saved policies, `VecNormalize` statistics, and
+learning curves stay comparable across versions; see
 [`CHANGELOG.md`](CHANGELOG.md) for the per-version details and migration
-notes.
-
-Version 0.19.0 revises `WallBallDepthCurriculum` after run
-`20260722_124613` showed that every stage's shared front-court interval
-let the policy keep contacting near `x=-1.85` instead of learning from
-the baseline. The five paddle fences now slide backward as whole
-windows, retaining adjacent overlap but no all-stage refuge, and the
-default budget is 6M steps so the final stage has training headroom.
-Rewards, policy spaces, open scoring, and the three-evaluation
-promotion gate are unchanged. New pre-/post-bounce contact telemetry
-measures whether baseline play emerges from the geometry; the changed
-curriculum trajectory begins a new comparison era. The replacement
-ladder passed a 200-episode-per-cell scripted sweep: oracle ≥2-return
-rates were 92–96%, while the diagnostic opening-volley probe fell to
-0% at the final stage.
-
-Version 0.15.0 added `WallBallDepthCurriculum`: with budget, incentives,
-and capacity all exhausted as levers (`docs/lessons_learned.md` lesson
-19), the campaign now curricularizes *position* — open-scoring rallies
-(volleys legal, no early-touch fine) with a performance-gated depth
-ladder that walks the paddle fence from volley range back to the
-workspace baseline each time the policy sustains a three-exchange rally.
-The five stages were calibrated by `tools/depth_stage_sweep.py`
-(scripted-ladder monotonicity, oracle feasibility 93–97%, crude
-learnability 66–83% at every stage). `WallBallBootstrap` is now
-historical: its cold-start problem was solved by auto-entropy before it
-ever ran. Depth-ladder metrics are a new era — not comparable to the
-fixed-lane baseline runs (reference `20260718_023737`).
-
-Version 0.14.0 reverts the 0.13.0 recalibration: run `20260718_213222`
-falsified it (1.33 vs 3.23 eval bounces — the asymmetric weak-return
-retry taught soft, unchainable returns; see `docs/lessons_learned.md`),
-so `WallBallBaseline` returns to the configuration both reference runs
-learned with, keeping only the ≥5-rate selection tiebreak. A new
-`wall_reward_increment` kwarg pays the n-th completed return
-`1 + (n−1)×increment` (ladder-calibrated at 0.5, ships dark — the
-baseline starter documents the two-line enable). Run directories are
-reorganized (`model/`, `metrics/`, `reports/`, `media/`; readers fall
-back to the legacy flat layout so old runs keep working) and the
-unreadable `eval_info.png` grid is split into four themed pages.
+notes, and [`docs/DECISIONS.md`](docs/DECISIONS.md) for why the
+non-obvious choices were made.
 
 | Ball Balance | Ball Bounce | Wall Ball |
 |:---:|:---:|:---:|
@@ -314,15 +276,15 @@ configuration and diagnostic evidence needed to investigate training. Some
 artifacts appear only when their corresponding callback fires or feature is
 enabled.
 
-| Artifact | Contents |
+| Path | Contents |
 |---|---|
-| `config.json` | Serializable training settings, environment class/space/curriculum metadata, selected resolved SB3 settings, versions, device, Git SHA, and warm-start identities |
+| `config.json` | Resolved training settings, environment class/space/curriculum metadata, resolved SB3 settings, versions, device, Git SHA, and warm-start identities |
+| `run_config.toml` | Byte-exact copy of the TOML run config, when one was used |
 | `stage_summary.txt` | Final evaluation and, when scheduled evaluation ran, best evaluation, plus duration, throughput, device, and final training-health metrics |
-| `evaluations.npz` | Evaluation reward history when scheduled evaluation runs |
-| `eval_info.csv` | Aggregated info metrics when info-dictionary evaluation is enabled and runs |
-| `tensorboard/`, `tensorboard/progress.csv` | Live training scalars and their CSV mirror |
-| `monitor/`, `checkpoints/`, `videos/` | Episode returns and optional snapshots or rollout recordings |
-| `best_model.zip`, `best_vec_normalize.pkl` | Best checkpoint after evaluation and, when normalization is enabled, its matching statistics |
+| `model/` | The protected best pair (`best_model.zip`, `best_vec_normalize.pkl`) with `best_model_meta.json` binding them by sha256; the end-of-run `final_model.zip` and `vec_normalize.pkl`; and `stage_bests/`, one archived best per curriculum stage |
+| `metrics/` | `eval_info.csv` (matched-stage info metrics), `eval_info_final.csv` (the unsynced goal-task stream), `evaluations.npz`, `progress.csv`, and the `tensorboard/` and `monitor/` directories |
+| `checkpoints/`, `media/videos/` | Periodic snapshots and milestone rollout recordings |
+| `reports/` | `curriculum_stages.json` (per-stage entry/exit, promotion windows, per-stage bests), the held-out long-horizon audit (`best_model_long_horizon_eval.json` and its per-episode CSV), and the diagnostic plots |
 
 `courtside_dynamics.notebook_utils` can replay the stage summary, audit a run
 directory, explain missing optional artifacts, and plot learning, evaluation,
@@ -386,9 +348,12 @@ courtside-dynamics/
 │   ├── envs/                    # Gymnasium tasks and curriculum contracts
 │   ├── callbacks/               # Evaluation and video recording
 │   ├── training/                # SAC/PPO training, artifacts, and promotion
+│   ├── run_configs/             # Packaged starter TOMLs, one per recipe
 │   ├── recipes.py               # Curated environment/training presets
+│   ├── run_config.py            # TOML run-config loading, merge, provenance
 │   ├── notebook_utils.py        # Colab setup, plots, replay, and audits
 │   └── scripted_policies.py     # Deterministic validation oracles
+├── tools/                       # Calibration sweeps and packaging checks
 ├── notebooks/
 └── tests/
 ```
