@@ -38,7 +38,22 @@ Pass criteria (all blocking except where noted):
    completed returns are a subset of all completed returns.
 
 Run: python tools/depth_stage_sweep.py [episodes-per-cell] [json-output]
-     [--seed-start N] [--ladder {aligned,baseline}]
+     [--seed-start N] [--ladder {release,aligned,baseline}]
+
+``--ladder release`` (the default) does not use this module's stage
+tables at all: it certifies the ``WallBallDepthCurriculum`` recipe's
+live gate stages through
+``courtside_dynamics.training.ladder_certification`` — the same sweep
+every training run now performs at startup — so the release geometry
+can never again drift from what this tool measures (the 0.22.0 ladder
+shipped uncertified precisely because the tables below still encoded
+the superseded 0.21 geometry; see review 20260727_233859). The
+``aligned``/``baseline`` tables remain pinned to the 0.21-era
+candidates for reproducing the serve-alignment campaign's paired
+comparisons. Until the probes are recalibrated for the constant-width
+geometry, a bare release run is EXPECTED to exit 1: with the stock
+probes the live ladder fails feasibility at stages 0/3 and the
+inversion detector at stage 1 (review 20260727_233859).
 """
 from __future__ import annotations
 
@@ -953,16 +968,24 @@ def _parse_args():
     parser.add_argument(
         "--seed-start",
         type=int,
-        default=0,
-        help="first seed in the contiguous held-out seed range (default: 0)",
+        default=None,
+        help=(
+            "first seed in the contiguous held-out seed range (default: 0 "
+            "for the candidate ladders; the recipe spec's seed_start for "
+            "--ladder release)"
+        ),
     )
     parser.add_argument(
         "--ladder",
-        choices=tuple(LADDERS),
-        default="aligned",
+        choices=(*LADDERS, "release"),
+        default="release",
         help=(
-            "serve-origin variant to measure; run both variants with the "
-            "same seed range for the paired comparison (default: aligned)"
+            "'release' certifies the WallBallDepthCurriculum recipe's live "
+            "gate stages via courtside_dynamics.training."
+            "ladder_certification (no stage table in this file to go "
+            "stale); 'aligned'/'baseline' measure the pinned 0.21-era "
+            "serve-origin candidates for paired comparisons "
+            "(default: release)"
         ),
     )
     parser.add_argument(
@@ -1007,10 +1030,81 @@ def _parse_args():
     return parser.parse_args()
 
 
+def _run_release_certification(args) -> int:
+    """Certify the live recipe ladder via the shared package certifier.
+
+    The stage tables in this module are the pinned 0.21-era serve-origin
+    candidates; the 0.22.0 release ladder shipped without a sweep
+    because nothing forced this file to track the recipe (review
+    20260727_233859). The release path therefore carries no stage table
+    at all: stages, probes, and env kwargs come from the
+    ``WallBallDepthCurriculum`` recipe at call time — the same spec
+    ``train()`` self-certifies against at startup.
+    """
+    if args.serve_origin_blend is not None or args.oracle_probe:
+        raise SystemExit(
+            "--serve-origin-blend and --oracle-probe drive the pinned "
+            "candidate ladders; the release path reads probes from the "
+            "recipe's ladder_certification spec (use --ladder aligned "
+            "or baseline)"
+        )
+    if (
+        args.calibration_seed_start is not None
+        or args.calibration_episodes is not None
+        or args.calibration_artifact
+    ):
+        raise SystemExit(
+            "calibration provenance flags apply to the candidate ladders; "
+            "the release path records provenance in the certifier report"
+        )
+    if args.episodes < 1:
+        raise SystemExit("episodes-per-cell must be a positive integer")
+    from courtside_dynamics.recipes import RECIPES
+    from courtside_dynamics.training.ladder_certification import (
+        certify_ladder,
+        format_report,
+    )
+
+    recipe = RECIPES["WallBallDepthCurriculum"]
+    gate = recipe.extra_cfg["performance_gate"]
+    spec = recipe.extra_cfg["ladder_certification"]
+    seed_start = (
+        args.seed_start
+        if args.seed_start is not None
+        else int(spec["seed_start"])
+    )
+    if seed_start < 0:
+        raise SystemExit("--seed-start must be a non-negative integer")
+
+    def env_fn():
+        # The exact constructor a training run's env_fn uses; stage
+        # attrs are applied on top by the certifier, like the gate.
+        return recipe.env_cls(**recipe.env_kwargs)
+
+    report = certify_ladder(
+        env_fn,
+        [dict(stage) for stage in gate["stages"]],
+        episodes=args.episodes,
+        seed_start=seed_start,
+        oracle_probes=[dict(p) for p in spec["oracle_probes"]],
+        gate_metric_key=gate.get("metric_key"),
+        gate_threshold=gate.get("threshold"),
+    )
+    print(format_report(report))
+    if args.json_output is not None:
+        with open(args.json_output, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2)
+            handle.write("\n")
+        print(f"RAW RESULTS: {args.json_output}")
+    return 0 if report["passed"] else 1
+
+
 def main() -> int:
     args = _parse_args()
+    if args.ladder == "release":
+        return _run_release_certification(args)
     episodes = args.episodes
-    seed_start = args.seed_start
+    seed_start = 0 if args.seed_start is None else args.seed_start
     json_output = args.json_output
     ladder_name = args.ladder
     stages = LADDERS[ladder_name]

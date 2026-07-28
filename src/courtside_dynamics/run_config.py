@@ -270,6 +270,90 @@ def _validate_performance_gate(gate: Any, path: str) -> None:
         )
 
 
+_LADDER_CERT_KEYS = (
+    "oracle_probes",
+    "episodes",
+    "seed_start",
+    "enforce",
+    "max_episode_steps",
+)
+
+
+def _validate_ladder_certification(spec: Any, path: str) -> None:
+    """Check the certification spec so a broken one fails here, with the
+    file named, instead of at ``train()`` startup with a bare KeyError.
+    Like ``performance_gate``, the table replaces the recipe's spec
+    wholesale, so a partial override that drops ``oracle_probes`` is a
+    load-time error, not a startup crash."""
+    if not isinstance(spec, dict):
+        raise ValueError(
+            f"{path}: [train.ladder_certification] must be a table (or "
+            f'the "none" sentinel to disable the recipe\'s certification)'
+        )
+    unknown = sorted(set(spec) - set(_LADDER_CERT_KEYS))
+    if unknown:
+        suggestions = difflib.get_close_matches(
+            unknown[0], _LADDER_CERT_KEYS, n=3
+        )
+        hint = (
+            f"; did you mean {', '.join(map(repr, suggestions))}?"
+            if suggestions
+            else ""
+        )
+        raise ValueError(
+            f"{path}: unknown [train.ladder_certification] key(s) "
+            f"{unknown}{hint} (train() reads exactly "
+            f"{list(_LADDER_CERT_KEYS)}, so anything else would be "
+            f"silently ignored)"
+        )
+    if "oracle_probes" not in spec:
+        raise ValueError(
+            f"{path}: [train.ladder_certification] replaces the recipe's "
+            f"spec wholesale and must define oracle_probes (one table "
+            f'with exactly one of "run_up"/"charge_gap" per gate stage)'
+        )
+    probes = spec["oracle_probes"]
+    if not isinstance(probes, list) or not probes:
+        raise ValueError(
+            f"{path}: [train.ladder_certification] oracle_probes must be "
+            f"a non-empty array of tables"
+        )
+    for index, probe in enumerate(probes):
+        if not isinstance(probe, dict) or set(probe) not in (
+            {"run_up"},
+            {"charge_gap"},
+        ):
+            raise ValueError(
+                f"{path}: [train.ladder_certification] oracle_probes"
+                f"[{index}] must be a table with exactly one of "
+                f'"run_up" or "charge_gap", got {probe!r}'
+            )
+        value = next(iter(probe.values()))
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                f"{path}: [train.ladder_certification] oracle_probes"
+                f"[{index}] value must be a number, got {value!r}"
+            )
+    for key, minimum in (("episodes", 1), ("seed_start", 0),
+                         ("max_episode_steps", 1)):
+        if key in spec:
+            value = spec[key]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < minimum
+            ):
+                raise ValueError(
+                    f"{path}: [train.ladder_certification] {key} must be "
+                    f"an integer >= {minimum}, got {value!r}"
+                )
+    if "enforce" in spec and not isinstance(spec["enforce"], bool):
+        raise ValueError(
+            f"{path}: [train.ladder_certification] enforce must be a "
+            f"boolean, got {spec['enforce']!r}"
+        )
+
+
 def _train_field_names() -> tuple[str, ...]:
     # Imported lazily: train.py pulls in SB3/torch, which a config-only
     # caller (or a docs build) should not pay for at module import time.
@@ -407,6 +491,9 @@ def load_run_config(path: str | Path) -> RunFileConfig:
     gate = train.get("performance_gate")
     if gate is not None:
         _validate_performance_gate(gate, str(resolved))
+    ladder_cert = train.get("ladder_certification")
+    if ladder_cert is not None:
+        _validate_ladder_certification(ladder_cert, str(resolved))
 
     env = _convert_none_sentinels(dict(raw.get("env", {})))
     _reject_quoted_booleans(env, str(resolved), "env")

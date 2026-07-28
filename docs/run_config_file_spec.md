@@ -75,8 +75,8 @@ serve_vy_max = 1.1
   `model_kwargs`, `record_video`, ...) rejects the sentinel outright —
   the smuggled `None` would only crash mid-`train()` or silently
   disable a falsy-checked feature; Optional fields like `phase_labels`,
-  `performance_gate`, `normalize_reward`, and `early_stop_patience`
-  do accept `"none"` as a disable). The quoted strings
+  `performance_gate`, `ladder_certification`, `normalize_reward`, and
+  `early_stop_patience` do accept `"none"` as a disable). The quoted strings
   `"true"`/`"false"` are rejected recursively everywhere except
   phase-label values — as Python strings both are truthy, silently
   enabling exactly what the file tried to disable. TOML arrays map to
@@ -111,6 +111,7 @@ The layer-vs-layer footgun is *replacement*; the file layer fixes it:
 | Scalars, strings, arrays | Replace |
 | Mapping-valued `TrainConfig` fields (`model_kwargs`, `phase_labels`, `info_eval_survival_thresholds`) | **Deep-merge, one level**: file keys override recipe keys, unmentioned recipe keys survive |
 | `performance_gate` | Replace **wholesale** — stage ladders are ordered lists whose element-wise merging would be ambiguous; a file that touches the gate must state the whole gate |
+| `ladder_certification` | Replace **wholesale**, same reasoning (`oracle_probes` is stage-ordered). A file that replaces the gate with fewer stages should also restate matching probes — or set `ladder_certification = "none"`; a probe/stage count mismatch at startup records a skipped certification report rather than training uncertified silently |
 | `[env]` / `[eval_env]` tables | `[env]` merges into the kwargs of **both** the training and evaluation environments (a physics tweak must not silently split the two); the recipe's `eval_env_overrides` then re-assert the canonical evaluation setup, and `[eval_env]` wins last for evaluation |
 
 Explicit keyword arguments keep today's replace-wholesale semantics (no
@@ -139,6 +140,14 @@ therefore fails loudly on everything:
   other key is rejected (it would be silently ignored downstream), and
   `stages` must be a non-empty array of non-empty tables. Deeper
   semantics stay with `PerformanceGatedEnvStagesCallback`.
+- `[train.ladder_certification]` is validated structurally at load:
+  `oracle_probes` is required (the table replaces the recipe's spec
+  wholesale) and must be a non-empty array of tables each carrying
+  exactly one of `run_up`/`charge_gap` with a numeric value; `episodes`
+  / `seed_start` / `max_episode_steps` are integer-checked and
+  `enforce` boolean-checked when present; any other key is rejected
+  with suggestions. Probe-count-vs-stage-count consistency is checked
+  at `train()` startup instead, where the resolved gate is known.
 - `phase_labels` keys must be strict decimal strings (`"1_0"`, `"+2"`,
   and whitespace variants are rejected rather than silently relabeling a
   different phase), and colliding spellings of the same id (`"1"`/`"01"`)

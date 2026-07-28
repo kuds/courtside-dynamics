@@ -5,6 +5,55 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## 0.23.0
+
+Startup ladder certification. No physics, observation, action, reward,
+or recipe-geometry changes: **learning curves and saved policies remain
+comparable with 0.22.0.**
+
+Review of run `20260727_233859` (the first 0.22.0 run;
+`docs/wall_ball_depth_curriculum_20260727_233859_review.md`) found the
+0.22.0 ladder had shipped without a calibration sweep:
+`tools/depth_stage_sweep.py` still hardcoded the retired 0.21 stage
+tables and fixed pivot, nothing forced it to track the recipe, and the
+mismatch surfaced only after a 17-hour run stalled at stage 1. The
+sweep is no longer ad hoc:
+
+**Training runs self-certify.** A new `TrainConfig.ladder_certification`
+spec (set by both depth recipes) makes `train()` sweep every
+`performance_gate` stage with the scripted reference cells — parked /
+crude / calibrated oracle plus the policy-independent serve-landing
+probe — *before* the worker fleet is built, on fresh `env_fn()`
+instances with each stage applied the way the gate applies it. The
+verdict lands in `reports/ladder_certification.json` (new run-layout
+artifact, recorded in `config.json`) and is printed at startup.
+Certification is derived entirely from the live gate spec and env
+factory, so there is no second stage table to go stale.
+
+**Stage-application integrity is a blocking criterion.** Every stage
+key must already exist on the constructed env and must read back with
+the written value — the exact class of the pre-0.22.0 `paddle_home_x`
+silent no-op, now caught in seconds instead of by post-mortem.
+Certification also warns when no scripted reference reaches the
+promotion bar and when the serve-landing offset jumps more than 0.25 m
+between adjacent stages (the measured stage-0→1 receive discontinuity).
+
+**Advisory by default.** The stock probes are per-index calibrations
+from the 0.21 geometry; with them the current ladder is *known* to fail
+feasibility at stages 0 and 3 and the inversion detector at stage 1, so
+failures print loudly and are recorded but do not abort unless the spec
+sets `enforce`. Certification probes draw from a reserved seed block
+(30000+), disjoint from every burned experiment range.
+
+**`tools/depth_stage_sweep.py --ladder release` (new default)** carries
+no stage table: it certifies the `WallBallDepthCurriculum` recipe's
+live gate stages through the same package certifier. The
+`aligned`/`baseline` tables remain pinned to the 0.21-era serve-origin
+candidates for reproducing the alignment campaign's paired comparisons.
+Also fixed: the recipe's usable-action-share comment now carries the
+measured values (0.49/0.43/0.42/0.47/0.63); the previous figures
+(0.52/0.48/0.49/0.54/0.66) matched neither the code nor the changelog.
+
 ## 0.22.0
 
 Four changes to both depth recipes, all aimed at defects the

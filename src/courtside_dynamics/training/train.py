@@ -439,6 +439,22 @@ class TrainConfig:
         threshold for the sustained number of consecutive evaluations.
         Requires ``info_dict_eval``. Unlike ``env_attr_schedules`` this
         is earned progression, not a timestep clock.
+    ladder_certification:
+        Optional startup certification for the ``performance_gate``
+        ladder (wall-ball recipes only), a mapping with keys
+        ``oracle_probes`` (required, one ``{"run_up": x}`` or
+        ``{"charge_gap": y}`` per stage) plus optional ``episodes``,
+        ``seed_start``, ``max_episode_steps``, and ``enforce``. Before
+        any training env is vectorized, every gate stage is applied to
+        a fresh ``env_fn()`` instance and swept with the scripted
+        reference cells; the verdict lands in
+        ``reports/ladder_certification.json`` and is printed. Advisory
+        by default: run ``20260727_233859`` trained 17 hours on a
+        ladder whose standalone sweep tool still encoded the previous
+        geometry, so certification is derived from the live gate spec
+        instead of a second stage table — but the stock probes are
+        index-calibrated, so failures warn rather than abort unless
+        ``enforce`` is set. Requires ``performance_gate`` with stages.
     reward_eval_episodes:
         Episode count for the reward-only ``EvalCallback`` stream. Only
         settable when a headline metric owns selection (otherwise that
@@ -546,6 +562,7 @@ class TrainConfig:
     degenerate_guard_keys: Sequence[str] = field(default_factory=tuple)
     degenerate_min_evals: int | None = None
     performance_gate: Mapping[str, Any] | None = None
+    ladder_certification: Mapping[str, Any] | None = None
     final_info_eval: bool = False
     reward_eval_episodes: int | None = None
     final_eval_episodes: int | None = None
@@ -876,6 +893,20 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     os.makedirs(cfg.log_dir, exist_ok=True)
     write_run_config(cfg, cfg.log_dir)
     start_time = time.monotonic()
+
+    if cfg.ladder_certification is not None:
+        # Certify the gate's ladder against fresh env_fn() instances
+        # BEFORE any worker fleet is built: the report must exist even
+        # if the run later dies, and a malformed spec (or enforce=true
+        # on a failing ladder) should stop the run in seconds, not
+        # after a fleet of MuJoCo envs has been constructed.
+        from courtside_dynamics.training.ladder_certification import (
+            run_startup_certification,
+        )
+
+        run_startup_certification(
+            cfg, artifact_path(cfg.log_dir, "ladder_certification")
+        )
 
     # ``check_env`` replays several reset/step cycles; running it on every
     # worker repeats the same verdict. Training and evaluation factories may
