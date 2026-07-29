@@ -89,7 +89,24 @@ Source: [`wall_ball_baseline_review.md`](wall_ball_baseline_review.md) (runs fro
 package). See also `CHANGELOG.md` 0.9.0 → 0.13.0. Depth-campaign entries
 below distill [`wall_ball_rally_diagnosis_20260728_review.md`](wall_ball_rally_diagnosis_20260728_review.md).
 
-### The sliding-fence depth ladder is retired; the goal task is trained directly — *implemented (0.24.0)*
+### The campaign goal is met: a sustained rally from the workspace baseline — *result (run 20260728_225217)*
+The first `WallBallGoalRally` run resolved the campaign: goal-task eval
+sustained `bounce_count_ep_mean ≥ 3.0` over 3×60-episode windows from 1.25M
+steps (best window 3.311; best model 3.333 confirmed 3.267 at 1.325M), and
+the 50-seed long-horizon audit reads **3.54 mean completed returns** (median
+3, p90 6, max 8; ≥5-survival 26%; 100% of episodes complete ≥1 return; zero
+opening volleys, 95% post-bounce play) — versus 1.14 and
+every-episode-double-bounce for the best ladder policy on the identical
+task. Every pre-registered success criterion passed including the stretch
+bar; early stop ended the run at 1.825M of 6M (~6.6 h) on a settled plateau.
+The bar that five curriculum runs treated as an unreachable promotion gate
+was a reachable performance level once training happened on the task itself.
+Caveats: seed 0, n=1 (second seed is the standing next step); plateau
+~3.0–3.3 with the ≥5 tail at 26% — consistency, not competence, is the
+remaining headroom on this geometry. Snapshot:
+[`wall_ball_goal_rally_20260728_225217_review.md`](wall_ball_goal_rally_20260728_225217_review.md).
+
+### The sliding-fence depth ladder is retired; the goal task is trained directly — *implemented (0.24.0); vindicated by run 20260728_225217*
 Three ladder generations (0.15/0.19-0.21/0.22) stalled the same way: a flat
 `bounce_count_ep_mean >= 3.0` bar that **no scripted reference reaches at any
 rung** (~70 controller configurations swept in the diagnosis, best 2.70;
