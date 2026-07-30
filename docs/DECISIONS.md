@@ -89,7 +89,21 @@ Source: [`wall_ball_baseline_review.md`](wall_ball_baseline_review.md) (runs fro
 package). See also `CHANGELOG.md` 0.9.0 → 0.13.0. Depth-campaign entries
 below distill [`wall_ball_rally_diagnosis_20260728_review.md`](wall_ball_rally_diagnosis_20260728_review.md).
 
-### The campaign goal is met: a sustained rally from the workspace baseline — *result (run 20260728_225217)*
+### The campaign goal is met: a sustained rally from the workspace baseline — *result (run 20260728_225217); replicated 2026-07-30*
+**Replication update (runs 20260729_140112 / 20260730_005134):** 2 of 3
+seeds pass, and the third success beats the first everywhere (best window
+3.750 vs 3.311; audit 3.76 mean / median 4 / max 11 / 32% >=5-survival;
+84% of audit episodes now end with the ball running out AFTER a rally).
+Seed 1 exposed a new failure mode — one-and-done basin capture for 1.4M
+steps, unaided escape to 1.45, then full collapse to zero paddle contact
+at ~2.5M, ended by the degenerate-signal guard at 3.175M with the
+pre-collapse champion banked. All measured policies play DEEP (contact-x
+-3.4 to -3.95; nobody camps the fence front), settling that the
+fixed-pitch face suffices for deep rally play. Reliability (~2/3), not
+capability, is the recipe's open item. Details:
+[`wall_ball_goal_rally_replication_20260730_review.md`](wall_ball_goal_rally_replication_20260730_review.md).
+
+Original seed-0 entry follows.
 The first `WallBallGoalRally` run resolved the campaign: goal-task eval
 sustained `bounce_count_ep_mean ≥ 3.0` over 3×60-episode windows from 1.25M
 steps (best window 3.311; best model 3.333 confirmed 3.267 at 1.325M), and
