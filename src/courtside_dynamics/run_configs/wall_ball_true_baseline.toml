@@ -1,0 +1,27 @@
+# WallBallTrueBaseline — the 0.25.0 era: the proven direct goal-task
+# recipe extended to the ITF baseline. Workspace and fence reach -8.2
+# (just behind the baseline the tennis style draws at -7.985), the
+# paddle starts at -7.9, and an 11 m/s serve forces first contact near
+# x = -7.0 before the rally recovers forward. Every geometry number was
+# probe-verified before this recipe existed; see
+# docs/design_wall_ball_true_baseline.md for the evidence and the
+# pre-registered success criteria. The single-stage gate never
+# promotes; startup certification sweeps the training geometry with the
+# calibrated lead-charge 2.6 probe against a 0.50 feasibility floor
+# (the measured oracle band, 67% two-return rate, minus two sampling
+# standard deviations — the stock 0.90 floor encodes a near-certainty
+# no scripted reference achieves on an 11.8 m court).
+# Usage: build_train_config("WallBallTrueBaseline", log_dir=..., config_file=<this file>)
+# Everything here matches the recipe today; edit a value to diverge.
+
+[train]
+total_timesteps = 6_000_000
+n_envs = 8
+early_stop_patience = 60  # evals without a new best before stopping
+
+[env]
+# Serve lateral spread and speed jitter as every depth-era run rolled
+# them; the geometry itself comes from the recipe (the gate's single
+# stage re-asserts it and the startup certification sweeps it).
+serve_speed_jitter = 0.5
+serve_vy_max = 2.0

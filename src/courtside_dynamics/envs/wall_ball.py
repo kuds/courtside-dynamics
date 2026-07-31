@@ -158,6 +158,14 @@ _BALL_MIN_Y = -5.5
 _BALL_MAX_Y = 5.5
 _BALL_MIN_Z = -0.5
 
+# Default world-space x action mapping when no paddle_x_target_range is
+# given. Frozen at the pre-0.25.0 physical workspace: the XML's slide
+# range widened to reach the true baseline, and deriving the default
+# from ctrlrange would silently rescale action semantics for every
+# config that never passed an explicit range. The extended workspace is
+# strictly opt-in via paddle_x_target_range.
+_DEFAULT_PADDLE_X_TARGET_RANGE = (-4.7, 0.3)
+
 _RALLY_STYLES = frozenset({"open", "volley", "one_bounce"})
 _AWAIT_BOUNCE = 0
 _AWAIT_PADDLE = 1
@@ -223,6 +231,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         serve_start_x: float = 1.0,
         paddle_start_x: float | None = None,
         paddle_x_fence: tuple[float, float] | None = None,
+        ball_in_play_min_x: float = _BALL_MIN_X,
         court_style: str = "diagnostic",
         wall_reward_increment: float = 0.0,
         **kwargs: Any,
@@ -294,6 +303,11 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             )
         if not np.isfinite(serve_start_x):
             raise ValueError("serve_start_x must be finite")
+        if not np.isfinite(ball_in_play_min_x) or ball_in_play_min_x >= 0.0:
+            raise ValueError(
+                "ball_in_play_min_x must be finite and negative (it is the "
+                "deep edge of the in-play volume, behind the paddle)"
+            )
         if paddle_start_x is not None and not np.isfinite(paddle_start_x):
             raise ValueError("paddle_start_x must be finite")
         resolved_fence: tuple[float, float] | None = None
@@ -370,6 +384,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 None if paddle_start_x is None else float(paddle_start_x)
             ),
             paddle_x_fence=resolved_fence,
+            ball_in_play_min_x=float(ball_in_play_min_x),
             court_style=court_style,
             wall_reward_increment=float(wall_reward_increment),
             return_shaping_scale=float(return_shaping_scale),
@@ -485,6 +500,13 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # and an annealed depth would only ever govern the first exchange.
         # Range-validated against the physical workspace after model load.
         self._paddle_x_fence = resolved_fence
+        # Deep edge of the in-play volume. A module-level constant for a
+        # decade of shallow eras (-6.0 leaves 1.3 m behind the old -4.7
+        # workspace); the 0.25.0 true-baseline era plays to -8.2, whose
+        # serves and rebounds legitimately hop past -9, so its recipe
+        # widens this per-task. Every other bound keeps the module
+        # defaults -- the wall, court width, and floor did not move.
+        self.ball_in_play_min_x = float(ball_in_play_min_x)
         # Minimum pre-impact downward speed for a ball-floor contact
         # onset to count as a bounce. A settling/rolling ball chatters
         # through many near-zero-energy contact onsets that must not
@@ -665,7 +687,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             self._paddle_x_origin + float(self._control_high[0]),
         )
         target_world_range = (
-            physical_world_range
+            _DEFAULT_PADDLE_X_TARGET_RANGE
             if resolved_target_range is None
             else resolved_target_range
         )
@@ -1674,7 +1696,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         obs = self._get_obs(ball_pos, paddle_head_pos)
         ball_x, ball_y, ball_z = ball_pos[0], ball_pos[1], ball_pos[2]
         ball_out_of_bounds = (
-            ball_x < _BALL_MIN_X
+            ball_x < self.ball_in_play_min_x
             or ball_x > _BALL_MAX_X
             or ball_y < _BALL_MIN_Y
             or ball_y > _BALL_MAX_Y

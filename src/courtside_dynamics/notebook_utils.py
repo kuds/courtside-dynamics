@@ -820,6 +820,9 @@ _LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS: dict[str, Any] = {
     "court_style": "diagnostic",
     # Added in 0.14.0: 0.0 reproduces the flat +1 wall reward exactly.
     "wall_reward_increment": 0.0,
+    # Added in 0.25.0: -6.0 reproduces the historical in-play volume
+    # exactly (the true-baseline era widens it per-task).
+    "ball_in_play_min_x": -6.0,
 }
 
 

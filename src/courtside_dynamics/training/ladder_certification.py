@@ -104,7 +104,14 @@ _TERMINATION_KEYS = (
 )
 
 _SPEC_KEYS = frozenset(
-    {"episodes", "seed_start", "enforce", "oracle_probes", "max_episode_steps"}
+    {
+        "episodes",
+        "seed_start",
+        "enforce",
+        "oracle_probes",
+        "max_episode_steps",
+        "feasibility_ge2_floor",
+    }
 )
 
 _POLICIES = ("parked", "crude", "oracle")
@@ -579,6 +586,7 @@ def certify_ladder(
     gate_metric_key: str | None = None,
     gate_threshold: float | None = None,
     max_episode_steps: int | None = None,
+    feasibility_ge2_floor: float = FEASIBILITY_GE2_FLOOR,
 ) -> dict[str, Any]:
     """Certify a gated ladder against the envs the run will actually train.
 
@@ -586,11 +594,25 @@ def certify_ladder(
     blocking findings and ``report["warnings"]`` the advisory ones.
     Never raises on a failed criterion — enforcement is the caller's
     policy decision.
+
+    ``feasibility_ge2_floor`` is the oracle >=2-return rate below which
+    a stage is declared infeasible. The 0.90 default expresses "a
+    scripted reference completes two exchanges almost every serve";
+    a recipe whose task is deliberately harder than any scripted
+    reference can play (e.g. the 0.25.0 true-baseline era, oracle band
+    67%) may declare a lower floor calibrated against a pre-measured
+    reference band — the resolved floor is recorded in the report so a
+    lowered bar is always visible in the run's artifacts.
     """
     if episodes < 1:
         raise ValueError("certification episodes must be a positive integer")
     if seed_start < 0:
         raise ValueError("certification seed_start must be non-negative")
+    if not (0.0 < feasibility_ge2_floor <= 1.0):
+        raise ValueError(
+            "feasibility_ge2_floor must be in (0, 1], got "
+            f"{feasibility_ge2_floor}"
+        )
     if len(oracle_probes) != len(stages):
         raise ValueError(
             f"oracle_probes must cover every stage: got {len(oracle_probes)} "
@@ -652,10 +674,10 @@ def certify_ladder(
                 f"{crude['reward_mean']:.2f} / oracle "
                 f"{oracle['reward_mean']:.2f})"
             )
-        if oracle["ge2_rate"] < FEASIBILITY_GE2_FLOOR:
+        if oracle["ge2_rate"] < feasibility_ge2_floor:
             stage_failures.append(
                 f"stage {index}: oracle >=2-return rate "
-                f"{oracle['ge2_rate']:.0%} < {FEASIBILITY_GE2_FLOOR:.0%}"
+                f"{oracle['ge2_rate']:.0%} < {feasibility_ge2_floor:.0%}"
             )
         if crude["ge2_rate"] <= 0.0:
             stage_failures.append(
@@ -746,6 +768,7 @@ def certify_ladder(
             "timestamp_utc": datetime.now(UTC).isoformat(timespec="seconds"),
             "episodes_per_cell": episodes,
             "seed_start": seed_start,
+            "feasibility_ge2_floor": feasibility_ge2_floor,
         },
         "gate": {"metric_key": gate_metric_key, "threshold": gate_threshold},
         "stages": stage_reports,
@@ -890,6 +913,9 @@ def run_startup_certification(cfg: Any, output_path: str) -> dict[str, Any]:
             gate_metric_key=gate.get("metric_key"),
             gate_threshold=gate.get("threshold"),
             max_episode_steps=spec.get("max_episode_steps"),
+            feasibility_ge2_floor=float(
+                spec.get("feasibility_ge2_floor", FEASIBILITY_GE2_FLOOR)
+            ),
         )
 
     _write_report(output_path, report)
