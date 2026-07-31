@@ -190,11 +190,22 @@ learnable at this budget" otherwise. For scale: equivalent local arms
 on the goal task reached ~1.9, and this task is harder (oracle band
 1.98 vs ~2.7) with ~25% longer cadence.
 
-**Result: [PENDING — the pilot is in flight; this section is filled
-with the measured read-out before this document ships. Do not merge
-with this placeholder in place.]** In-flight health at 125k steps:
-all three arms contact the serve and complete returns (eval bounce
-means 0.57–1.00 and rising) — no arm is in the zero-contact basin.
+**Result: LEARNABLE — 2 of 3 seeds pass both clauses; the third
+misses the bounce clause by 0.013.** Last-5-eval bounce means 1.387
+(seed 401), 1.313 (402), 0.987 (403); end-state contact rates 100%
+on all three (50-episode deterministic replay of each final model on
+burned seeds 1000–1049, corroborating replay bounce means
+1.40/1.30/0.94). Seeds 401/402 genuinely rally: final ≥2 rates
+31–33%, best evals 1.57/1.50, first ≥1.0 window by 150k/100k steps.
+Seed 403 is the one-and-done basin's deep variant — bounce pinned at
+~1.0 for 300k steps, ≥2 rate ~0, 3.4 paddle touches/episode: it
+blocks the deep receive every time and never completes a second
+exchange — consistent with the goal era's measured ~25% capture rate
+at this horizon (S3 sweep). All three arms play deep (mean legal-hit
+x −5.4 to −6.1; nobody camps the fence front). At local budget the
+passing arms sit at ~70% of the oracle band's mean (1.35/1.98) —
+the same ratio the goal-era local arms held against their band
+(~1.9/~2.7) before the GPU runs beat that band outright.
 
 ## 8. Pre-registered next run (GPU, Colab)
 
