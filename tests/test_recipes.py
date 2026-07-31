@@ -1104,3 +1104,79 @@ def test_goal_rally_config_builds_and_gate_stage_applies(tmp_path):
     finally:
         env.close()
         eval_env.close()
+
+
+def test_true_baseline_extends_the_goal_recipe_to_the_itf_baseline():
+    """The 0.25.0 era: the goal-rally structure, opted into the extended
+    workspace, with probe-derived serve energy and in-play bound. The
+    era is a delta on the proven recipe, not a new design."""
+    recipe = RECIPES["WallBallTrueBaseline"]
+    goal = RECIPES["WallBallGoalRally"]
+
+    task = {
+        "paddle_x_fence": (-8.2, -2.6),
+        "paddle_start_x": -7.9,
+        "paddle_home_x": -5.4,
+        "serve_start_x": 1.0,
+        "serve_speed": 11.0,
+    }
+    for key, value in task.items():
+        assert recipe.env_kwargs[key] == value, key
+    # The extended action mapping is explicit opt-in (the bare-env
+    # default stays frozen at (-4.7, 0.3)), pivoted on the fence
+    # midpoint per the 0.22.0 usable-share rule.
+    assert recipe.env_kwargs["paddle_x_target_range"] == (-8.2, 0.3)
+    assert recipe.env_kwargs["paddle_home_x"] == pytest.approx(
+        sum(recipe.env_kwargs["paddle_x_fence"]) / 2
+    )
+    # Deep serves/rebounds legitimately hop past -9; only this era
+    # widens the in-play bound, and only via the per-task kwarg.
+    assert recipe.env_kwargs["ball_in_play_min_x"] == -10.0
+    assert "ball_in_play_min_x" not in goal.env_kwargs
+
+    # Same single-stage informational gate contract as the goal era:
+    # nothing to promote to, no advance package.
+    gate = recipe.extra_cfg["performance_gate"]
+    assert [dict(s) for s in gate["stages"]] == [task]
+    assert gate["threshold"] == 3.0
+    assert gate["promotion_rule"] == "window_mean"
+    assert "clear_replay_buffer_on_advance" not in gate
+    assert "advance_update_pause_steps" not in gate
+    assert "reset_entropy_on_advance" not in gate
+    assert recipe.eval_env_overrides == task
+
+    # Certification: calibrated lead-charge 2.6 probe from the reserved
+    # 30000+ block, feasibility floor 0.50 per the measured oracle band
+    # (67% two-return rate on a task no scripted reference dominates).
+    cert = recipe.extra_cfg["ladder_certification"]
+    assert list(cert["oracle_probes"]) == [{"lead_charge": 2.6}]
+    assert cert["seed_start"] >= 30_000
+    assert cert["episodes"] == 30
+    assert cert["feasibility_ge2_floor"] == 0.50
+    # The stock floor is untouched for every other recipe.
+    assert "feasibility_ge2_floor" not in goal.extra_cfg[
+        "ladder_certification"
+    ]
+
+    assert recipe.extra_cfg["final_info_eval"] is False
+    assert recipe.extra_cfg["final_eval_episodes"] is None
+    assert recipe.extra_cfg["early_stop_patience"] == 60
+    assert recipe.extra_cfg["model_kwargs"] == {"gamma": 0.995}
+
+
+def test_true_baseline_config_builds_and_gate_stage_applies(tmp_path):
+    cfg = build_train_config("WallBallTrueBaseline", log_dir=str(tmp_path))
+    env = cfg.env_fn()
+    eval_env = cfg.eval_env_fn()
+    try:
+        for e in (env, eval_env):
+            assert e.unwrapped.paddle_x_fence == (-8.2, -2.6)
+            assert e.unwrapped.paddle_start_x == -7.9
+            assert e.unwrapped.paddle_home_x == -5.4
+            assert e.unwrapped.serve_start_x == 1.0
+            assert e.unwrapped.serve_speed == 11.0
+            assert e.unwrapped.paddle_x_target_range == (-8.2, 0.3)
+            assert e.unwrapped.ball_in_play_min_x == -10.0
+    finally:
+        env.close()
+        eval_env.close()

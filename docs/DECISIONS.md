@@ -89,6 +89,54 @@ Source: [`wall_ball_baseline_review.md`](wall_ball_baseline_review.md) (runs fro
 package). See also `CHANGELOG.md` 0.9.0 → 0.13.0. Depth-campaign entries
 below distill [`wall_ball_rally_diagnosis_20260728_review.md`](wall_ball_rally_diagnosis_20260728_review.md).
 
+### The true-baseline era task is probe-frozen and certified before any run — *implemented (0.25.0)*
+The extension to the ITF baseline (workspace (-8.2, 0.3), fence
+(-8.2, -2.6), start -7.9, home -5.4, serve 11.0, in-play bound -10.0 —
+`WallBallTrueBaseline`) was measured before it was built, and three of
+the measurements overturned the "obvious" design:
+- **Serve speed is the depth lever, and it has a floor.** Landing
+  scales ~0.5 m per +1 m/s from origin 1.0; below 10 m/s the ball dies
+  short of a paddle at -7.9, so the goal-era serve (7.0) is
+  unreturnable there because it *never arrives*. At 11.0 the
+  post-bounce leg crosses -7.9 at 0.54 m and 9.4 m/s in 100% of
+  episodes — reachable, and (from -7.9) impossible to intercept
+  pre-bounce, so the deep receive is forced without any fence trick.
+- **A baseline-only fence is geometrically unsustainable.** Rebounds
+  off legal deep returns land at mean x = -1.0 and are *never* deeper
+  than -6.1 — the rally always comes forward. The era fence adds the
+  deep band to the goal fence instead of relocating play.
+- **The in-play bound is task geometry, not a constant.** The
+  historical OOB edge (-6.0) sits 1.9 m in front of the new paddle
+  start: the serve terminates out-of-bounds before the receiver can
+  touch it (measured 60/60 dead serves). `ball_in_play_min_x` is now a
+  per-task kwarg (default -6.0, bit-for-bit historical), -10.0 here.
+- The certification feasibility floor became a spec knob
+  (`feasibility_ge2_floor`, default 0.90): no scripted reference
+  dominates an 11.8 m court (oracle band mean 1.98, >=2 rate 67%,
+  cadence 156 steps), so the recipe declares 0.50 = band minus two
+  30-episode sampling sd, stamped into every report. Held-out
+  certification on fresh seeds 4000-4099 passes every blocking
+  criterion (oracle 61%, CI [0.51, 0.70]). Probe-design lesson en
+  route: score the serve by *crossing-state kinematics* at the receive
+  depth, not by arrival at a parked face — the post-bounce hop
+  (apex ~0.6 m) passes under a parked face (bottom 0.95 m) and reads
+  as a false 0% reachable.
+  Details: [`design_wall_ball_true_baseline.md`](design_wall_ball_true_baseline.md).
+
+### The default action mapping must never be derived from the XML — *implemented (0.25.0)*
+Widening `paddle_slide_x`/ctrlrange for the workspace extension
+silently rescaled the **default** x action mapping (action -1 went
+from world -4.7 to -8.2) for any env built without an explicit
+`paddle_x_target_range` — caught by the bit-for-bit default-config
+guard test, which exists for exactly this. The default mapping is now
+a frozen module constant (`_DEFAULT_PADDLE_X_TARGET_RANGE =
+(-4.7, 0.3)`); the extended workspace is opt-in per recipe. Verified
+by hashing full obs/reward/termination streams across HEAD vs the
+extended tree on four legacy configs — all bitwise identical. The
+general rule: physical capability (XML ranges) and action semantics
+(the mapping) are separate contracts; growing the first must never
+move the second implicitly.
+
 ### The campaign goal is met: a sustained rally from the workspace baseline — *result (run 20260728_225217); replicated 2026-07-30*
 **Replication update (runs 20260729_140112 / 20260730_005134):** 2 of 3
 seeds pass, and the third success beats the first everywhere (best window

@@ -5,6 +5,56 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## 0.25.0
+
+The true-baseline extension
+(`docs/design_wall_ball_true_baseline.md`). The paddle workspace, serve
+energy, and in-play volume extend to the ITF baseline — **verified
+bit-for-bit neutral for every pre-existing configuration**, so all
+saved policies, `VecNormalize` statistics, and learning curves remain
+comparable with 0.22.0–0.24.0. Every geometry and mechanics number was
+measured by scripted probes before the change landed, and the frozen
+era task passed a held-out certification (seeds 4000–4099) before its
+first run.
+
+- **`wall_ball.xml` workspace extension.** `paddle_slide_x` joint
+  range and `paddle_target_x` ctrlrange widen (−3, 2) → (−6.5, 2),
+  taking the physical world-space workspace from (−4.7, 0.3) to
+  (−8.2, 0.3). The bold baseline marker moves to −8.2 (just behind
+  the ITF baseline the tennis style draws at −7.985) and gains −5..−8
+  ticks (render-only sites). **The default x action mapping does NOT
+  follow**: it is now frozen at the historical workspace via
+  `_DEFAULT_PADDLE_X_TARGET_RANGE = (-4.7, 0.3)` — previously it was
+  derived from the XML ctrlrange, and widening the XML would have
+  silently rescaled action semantics for every config without an
+  explicit `paddle_x_target_range`. The extended workspace is strictly
+  opt-in. Verified by hashing full obs/reward/termination streams,
+  HEAD vs extended tree, on four legacy configs: all identical.
+- **`WallBallEnv` gains `ball_in_play_min_x`** (default −6.0 =
+  bit-for-bit historical behavior; validated finite and negative).
+  The deep out-of-bounds edge is task geometry: an 11 m/s serve dies
+  OOB at −6.0 before a paddle at −7.9 can touch it (measured 60/60).
+  Only the new recipe widens it (−10.0).
+- **`ladder_certification` gains `feasibility_ge2_floor`** (spec knob,
+  default the stock 0.90, validated in (0, 1]; the resolved floor is
+  recorded in every report's provenance). No scripted reference
+  dominates the 11.8 m task (calibrated oracle band: 1.98 mean, 67%
+  ≥2 rate), so the true-baseline recipe declares 0.50 — the band
+  minus two 30-episode sampling standard deviations. Every other
+  recipe keeps the stock floor.
+- **`WallBallTrueBaseline` recipe + packaged starter**
+  (`run_configs/wall_ball_true_baseline.toml`): the goal-rally
+  structure (direct task, single-stage informational gate at the
+  campaign's 3.0 mark, no curriculum) at the era task — fence
+  (−8.2, −2.6), start −7.9, home −5.4 (fence midpoint), serve 11.0
+  from origin 1.0, mapping (−8.2, 0.3), in-play bound −10.0,
+  patience 60 (the replication's record seed banked its best at 3.2M
+  under patience 60). Certification probe `lead_charge` 2.6 (gap
+  sweep winner), 30 episodes, seeds 30000+. Held-out certification
+  passes all blocking criteria: oracle 1.81 mean / 61% ≥2 (Wilson CI
+  [0.51, 0.70]), crude 9% > 0, monotone references, clean landing
+  probe. `WallBallGoalRally` and every other recipe are untouched.
+
 ## 0.24.0
 
 The campaign diagnosis release

@@ -2137,6 +2137,8 @@ class TestWallBallRallyStyleConfiguration:
     @pytest.mark.parametrize(
         "kwargs,parameter",
         [
+            # -5.0 sits inside the extended physical workspace but
+            # outside the frozen default mapping range (-4.7, 0.3).
             ({"paddle_home_x": -5.0}, "paddle_home_x"),
             (
                 {
@@ -2145,7 +2147,9 @@ class TestWallBallRallyStyleConfiguration:
                 },
                 "paddle_home_x",
             ),
-            ({"paddle_x_target_range": (-5.0, -2.0)}, "paddle_x_target_range"),
+            # -9.0 is beyond even the extended physical workspace
+            # (-8.2), so this exercises the physical-bound check.
+            ({"paddle_x_target_range": (-9.0, -2.0)}, "paddle_x_target_range"),
             ({"paddle_x_target_range": (-2.0, 0.5)}, "paddle_x_target_range"),
             ({"paddle_x_target_range": (-2.0, -3.0)}, "paddle_x_target_range"),
             ({"paddle_x_target_range": (-2.0,)}, "paddle_x_target_range"),
@@ -3431,7 +3435,7 @@ class TestWallBallCourtMarkers:
             assert env.model.site_size[strip_id][0] == pytest.approx(0.8)
             # Static geography stays authored in the XML.
             assert self._site_x(env, "court_line_wall_base") == 3.9
-            assert self._site_x(env, "court_line_baseline") == -4.7
+            assert self._site_x(env, "court_line_baseline") == -8.2
         finally:
             env.close()
 
@@ -3489,6 +3493,59 @@ class TestWallBallCourtMarkers:
                 np.testing.assert_array_equal(a, b)
         finally:
             env.close()
+
+
+class TestWallBallInPlayBound:
+    """ball_in_play_min_x widens the deep OOB edge per-task (0.25.0)."""
+
+    def test_default_keeps_the_historical_bound(self):
+        env = WallBallEnv()
+        try:
+            assert env.ball_in_play_min_x == -6.0
+        finally:
+            env.close()
+
+    @pytest.mark.parametrize("value", [0.0, 0.5, np.nan, np.inf, -np.inf])
+    def test_bound_must_be_finite_and_negative(self, value):
+        with pytest.raises(ValueError, match="ball_in_play_min_x"):
+            WallBallEnv(ball_in_play_min_x=value)
+
+    def _drive_ball_deep(self, env):
+        """Send the ball flat and fast past the paddle toward deep x;
+        returns (ball_x_at_termination, terminated_within_budget)."""
+        env.reset(seed=0)
+        qpos = env.data.qpos.copy()
+        qvel = env.data.qvel.copy()
+        adr = int(env.model.joint("ball_x").qposadr[0])
+        dof = int(env.model.joint("ball_x").dofadr[0])
+        # Fast and flat: reaches x=-10 from -5.0 in ~0.2 s, well before
+        # the drop from z=0.5 can produce a second floor bounce.
+        qpos[adr : adr + 3] = [-5.0, 2.0, 0.5]
+        qvel[dof : dof + 3] = [-25.0, 0.0, 0.0]
+        env.set_state(qpos, qvel)
+        for _ in range(40):
+            obs, _, terminated, truncated, info = env.step(
+                np.zeros(env.action_space.shape, dtype=np.float32)
+            )
+            if terminated or truncated:
+                return float(obs[0]), bool(info["term_oob"])
+        raise AssertionError("ball never left play")
+
+    def test_widened_bound_extends_play_and_still_terminates(self):
+        default_env = WallBallEnv(out_of_bounds_penalty=0.0)
+        wide_env = WallBallEnv(
+            out_of_bounds_penalty=0.0, ball_in_play_min_x=-9.5
+        )
+        try:
+            x_default, oob_default = self._drive_ball_deep(default_env)
+            x_wide, oob_wide = self._drive_ball_deep(wide_env)
+            assert oob_default and x_default <= -6.0
+            # The widened env keeps the same ball alive well past the
+            # historical edge, then terminates at its own bound.
+            assert oob_wide and x_wide <= -9.5
+        finally:
+            default_env.close()
+            wide_env.close()
 
 
 class TestWallBallCourtStyle:

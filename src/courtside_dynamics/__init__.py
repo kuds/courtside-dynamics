@@ -117,7 +117,7 @@ from gymnasium.envs.registration import register
 # pre-bounce, post-bounce, opening-volley, and post-bounce-return
 # behavior. Policy spaces and rewards are unchanged, but curriculum
 # trajectories start a new comparison era.
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 
 # Register environments with gymnasium so they can be created via
 # ``gymnasium.make("CourtsideDynamics/BallBalance")`` etc.

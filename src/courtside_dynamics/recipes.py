@@ -1235,6 +1235,116 @@ RECIPES["WallBallGoalRally"] = _make_goal_rally(
 )
 
 
+def _make_true_baseline(base: Recipe) -> Recipe:
+    """Build the 0.25.0 true-baseline era recipe from the goal-rally one.
+
+    The goal-rally era proved deep receive-and-recover play at the
+    workspace edge (-4.7): 2 of 3 seeds sustained >= 3.3 completed
+    returns, all contacting at -3.4..-3.7 with the fixed-pitch face
+    (replication review 2026-07-30). This era extends the same direct
+    task to the ITF baseline: the paddle workspace reaches -8.2 (just
+    behind the baseline the tennis style draws at -7.985), the paddle
+    starts at -7.9, and an 11 m/s serve forces a genuinely deep first
+    contact.
+
+    Every geometry and mechanics number here was verified by scripted
+    probes before this recipe existed (design doc
+    design_wall_ball_true_baseline.md):
+
+    - Serve: from origin 1.0 at speed 11.0, the serve's post-bounce leg
+      crosses x=-7.9 in 100% of probe episodes at 0.54 m height and
+      9.4 m/s -- reachable by the face (its centre spans 0.05-2.0 m
+      when addressing) and forced deep: oracle first contact averages
+      -7.0 (p90 -6.99). Speeds below 10 die before the baseline; the
+      pre-extension serve (7.0) is unreturnable from -7.9 only because
+      it never arrives, not because of paddle mechanics.
+    - Fence (-8.2, -2.6): a baseline-only fence is unsustainable by
+      geometry -- measured rebounds off deep returns land at mean
+      x=-1.0, so the rally necessarily travels forward. The fence keeps
+      the goal-era back edge -2.6, adding the deep band rather than
+      relocating play; the deep *receive* is forced by the serve, and
+      forward recovery stays legal. paddle_home_x -5.4 is the fence
+      midpoint (the 0.22.0 usable-share rule).
+    - In-play bound: legal deep serves and rebounds legitimately hop
+      past x=-9 behind the -8.2 workspace, so this recipe widens the
+      env's deep out-of-bounds edge to -10.0 (a per-task kwarg added in
+      0.25.0; every earlier recipe keeps the historical -6.0).
+    - Reference band (calibrated lead-charge 2.6 oracle, seeds 0-59):
+      mean 1.98 completed returns, >=2 rate 67%, >=3 rate 22%, exchange
+      cadence ~156 steps (vs ~125 at the goal task). The certification
+      feasibility floor is set to 0.50 -- the measured band minus two
+      30-episode sampling standard deviations -- because the stock 0.90
+      floor encodes "near-certain two exchanges", which no scripted
+      reference achieves on an 11.8 m court. The resolved floor is
+      stamped into the certification report.
+
+    The single-stage gate again never promotes; the 3.0 threshold stays
+    the campaign-wide informational mark (NOT a promotion bar -- there
+    is nothing to promote to). Era-specific success criteria are
+    pre-registered in the design doc, calibrated against the reference
+    band above rather than the goal-era's.
+    """
+    env_kwargs = deepcopy(base.env_kwargs)
+    extra_cfg = deepcopy(base.extra_cfg)
+    task = {
+        "paddle_x_fence": (-8.2, -2.6),
+        "paddle_start_x": -7.9,
+        "paddle_home_x": -5.4,
+        "serve_start_x": 1.0,
+        "serve_speed": 11.0,
+    }
+    env_kwargs.update(task)
+    # The action mapping opts into the extended physical workspace and
+    # stays pinned there for the whole run (mapping never moves; the
+    # fence confines position). The bare-env default mapping remains
+    # frozen at (-4.7, 0.3), so this range must be explicit.
+    env_kwargs["paddle_x_target_range"] = (-8.2, 0.3)
+    env_kwargs["ball_in_play_min_x"] = -10.0
+    stages = (dict(task),)
+    extra_cfg["performance_gate"] = {
+        "metric_key": "bounce_count_ep_mean",
+        "threshold": 3.0,
+        "sustain_evals": 3,
+        "promotion_rule": "window_mean",
+        "stages": stages,
+    }
+    extra_cfg["ladder_certification"] = {
+        "episodes": 30,
+        "seed_start": 30_000,
+        "oracle_probes": ({"lead_charge": 2.6},),
+        "feasibility_ge2_floor": 0.50,
+    }
+    extra_cfg["final_info_eval"] = False
+    extra_cfg["final_eval_episodes"] = None
+    # Patience 60, not the goal era's 20: the replication's record seed
+    # set its best window at 3.2M steps under patience 60 after long
+    # flat stretches, and this era's exchange cadence is ~25% longer
+    # still, so improvement arrives in fewer evals per step.
+    extra_cfg["early_stop_patience"] = 60
+    eval_env_overrides = dict(task)
+    return replace(
+        base,
+        env_kwargs=env_kwargs,
+        eval_env_overrides=eval_env_overrides,
+        name_prefix="wall_ball_true_baseline",
+        extra_cfg=extra_cfg,
+        description=(
+            "Extend the proven direct-task recipe to the ITF baseline: "
+            "workspace and fence reach -8.2, paddle starts at -7.9, and "
+            "an 11 m/s serve forces first contact near -7.0 before the "
+            "rally recovers forward (rebounds land near -1.0). Probe-"
+            "verified geometry throughout; certification floor 0.50 per "
+            "the measured oracle band (67% two-return rate) on a task "
+            "harder than any scripted reference plays."
+        ),
+    )
+
+
+RECIPES["WallBallTrueBaseline"] = _make_true_baseline(
+    RECIPES["WallBallGoalRally"]
+)
+
+
 # Quick-test overrides applied on top of the recipe defaults so a notebook
 # can verify the whole pipeline (callbacks, video, plotting) end-to-end in
 # a couple of minutes instead of hours.
