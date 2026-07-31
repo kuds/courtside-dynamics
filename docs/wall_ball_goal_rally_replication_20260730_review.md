@@ -86,11 +86,21 @@ n=3 it reads as a low-frequency instability rather than a recipe
 defect — but 2/3 is the honest reliability number until more seeds
 exist.
 
-A local 8-seed CPU sweep (500k steps, reduced update ratio,
-pre-registered as S3 in the diagnosis appendix conventions) is
-running to estimate how common the *basin-capture* phase is early in
-training; it cannot see the late collapse (which occurred at 2.5M
-under the 1:1 ratio) and is scoped accordingly.
+**The pre-registered local 8-seed sweep (S3) has since completed**
+(500k steps/seed, 1:2 update ratio — local-only numbers, never
+comparable to GPU runs). Classification from the last 5 evaluations:
+**2 of 8 captured** (seeds 302, 305: flat at ~1.0 with ≥2-rate below
+10% — the seed-1 signature), 5 escaping (means 1.47-1.81, ≥2-rates
+43-68%), 1 climbing (2.03). Every seed spends its first ~200-300k
+steps in or near the basin; most exit unaided. The pre-registered
+lever-A/B trigger (≥3 of 8 captured) did **not** fire, so no
+`wall_reward_increment`/stability experiment is authorized by this
+data — the recorded conclusion is that the basin is a *delay* with a
+~25% chance (at this horizon and ratio) of still holding a seed at
+500k, while the catastrophic late collapse remains a separate,
+so-far-once-observed phenomenon this sweep cannot reach. Seed 305
+was trending upward at its final evaluations (last eval 1.20), so
+the 2/8 figure is conservative.
 
 ## 3. What the replication changes
 
