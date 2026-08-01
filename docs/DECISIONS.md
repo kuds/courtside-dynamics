@@ -89,6 +89,29 @@ Source: [`wall_ball_baseline_review.md`](wall_ball_baseline_review.md) (runs fro
 package). See also `CHANGELOG.md` 0.9.0 → 0.13.0. Depth-campaign entries
 below distill [`wall_ball_rally_diagnosis_20260728_review.md`](wall_ball_rally_diagnosis_20260728_review.md).
 
+### The true-baseline era opens on the first run — and the episode cap becomes the measured ceiling — *result (run 20260731_132322)*
+The first `WallBallTrueBaseline` GPU run passed every pre-registered
+primary criterion: best window 2.856 (bar 2.0), uncapped audit **3.02
+mean completed returns** (100% of episodes ≥1, 98% ≥2, max 9), and a
+measured mean first contact of **x = −6.49** (bar ≤ −6.0; 98% of
+episodes deeper) — 2.8 m deeper than the goal era, with zero opening
+volleys. Band-relative it is the project's strongest policy (1.53×
+its oracle band vs 1.31–1.39× for the goal-era seeds). The champion
+banked at 2.1M; early stop at 3.6M with the final policy off-peak
+(1.98) — best-model banking again saved the result. The stretch (a
+≥3.0 window) was NOT met, and three independent observations pin the
+cause on the 750-step episode cap, not the policy: eval max rallies
+sat at *exactly* 5 for ~120 consecutive evals (750 ÷ 156-step cadence
+= 4.8 exchanges), timeout terminations tracked the ≥5-rate
+one-for-one on strong evals, and 14% of uncapped audit episodes
+outran the cap (longest 1,487 steps, 9 returns). Lesson for future
+eras: when cadence changes, the episode cap silently rescales the
+headline metric's ceiling — re-derive `episode_len` from cadence
+(target ~6 exchanges) whenever geometry moves. `episode_len` 750 →
+~1,100 is the pre-registered 0.26.0 candidate, to land between runs;
+the seed-1 replication runs first, unchanged. Details:
+[`wall_ball_true_baseline_20260731_132322_review.md`](wall_ball_true_baseline_20260731_132322_review.md).
+
 ### The true-baseline era task is probe-frozen and certified before any run — *implemented (0.25.0)*
 The extension to the ITF baseline (workspace (-8.2, 0.3), fence
 (-8.2, -2.6), start -7.9, home -5.4, serve 11.0, in-play bound -10.0 —
