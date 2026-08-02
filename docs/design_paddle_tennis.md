@@ -132,6 +132,14 @@ B side) and grown only as phases earn it.
 > `PaddleTennis` recipe, and the frozen task definition recorded in
 > [`paddle_tennis_env_20260802.md`](paddle_tennis_env_20260802.md).
 >
+> **Status update, 2026-08-02 (first learned evidence + first-run
+> pre-registration):** the local SAC pilot of the frozen recipe
+> passes the scripted band by ~190k steps and reaches crossings 6.40
+> without plateau
+> ([`paddle_tennis_pilot_and_first_run_20260802.md`](paddle_tennis_pilot_and_first_run_20260802.md)),
+> which also pre-registers the first GPU run (seed 1, stock TOML,
+> primary ≥ 6.0, held-out gate on block 4100–4199).
+>
 > **Status update, 2026-08-02 (P5 instrument):** the transfer shim
 > shipped and its scripted calibration ran
 > ([`paddle_tennis_p5_transfer_20260802.md`](paddle_tennis_p5_transfer_20260802.md)):
