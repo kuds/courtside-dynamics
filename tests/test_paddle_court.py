@@ -301,3 +301,61 @@ class TestP4MirroringIdentity:
             assert ball[0] == pytest.approx(-ball_m[0], abs=1e-6)
             assert ball[1] == pytest.approx(-ball_m[1], abs=1e-6)
             assert ball[2] == pytest.approx(ball_m[2], abs=1e-6)
+
+
+class TestP3Harness:
+    """The serve-rules probe harness (tools/paddle_tennis_probes.py)."""
+
+    def test_quick_sweep_produces_paired_alternation_cells(self):
+        import sys
+
+        sys.path.insert(0, "tools")
+        try:
+            from paddle_tennis_probes import format_report, sweep_serve_rules
+        finally:
+            sys.path.pop(0)
+
+        cells = sweep_serve_rules(quick=True)
+        # One config, both serving sides, sharing a seed block.
+        assert len(cells) == 2
+        sides = {cell.serving_side for cell in cells}
+        assert sides == {CourtSide.A, CourtSide.B}
+        # P4's mirror identity, observed end to end: the alternation
+        # twin must reproduce the primary cell's statistics.
+        primary, twin = cells
+        assert primary.legal_serve_rate == twin.legal_serve_rate
+        assert primary.mean_crossings == twin.mean_crossings
+        report = format_report(cells)
+        assert "| depth | speed | elev | side |" in report
+
+    def test_lead_charge_controller_yields_parks_and_charges(self):
+        import sys
+
+        sys.path.insert(0, "tools")
+        try:
+            from paddle_tennis_probes import lead_charge_local_action
+        finally:
+            sys.path.pop(0)
+
+        # Outgoing ball: neutral yield (exactly zero action).
+        outgoing = lead_charge_local_action(
+            np.array([-3.0, 0.5, 1.5]),
+            np.array([6.0, 0.0, 2.0]),
+            np.array([-1.7, 0.0, 1.2]),
+        )
+        assert np.array_equal(outgoing, np.zeros(3))
+        # Incoming far ball: hold the home column, track y.
+        waiting = lead_charge_local_action(
+            np.array([3.0, 1.0, 2.0]),
+            np.array([-8.0, 0.0, 1.0]),
+            np.array([-1.7, 0.0, 1.2]),
+        )
+        assert waiting[0] == pytest.approx(0.0)
+        assert waiting[1] > 0.0
+        # Incoming ball inside the commit gap: swing toward the net.
+        charging = lead_charge_local_action(
+            np.array([-1.2, 0.0, 1.4]),
+            np.array([-7.0, 0.0, -1.0]),
+            np.array([-1.7, 0.0, 1.2]),
+        )
+        assert charging[0] > 0.0
