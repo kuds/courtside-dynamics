@@ -42,6 +42,14 @@ curves all remain comparable with 0.25.0.
   seeds 3100–3199: mean crossings 3.22 against the pre-registered
   2.6 floor, zero unsafe terminations;
   `docs/paddle_tennis_env_20260802.md`).
+- **P5 transfer instrument.** `tools/paddle_tennis_p5_transfer.py`
+  renders the paddle court as the wall-ball world (23-value
+  observation, true-baseline action mapping) so the wall-ball
+  champions can play `PaddleTennisEnv` unmodified. Scripted
+  calibration (`docs/paddle_tennis_p5_transfer_20260802.md`): the
+  `scaled` identification plus a serve-yield overlay is the only
+  viable configuration; champion measurements and the pre-registered
+  pool-admission rule run on Colab.
 - **BallBalance nonfinite guard.** BallBalance now carries the same
   guard as every sibling env: actions are shape/finiteness-validated,
   the physics state is checked before stepping, and a nonfinite

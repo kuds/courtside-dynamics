@@ -131,6 +131,16 @@ B side) and grown only as phases earn it.
 > `CourtsideDynamics/PaddleTennis` (`envs/paddle_tennis.py`), the
 > `PaddleTennis` recipe, and the frozen task definition recorded in
 > [`paddle_tennis_env_20260802.md`](paddle_tennis_env_20260802.md).
+>
+> **Status update, 2026-08-02 (P5 instrument):** the transfer shim
+> shipped and its scripted calibration ran
+> ([`paddle_tennis_p5_transfer_20260802.md`](paddle_tennis_p5_transfer_20260802.md)):
+> the `scaled + yield` configuration is the only viable one (rigid
+> translation is broken by command-range geometry; the serve-yield
+> overlay is mandatory — wall-ball players never learned to stand
+> down during their own serve). The champion measurements themselves
+> run on Colab against a pre-registered pool-admission rule; until
+> they do, P5's opponent-pool decision stays open.
 
 All scripted, no learning, calibration seed blocks; numbers frozen
 into the task definition the way T1–T7 froze the true-baseline era:
