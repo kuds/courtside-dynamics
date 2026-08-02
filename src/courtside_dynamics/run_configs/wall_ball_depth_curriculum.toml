@@ -1,12 +1,16 @@
-# WallBallDepthCurriculum — earn your way back to the baseline: open
-# scoring (volleys legal, no early-touch fine) with a performance-gated
-# depth ladder that walks the paddle fence from volley range to the
-# workspace baseline as eval bounce_count_ep_mean sustains >= 3.0
-# (SAC with SB3-default auto entropy, 6M steps). The sliding-window
-# ladder removes the common front-court refuge exposed by run
-# 20260722_124613 and passed the 200-episode-per-cell scripted sweep on
-# 2026-07-23. This remains the fixed-origin control; use
-# WallBallDepthCurriculumAligned for the experimental treatment.
+# WallBallDepthCurriculum — HISTORICAL starter: the sliding-fence
+# ladder was retired by the 0.24.0 campaign diagnosis (three ladder
+# generations stalled below the flat 3.0 bar; the pre-registered A/B
+# showed direct goal-task training wins). The aligned treatment arm
+# closed on the 2026-07-28 Phase D no-go. For new work use
+# wall_ball_goal_rally.toml or wall_ball_true_baseline.toml.
+# Kept for reproducing the ladder era: open scoring (volleys legal, no
+# early-touch fine) with a performance-gated depth ladder that walks
+# the paddle fence from volley range to the workspace baseline as eval
+# bounce_count_ep_mean sustains >= 3.0 (SAC with SB3-default auto
+# entropy, 6M steps). The sliding-window ladder removes the common
+# front-court refuge exposed by run 20260722_124613 and passed the
+# 200-episode-per-cell scripted sweep on 2026-07-23.
 # Usage: build_train_config("WallBallDepthCurriculum", log_dir=..., config_file=<this file>)
 # Everything here matches the recipe today; edit a value to diverge.
 # Do NOT set stage-0 geometry in [env] — the gate owns it. Final
@@ -62,6 +66,8 @@ serve_vy_max = 2.0
 # serve_start_x = 1.0
 # serve_speed = 7.0
 # [train.ladder_certification]
-# episodes = 10
+# episodes = 30
 # seed_start = 30_000
-# oracle_probes = [{ run_up = 1.1 }, { charge_gap = 1.7 }]
+# The recipe's recalibrated probes for rungs 0 and 4 (one per listed
+# stage, matching the example stages above):
+# oracle_probes = [{ lead_charge = 3.0 }, { lead_charge = 3.0 }]

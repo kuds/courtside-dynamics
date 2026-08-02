@@ -672,12 +672,13 @@ RECIPES: dict[str, Recipe] = {
             },
         },
         description=(
-            "HISTORICAL (superseded by WallBallDepthCurriculum): the "
-            "cold-start problem this recipe targets was solved by "
-            "auto-entropy before it ever trained (lessons_learned.md "
-            "lesson 5), and its reward package bundles the since-"
-            "falsified weak-return retry. Kept for the record; use "
-            "WallBallDepthCurriculum for gated-curriculum training."
+            "HISTORICAL: the cold-start problem this recipe targets was "
+            "solved by auto-entropy before it ever trained "
+            "(lessons_learned.md lesson 5), and its reward package "
+            "bundles the since-falsified weak-return retry. Its "
+            "original successor, WallBallDepthCurriculum, was itself "
+            "retired by the 0.24.0 diagnosis. Kept for the record; for "
+            "new work use WallBallGoalRally or WallBallTrueBaseline."
         ),
     ),
     "WallBallDepthCurriculum": Recipe(
@@ -986,11 +987,16 @@ RECIPES: dict[str, Recipe] = {
             },
         },
         description=(
-            "Earn your way back to the baseline: open-scoring wall "
-            "rallies with a performance-gated depth ladder that walks "
-            "the paddle fence from volley range to the workspace "
-            "baseline each time a sustained three-exchange rally is "
-            "demonstrated."
+            "HISTORICAL (the sliding-fence ladder was retired by the "
+            "0.24.0 campaign diagnosis: three ladder generations "
+            "stalled below the flat 3.0 bar, and the pre-registered "
+            "paired A/B showed direct goal-task training beats every "
+            "curriculum variant -- use WallBallGoalRally or "
+            "WallBallTrueBaseline). Kept for reproducing the ladder "
+            "era: open-scoring wall rallies with a performance-gated "
+            "depth ladder that walks the paddle fence from volley "
+            "range to the workspace baseline each time a sustained "
+            "three-exchange rally is demonstrated."
         ),
     ),
     "HumanoidTennisStage0Intercept": Recipe(
@@ -1136,12 +1142,14 @@ def _make_aligned_depth_curriculum(base: Recipe) -> Recipe:
         name_prefix="wall_ball_depth_curriculum_aligned",
         extra_cfg=extra_cfg,
         description=(
-            "EXPERIMENTAL treatment for WallBallDepthCurriculum: the same "
-            "open-scoring depth ladder with stage-specific serve origins "
-            "that align first-bounce position to paddle start. Preserve "
-            "WallBallDepthCurriculum as the fixed-origin control; this arm "
-            "requires scripted certification and a paired stage-1 A/B "
-            "before any full 6M pilot."
+            "HISTORICAL (closed permanently on 2026-07-28: Phase D's "
+            "pre-registered no-go fired -- alignment falsified at both "
+            "test sites; see plan_wall_ball_aligned_deep_stages.md). "
+            "The serve-origin treatment arm of the retired depth "
+            "ladder: the same open-scoring ladder with stage-specific "
+            "serve origins aligning first-bounce position to paddle "
+            "start, with WallBallDepthCurriculum as the fixed-origin "
+            "control. Kept for reproducing the A/B."
         ),
     )
 

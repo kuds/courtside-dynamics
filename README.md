@@ -106,9 +106,16 @@ available recipe keys are:
 - `WallBall`
 - `WallBallVolley`
 - `WallBallBaseline`
-- `WallBallBootstrap` (historical — superseded by `WallBallDepthCurriculum`)
-- `WallBallDepthCurriculum`
-- `WallBallDepthCurriculumAligned` (experimental serve-origin treatment)
+- `WallBallBootstrap` (historical — its reward package was falsified;
+  see the recipe description)
+- `WallBallDepthCurriculum` (historical — the sliding-fence ladder was
+  retired by the 0.24.0 campaign diagnosis)
+- `WallBallDepthCurriculumAligned` (historical — the aligned arm closed
+  on the 2026-07-28 Phase D no-go)
+- `WallBallGoalRally` (0.24.0 — direct goal-task training at the
+  workspace baseline; the campaign-goal recipe)
+- `WallBallTrueBaseline` (0.25.0 — the current era task on the extended
+  ITF-baseline workspace)
 - `HumanoidTennisStage0Intercept`
 - `HumanoidTennisStage1AnchoredReturn`
 - `HumanoidTennisStage2RandomizedReturn`

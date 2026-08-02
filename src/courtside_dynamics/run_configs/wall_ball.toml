@@ -1,8 +1,8 @@
-# WallBall (classic) — serve, bounce, paddle hit, wall on the full
+# WallBall (classic) — the full serve/bounce/paddle-hit/wall rally task
 # (SAC, 1.5M steps). NOTE: for new WallBall work prefer
-# wall_ball_bootstrap.toml (curriculum + bootstrap rewards) or
-# wall_ball_baseline.toml (calibrated geometry); this classic preset
-# predates that calibration and is kept for comparison runs.
+# wall_ball_goal_rally.toml or wall_ball_true_baseline.toml (the
+# current-era direct-task recipes); this classic preset predates the
+# geometry calibration and is kept for comparison runs.
 # Usage: build_train_config("WallBall", log_dir=..., config_file=<this file>)
 
 [train]

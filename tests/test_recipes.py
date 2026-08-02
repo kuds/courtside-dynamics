@@ -981,7 +981,9 @@ def test_aligned_depth_curriculum_is_an_isolated_paired_treatment():
 
     assert baseline.name_prefix == "wall_ball_depth_curriculum"
     assert aligned.name_prefix == "wall_ball_depth_curriculum_aligned"
-    assert "EXPERIMENTAL" in aligned.description
+    # Status marker updated 2026-08-02: the arm closed on the Phase D
+    # no-go (was EXPERIMENTAL while the A/B was pending).
+    assert "HISTORICAL" in aligned.description
     assert baseline.env_kwargs == aligned.env_kwargs
     assert baseline.env_kwargs is not aligned.env_kwargs
     assert baseline.extra_cfg is not aligned.extra_cfg
@@ -1032,10 +1034,45 @@ def test_aligned_depth_curriculum_is_an_isolated_paired_treatment():
 def test_wall_ball_bootstrap_is_marked_historical():
     """Bootstrap is kept for the record but must say so: its cold-start
     problem was solved by auto-entropy before it ever ran, and its
-    reward package bundles the falsified weak-return retry."""
+    reward package bundles the falsified weak-return retry. The
+    supersession pointer must name the CURRENT era recipes -- its
+    original successor was itself retired."""
     description = RECIPES["WallBallBootstrap"].description
     assert "HISTORICAL" in description
-    assert "WallBallDepthCurriculum" in description
+    assert "WallBallGoalRally" in description
+    assert "WallBallTrueBaseline" in description
+
+
+def test_retired_depth_curriculum_recipes_are_marked_historical():
+    """The 0.24.0 diagnosis retired the sliding-fence ladder and the
+    Phase D no-go closed the aligned arm permanently, yet both
+    descriptions read as live presets for months. Recipe descriptions
+    are the browsing surface for the next campaign's template hunt --
+    a retired preset must say so and point at the current era."""
+    ladder = RECIPES["WallBallDepthCurriculum"].description
+    assert "HISTORICAL" in ladder
+    assert "WallBallGoalRally" in ladder
+
+    aligned = RECIPES["WallBallDepthCurriculumAligned"].description
+    assert "HISTORICAL" in aligned
+    assert "closed" in aligned.lower()
+
+
+def test_readme_lists_every_recipe():
+    """The README's recipe list went two releases stale: 0.24.0's
+    WallBallGoalRally and 0.25.0's WallBallTrueBaseline -- the recipes
+    behind the campaign's headline results -- appeared nowhere in it.
+    Pin the list so the next recipe cannot drift the same way."""
+    from pathlib import Path
+
+    readme_path = Path(__file__).resolve().parents[1] / "README.md"
+    if not readme_path.is_file():
+        pytest.skip("README.md not present (installed-package test run)")
+    readme = readme_path.read_text(encoding="utf-8")
+    missing = [name for name in RECIPES if f"`{name}`" not in readme]
+    assert not missing, (
+        f"recipes missing from README.md's recipe list: {missing}"
+    )
 
 
 def test_goal_rally_trains_the_goal_task_directly():
