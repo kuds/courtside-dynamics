@@ -17,6 +17,7 @@ from enum import IntEnum, StrEnum
 from types import MappingProxyType
 from typing import Final
 
+from courtside_dynamics.envs._serve import validate_feed_geometry
 from courtside_dynamics.envs._tennis_physics import (
     COURT_HALF_LENGTH,
     COURT_HALF_WIDTH,
@@ -140,27 +141,18 @@ class CurriculumLaunchConfig:
         )
         if not all(math.isfinite(float(value)) for value in values):
             raise ValueError("launch configuration must contain only finite values")
-        if not 0.0 < self.start_distance_from_net <= COURT_HALF_LENGTH:
-            raise ValueError("launch must start on one physical court half")
-        if any(value < 0.0 for value in self.position_noise):
-            raise ValueError("position noise must be non-negative")
-        if self.start_distance_from_net <= self.position_noise[0]:
-            raise ValueError("position noise must keep the launch off the net plane")
-        if (
-            self.start_distance_from_net + self.position_noise[0]
-            > COURT_HALF_LENGTH
-        ):
-            raise ValueError("position noise must keep the launch inside the baseline")
-        if (
-            abs(self.lateral_position) + self.position_noise[1]
-            > COURT_HALF_WIDTH
-        ):
-            raise ValueError("launch position must remain inside the singles court")
-        if not (
-            1.1 <= self.height - self.position_noise[2]
-            and self.height + self.position_noise[2] <= 1.5
-        ):
-            raise ValueError("launch height/noise must remain within 1.1–1.5 m")
+        # The geometric feed contract is shared with TennisServeConfig
+        # (envs._serve): one implementation for on-half, in-width,
+        # off-net-plane, inside-baseline, and the 1.1-1.5 m height
+        # window.
+        validate_feed_geometry(
+            kind="launch",
+            start_distance_from_net=self.start_distance_from_net,
+            lateral_position=self.lateral_position,
+            height=self.height,
+            position_noise=self.position_noise,
+            require_inside_baseline=True,
+        )
         if self.speed <= 0.0 or not 0.0 <= self.speed_noise < self.speed:
             raise ValueError("launch speed must remain positive across its noise")
         if self.elevation_noise_degrees < 0.0:
