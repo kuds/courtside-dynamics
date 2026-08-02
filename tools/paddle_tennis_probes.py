@@ -40,6 +40,7 @@ import numpy as np
 
 from courtside_dynamics.envs._base import invert_piecewise_target
 from courtside_dynamics.envs._paddle_court import (
+    NET_HEIGHT,
     PADDLE_COURT,
     PaddleCourtScene,
     PaddleCourtServe,
@@ -69,9 +70,10 @@ _X_LOW, _X_HIGH = -6.4, -0.1
 _Y_SPAN = 3.0
 _Z_BASE, _Z_LOW, _Z_HIGH = 1.2, -0.9, 2.0
 
-#: Default control-frame budget per point: 6 s of simulated time at
-#: the 100 Hz control rate, comfortably past the longest probe rallies.
-MAX_CONTROL_STEPS = 600
+#: Default control-frame budget per point: 12 s of simulated time at
+#: the 100 Hz control rate. A point that exhausts it shows up honestly
+#: in the taxonomy as termination NONE (truncated), never silently.
+MAX_CONTROL_STEPS = 1200
 
 
 def lead_charge_local_action(
@@ -157,12 +159,12 @@ def play_point(
 ) -> PointResult:
     """Serve and play one point.
 
-    ``active_receiver=False`` parks both paddles in the neutral yield
-    posture for the whole point: the policy-independent serve-landing
-    measurement, exactly the parked-paddle probe the wall-ball
-    certification uses. The same seed draws the same serve in both
-    modes, so a cell can pair each landing verdict with its active
-    outcome.
+    ``active_receiver=False`` corner-parks both paddles outside the
+    flight envelope for the whole point: the policy-independent
+    serve-landing measurement (the wall-ball certification's
+    parked-paddle instrument, moved clear of play). The same seed draws
+    the same serve in both modes, so a cell can pair each landing
+    verdict with its active outcome.
     """
     serving_side = CourtSide(serving_side)
     receiver = serving_side.opponent
@@ -172,12 +174,18 @@ def play_point(
     serve_first_bounce_in = False
     first_bounce_depth: float | None = None
     receiver_returned = False
-    yield_action = np.array([0.0, 0.0, 0.0])
+    # The parked pass measures ballistics, so the paddles must be OUT
+    # of the flight envelope entirely: a home-column park is itself an
+    # obstacle (the receiver's parked face passively volleys in-flight
+    # serves, censoring perfectly legal draws -- the first committed
+    # sweep's whole 'fault budget' at the primary band was this
+    # artifact). Corner-park: deep, full-left, floor.
+    corner_park = np.array([-1.0, -1.0, -1.0])
     steps_played = max_control_steps
     for step in range(max_control_steps):
         for side in (CourtSide.A, CourtSide.B):
             if not active_receiver:
-                scene.apply_action(side, yield_action)
+                scene.apply_action(side, corner_park)
                 continue
             ball = scene.ball_position()
             ball_vel = scene.ball_velocity()
@@ -222,9 +230,16 @@ def play_point(
         serve_first_bounce_in=serve_first_bounce_in,
         first_bounce_depth=first_bounce_depth,
         receiver_returned=receiver_returned,
-        # The P1 metric counts RETURN crossings (median 0 = unreturned
-        # serve), not the feed itself.
-        crossings=int(after.shot_crossing_count),
+        # The P1 metric counts cumulative RETURN crossings (median 0 =
+        # unreturned serve): total net crossings minus the feed's own.
+        # (snapshot.shot_crossing_count is an end-state latch -- was the
+        # FINAL shot across at termination -- not a cumulative count;
+        # the first committed sweep misused it and under-reported the
+        # rally tail.)
+        crossings=max(
+            0,
+            int(after.net_crossing_count) - int(after.feed_crossed_net),
+        ),
         termination=after.termination_reason,
         control_steps=steps_played,
     )
@@ -374,7 +389,7 @@ def format_report(cells: list[CellResult]) -> str:
     lines = [
         "P3 serve-rules sweep "
         f"(court half-length {PADDLE_COURT.half_length}, "
-        f"net 0.914, frozen lead_charge receiver)",
+        f"net {NET_HEIGHT}, frozen lead_charge receiver)",
         "",
         "| depth | speed | elev | side | legal | land-depth "
         "| returnable | crossings | top terminations |",

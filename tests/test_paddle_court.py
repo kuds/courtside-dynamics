@@ -96,6 +96,24 @@ class TestPaddleInterfaceDrift:
         finally:
             env.close()
 
+    def test_moving_home_keeps_the_mapping_in_step_with_wall_ball(self):
+        """The 0.22.0 silent-no-op class: a home move must re-derive the
+        mapping pivot in both implementations identically."""
+        env = WallBallEnv()
+        try:
+            interface = _wall_ball_interface(env)
+            env.unwrapped.paddle_home_x = -2.8
+            interface.set_home_x(-2.8)
+            rng = np.random.default_rng(3)
+            for _ in range(25):
+                action = rng.uniform(-1.0, 1.0, size=3).astype(np.float32)
+                assert np.array_equal(
+                    env.unwrapped._action_to_controls(action),
+                    interface.targets(action),
+                )
+        finally:
+            env.close()
+
     def test_validation_matches_wall_ball_contracts(self):
         env = WallBallEnv()
         try:
@@ -108,6 +126,10 @@ class TestPaddleInterfaceDrift:
                 interface.set_fence((-1.0, -2.0))
             with pytest.raises(ValueError, match="finite and positive"):
                 interface.set_damping(0.0)
+            with pytest.raises(ValueError, match="two values"):
+                interface.set_x_target_range((-4.0, -2.0, 0.0))
+            with pytest.raises(ValueError, match="strictly increasing"):
+                interface.set_x_target_range((-2.0, -2.0))
             # Damping override writes and None restores the XML value.
             dofadr = int(env.unwrapped.model.joint("paddle_slide_x").dofadr[0])
             xml_value = float(env.unwrapped.model.dof_damping[dofadr])
@@ -128,6 +150,13 @@ def _mirror_scene_state(
     target take the mirror of side A's in the source (their bases and
     ranges are exact mirrors, so the mirrored world pose is
     ``qpos' = -qpos`` for x/y and identical z), and vice versa.
+
+    Exact only in the identity-ball-quaternion domain every caller
+    stays in: the ball quaternion is copied unmirrored and the
+    angular-velocity x/y negation is body-local, which is the correct
+    world-frame spin mirror only while body and world frames coincide.
+    Mid-rally states (tilted quaternions) need a proper quaternion
+    mirror before this helper's contract extends to them.
     """
     src, dst = source.data, target.data
     model = source.model
@@ -184,6 +213,17 @@ def _randomize_scene(scene: PaddleCourtScene, rng: np.random.Generator):
 
 
 class TestPaddleCourtPrototype:
+    def test_observation_names_pin_the_candidate_layout(self):
+        from courtside_dynamics.envs._paddle_court import (
+            PADDLE_COURT_OBSERVATION_NAMES,
+        )
+
+        scene = PaddleCourtScene()
+        for side in (CourtSide.A, CourtSide.B):
+            assert scene.observation(side).shape == (
+                len(PADDLE_COURT_OBSERVATION_NAMES),
+            )
+
     def test_scene_wires_the_shared_machinery_without_robots(self):
         scene = PaddleCourtScene()
         assert not scene.index.humanoid_a_geoms
@@ -307,13 +347,10 @@ class TestP3Harness:
     """The serve-rules probe harness (tools/paddle_tennis_probes.py)."""
 
     def test_quick_sweep_produces_paired_alternation_cells(self):
-        import sys
-
-        sys.path.insert(0, "tools")
-        try:
-            from paddle_tennis_probes import format_report, sweep_serve_rules
-        finally:
-            sys.path.pop(0)
+        from tools.paddle_tennis_probes import (
+            format_report,
+            sweep_serve_rules,
+        )
 
         cells = sweep_serve_rules(quick=True)
         # One config, both serving sides, sharing a seed block.
@@ -329,13 +366,7 @@ class TestP3Harness:
         assert "| depth | speed | elev | side |" in report
 
     def test_lead_charge_controller_yields_parks_and_charges(self):
-        import sys
-
-        sys.path.insert(0, "tools")
-        try:
-            from paddle_tennis_probes import lead_charge_local_action
-        finally:
-            sys.path.pop(0)
+        from tools.paddle_tennis_probes import lead_charge_local_action
 
         # Outgoing ball: neutral yield (exactly zero action).
         outgoing = lead_charge_local_action(

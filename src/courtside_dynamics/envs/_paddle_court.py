@@ -50,8 +50,6 @@ NET_HEIGHT = 0.914
 #: world-space x workspaces bounded to each half (see paddle_court.xml).
 PADDLE_HOME_X = 1.7  # magnitude; side A at -1.7, side B mirrored
 
-_GRAVITY = 9.81
-
 #: Candidate side-relative observation layout, to be frozen by the env
 #: definition after the probes (design doc §3 extends the wall-ball
 #: template with the opponent paddle's state). All vectors are in the
@@ -79,10 +77,13 @@ class PaddleCourtServe:
     the small court.
     """
 
+    # Defaults are the P3-measured primary band (probe doc
+    # paddle_tennis_probes_p3_p4_20260802.md): origin 3.25 m behind the
+    # net at 9 m/s, 21 degrees. Do not drift them without a probe.
     start_distance_from_net: float = 3.25
     lateral_position: float = 0.0
     height: float = 1.3
-    speed: float = 11.0
+    speed: float = 9.0
     elevation_degrees: float = 21.0
     lateral_degrees: float = 0.0
     position_noise: tuple[float, float, float] = (0.25, 0.5, 0.05)

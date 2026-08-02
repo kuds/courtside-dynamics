@@ -57,8 +57,10 @@
         <!-- Side A paddle: the wall-ball paddle verbatim (gains, mass,
              face size, +/-10 deg pitch toward its net direction),
              workspace bounded to its own half. Slide ranges are chosen
-             so the world-space x workspace is (-6.4, -0.1): the full
-             frozen half-court minus 0.1 m of net clearance.
+             so the world-space x workspace is (-6.4, -0.1): 0.1 m
+             inside each end of the frozen 6.5 m half-court (net
+             clearance at the front; the deepest 0.1 m at the baseline
+             is deliberately out of reach).
              y range +/-3 is the wall-ball value VERBATIM (probes ran
              it); corners beyond |y|=3 are unreachable by design until
              a probe says otherwise. PROVISIONAL pending the

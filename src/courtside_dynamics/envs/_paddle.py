@@ -83,9 +83,15 @@ class PaddleInterface:
         self._dofadrs = tuple(
             int(model.joint(name).dofadr[0]) for name in self.joint_names
         )
-        # XML-compiled damping captured before any override, so a later
-        # ``set_damping(None)`` restores it exactly (the WallBall
-        # contract).
+        # Baseline damping captured AT CONSTRUCTION, so a later
+        # ``set_damping(None)`` restores it exactly. On a fresh model
+        # this is the XML value (the WallBall contract); on a model
+        # whose damping was already overridden before construction --
+        # e.g. an interface built over a live WallBallEnv with
+        # ``paddle_joint_damping`` set -- the baseline is that
+        # override, and the delegation must construct the interface
+        # BEFORE applying the env's own override to preserve
+        # restore-to-XML semantics.
         self._xml_damping = tuple(
             float(model.dof_damping[dofadr]) for dofadr in self._dofadrs
         )
@@ -170,7 +176,27 @@ class PaddleInterface:
 
         Also re-validates home containment, mirroring the WallBall
         constructor's ordering.
+
+        DIVERGENCE NOTE for the planned WallBall delegation:
+        ``WallBallEnv`` resolves ``paddle_x_target_range=None`` to its
+        FROZEN historical default (-4.7, 0.3), deliberately NOT the
+        physical workspace (the 0.25.0 extension widened the XML while
+        freezing action semantics). Here ``None`` means the full
+        physical range -- the right contract for a fresh court. The
+        delegation must therefore resolve WallBall's default
+        explicitly before constructing this interface; forwarding
+        ``None`` through would silently rescale every recipe's x
+        mapping.
         """
+        if value is not None:
+            if len(value) != 2:
+                raise ValueError(
+                    "paddle_x_target_range must contain two values"
+                )
+            if not (float(value[0]) < float(value[1])):
+                raise ValueError(
+                    "paddle_x_target_range must be strictly increasing"
+                )
         tolerance = 1e-9
         physical = self._physical_world_range
         target = (

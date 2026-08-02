@@ -110,8 +110,17 @@ B side) and grown only as phases earn it.
 > net 0.914 m; the scripted rally band is 2.0 crossings/point
 > (max 10, ≥4 in 33%); and loft control with the fixed-pitch face is
 > identified as the era's core difficulty, with strike height as a
-> measured control channel. P3–P5 remain open and still gate any env
-> code.
+> measured control channel.
+>
+> **Status update, 2026-08-02 (later): P3–P4 have also run** — on the
+> committed probe substrate (`envs/_paddle_court.py`, an unregistered,
+> reward-free prototype scene; results in
+> [`paddle_tennis_probes_p3_p4_20260802.md`](paddle_tennis_probes_p3_p4_20260802.md)).
+> The serve band and the mirroring identity are measured; **P5
+> (champion transfer) remains open** and gates the opponent-pool
+> decision. The env *definition* (registered id, rewards, recipe)
+> remains unshipped pending the freeze + certification this doctrine
+> requires.
 
 All scripted, no learning, calibration seed blocks; numbers frozen
 into the task definition the way T1–T7 froze the true-baseline era:
