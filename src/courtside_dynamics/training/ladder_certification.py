@@ -63,6 +63,7 @@ from typing import Any
 import numpy as np
 
 import courtside_dynamics
+from courtside_dynamics.envs._base import invert_piecewise_target
 
 _GRAVITY = 9.81
 
@@ -103,7 +104,11 @@ _TERMINATION_KEYS = (
     "term_nonfinite",
 )
 
-_SPEC_KEYS = frozenset(
+# Public (no underscore) because run_config.py derives its TOML
+# allowlist from these two constants and a drift test pins the pair --
+# lead_charge (0.24.0) and feasibility_ge2_floor (0.25.0) both shipped
+# here while the loader's hand-copied lists still rejected them.
+SPEC_KEYS = frozenset(
     {
         "episodes",
         "seed_start",
@@ -114,6 +119,10 @@ _SPEC_KEYS = frozenset(
     }
 )
 
+#: The mutually exclusive oracle-probe kinds an ``oracle_probes`` table
+#: may set, exactly one per gate stage.
+PROBE_KINDS = ("run_up", "charge_gap", "lead_charge")
+
 _POLICIES = ("parked", "crude", "oracle")
 
 
@@ -122,13 +131,13 @@ def _map_action_x(
 ) -> float:
     """Invert the env's asymmetric x action map for a world-x target.
 
-    A stage may legally pivot ``paddle_home_x`` onto a mapping endpoint
-    (the env accepts it and degrades gracefully), which zeroes one
-    half-span; the floor keeps the inversion finite so certification
-    measures such a ladder instead of crashing on it.
+    Delegates to the shared inverse of the env's own piecewise mapping
+    (``envs._base.invert_piecewise_target``), whose span floor keeps
+    the inversion finite when a stage legally pivots ``paddle_home_x``
+    onto a mapping endpoint -- certification measures such a ladder
+    instead of crashing on it.
     """
-    span = (mapping[1] - home) if target_x >= home else (home - mapping[0])
-    return float(np.clip((target_x - home) / max(span, 1e-9), -1.0, 1.0))
+    return invert_piecewise_target(target_x, mapping[0], home, mapping[1])
 
 
 def _parked_action(
@@ -619,7 +628,7 @@ def certify_ladder(
             f"probes for {len(stages)} stages"
         )
     for index, probe in enumerate(oracle_probes):
-        if set(probe) not in ({"run_up"}, {"charge_gap"}, {"lead_charge"}):
+        if len(probe) != 1 or next(iter(probe)) not in PROBE_KINDS:
             raise ValueError(
                 f"oracle_probes[{index}] must set exactly one of 'run_up', "
                 f"'charge_gap', or 'lead_charge', got {dict(probe)!r}"
@@ -865,11 +874,11 @@ def run_startup_certification(cfg: Any, output_path: str) -> dict[str, Any]:
     ``enforce`` (default: advisory).
     """
     spec = dict(cfg.ladder_certification)
-    unknown = sorted(set(spec) - _SPEC_KEYS)
+    unknown = sorted(set(spec) - SPEC_KEYS)
     if unknown:
         raise ValueError(
             f"unknown ladder_certification key(s) {unknown}; expected a "
-            f"subset of {sorted(_SPEC_KEYS)}"
+            f"subset of {sorted(SPEC_KEYS)}"
         )
     gate = cfg.performance_gate
     if not gate or not gate.get("stages"):

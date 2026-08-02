@@ -14,6 +14,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from courtside_dynamics.callbacks.performance_gate import (
     PerformanceGatedEnvStagesCallback,
 )
+from tests._helpers import FakeGetEnvModel as _FakeModel
 
 
 class _StagedEnv(gym.Env):
@@ -82,14 +83,6 @@ class _FakeReplayBuffer:
 
     def reset(self) -> None:
         self.resets += 1
-
-
-class _FakeModel:
-    def __init__(self, training_env) -> None:
-        self._training_env = training_env
-
-    def get_env(self):
-        return self._training_env
 
 
 class _FakeOffPolicyModel(_FakeModel):
@@ -507,6 +500,13 @@ def test_gate_archives_stage_bests_and_writes_history(tmp_path):
         assert history["threshold"] == 1.3
         assert history["stage_count"] == len(STAGES)
         assert history["final_stage_index"] == 1
+        # The header records every optional gate lever at its resolved
+        # value -- a budget-stopped run's history must show the budget
+        # that stopped it (the 0.24.0 staleness pair was absent from
+        # this payload for two releases).
+        assert history["stage_eval_budget"] is None
+        assert history["stage_eval_budget_action"] == "stop"
+        assert history["entropy_reset_value"] is None
         rows = history["stages"]
         assert [row["stage_index"] for row in rows] == [0, 1]
         assert rows[0]["promoted"] is True
@@ -1063,6 +1063,10 @@ def test_stage_eval_budget_stop_ends_training_and_records_history(tmp_path):
         info_eval.finish_eval({"bounce_count_ep_mean": 0.5})
         assert gate._on_step() is False  # budget exhausted -> stop
         assert gate.stage_index == 0
+        # The stop records its reason for the run summary (the console
+        # print vanishes with the Colab runtime).
+        assert gate.stop_reason is not None
+        assert gate.stop_reason.startswith("stage_eval_budget")
 
         gate._on_training_end()
         rows = json.loads(

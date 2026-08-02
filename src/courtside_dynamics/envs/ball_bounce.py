@@ -26,7 +26,11 @@ import numpy as np
 from gymnasium import utils
 
 from courtside_dynamics.assets import asset_path
-from courtside_dynamics.envs._base import CourtsideMujocoEnv
+from courtside_dynamics.envs._base import (
+    CourtsideMujocoEnv,
+    finite_nonnegative,
+    finite_positive,
+)
 
 
 class BallBounceEnv(CourtsideMujocoEnv, utils.EzPickle):
@@ -107,21 +111,12 @@ class BallBounceEnv(CourtsideMujocoEnv, utils.EzPickle):
             )
 
         self._reset_contact_tracker()
-        self._last_finite_observation = np.zeros(30, dtype=np.float64)
 
-    @staticmethod
-    def _finite_nonnegative(name: str, value: float) -> float:
-        result = float(value)
-        if not math.isfinite(result) or result < 0.0:
-            raise ValueError(f"{name} must be finite and non-negative")
-        return result
-
-    @staticmethod
-    def _finite_positive(name: str, value: float) -> float:
-        result = float(value)
-        if not math.isfinite(result) or result <= 0.0:
-            raise ValueError(f"{name} must be finite and positive")
-        return result
+    # Thin aliases over the shared validators so the many call sites in
+    # __init__ keep reading as before; the implementation lives in
+    # ``_base`` where every env (and the next one) can use it.
+    _finite_nonnegative = staticmethod(finite_nonnegative)
+    _finite_positive = staticmethod(finite_positive)
 
     def _reset_contact_tracker(self) -> None:
         self.bounce_count = 0
@@ -436,13 +431,12 @@ class BallBounceEnv(CourtsideMujocoEnv, utils.EzPickle):
             or not self._physics_state_is_finite()
             or not bool(np.isfinite(raw_observation).all())
         )
-        if state_nonfinite:
-            obs = self._last_finite_observation.copy()
-            ball_paddle_height = 0.0
-        else:
-            obs = raw_observation
-            self._last_finite_observation = obs.copy()
-            ball_paddle_height = self._ball_paddle_height()
+        obs = self._record_or_echo_observation(
+            raw_observation, state_nonfinite
+        )
+        ball_paddle_height = (
+            0.0 if state_nonfinite else self._ball_paddle_height()
+        )
         ball_below_paddle = (
             not state_nonfinite and ball_paddle_height < -self.drop_margin
         )
@@ -526,7 +520,7 @@ class BallBounceEnv(CourtsideMujocoEnv, utils.EzPickle):
 
         self.set_state(qpos, qvel)
         observation = self._get_obs()
-        self._last_finite_observation = observation.copy()
+        self._remember_finite_observation(observation)
         return observation
 
     observation_names: tuple[str, ...] = (

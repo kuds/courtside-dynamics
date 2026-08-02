@@ -353,6 +353,12 @@ class InfoDictEvalCallback(BaseCallback):
         self._recent_signal: deque[
             tuple[tuple[float, ...], tuple[float, ...]]
         ] = deque(maxlen=max(1, self.degenerate_stop_evals))
+        #: Why this callback ended training, when it did: a
+        #: machine-readable line train() persists into
+        #: ``stage_summary.txt``. The console print scrolls away with
+        #: the Colab runtime; the artifact must be able to say why an
+        #: unattended run stopped.
+        self.stop_reason: str | None = None
 
     def _on_step(self) -> bool:
         if self.eval_freq <= 0 or self.n_calls % self.eval_freq != 0:
@@ -369,8 +375,24 @@ class InfoDictEvalCallback(BaseCallback):
                 )
 
                 sync_envs_normalization(self.training_env, self.eval_env)
-            except (AttributeError, AssertionError):
-                pass
+            except (AttributeError, AssertionError) as error:
+                # A wrapper-stack mismatch here means every evaluation
+                # -- and therefore best-model selection -- scores the
+                # policy on stale normalization stats while looking
+                # healthy. train() always wraps both sides identically,
+                # so this fires only on hand-wired stacks (tests use
+                # unwrapped stubs); keep evaluating, but say so loudly
+                # every time rather than silently mismeasuring. The
+                # message must not touch self.training_env: that
+                # property can be the very thing that raised, and
+                # re-evaluating it here would escalate the warning into
+                # an uncaught crash.
+                print(
+                    f"[InfoDictEvalCallback] could not sync "
+                    f"normalization stats from the training env to the "
+                    f"eval env: {error!r}; evaluations are using the "
+                    f"eval env's existing statistics"
+                )
 
         self._last_episode_samples = None
         metrics = self._collect_metrics()
@@ -814,6 +836,11 @@ class InfoDictEvalCallback(BaseCallback):
             self._evals_since_best += 1
 
         if self._degenerate_signal(score, metrics):
+            self.stop_reason = (
+                f"degenerate_signal: {'/'.join(self.best_metric_keys)} "
+                f"flat and {'/'.join(self.degenerate_guard_keys)} zero "
+                f"for the last {self.degenerate_stop_evals} evaluations"
+            )
             print(
                 f"Stopping training: {'/'.join(self.best_metric_keys)} "
                 f"flat and {'/'.join(self.degenerate_guard_keys)} zero "
@@ -827,6 +854,11 @@ class InfoDictEvalCallback(BaseCallback):
             and self.early_stop_patience > 0
             and self._evals_since_best >= self.early_stop_patience
         ):
+            self.stop_reason = (
+                f"early_stop_patience: no improvement in "
+                f"{'/'.join(self.best_metric_keys)} for the last "
+                f"{self._evals_since_best} evaluations"
+            )
             # A run-ending decision is always worth one line, verbose
             # or not (mirrors SB3's StopTrainingOnNoModelImprovement).
             print(

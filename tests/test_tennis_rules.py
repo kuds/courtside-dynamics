@@ -558,3 +558,132 @@ def test_scripted_two_player_oracle_completes_two_controlled_returns():
     assert transition.after.legal_hit_count == 2
     assert transition.after.bounce_count == 1
     assert not transition.after.terminated
+
+
+def test_same_substep_feed_crossing_and_landing_is_legal():
+    """A feed that crosses the net and lands in the same substep group
+    must be a legal first bounce, not FAILED_TO_CROSS: the fault
+    pre-scan projects the crossing before classifying the landing.
+    Hand-traced correct before this test existed; pinned because a
+    regression here silently turns every fast feed into a fault."""
+    machine = RallyStateMachine(serving_side=CourtSide.A)
+    transition, after = _advance(
+        machine, [_crossing(CourtSide.B, 0), _court(CourtSide.B, 0)]
+    )
+    assert not after.terminated
+    assert after.phase is RallyPhase.AWAITING_RETURN
+    assert transition.first_bounces == (CourtSide.B,)
+    assert after.bounce_count == 1
+
+
+def test_same_substep_return_crossing_and_landing_confirms_the_return():
+    """The RETURN_IN_FLIGHT sibling: a return that crosses and lands in
+    one substep group confirms the pending return."""
+    machine = RallyStateMachine(serving_side=CourtSide.A)
+    _launch_return(machine, CourtSide.A)  # B's racket hit is pending
+    transition, after = _advance(
+        machine, [_crossing(CourtSide.A, 2), _court(CourtSide.A, 2)]
+    )
+    assert not after.terminated
+    assert transition.confirmed_returns == (CourtSide.B,)
+    assert after.rally_count == 1
+    assert after.valid_return_count_b == 1
+
+
+def test_explicit_from_side_a_is_honored_on_the_feed():
+    """``CourtSide.A`` is falsy (IntEnum value 0). The reducer used to
+    evaluate ``event.from_side or self._ball_side``, silently discarding
+    an explicit ``from_side=CourtSide.A``; on every consistent trace the
+    fallback coincided with the discarded value, so no end-to-end trace
+    can distinguish the two forms today. The source resolution therefore
+    lives in one unit-testable helper, ``_event_source``, and this test
+    pins its semantics directly: reverting the helper to the ``or`` form
+    fails here even though every rally trace stays green."""
+    machine = RallyStateMachine(serving_side=CourtSide.A)
+
+    # The unit pin: explicit A wins over a DIFFERENT fallback.
+    explicit_a = _crossing(CourtSide.B, 0)
+    assert explicit_a.from_side is CourtSide.A  # explicit, and falsy
+    assert (
+        machine._event_source(explicit_a, ball_side=CourtSide.B)
+        is CourtSide.A
+    ), "explicit from_side=CourtSide.A was discarded for the fallback"
+    # And the fallback engages only when from_side is truly absent.
+    implicit = RallyEvent(
+        kind=RallyEventKind.NET_CROSSING_TO_B, substep=0
+    )
+    assert (
+        machine._event_source(implicit, ball_side=CourtSide.B)
+        is CourtSide.B
+    )
+
+    # The end-to-end sanity check: the explicit-A feed still advances.
+    transition = machine.advance([explicit_a])
+    assert transition.after.phase is RallyPhase.AWAITING_RETURN
+    assert not transition.after.terminated
+    assert transition.after.feed_crossed_net is True
+
+
+def test_court_geometry_parameterizes_the_out_of_bounds_rule():
+    """The reducer measures OUT_OF_BOUNDS against its ``CourtGeometry``:
+    the same landing is in on the regulation court and out on a
+    PaddleTennis-scale court (probe-frozen half-length 6.5), so the
+    small-court era reuses the rules stack instead of forking it."""
+    from courtside_dynamics.envs._tennis_physics import CourtGeometry
+
+    landing = (7.0, 0.0, 0.0)  # inside regulation (11.885), outside 6.5
+
+    regulation = RallyStateMachine(serving_side=CourtSide.A)
+    _, after = _advance(
+        regulation,
+        [
+            _crossing(CourtSide.B, 0),
+            _court(CourtSide.B, 1, position=landing),
+        ],
+    )
+    assert not after.terminated
+    assert after.bounce_count == 1
+
+    small = RallyStateMachine(
+        serving_side=CourtSide.A,
+        court=CourtGeometry(half_length=6.5, half_width=4.115),
+    )
+    _, after = _advance(
+        small,
+        [
+            _crossing(CourtSide.B, 0),
+            _court(CourtSide.B, 1, position=landing),
+        ],
+    )
+    assert after.terminated
+    assert after.termination_reason is TerminationReason.OUT_OF_BOUNDS
+
+
+def test_court_geometry_validates_dimensions():
+    from courtside_dynamics.envs._tennis_physics import CourtGeometry
+
+    with pytest.raises(ValueError, match="half_length"):
+        CourtGeometry(half_length=0.0)
+    with pytest.raises(ValueError, match="half_width"):
+        CourtGeometry(half_width=float("nan"))
+    with pytest.raises(ValueError, match="tolerance"):
+        CourtGeometry(tolerance=-1e-6)
+
+
+def test_regulation_geometry_matches_module_predicate():
+    """The default CourtGeometry and the module-level predicate are the
+    same measurement; drift between them would let the sampler and the
+    reducer disagree on the same landing."""
+    from courtside_dynamics.envs._tennis_physics import (
+        REGULATION_COURT,
+        is_in_bounds,
+    )
+
+    for x, y in (
+        (0.0, 0.0),
+        (COURT_HALF_LENGTH, COURT_HALF_WIDTH),
+        (COURT_HALF_LENGTH + 0.01, 0.0),
+        (0.0, COURT_HALF_WIDTH + 0.01),
+        (-COURT_HALF_LENGTH - 0.01, 0.0),
+    ):
+        assert REGULATION_COURT.is_in_bounds(x, y) == is_in_bounds(x, y)

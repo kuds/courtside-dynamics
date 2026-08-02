@@ -13,6 +13,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from courtside_dynamics.callbacks.env_attr_schedule import (
     LinearEnvAttrScheduleCallback,
 )
+from tests._helpers import FakeGetEnvModel as _FakeModel
 
 
 class _RecordingVecEnv:
@@ -30,14 +31,6 @@ class _RecordingVecEnv:
         assert kwargs == {"force": False}
         self.calls.append((attr_name, value))
         return [True]
-
-
-class _FakeModel:
-    def __init__(self, training_env: _RecordingVecEnv) -> None:
-        self._training_env = training_env
-
-    def get_env(self) -> _RecordingVecEnv:
-        return self._training_env
 
 
 def _callback(**overrides) -> LinearEnvAttrScheduleCallback:

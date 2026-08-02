@@ -256,3 +256,20 @@ def test_sb3_notebook_replay_uses_tennis_court_style() -> None:
     assert "if is_wall_ball_recipe:" in source
     # Metrics paths must not restyle their envs.
     assert "court_style" not in source.split("REPLAY_COURT_STYLE")[0]
+
+
+def test_sb3_notebook_lists_every_recipe() -> None:
+    """The notebook's inline recipe menus (the ENV cell comment and the
+    intro markdown) went two releases stale exactly like the README's
+    list -- 0.24.0's WallBallGoalRally and 0.25.0's WallBallTrueBaseline
+    appeared nowhere in the generic driver notebook. Pin every recipe
+    name into the notebook source so the next recipe cannot drift."""
+    from courtside_dynamics.recipes import RECIPES
+
+    source = "\n".join(
+        _source(cell) for cell in _load_sb3_notebook()["cells"]
+    )
+    missing = [name for name in RECIPES if name not in source]
+    assert not missing, (
+        f"recipes missing from the sb3 notebook's menus: {missing}"
+    )

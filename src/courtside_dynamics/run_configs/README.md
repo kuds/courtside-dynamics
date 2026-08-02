@@ -5,13 +5,14 @@ shipped as package data so pip installs (Colab included) carry them.
 Discover and use them via:
 
 ```python
+from courtside_dynamics.recipes import build_train_config
 from courtside_dynamics.run_config import (
     available_run_configs,   # {recipe name: packaged Path}
     copy_starter_config,     # copy one next to your runs for editing
 )
 
-config_file = copy_starter_config("WallBallBootstrap", DRIVE_CONFIG_DIR)
-cfg = build_train_config("WallBallBootstrap", log_dir=LOG_DIR, seed=SEED,
+config_file = copy_starter_config("WallBallTrueBaseline", DRIVE_CONFIG_DIR)
+cfg = build_train_config("WallBallTrueBaseline", log_dir=LOG_DIR, seed=SEED,
                          config_file=config_file)
 ```
 

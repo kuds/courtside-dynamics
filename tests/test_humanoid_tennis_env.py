@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib
 import os
 import sys
-from collections.abc import Iterator
 
 import gymnasium as gym
 import mujoco
@@ -15,7 +14,6 @@ import pytest
 import courtside_dynamics  # noqa: F401  (triggers Gymnasium registration)
 from courtside_dynamics.envs._tennis_events import (
     TENNIS_CONTACT_CHANNELS,
-    TennisStepEventBatch,
 )
 from courtside_dynamics.envs.humanoid_tennis import (
     HUMANOID_TENNIS_ACTION_NAMES,
@@ -35,35 +33,8 @@ from courtside_dynamics.envs.tennis_rules import (
     RallyEventKind,
 )
 from courtside_dynamics.scripted_policies import run_humanoid_tennis_oracle
-
-
-def _event_batch(
-    control_step: int,
-    *events: RallyEvent,
-) -> TennisStepEventBatch:
-    peaks = {
-        event.kind: event.peak_force
-        for event in events
-        if event.peak_force > 0.0
-    }
-    return TennisStepEventBatch(
-        control_step=control_step,
-        substeps_sampled=1,
-        events=events,
-        contact_peaks=peaks,
-        active_contact_latches=frozenset(),
-    )
-
-
-def _inject_batches(
-    monkeypatch: pytest.MonkeyPatch,
-    env: HumanoidTennisCoopEnv,
-    batches: Iterator[TennisStepEventBatch],
-) -> None:
-    def set_next_batch(_ctrl: np.ndarray, _n_frames: int) -> None:
-        env._latest_event_batch = next(batches)
-
-    monkeypatch.setattr(env, "_step_mujoco_simulation", set_next_batch)
+from tests._helpers import event_batch as _event_batch
+from tests._helpers import inject_batches as _inject_batches
 
 
 def test_centralized_action_contract_is_exact_and_player_partitioned():

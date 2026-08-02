@@ -3,8 +3,8 @@
 ``python -m build`` proves the wheel builds; it does not prove the wheel
 works. The gap matters here because the package's whole distribution path
 is ``pip install "courtside-dynamics @ git+https://..."`` on Colab, and it
-ships its simulation assets as package *data*: 35 STL meshes, 7 MJCF XMLs,
-and 11 starter run-config TOMLs, selected by hand-written globs in
+ships its simulation assets as package *data* -- STL meshes, MJCF XMLs,
+and the starter run-config TOMLs -- selected by hand-written globs in
 ``[tool.setuptools.package-data]``. Drop a glob and every environment
 constructor fails at ``mj_loadXML`` for anyone who installed from a wheel
 -- while a source checkout, where the files sit next to the code
@@ -37,12 +37,33 @@ import sys
 import tempfile
 
 # Registered ids are unversioned as of 0.6.0; see the README's table.
-EXPECTED_ENV_IDS = (
-    "CourtsideDynamics/BallBalance",
-    "CourtsideDynamics/BallBounce",
-    "CourtsideDynamics/WallBall",
-    "CourtsideDynamics/HumanoidTennisCoop",
-)
+# Fewer registrations than this is a packaging/registration regression.
+# The id list itself is derived from the live gymnasium registry (see
+# _registered_env_ids) so a newly registered environment -- and the
+# packaged MJCF assets its constructor loads -- is smoke-tested the day
+# it ships, instead of silently skipped by a stale hand-copied tuple.
+MIN_EXPECTED_ENV_COUNT = 4
+
+
+def _registered_env_ids() -> tuple[str, ...]:
+    import gymnasium as gym
+
+    import courtside_dynamics  # noqa: F401 - registers the env ids
+
+    ids = tuple(
+        sorted(
+            env_id
+            for env_id in gym.registry
+            if env_id.startswith("CourtsideDynamics/")
+        )
+    )
+    if len(ids) < MIN_EXPECTED_ENV_COUNT:
+        raise SystemExit(
+            f"smoke_wheel: only {len(ids)} CourtsideDynamics/* env ids are "
+            f"registered ({list(ids)}); expected at least "
+            f"{MIN_EXPECTED_ENV_COUNT} -- a registration went missing"
+        )
+    return ids
 
 
 def _check_installed_not_shadowed() -> str:
@@ -76,9 +97,7 @@ def _check_environments() -> None:
     """
     import gymnasium as gym
 
-    import courtside_dynamics  # noqa: F401 - registers the env ids
-
-    for env_id in EXPECTED_ENV_IDS:
+    for env_id in _registered_env_ids():
         try:
             env = gym.make(env_id)
         except Exception as error:  # noqa: BLE001 - report and fail loudly

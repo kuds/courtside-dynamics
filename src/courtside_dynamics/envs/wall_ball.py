@@ -143,7 +143,10 @@ from gymnasium import utils
 from gymnasium.spaces import Box
 
 from courtside_dynamics.assets import asset_path
-from courtside_dynamics.envs._base import CourtsideMujocoEnv
+from courtside_dynamics.envs._base import (
+    CourtsideMujocoEnv,
+    piecewise_targets,
+)
 
 # Cartesian bounds for "ball is still in play". Outside these, the
 # episode terminates. Paddle starts near x=-2, wall sits at x=4, so
@@ -583,9 +586,6 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # created the incoming trajectory.
         self._recoverable_bounce_eligible = False
         self._reset_mode = _RESET_NORMAL
-        # Most recent finite observation, echoed back if the sim ever
-        # produces a nonfinite state so NaNs can't reach VecNormalize.
-        self._last_finite_obs: np.ndarray | None = None
 
         # Obs: ball pos(3) + ball vel(3) + paddle qpos/qvel(6) +
         # paddle_hit_since_last_wall flag(1) + floor_bounce_count(1) +
@@ -732,17 +732,48 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             )
 
         # Court markings are render-only sites (sites never generate
-        # contacts); capture their XML alphas so markers hidden by a
-        # style (or the fence lines when no fence is set) can be
-        # restored exactly.
+        # contacts). The style-visibility lists are DERIVED from the
+        # compiled model by name prefix rather than hand-maintained:
+        # the 0.25.0 workspace extension added court_tick_xm5..xm8 to
+        # the XML but not to the Python tuple, so court_style="tennis"/
+        # "none" never hid them. Any court_* site in the XML is now
+        # style-managed the moment it exists. Only the preset-dependent
+        # _COURT_MARKER_SITES stay hand-listed -- each has bespoke
+        # placement logic in _refresh_court_markers, so a new one needs
+        # code anyway (and a typo there fails loudly below).
+        court_sites = tuple(
+            name
+            for name in (
+                self.model.site(i).name for i in range(self.model.nsite)
+            )
+            if name.startswith("court_")
+        )
+        missing_markers = [
+            name
+            for name in self._COURT_MARKER_SITES
+            if name not in court_sites
+        ]
+        if missing_markers:
+            raise ValueError(
+                f"wall_ball.xml is missing preset marker site(s) "
+                f"{missing_markers} required by _COURT_MARKER_SITES"
+            )
+        self._court_tennis_sites = tuple(
+            name
+            for name in court_sites
+            if name.startswith("court_tennis_")
+        )
+        self._court_static_sites = tuple(
+            name
+            for name in court_sites
+            if not name.startswith("court_tennis_")
+            and name not in self._COURT_MARKER_SITES
+        )
+        # Capture the XML alphas so markers hidden by a style (or the
+        # fence lines when no fence is set) can be restored exactly.
         self._court_marker_alpha = {
             name: float(self.model.site(name).rgba[3])
-            for name in (
-                self._COURT_MARKER_SITES
-                + self._COURT_STATIC_SITES
-                + self._COURT_TENNIS_SITES
-                + self._SENSOR_TINT_SITES
-            )
+            for name in court_sites + self._SENSOR_TINT_SITES
         }
         self._refresh_court_markers()
 
@@ -901,30 +932,11 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         "court_line_fence_max",
         "court_line_serve",
     )
-    _COURT_STATIC_SITES = (
-        "court_line_wall_base",
-        "court_line_baseline",
-        "court_tick_xm4",
-        "court_tick_xm3",
-        "court_tick_xm2",
-        "court_tick_xm1",
-        "court_tick_x0",
-        "court_tick_xp1",
-        "court_tick_xp2",
-        "court_tick_xp3",
-    )
-    _COURT_TENNIS_SITES = (
-        "court_tennis_apron",
-        "court_tennis_surface",
-        "court_tennis_baseline",
-        "court_tennis_service_line",
-        "court_tennis_singles_left",
-        "court_tennis_singles_right",
-        "court_tennis_doubles_left",
-        "court_tennis_doubles_right",
-        "court_tennis_center_service",
-        "court_tennis_center_mark",
-    )
+    # The static-diagnostic and tennis site lists are not hand-listed:
+    # __init__ derives self._court_static_sites and
+    # self._court_tennis_sites from the compiled model's court_* site
+    # names, so the XML is the single source of truth for what the
+    # styles manage.
     # Debug tints hidden in tennis presentation footage. Alpha affects
     # rendering only; the touch sensors attached to these sites keep
     # working (pinned by the cross-style observation-equality test).
@@ -971,9 +983,9 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 self._court_marker_alpha[name] if visible else 0.0
             )
 
-        for name in self._COURT_STATIC_SITES:
+        for name in self._court_static_sites:
             _show(name, diagnostic)
-        for name in self._COURT_TENNIS_SITES:
+        for name in self._court_tennis_sites:
             _show(name, tennis)
         for name in self._SENSOR_TINT_SITES:
             _show(name, not tennis)
@@ -1176,12 +1188,11 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         if not bool(np.isfinite(normalized).all()):
             raise ValueError("action must contain only finite values")
         normalized = np.clip(normalized, -1.0, 1.0)
-        positive_span = self._control_high - self._control_home
-        negative_span = self._control_home - self._control_low
-        targets = np.where(
-            normalized >= 0.0,
-            self._control_home + normalized * positive_span,
-            self._control_home + normalized * negative_span,
+        targets = piecewise_targets(
+            normalized,
+            self._control_low,
+            self._control_home,
+            self._control_high,
         )
         if self._paddle_x_fence is not None:
             # The fence clamps the *target*, not the mapping: in-window
@@ -1787,10 +1798,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # instead (the episode is terminating via term_nonfinite). A
         # single NaN obs ingested by VecNormalize's running statistics
         # would silently corrupt every subsequent normalized step.
-        if obs_nonfinite and self._last_finite_obs is not None:
-            obs = self._last_finite_obs.copy()
-        else:
-            self._last_finite_obs = obs.copy()
+        obs = self._record_or_echo_observation(obs, obs_nonfinite)
 
         info = {
             # Backward-compat keys consumed by callbacks/CSV writers.
@@ -1904,8 +1912,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._pending_shaping = 0.0
         self._pending_bonus = 0.0
         obs = (
-            self._last_finite_obs.copy()
-            if self._last_finite_obs is not None
+            self._last_finite_observation.copy()
+            if self._last_finite_observation is not None
             else self._get_obs()
         )
         info = {
@@ -2147,7 +2155,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
 
         self.set_state(qpos, qvel)
         obs = self._get_obs()
-        self._last_finite_obs = obs.copy()
+        self._remember_finite_observation(obs)
         return obs
 
     def _get_reset_info(self) -> dict[str, Any]:

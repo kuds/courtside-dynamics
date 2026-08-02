@@ -27,46 +27,9 @@ from courtside_dynamics.envs._tennis_physics import (
     is_in_bounds,
     net_height_at,
 )
-from courtside_dynamics.envs.robot_models import initialize_humanoid_tennis_home
-
-
-def _fresh_model():
-    model = mujoco.MjModel.from_xml_path(asset_path("humanoid_tennis.xml"))
-    data = mujoco.MjData(model)
-    initialize_humanoid_tennis_home(model, data)
-    return model, data
-
-
-def _set_ball_state(
-    model: mujoco.MjModel,
-    data: mujoco.MjData,
-    *,
-    position: tuple[float, float, float],
-    linear_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
-) -> None:
-    joint = model.joint("ball_free")
-    qposadr = int(joint.qposadr[0])
-    dofadr = int(joint.dofadr[0])
-    data.qpos[qposadr : qposadr + 3] = position
-    data.qpos[qposadr + 3 : qposadr + 7] = [1.0, 0.0, 0.0, 0.0]
-    data.qvel[dofadr : dofadr + 6] = 0.0
-    data.qvel[dofadr : dofadr + 3] = linear_velocity
-    mujoco.mj_forward(model, data)
-
-
-def _has_active_contact(
-    model: mujoco.MjModel,
-    data: mujoco.MjData,
-    geom_a: str,
-    geom_b: str,
-) -> bool:
-    expected = {int(model.geom(geom_a).id), int(model.geom(geom_b).id)}
-    for index in range(data.ncon):
-        contact = data.contact[index]
-        actual = {int(contact.geom1), int(contact.geom2)}
-        if int(contact.efc_address) >= 0 and actual == expected:
-            return True
-    return False
+from tests._helpers import fresh_model as _fresh_model
+from tests._helpers import has_active_contact as _has_active_contact
+from tests._helpers import set_ball_state as _set_ball_state
 
 
 def _masks_allow_contact(geom_a, geom_b) -> bool:
@@ -397,7 +360,7 @@ def test_oblique_court_bounce_reduces_slip_and_generates_spin():
         model,
         data,
         position=(2.0, 0.0, 0.5),
-        linear_velocity=(initial_horizontal_speed, 0.0, -5.0),
+        velocity=(initial_horizontal_speed, 0.0, -5.0),
     )
 
     touched_court = False
@@ -437,7 +400,7 @@ def test_ball_net_contact_is_physically_detectable(
         model,
         data,
         position=(-0.25, lateral_position, 0.5),
-        linear_velocity=(impact_speed, 0.0, 0.0),
+        velocity=(impact_speed, 0.0, 0.0),
     )
 
     saw_ball_net = False
@@ -477,7 +440,7 @@ def test_ball_above_net_crosses_without_contact(lateral_position):
             lateral_position,
             net_height_at(lateral_position) + BALL_RADIUS + 0.02,
         ),
-        linear_velocity=(20.0, 0.0, 0.0),
+        velocity=(20.0, 0.0, 0.0),
     )
 
     saw_net_contact = False

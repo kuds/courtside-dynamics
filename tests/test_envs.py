@@ -3559,6 +3559,17 @@ class TestWallBallCourtStyle:
         return env.model.site_pos[sid].copy(), env.model.site_size[sid].copy()
 
     def test_style_visibility_matrix(self):
+        """Every court_* site in the COMPILED MODEL obeys its style.
+
+        Iterating the model's own site names (not a Python tuple) is
+        the point: the 0.25.0 workspace extension added
+        court_tick_xm5..xm8 to the XML but not to the hand-maintained
+        visibility tuple, and the old version of this test iterated the
+        same incomplete tuple -- so the ticks stayed visible on top of
+        the tennis surface while the suite passed. The lists are now
+        derived from the model in __init__; this test re-derives the
+        expectation independently so a partition bug cannot hide.
+        """
         for style, diag_visible, tennis_visible in (
             ("diagnostic", True, False),
             ("tennis", False, True),
@@ -3566,19 +3577,30 @@ class TestWallBallCourtStyle:
         ):
             env = WallBallEnv(court_style=style)
             try:
-                for name in (
-                    WallBallEnv._COURT_STATIC_SITES
-                    + WallBallEnv._COURT_MARKER_SITES
-                ):
+                model = env.unwrapped.model
+                court_sites = [
+                    name
+                    for name in (
+                        model.site(i).name for i in range(model.nsite)
+                    )
+                    if name.startswith("court_")
+                ]
+                assert len(court_sites) >= 25, court_sites
+                for name in court_sites:
                     if name.startswith("court_line_fence"):
                         continue  # fence lines also need a fence set
-                    assert (self._alpha(env, name) > 0) == diag_visible, (
+                    expected = (
+                        tennis_visible
+                        if name.startswith("court_tennis_")
+                        else diag_visible
+                    )
+                    assert (self._alpha(env, name) > 0) == expected, (
                         f"{name} in {style}"
                     )
-                for name in WallBallEnv._COURT_TENNIS_SITES:
-                    assert (self._alpha(env, name) > 0) == tennis_visible, (
-                        f"{name} in {style}"
-                    )
+                # The one the stale tuple missed for a whole release:
+                assert (
+                    self._alpha(env, "court_tick_xm8") > 0
+                ) == diag_visible
                 # Sensor-debug tints are hidden only in presentation
                 # (tennis) footage.
                 for name in WallBallEnv._SENSOR_TINT_SITES:
@@ -3963,3 +3985,109 @@ class TestReturnShapingScale:
             WallBallEnv(return_shaping_scale=-0.1)
         with pytest.raises(ValueError, match="return_shaping_scale"):
             WallBallEnv(return_shaping_scale=float("nan"))
+
+
+class TestSharedBaseGuards:
+    """The _base.py helpers every env (and the next one) shares."""
+
+    def test_piecewise_mapping_and_inverse_round_trip(self):
+        from courtside_dynamics.envs._base import (
+            invert_piecewise_target,
+            piecewise_targets,
+        )
+
+        low, home, high = -4.7, -1.7, 0.3  # the calibrated x asymmetry
+        # Action zero is exactly home; the endpoints map to the limits
+        # (to float associativity -- home + (high - home) regroups).
+        assert piecewise_targets(0.0, low, home, high) == home
+        assert float(
+            piecewise_targets(-1.0, low, home, high)
+        ) == pytest.approx(low, abs=1e-12)
+        assert float(
+            piecewise_targets(1.0, low, home, high)
+        ) == pytest.approx(high, abs=1e-12)
+        for normalized in (-1.0, -0.5, -0.1, 0.0, 0.25, 0.9, 1.0):
+            target = float(
+                piecewise_targets(normalized, low, home, high)
+            )
+            recovered = invert_piecewise_target(target, low, home, high)
+            assert recovered == pytest.approx(normalized, abs=1e-12)
+        # Vectorized form matches per-element scalars.
+        lows = np.array([low, -3.0, 0.0])
+        homes = np.array([home, 0.0, 2.0])
+        highs = np.array([high, 3.0, 2.9])
+        actions = np.array([-0.75, 0.5, -0.25])
+        vec = piecewise_targets(actions, lows, homes, highs)
+        for index in range(3):
+            assert vec[index] == pytest.approx(
+                float(
+                    piecewise_targets(
+                        actions[index],
+                        lows[index],
+                        homes[index],
+                        highs[index],
+                    )
+                )
+            )
+        # A home pivoted onto a mapping endpoint zeroes one half-span;
+        # the inverse stays finite (the certification-ladder case).
+        assert np.isfinite(
+            invert_piecewise_target(-5.0, -4.7, -4.7, 0.3)
+        )
+
+    def test_shared_validators(self):
+        from courtside_dynamics.envs._base import (
+            finite_nonnegative,
+            finite_positive,
+        )
+
+        assert finite_nonnegative("knob", 0) == 0.0
+        assert finite_positive("knob", 2) == 2.0
+        for bad in (float("nan"), float("inf"), -1.0):
+            with pytest.raises(ValueError, match="knob"):
+                finite_nonnegative("knob", bad)
+        for bad in (float("nan"), 0.0, -1.0):
+            with pytest.raises(ValueError, match="knob"):
+                finite_positive("knob", bad)
+
+    def test_ball_balance_rejects_nonfinite_actions_without_physics(self):
+        """MuJoCo reacts to NaN ctrl by warning and resetting its state
+        mid-episode; BallBalance -- previously the one env without the
+        guard its siblings carry -- must end the episode on the last
+        finite observation instead of stepping physics with the NaN."""
+        env = BallBalanceEnv(episode_len=50)
+        try:
+            env.reset(seed=0)
+            healthy_obs, *_ = env.step(np.zeros(6))
+            qpos_before = env.unwrapped.data.qpos.copy()
+            # The shape half of the new validation, pinned alongside
+            # the finiteness half (WallBall's identical branch already
+            # was).
+            with pytest.raises(ValueError, match="action must have shape"):
+                env.step(np.zeros(3))
+            bad = np.full(6, np.nan)
+            obs, reward, terminated, truncated, _ = env.step(bad)
+            assert terminated
+            assert reward == 0.0
+            assert bool(np.isfinite(obs).all())
+            assert np.array_equal(obs, healthy_obs)
+            # Physics was never stepped with the NaN control.
+            assert np.array_equal(env.unwrapped.data.qpos, qpos_before)
+        finally:
+            env.close()
+
+    def test_ball_balance_echoes_last_finite_observation(self):
+        """A solver blow-up must terminate on the echoed observation,
+        not deliver NaNs to VecNormalize (the guard wall_ball and
+        ball_bounce already had)."""
+        env = BallBalanceEnv(episode_len=50)
+        try:
+            env.reset(seed=0)
+            healthy_obs, *_ = env.step(np.zeros(6))
+            env.unwrapped.data.qpos[:] = np.nan
+            obs, _, terminated, _, _ = env.step(np.zeros(6))
+            assert terminated
+            assert bool(np.isfinite(obs).all())
+            assert np.array_equal(obs, healthy_obs)
+        finally:
+            env.close()

@@ -8,7 +8,6 @@ import mujoco
 import numpy as np
 import pytest
 
-from courtside_dynamics.assets import asset_path
 from courtside_dynamics.envs._tennis_events import (
     SubstepTennisEventSampler,
     TennisEventSamplerConfig,
@@ -20,55 +19,15 @@ from courtside_dynamics.envs._tennis_physics import (
     COURT_HALF_LENGTH,
     COURT_HALF_WIDTH,
 )
-from courtside_dynamics.envs.robot_models import initialize_humanoid_tennis_home
 from courtside_dynamics.envs.tennis_rules import (
     CourtSide,
     RallyEventKind,
     RallyPhase,
     RallyStateMachine,
 )
-
-
-def _fresh_model():
-    model = mujoco.MjModel.from_xml_path(asset_path("humanoid_tennis.xml"))
-    data = mujoco.MjData(model)
-    initialize_humanoid_tennis_home(model, data)
-    return model, data
-
-
-def _set_ball_state(
-    model: mujoco.MjModel,
-    data: mujoco.MjData,
-    *,
-    position: np.ndarray | tuple[float, float, float],
-    velocity: np.ndarray | tuple[float, float, float] = (0.0, 0.0, 0.0),
-) -> None:
-    joint = model.joint("ball_free")
-    qposadr = int(joint.qposadr[0])
-    dofadr = int(joint.dofadr[0])
-    data.qpos[qposadr : qposadr + 3] = position
-    data.qpos[qposadr + 3 : qposadr + 7] = [1.0, 0.0, 0.0, 0.0]
-    data.qvel[dofadr : dofadr + 6] = 0.0
-    data.qvel[dofadr : dofadr + 3] = velocity
-    mujoco.mj_forward(model, data)
-
-
-def _set_ball_toward_stringbed(
-    model: mujoco.MjModel,
-    data: mujoco.MjData,
-    player: str,
-    *,
-    speed: float,
-) -> None:
-    stringbed = model.geom(f"{player}_racket_racket_stringbed")
-    center = data.geom_xpos[stringbed.id].copy()
-    normal = data.geom_xmat[stringbed.id].reshape(3, 3)[:, 0].copy()
-    _set_ball_state(
-        model,
-        data,
-        position=center - 0.2 * normal,
-        velocity=speed * normal,
-    )
+from tests._helpers import fresh_model as _fresh_model
+from tests._helpers import set_ball_state as _set_ball_state
+from tests._helpers import set_ball_toward_stringbed as _set_ball_toward_stringbed
 
 
 def _sample_steps(
@@ -562,3 +521,84 @@ def test_control_step_buffer_must_be_opened_and_drained_exactly_once():
     sampler.end_control_step()
     with pytest.raises(RuntimeError, match="no open control step"):
         sampler.end_control_step()
+
+
+_PADDLE_COURT_XML = """
+<mujoco model="paddle-court-smoke">
+  <worldbody>
+    <geom name="court_surface" type="plane" size="7 5 0.1"
+          contype="1" conaffinity="2"/>
+    <body name="net">
+      <geom name="net_panel" type="box" size="0.02 4.2 0.457"
+            pos="0 0 0.457" contype="4" conaffinity="2"/>
+    </body>
+    <body name="ball" pos="0 0 1">
+      <freejoint name="ball_free"/>
+      <geom name="ball_geom" type="sphere" size="0.0335" mass="0.057"
+            contype="2" conaffinity="13"/>
+    </body>
+    <body name="paddle_a" pos="-2 0 1">
+      <geom name="player_a_racket_face" type="box" size="0.1 0.1 0.02"
+            contype="8" conaffinity="2"/>
+    </body>
+    <body name="paddle_b" pos="2 0 1">
+      <geom name="player_b_racket_face" type="box" size="0.1 0.1 0.02"
+            contype="8" conaffinity="2"/>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
+
+def test_contact_index_supports_a_robot_free_scene():
+    """docs/design_paddle_tennis.md reuses this events layer for a
+    two-paddle court with no humanoids. The index must resolve such a
+    scene when told robots are optional -- and keep failing loudly by
+    default, so the humanoid scene cannot silently lose its robot
+    groups."""
+    from courtside_dynamics.envs._tennis_events import TennisSceneContactIndex
+
+    model = mujoco.MjModel.from_xml_string(_PADDLE_COURT_XML)
+    with pytest.raises(ValueError, match="humanoid_a"):
+        TennisSceneContactIndex.from_model(model)
+
+    index = TennisSceneContactIndex.from_model(model, require_robots=False)
+    assert index.racket_a_geoms and index.racket_b_geoms
+    assert not index.humanoid_a_geoms
+    assert not index.humanoid_b_geoms
+
+
+def test_sampler_runs_on_a_robot_free_scene_with_a_custom_court():
+    """The substep sampler must operate end-to-end on the paddle-only
+    scene: prime latches on reset, open a control step, and sample --
+    with the in_bounds annotation measured against the scene's own
+    (non-regulation) court geometry."""
+    from courtside_dynamics.envs._tennis_events import (
+        SubstepTennisEventSampler,
+        TennisSceneContactIndex,
+    )
+    from courtside_dynamics.envs._tennis_physics import (
+        REGULATION_COURT,
+        CourtGeometry,
+    )
+
+    model = mujoco.MjModel.from_xml_string(_PADDLE_COURT_XML)
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    index = TennisSceneContactIndex.from_model(model, require_robots=False)
+    small_court = CourtGeometry(half_length=6.5, half_width=4.115)
+    sampler = SubstepTennisEventSampler(model, index=index, court=small_court)
+    assert sampler.index is index
+    assert sampler.court is small_court
+
+    sampler.reset(data)
+    sampler.begin_control_step(0)
+    sampler.sample_substep(data, control_substep=0)
+    batch = sampler.end_control_step()
+    assert batch.substeps_sampled == 1
+
+    # Default construction keeps the humanoid contract: regulation
+    # court, index resolved with robots required.
+    humanoid_model, _humanoid_data = _fresh_model()
+    default_sampler = SubstepTennisEventSampler(humanoid_model)
+    assert default_sampler.court is REGULATION_COURT

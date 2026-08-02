@@ -445,6 +445,136 @@ class TestLoader:
         gate = load_run_config(path).train["performance_gate"]
         assert gate["stages"] == [{"early_touch_penalty": None}]
 
+    def test_gate_staleness_and_entropy_keys_load_and_type_check(
+        self, tmp_path
+    ):
+        # The 0.20.0 entropy pair and the 0.24.0 staleness pair:
+        # train() accepted all four since their releases, but the
+        # loader's hand-copied allowlist rejected the staleness pair
+        # for two releases. The allowlist is now derived from
+        # train.PERFORMANCE_GATE_KEYS; this pins the levers as
+        # file-configurable with per-key validation.
+        base = (
+            "[train.performance_gate]\n"
+            'metric_key = "bounce_count_ep_mean"\n'
+            "threshold = 3.0\n"
+            "sustain_evals = 2\n"
+            "reset_entropy_on_advance = true\n"
+            "entropy_reset_value = 0.05\n"
+            "stage_eval_budget = 40\n"
+            'stage_eval_budget_action = "advance"\n'
+            "[[train.performance_gate.stages]]\n"
+            "serve_vy_max = 1.2\n"
+        )
+        gate = load_run_config(_write(tmp_path, base)).train[
+            "performance_gate"
+        ]
+        assert gate["reset_entropy_on_advance"] is True
+        assert gate["entropy_reset_value"] == 0.05
+        assert gate["stage_eval_budget"] == 40
+        assert gate["stage_eval_budget_action"] == "advance"
+
+        for broken, match in (
+            (
+                base.replace(
+                    "reset_entropy_on_advance = true\n",
+                    "reset_entropy_on_advance = 1\n",
+                ),
+                "reset_entropy_on_advance must be a boolean",
+            ),
+            (
+                base.replace(
+                    "entropy_reset_value = 0.05\n",
+                    'entropy_reset_value = "auto"\n',
+                ),
+                "entropy_reset_value must be a number",
+            ),
+            (
+                base.replace(
+                    "stage_eval_budget = 40\n",
+                    "stage_eval_budget = 0\n",
+                ),
+                "stage_eval_budget must be a positive integer",
+            ),
+            (
+                base.replace(
+                    "stage_eval_budget = 40\n",
+                    "stage_eval_budget = true\n",
+                ),
+                "stage_eval_budget must be a positive integer",
+            ),
+            (
+                base.replace(
+                    'stage_eval_budget_action = "advance"\n',
+                    'stage_eval_budget_action = "pause"\n',
+                ),
+                "stage_eval_budget_action must be",
+            ),
+        ):
+            path = _write(tmp_path, broken, "broken_gate.toml")
+            with pytest.raises(ValueError, match=match):
+                load_run_config(path)
+
+        # The "none" sentinel is accepted only by the levers whose
+        # downstream type admits None (budget off, gate-derived entropy
+        # target).
+        nulls = base.replace(
+            "stage_eval_budget = 40\n", 'stage_eval_budget = "none"\n'
+        ).replace(
+            "entropy_reset_value = 0.05\n",
+            'entropy_reset_value = "none"\n',
+        )
+        gate = load_run_config(
+            _write(tmp_path, nulls, "nulls.toml")
+        ).train["performance_gate"]
+        assert gate["stage_eval_budget"] is None
+        assert gate["entropy_reset_value"] is None
+
+    def test_loader_allowlists_are_derived_from_the_consumers(self):
+        # The drift class behind the 0.24.0/0.25.0 gaps: train() and
+        # the certifier grew keys the loader's hand-copied lists never
+        # learned, so live-recipe specs were unwritable as TOML. The
+        # allowlists are now derived; this pins the derivation, and
+        # pins train's constant to the gate callback's actual
+        # constructor surface so the next lever cannot ship half-wired.
+        import inspect
+
+        from courtside_dynamics import run_config
+        from courtside_dynamics.callbacks.performance_gate import (
+            PerformanceGatedEnvStagesCallback,
+        )
+        from courtside_dynamics.training import ladder_certification
+        from courtside_dynamics.training.train import (
+            PERFORMANCE_GATE_KEYS,
+        )
+
+        assert set(run_config._gate_known_keys()) == set(
+            PERFORMANCE_GATE_KEYS
+        )
+        assert set(run_config._ladder_cert_known_keys()) == set(
+            ladder_certification.SPEC_KEYS
+        )
+        # Constructor params that are runtime wiring, not gate data.
+        # A new *data* lever on the callback must be added to
+        # PERFORMANCE_GATE_KEYS (making it file-configurable and
+        # provenance-recorded) or fail here; a new wiring param must be
+        # added to this exclusion set with a reason.
+        wiring = {
+            "self",
+            "info_eval",
+            "extra_target_envs",  # live VecEnv handles
+            "stage_bests_dir",
+            "stage_history_path",
+            "run_config_path",
+            "verbose",
+        }
+        params = set(
+            inspect.signature(
+                PerformanceGatedEnvStagesCallback.__init__
+            ).parameters
+        )
+        assert PERFORMANCE_GATE_KEYS == params - wiring
+
 
 class TestBuildTrainConfig:
     def test_file_overrides_recipe_and_deep_merges_model_kwargs(

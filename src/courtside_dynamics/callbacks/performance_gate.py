@@ -391,6 +391,11 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         self.run_config_path: str | None = run_config_path
         self.stage_eval_budget: int | None = stage_eval_budget
         self.stage_eval_budget_action: str = stage_eval_budget_action
+        #: Why the gate ended training, when it did (mirrors
+        #: ``InfoDictEvalCallback.stop_reason``); train() persists it
+        #: into ``stage_summary.txt`` so the artifact can explain an
+        #: unattended stop after the console is gone.
+        self.stop_reason: str | None = None
         self._finalized: bool = False
         self._stage_entry_timestep: int = 0
         self._stage_eval_count: int = 0
@@ -574,6 +579,9 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                 self.clear_replay_buffer_on_advance
             ),
             "reset_entropy_on_advance": self.reset_entropy_on_advance,
+            "entropy_reset_value": self.entropy_reset_value,
+            "stage_eval_budget": self.stage_eval_budget,
+            "stage_eval_budget_action": self.stage_eval_budget_action,
             "stage_count": len(self.stages),
             "final_stage_index": self._stage_index,
             "stages": self._stage_history,
@@ -782,6 +790,11 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
             if self.stage_eval_budget_action == "advance":
                 self._advance_stage("stage_eval_budget")
                 return True
+            self.stop_reason = (
+                f"stage_eval_budget: stage {self._stage_index} recorded "
+                f"{self._stage_eval_count} evaluations without promoting "
+                f"(budget {self.stage_eval_budget})"
+            )
             print(
                 f"[PerformanceGatedEnvStagesCallback] stopping training at "
                 f"{self.num_timesteps} steps: stage {self._stage_index} "

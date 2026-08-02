@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import math
 import pickle
-from collections.abc import Iterator
 from dataclasses import replace
 
 import numpy as np
 import pytest
 
-from courtside_dynamics.envs._tennis_events import TennisStepEventBatch
 from courtside_dynamics.envs.humanoid_tennis import (
     HUMANOID_TENNIS_OBSERVATION_LAYOUT,
     HumanoidTennisCoopEnv,
@@ -34,32 +32,8 @@ from courtside_dynamics.training.tennis_curriculum import (
     HeldOutSeedSuite,
     evaluate_curriculum_stage,
 )
-
-
-def _event_batch(
-    control_step: int,
-    *events: RallyEvent,
-) -> TennisStepEventBatch:
-    return TennisStepEventBatch(
-        control_step=control_step,
-        substeps_sampled=1,
-        events=events,
-        contact_peaks={
-            event.kind: event.peak_force for event in events if event.peak_force > 0.0
-        },
-        active_contact_latches=frozenset(),
-    )
-
-
-def _inject_batches(
-    monkeypatch: pytest.MonkeyPatch,
-    env: HumanoidTennisCoopEnv,
-    batches: Iterator[TennisStepEventBatch],
-) -> None:
-    def set_next_batch(_ctrl: np.ndarray, _n_frames: int) -> None:
-        env._latest_event_batch = next(batches)
-
-    monkeypatch.setattr(env, "_step_mujoco_simulation", set_next_batch)
+from tests._helpers import event_batch as _event_batch
+from tests._helpers import inject_batches as _inject_batches
 
 
 def _feed_crossing_to_b(substep: int = 0) -> RallyEvent:

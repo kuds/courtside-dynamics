@@ -268,3 +268,72 @@ def test_playable_and_mirrored_target_boundaries_are_inclusive() -> None:
         (-2.0, -1.5 - 2 * LINE_TOLERANCE, 0.0),
         side=CourtSide.A,
     )
+
+
+def test_feed_geometry_contract_is_shared_between_serve_and_launch():
+    """TennisServeConfig and CurriculumLaunchConfig validate the same
+    side-A-local feed contract through one implementation
+    (envs._serve.validate_feed_geometry): the two __post_init__ copies
+    had already drifted in phrasing and rule coverage, and the
+    PaddleTennis serve-rules probe needs exactly one authority."""
+    from courtside_dynamics.envs._serve import (
+        TennisServeConfig,
+        validate_feed_geometry,
+    )
+
+    # Same rule, kind-prefixed messages naming the failing config.
+    with pytest.raises(ValueError, match="serve.*one court half"):
+        TennisServeConfig(start_distance_from_net=0.0)
+    with pytest.raises(ValueError, match="launch.*one court half"):
+        CurriculumLaunchConfig(
+            mode=ServeMode.SCRIPTED,
+            start_distance_from_net=0.0,
+            lateral_position=0.0,
+            height=1.3,
+            speed=10.0,
+            elevation_degrees=20.0,
+        )
+    with pytest.raises(ValueError, match="serve.*1.1–1.5"):
+        TennisServeConfig(height=1.0)
+
+    # The launch's stricter inside-the-baseline bound is opt-in; the
+    # serve keeps its historical contract (start on the half is enough).
+    validate_feed_geometry(
+        kind="serve",
+        start_distance_from_net=COURT_HALF_LENGTH - 0.05,
+        lateral_position=0.0,
+        height=1.3,
+        position_noise=(0.1, 0.0, 0.0),
+    )
+    with pytest.raises(ValueError, match="inside the baseline"):
+        validate_feed_geometry(
+            kind="launch",
+            start_distance_from_net=COURT_HALF_LENGTH - 0.05,
+            lateral_position=0.0,
+            height=1.3,
+            position_noise=(0.1, 0.0, 0.0),
+            require_inside_baseline=True,
+        )
+
+    # The moved class stays importable from its historical homes.
+    from courtside_dynamics.envs import TennisServeConfig as from_package
+    from courtside_dynamics.envs.humanoid_tennis import (
+        TennisServeConfig as from_module,
+    )
+
+    assert from_package is from_module is TennisServeConfig
+
+
+def test_mirror_for_side_rotates_court_vectors():
+    """Side B is the 180-degree rotation about z: x/y negate, z is
+    invariant -- one helper for positions, velocities, and angular
+    velocities instead of per-sampler ``[:2] *= -1`` lines."""
+    import numpy as np
+
+    from courtside_dynamics.envs._serve import mirror_for_side
+
+    vector = np.array([1.0, -2.0, 3.0])
+    untouched = mirror_for_side(vector.copy(), CourtSide.A)
+    assert np.array_equal(untouched, vector)
+    mirrored = mirror_for_side(vector.copy(), CourtSide.B)
+    assert np.array_equal(mirrored, np.array([-1.0, 2.0, 3.0]))

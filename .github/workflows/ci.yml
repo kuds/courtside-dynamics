@@ -5,16 +5,30 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Every dependency is an unpinned floor and the primary distribution
+  # path is a fresh pip resolve on Colab, so an upstream release can
+  # break users while pushes are paused mid-campaign (the glfw-stub
+  # mypy override records one such breakage). The weekly run re-resolves
+  # the whole matrix between pushes; workflow_dispatch allows an
+  # on-demand check after an upstream release announcement.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
-# Cancel superseded runs on the same ref.
+# Cancel superseded runs on the same ref. Keyed by event too: schedule
+# and workflow_dispatch runs resolve to refs/heads/main, and in a
+# ref-only group the Monday cron and an in-flight push run on main
+# would cancel each other, leaving a head commit with a permanently
+# 'cancelled' check.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   lint:
     name: ruff
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,6 +42,7 @@ jobs:
   typecheck:
     name: mypy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,12 +50,13 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: python -m pip install --upgrade pip
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[train,dev]"
       - run: mypy
 
   build:
     name: build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -50,8 +66,9 @@ jobs:
       - run: python -m pip install --upgrade pip build
       - run: python -m build
       # Building proves the wheel builds; it does not prove it works. The
-      # package ships 35 STL meshes, 7 MJCFs and 11 starter TOMLs as
-      # package *data* selected by hand-written globs, and its whole
+      # package ships its simulation assets -- STL meshes, MJCF XMLs,
+      # and the starter run-config TOMLs -- as package *data* selected
+      # by hand-written globs, and its whole
       # distribution path is `pip install git+...` on Colab. Drop a glob
       # and every env constructor fails at mj_loadXML for wheel users
       # while a source checkout -- where the files sit beside the code
@@ -68,6 +85,7 @@ jobs:
   test:
     name: pytest (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -87,10 +105,21 @@ jobs:
       # why -n is not in addopts: a default that is catastrophic unless
       # paired with an env var does not belong there.
       - name: pytest
+        if: matrix.python-version != '3.13'
         env:
           OMP_NUM_THREADS: 1
           MKL_NUM_THREADS: 1
         run: pytest -n 2
+      # One leg carries coverage so gaps stay visible in the job log
+      # (pytest-cov is xdist-aware); no fail-under gate on purpose.
+      - name: pytest (with coverage)
+        if: matrix.python-version == '3.13'
+        env:
+          OMP_NUM_THREADS: 1
+          MKL_NUM_THREADS: 1
+        run: >
+          pytest -n 2 --cov=courtside_dynamics
+          --cov-report=term-missing:skip-covered
       - name: MuJoCo rendering smoke test
         if: matrix.python-version == '3.13'
         env:

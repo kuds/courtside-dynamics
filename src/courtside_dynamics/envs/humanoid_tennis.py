@@ -31,7 +31,14 @@ from gymnasium import utils
 from gymnasium.spaces import Box
 
 from courtside_dynamics.assets import asset_path
-from courtside_dynamics.envs._base import CourtsideMujocoEnv
+from courtside_dynamics.envs._base import (
+    CourtsideMujocoEnv,
+    piecewise_targets,
+)
+from courtside_dynamics.envs._serve import (
+    TennisServeConfig,
+    mirror_for_side,
+)
 from courtside_dynamics.envs._tennis_events import (
     TENNIS_CONTACT_CHANNELS,
     TENNIS_CONTACT_MARKOV_LABELS,
@@ -40,8 +47,6 @@ from courtside_dynamics.envs._tennis_events import (
     TennisStepEventBatch,
 )
 from courtside_dynamics.envs._tennis_physics import (
-    COURT_HALF_LENGTH,
-    COURT_HALF_WIDTH,
     ball_drag_force,
 )
 from courtside_dynamics.envs.robot_models import (
@@ -75,70 +80,12 @@ from courtside_dynamics.envs.tennis_rules import (
     TerminationReason,
 )
 
-
-@dataclass(frozen=True, slots=True)
-class TennisServeConfig:
-    """Seeded initial-feed distribution in side-A-local court coordinates.
-
-    Side B is the exact 180-degree court rotation of side A.  The default ball
-    starts 1.635 m inside the baseline, just courtward of the serving-side G1;
-    a centered feed launched from behind that robot would immediately hit its
-    torso rather than enter the rally.
-    """
-
-    start_distance_from_net: float = 10.25
-    lateral_position: float = 0.0
-    height: float = 1.3
-    local_velocity: tuple[float, float, float] = (16.0, 0.0, 4.5)
-    position_noise: tuple[float, float, float] = (0.1, 0.25, 0.1)
-    velocity_noise: tuple[float, float, float] = (0.5, 0.25, 0.25)
-    local_angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
-
-    def __post_init__(self) -> None:
-        for name, values in (
-            ("local_velocity", self.local_velocity),
-            ("position_noise", self.position_noise),
-            ("velocity_noise", self.velocity_noise),
-            ("local_angular_velocity", self.local_angular_velocity),
-        ):
-            if len(values) != 3:
-                raise ValueError(f"{name} must contain exactly three values")
-        scalar_values = (
-            self.start_distance_from_net,
-            self.lateral_position,
-            self.height,
-            *self.local_velocity,
-            *self.position_noise,
-            *self.velocity_noise,
-            *self.local_angular_velocity,
-        )
-        if not all(math.isfinite(float(value)) for value in scalar_values):
-            raise ValueError("serve configuration must contain only finite values")
-        if not 0.0 < self.start_distance_from_net <= COURT_HALF_LENGTH:
-            raise ValueError("start_distance_from_net must lie on one court half")
-        if self.height <= 0.0:
-            raise ValueError("serve height must be positive")
-        if any(value < 0.0 for value in self.position_noise):
-            raise ValueError("position_noise values must be non-negative")
-        if any(value < 0.0 for value in self.velocity_noise):
-            raise ValueError("velocity_noise values must be non-negative")
-        if self.local_velocity[0] <= self.velocity_noise[0]:
-            raise ValueError(
-                "forward serve velocity must remain positive across its noise range"
-            )
-        if self.start_distance_from_net <= self.position_noise[0]:
-            raise ValueError(
-                "longitudinal position noise must keep the ball on its serving side"
-            )
-        if abs(self.lateral_position) + self.position_noise[1] > COURT_HALF_WIDTH:
-            raise ValueError("serve lateral position/noise must start in bounds")
-        if not (
-            1.1 <= self.height - self.position_noise[2]
-            and self.height + self.position_noise[2] <= 1.5
-        ):
-            raise ValueError(
-                "serve height and noise must keep reset height within 1.1–1.5 m"
-            )
+# TennisServeConfig is imported (not defined) here as a back-compat
+# re-export: it moved to the shared envs._serve module -- it was never
+# humanoid-specific, and the design doc lists it among the reusable
+# serve machinery. Existing imports from this module and from
+# courtside_dynamics.envs keep working; the module's __all__ (at the
+# bottom) still exports it.
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,10 +447,6 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._stage_attempt_complete = False
         self._target_hit = False
         self._target_miss = False
-        self._last_finite_observation = np.zeros(
-            self.observation_layout.total_size,
-            dtype=np.float64,
-        )
 
     @property
     def neutral_action(self) -> np.ndarray:
@@ -704,12 +647,11 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         if not bool(np.isfinite(normalized).all()):
             raise ValueError("action must contain only finite values")
         normalized = np.clip(normalized, -1.0, 1.0) * self._active_action_mask
-        positive_span = self._control_high - self._stand_controls
-        negative_span = self._stand_controls - self._control_low
-        return np.where(
-            normalized >= 0.0,
-            self._stand_controls + normalized * positive_span,
-            self._stand_controls + normalized * negative_span,
+        return piecewise_targets(
+            normalized,
+            self._control_low,
+            self._stand_controls,
+            self._control_high,
         )
 
     def _configure_action_mask(self, serving_side: CourtSide) -> None:
@@ -922,7 +864,7 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         observation = self._get_obs()
         if not bool(np.isfinite(observation).all()):
             raise RuntimeError("reset produced a non-finite observation")
-        self._last_finite_observation = observation.copy()
+        self._remember_finite_observation(observation)
         return observation
 
     def _sample_initial_ball_state(
@@ -955,9 +897,8 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             config.local_velocity,
             dtype=np.float64,
         ) + velocity_noise
-        if serving_side is CourtSide.B:
-            canonical_position[:2] *= -1.0
-            canonical_velocity[:2] *= -1.0
+        mirror_for_side(canonical_position, serving_side)
+        mirror_for_side(canonical_velocity, serving_side)
         return canonical_position, canonical_velocity
 
     def _sample_curriculum_launch(
@@ -1011,9 +952,8 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
             ),
             dtype=np.float64,
         )
-        if serving_side is CourtSide.B:
-            canonical_position[:2] *= -1.0
-            canonical_velocity[:2] *= -1.0
+        mirror_for_side(canonical_position, serving_side)
+        mirror_for_side(canonical_velocity, serving_side)
         return canonical_position, canonical_velocity
 
     def _world_angular_velocity(self, serving_side: CourtSide) -> np.ndarray:
@@ -1025,9 +965,7 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         else:
             values = self.serve_config.local_angular_velocity
         angular = np.asarray(values, dtype=np.float64).copy()
-        if serving_side is CourtSide.B:
-            angular[:2] *= -1.0
-        return angular
+        return mirror_for_side(angular, serving_side)
 
     def _build_initial_state_info(self, serving_side: CourtSide) -> dict[str, Any]:
         qpos = self.data.qpos[self._ball_qposadr : self._ball_qposadr + 7].copy()
@@ -1259,11 +1197,9 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
 
         raw_observation = self._get_obs()
         observation_sanitized = not bool(np.isfinite(raw_observation).all())
-        if observation_sanitized:
-            observation = self._last_finite_observation.copy()
-        else:
-            observation = raw_observation
-            self._last_finite_observation = observation.copy()
+        observation = self._record_or_echo_observation(
+            raw_observation, observation_sanitized
+        )
 
         stage_success_terminal = bool(
             stage_success_now

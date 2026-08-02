@@ -916,6 +916,65 @@ def _merged_eval_cfg(tmp_path, **overrides):
     return TrainConfig(**cfg_kwargs)
 
 
+def test_stop_reason_lands_in_the_stage_summary(tmp_path):
+    """End-to-end pin for the stop_reason glue inside train(): the
+    callback ends training with a reason, and the summary must carry it.
+    The two ends (callbacks setting stop_reason; write_run_summary
+    rendering one) are pinned elsewhere -- this covers the extraction
+    scan in between, whose silent failure would quietly return every
+    stopped-early summary to a reason-less '(stopped early)'."""
+
+    class _StopWithReason(BaseCallback):
+        def __init__(self):
+            super().__init__()
+            self.stop_reason: str | None = None
+
+        def _on_step(self) -> bool:
+            if self.num_timesteps >= 64:
+                self.stop_reason = (
+                    "test_guard: synthetic stop for the glue test"
+                )
+                return False
+            return True
+
+    train(
+        _merged_eval_cfg(
+            tmp_path, extra_callbacks=(_StopWithReason(),)
+        )
+    )
+    text = (tmp_path / "stage_summary.txt").read_text()
+    assert "Stop reason" in text
+    assert "test_guard: synthetic stop for the glue test" in text
+
+
+def test_completed_final_info_eval_run_closes_every_constructed_env(
+    tmp_path,
+):
+    """Success-path sibling of the warm-start close test: the inner
+    cleanup used to ``opened_envs.clear()`` before the outer finally
+    ran, so the final_info_eval base env leaked its MuJoCo resources on
+    every completed run."""
+    constructed: set[int] = set()
+    closed: set[int] = set()
+
+    def tracked_env_fn():
+        env = BallBalanceEnv(episode_len=12)
+        identity = id(env)
+        constructed.add(identity)
+        original_close = env.close
+
+        def tracked_close():
+            closed.add(identity)
+            original_close()
+
+        env.close = tracked_close
+        return env
+
+    train(_merged_eval_cfg(tmp_path, env_fn=tracked_env_fn))
+    assert constructed
+    assert constructed <= closed
+
+
 def test_final_info_eval_owns_evaluations_npz_when_reward_stream_retired(
     tmp_path,
 ):
@@ -1128,3 +1187,34 @@ def test_config_json_records_every_train_config_data_field(tmp_path):
     # The excluded-but-real fields must still be recorded somewhere.
     for name in recorded_at_top_level:
         assert name in payload
+
+
+def test_config_json_gate_block_records_every_gate_key(tmp_path):
+    """The nested ``performance_gate`` block is hand-maintained too.
+
+    The 0.24.0 ``stage_eval_budget`` pair was accepted by ``train()``
+    but absent from this block for two releases, so a run stopped by
+    the staleness guard had a ``config.json`` showing no guard was
+    configured. Pin the block to ``PERFORMANCE_GATE_KEYS`` so the next
+    gate lever cannot drift the same way.
+    """
+    from courtside_dynamics.training.train import PERFORMANCE_GATE_KEYS
+
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=8),
+        log_dir=str(tmp_path),
+        performance_gate={
+            "metric_key": "m",
+            "threshold": 1.0,
+            "sustain_evals": 1,
+            "stages": ({"episode_len": 8},),
+        },
+    )
+    write_run_config(cfg, str(tmp_path))
+    payload = json.loads((tmp_path / "config.json").read_text())
+    gate_block = payload["train_config"]["performance_gate"]
+    assert set(gate_block) == set(PERFORMANCE_GATE_KEYS)
+    # Unset optional levers are recorded at train()'s resolution
+    # defaults, so the block reads as the gate actually ran.
+    assert gate_block["stage_eval_budget"] is None
+    assert gate_block["stage_eval_budget_action"] == "stop"
