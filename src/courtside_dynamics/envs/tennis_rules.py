@@ -22,7 +22,10 @@ from itertools import groupby
 from types import MappingProxyType
 from typing import Final
 
-from courtside_dynamics.envs._tennis_physics import is_in_bounds
+from courtside_dynamics.envs._tennis_physics import (
+    REGULATION_COURT,
+    CourtGeometry,
+)
 
 
 class CourtSide(IntEnum):
@@ -398,8 +401,14 @@ class RallyStateMachine:
         *,
         serving_side: CourtSide = CourtSide.A,
         rules: RallyRules | None = None,
+        court: CourtGeometry | None = None,
     ) -> None:
         self.rules = rules or RallyRules()
+        # The surface the OUT_OF_BOUNDS rule measures against. Default
+        # is the regulation singles court (byte-identical for every
+        # existing consumer); a non-regulation env passes its own
+        # geometry instead of forking the reducer.
+        self.court = court if court is not None else REGULATION_COURT
         self.reset(serving_side)
 
     def reset(self, serving_side: CourtSide) -> RallySnapshot:
@@ -639,12 +648,17 @@ class RallyStateMachine:
                 float(event.peak_force),
             )
 
-    @staticmethod
     def _validate_batch(
+        self,
         events: Iterable[RallyEvent],
         contact_peaks: Mapping[RallyEventKind, float],
     ) -> dict[RallyEventKind, float]:
-        """Validate the complete batch before any machine state is mutated."""
+        """Validate the complete batch before any machine state is mutated.
+
+        An instance method (not the historical staticmethod) because the
+        in_bounds cross-check measures against the machine's own
+        ``CourtGeometry``.
+        """
         validated_peaks: dict[RallyEventKind, float] = {}
         for kind, peak in contact_peaks.items():
             if kind not in CONTACT_EVENT_KINDS:
@@ -664,7 +678,7 @@ class RallyStateMachine:
                     raise ValueError("court event side contradicts contact position")
                 if x > 0.0 and side is not CourtSide.B:
                     raise ValueError("court event side contradicts contact position")
-                derived_in_bounds = is_in_bounds(
+                derived_in_bounds = self.court.is_in_bounds(
                     event.position[0],
                     event.position[1],
                 )
@@ -724,12 +738,22 @@ class RallyStateMachine:
             and (
                 (
                     self._phase is RallyPhase.INITIAL_FEED
-                    and (event.from_side or self._ball_side) is self._serving_side
+                    and (
+                        self._ball_side
+                        if event.from_side is None
+                        else event.from_side
+                    )
+                    is self._serving_side
                 )
                 or (
                     self._phase is RallyPhase.RETURN_IN_FLIGHT
                     and self._pending_hitter is not None
-                    and (event.from_side or self._ball_side) is self._pending_hitter
+                    and (
+                        self._ball_side
+                        if event.from_side is None
+                        else event.from_side
+                    )
+                    is self._pending_hitter
                 )
             )
             for event in events
@@ -758,7 +782,7 @@ class RallyStateMachine:
         for event in court_events:
             assert event.position is not None  # validated before mutation
             side = _event_side(event.kind)
-            if not is_in_bounds(event.position[0], event.position[1]):
+            if not self.court.is_in_bounds(event.position[0], event.position[1]):
                 reason = TerminationReason.OUT_OF_BOUNDS
             elif (
                 side is not self._expected_returner
@@ -800,7 +824,9 @@ class RallyStateMachine:
             if event.kind not in CROSSING_EVENT_KINDS:
                 continue
             target = _event_side(event.kind)
-            source = event.from_side or ball_side
+            source = (
+                ball_side if event.from_side is None else event.from_side
+            )
             invalid = (
                 target is source
                 or source is not ball_side
@@ -890,7 +916,9 @@ class RallyStateMachine:
 
     def _handle_crossing(self, event: RallyEvent) -> None:
         target = _event_side(event.kind)
-        source = event.from_side or self._ball_side
+        source = (
+            self._ball_side if event.from_side is None else event.from_side
+        )
 
         if (
             target is source
@@ -941,7 +969,7 @@ class RallyStateMachine:
     def _handle_court_contact(self, event: RallyEvent) -> CourtSide | None:
         side = _event_side(event.kind)
         assert event.position is not None  # validated before mutation
-        if not is_in_bounds(event.position[0], event.position[1]):
+        if not self.court.is_in_bounds(event.position[0], event.position[1]):
             self._terminate(TerminationReason.OUT_OF_BOUNDS)
             return None
 

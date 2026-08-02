@@ -24,7 +24,8 @@ from courtside_dynamics.envs._tennis_physics import (
     COLLISION_NET,
     COLLISION_RACKET,
     COLLISION_ROBOT,
-    is_in_bounds,
+    REGULATION_COURT,
+    CourtGeometry,
 )
 from courtside_dynamics.envs.tennis_rules import (
     CourtSide,
@@ -114,10 +115,29 @@ class TennisSceneContactIndex:
     humanoid_b_geoms: frozenset[int]
 
     @classmethod
-    def from_model(cls, model: mujoco.MjModel) -> TennisSceneContactIndex:
-        """Resolve semantic sets from stable categories and player prefixes."""
-        ball_geom = int(model.geom("ball_geom").id)
-        court_geom = int(model.geom("court_surface").id)
+    def from_model(
+        cls,
+        model: mujoco.MjModel,
+        *,
+        ball_geom_name: str = "ball_geom",
+        court_geom_name: str = "court_surface",
+        racket_prefixes: tuple[str, str] = (
+            "player_a_racket_",
+            "player_b_racket_",
+        ),
+        robot_prefixes: tuple[str, str] = ("player_a_", "player_b_"),
+        require_robots: bool = True,
+    ) -> TennisSceneContactIndex:
+        """Resolve semantic sets from stable categories and player prefixes.
+
+        The defaults are the humanoid-tennis scene, unchanged. A
+        robot-free scene (two bare paddles across the net) passes
+        ``require_robots=False`` and its own name prefixes so the
+        substep sampler, contact latching, and crossing detection can
+        be reused without a humanoid in the model.
+        """
+        ball_geom = int(model.geom(ball_geom_name).id)
+        court_geom = int(model.geom(court_geom_name).id)
         court_geoms: set[int] = set()
         net_geoms: set[int] = set()
         racket_a: set[int] = set()
@@ -134,14 +154,14 @@ class TennisSceneContactIndex:
             elif category == COLLISION_NET:
                 net_geoms.add(geom_id)
             elif category == COLLISION_RACKET:
-                if name.startswith("player_a_racket_"):
+                if name.startswith(racket_prefixes[0]):
                     racket_a.add(geom_id)
-                elif name.startswith("player_b_racket_"):
+                elif name.startswith(racket_prefixes[1]):
                     racket_b.add(geom_id)
             elif category == COLLISION_ROBOT:
-                if name.startswith("player_a_"):
+                if name.startswith(robot_prefixes[0]):
                     humanoid_a.add(geom_id)
-                elif name.startswith("player_b_"):
+                elif name.startswith(robot_prefixes[1]):
                     humanoid_b.add(geom_id)
 
         index = cls(
@@ -154,10 +174,12 @@ class TennisSceneContactIndex:
             humanoid_a_geoms=frozenset(humanoid_a),
             humanoid_b_geoms=frozenset(humanoid_b),
         )
-        index._validate(model)
+        index._validate(model, require_robots=require_robots)
         return index
 
-    def _validate(self, model: mujoco.MjModel) -> None:
+    def _validate(
+        self, model: mujoco.MjModel, *, require_robots: bool = True
+    ) -> None:
         groups = {
             "court": self.court_geoms,
             "net": self.net_geoms,
@@ -166,7 +188,16 @@ class TennisSceneContactIndex:
             "humanoid_a": self.humanoid_a_geoms,
             "humanoid_b": self.humanoid_b_geoms,
         }
-        missing = [name for name, values in groups.items() if not values]
+        # Court, net, and both strikers are the minimum rules scene;
+        # the robot bodies are optional so a paddle-only court can
+        # reuse this index (robot-dependent event kinds simply never
+        # fire against empty groups).
+        optional = () if require_robots else ("humanoid_a", "humanoid_b")
+        missing = [
+            name
+            for name, values in groups.items()
+            if not values and name not in optional
+        ]
         if missing:
             raise ValueError(f"missing semantic tennis geom groups: {missing}")
         all_groups = [
@@ -223,11 +254,24 @@ class SubstepTennisEventSampler:
         model: mujoco.MjModel,
         *,
         config: TennisEventSamplerConfig | None = None,
+        index: TennisSceneContactIndex | None = None,
+        ball_joint_name: str = "ball_free",
+        court: CourtGeometry | None = None,
     ) -> None:
         self.model = model
         self.config = config or TennisEventSamplerConfig()
-        self.index = TennisSceneContactIndex.from_model(model)
-        ball_joint = model.joint("ball_free")
+        # A pre-built index lets a non-humanoid scene (or one with
+        # different naming) reuse the sampler; the default resolves the
+        # humanoid-tennis scene exactly as before.
+        self.index = (
+            index
+            if index is not None
+            else TennisSceneContactIndex.from_model(model)
+        )
+        # The surface the in_bounds annotation measures against;
+        # regulation by default, byte-identical for existing scenes.
+        self.court = court if court is not None else REGULATION_COURT
+        ball_joint = model.joint(ball_joint_name)
         self._ball_qposadr = int(ball_joint.qposadr[0])
         self._ball_dofadr = int(ball_joint.dofadr[0])
         self._latched_contacts: set[str] = set()
@@ -579,7 +623,7 @@ class SubstepTennisEventSampler:
             geom_ids = (min(geom1, geom2), max(geom1, geom2))
             geom_names = tuple(self.model.geom(geom_id).name for geom_id in geom_ids)
             contact_in_bounds = (
-                is_in_bounds(position[0], position[1])
+                self.court.is_in_bounds(position[0], position[1])
                 if kind in {
                     RallyEventKind.BALL_COURT_A,
                     RallyEventKind.BALL_COURT_B,

@@ -9,6 +9,8 @@ boundary is in bounds.
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from typing import Final
 
 import numpy as np
@@ -40,6 +42,58 @@ COLLISION_ROBOT: Final = 1 << 4
 # A tiny numerical tolerance is enough for deterministic analytic tests while
 # still treating the outside edge of each painted line as in bounds.
 LINE_TOLERANCE: Final = 1e-6
+
+
+@dataclass(frozen=True, slots=True)
+class CourtGeometry:
+    """The playing-surface dimensions the rules machinery measures against.
+
+    Defaults are the regulation singles court described by this module's
+    constants, so every existing consumer is byte-identical. A
+    non-regulation court (the PaddleTennis probes froze 6.5 m
+    half-length) constructs its own instance and threads it through
+    ``RallyStateMachine`` and ``SubstepTennisEventSampler`` instead of
+    forking the reducer.
+    """
+
+    half_length: float = COURT_HALF_LENGTH
+    half_width: float = COURT_HALF_WIDTH
+    tolerance: float = LINE_TOLERANCE
+
+    def __post_init__(self) -> None:
+        for name in ("half_length", "half_width"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0.0
+            ):
+                raise ValueError(
+                    f"CourtGeometry.{name} must be a finite positive "
+                    f"number, got {value!r}"
+                )
+        if (
+            isinstance(self.tolerance, bool)
+            or not isinstance(self.tolerance, (int, float))
+            or not math.isfinite(self.tolerance)
+            or self.tolerance < 0.0
+        ):
+            raise ValueError(
+                f"CourtGeometry.tolerance must be a finite non-negative "
+                f"number, got {self.tolerance!r}"
+            )
+
+    def is_in_bounds(self, x: float, y: float) -> bool:
+        """Whether a court-contact point is on or inside the lines."""
+        return (
+            abs(float(x)) <= self.half_length + self.tolerance
+            and abs(float(y)) <= self.half_width + self.tolerance
+        )
+
+
+#: The regulation singles court every consumer uses by default.
+REGULATION_COURT: Final = CourtGeometry()
 
 
 def is_in_bounds(
@@ -100,6 +154,8 @@ __all__ = [
     "COURT_LENGTH",
     "COURT_WIDTH",
     "LINE_TOLERANCE",
+    "CourtGeometry",
+    "REGULATION_COURT",
     "NET_CENTER_HEIGHT",
     "NET_POST_HEIGHT",
     "NET_POST_OFFSET_FROM_SIDELINE",
