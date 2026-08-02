@@ -103,7 +103,11 @@ _TERMINATION_KEYS = (
     "term_nonfinite",
 )
 
-_SPEC_KEYS = frozenset(
+# Public (no underscore) because run_config.py derives its TOML
+# allowlist from these two constants and a drift test pins the pair --
+# lead_charge (0.24.0) and feasibility_ge2_floor (0.25.0) both shipped
+# here while the loader's hand-copied lists still rejected them.
+SPEC_KEYS = frozenset(
     {
         "episodes",
         "seed_start",
@@ -113,6 +117,10 @@ _SPEC_KEYS = frozenset(
         "feasibility_ge2_floor",
     }
 )
+
+#: The mutually exclusive oracle-probe kinds an ``oracle_probes`` table
+#: may set, exactly one per gate stage.
+PROBE_KINDS = ("run_up", "charge_gap", "lead_charge")
 
 _POLICIES = ("parked", "crude", "oracle")
 
@@ -619,7 +627,7 @@ def certify_ladder(
             f"probes for {len(stages)} stages"
         )
     for index, probe in enumerate(oracle_probes):
-        if set(probe) not in ({"run_up"}, {"charge_gap"}, {"lead_charge"}):
+        if len(probe) != 1 or next(iter(probe)) not in PROBE_KINDS:
             raise ValueError(
                 f"oracle_probes[{index}] must set exactly one of 'run_up', "
                 f"'charge_gap', or 'lead_charge', got {dict(probe)!r}"
@@ -865,11 +873,11 @@ def run_startup_certification(cfg: Any, output_path: str) -> dict[str, Any]:
     ``enforce`` (default: advisory).
     """
     spec = dict(cfg.ladder_certification)
-    unknown = sorted(set(spec) - _SPEC_KEYS)
+    unknown = sorted(set(spec) - SPEC_KEYS)
     if unknown:
         raise ValueError(
             f"unknown ladder_certification key(s) {unknown}; expected a "
-            f"subset of {sorted(_SPEC_KEYS)}"
+            f"subset of {sorted(SPEC_KEYS)}"
         )
     gate = cfg.performance_gate
     if not gate or not gate.get("stages"):

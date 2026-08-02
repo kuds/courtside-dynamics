@@ -1128,3 +1128,34 @@ def test_config_json_records_every_train_config_data_field(tmp_path):
     # The excluded-but-real fields must still be recorded somewhere.
     for name in recorded_at_top_level:
         assert name in payload
+
+
+def test_config_json_gate_block_records_every_gate_key(tmp_path):
+    """The nested ``performance_gate`` block is hand-maintained too.
+
+    The 0.24.0 ``stage_eval_budget`` pair was accepted by ``train()``
+    but absent from this block for two releases, so a run stopped by
+    the staleness guard had a ``config.json`` showing no guard was
+    configured. Pin the block to ``PERFORMANCE_GATE_KEYS`` so the next
+    gate lever cannot drift the same way.
+    """
+    from courtside_dynamics.training.train import PERFORMANCE_GATE_KEYS
+
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=8),
+        log_dir=str(tmp_path),
+        performance_gate={
+            "metric_key": "m",
+            "threshold": 1.0,
+            "sustain_evals": 1,
+            "stages": ({"episode_len": 8},),
+        },
+    )
+    write_run_config(cfg, str(tmp_path))
+    payload = json.loads((tmp_path / "config.json").read_text())
+    gate_block = payload["train_config"]["performance_gate"]
+    assert set(gate_block) == set(PERFORMANCE_GATE_KEYS)
+    # Unset optional levers are recorded at train()'s resolution
+    # defaults, so the block reads as the gate actually ran.
+    assert gate_block["stage_eval_budget"] is None
+    assert gate_block["stage_eval_budget_action"] == "stop"

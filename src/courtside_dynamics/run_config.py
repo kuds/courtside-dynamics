@@ -174,13 +174,21 @@ def _convert_phase_labels(labels: Any, path: str) -> dict[int, Any]:
 
 
 _GATE_REQUIRED_KEYS = ("metric_key", "threshold", "sustain_evals", "stages")
-_GATE_OPTIONAL_KEYS = (
-    "promotion_rule",
-    "advance_update_pause_steps",
-    "clear_replay_buffer_on_advance",
-    "reset_entropy_on_advance",
-    "entropy_reset_value",
-)
+
+
+def _gate_known_keys() -> tuple[str, ...]:
+    """The exact key set ``train()`` reads from a gate mapping.
+
+    Imported from ``train`` (lazily -- it pulls in SB3/torch, and every
+    caller of this helper is already inside a validation that imports
+    it) so the TOML allowlist can never lag a new gate lever again: the
+    0.24.0 ``stage_eval_budget`` pair was accepted by ``train()`` but
+    rejected here for two releases while the lists were hand-copied.
+    """
+    from courtside_dynamics.training.train import PERFORMANCE_GATE_KEYS
+
+    optional = sorted(PERFORMANCE_GATE_KEYS - set(_GATE_REQUIRED_KEYS))
+    return _GATE_REQUIRED_KEYS + tuple(optional)
 
 
 def _validate_performance_gate(gate: Any, path: str) -> None:
@@ -201,7 +209,7 @@ def _validate_performance_gate(gate: Any, path: str) -> None:
             f"{path}: [train.performance_gate] replaces the recipe's gate "
             f"wholesale and must define {missing}"
         )
-    known_keys = _GATE_REQUIRED_KEYS + _GATE_OPTIONAL_KEYS
+    known_keys = _gate_known_keys()
     unknown = sorted(set(gate) - set(known_keys))
     if unknown:
         suggestions = difflib.get_close_matches(unknown[0], known_keys, n=3)
@@ -268,15 +276,49 @@ def _validate_performance_gate(gate: Any, path: str) -> None:
             f"clear_replay_buffer_on_advance must be a boolean, got "
             f"{gate['clear_replay_buffer_on_advance']!r}"
         )
+    if "reset_entropy_on_advance" in gate and not isinstance(
+        gate["reset_entropy_on_advance"], bool
+    ):
+        raise ValueError(
+            f"{path}: [train.performance_gate] reset_entropy_on_advance "
+            f"must be a boolean, got {gate['reset_entropy_on_advance']!r}"
+        )
+    if "entropy_reset_value" in gate and gate["entropy_reset_value"] is not None:
+        value = gate["entropy_reset_value"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                f"{path}: [train.performance_gate] entropy_reset_value "
+                f'must be a number (or the "none" sentinel), got {value!r}'
+            )
+    if "stage_eval_budget" in gate and gate["stage_eval_budget"] is not None:
+        budget = gate["stage_eval_budget"]
+        if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
+            raise ValueError(
+                f"{path}: [train.performance_gate] stage_eval_budget "
+                f'must be a positive integer (or the "none" sentinel), '
+                f"got {budget!r}"
+            )
+    if "stage_eval_budget_action" in gate and gate[
+        "stage_eval_budget_action"
+    ] not in ("stop", "advance"):
+        raise ValueError(
+            f"{path}: [train.performance_gate] stage_eval_budget_action "
+            f"must be 'stop' or 'advance', got "
+            f"{gate['stage_eval_budget_action']!r}"
+        )
 
 
-_LADDER_CERT_KEYS = (
-    "oracle_probes",
-    "episodes",
-    "seed_start",
-    "enforce",
-    "max_episode_steps",
-)
+def _ladder_cert_known_keys() -> tuple[str, ...]:
+    """The exact spec keys ``train()``'s startup certification reads.
+
+    Imported from ``ladder_certification`` (lazily, mirroring
+    :func:`_gate_known_keys`) so the allowlist tracks the certifier:
+    ``feasibility_ge2_floor`` shipped in 0.25.0 while the hand-copied
+    list here still rejected it.
+    """
+    from courtside_dynamics.training.ladder_certification import SPEC_KEYS
+
+    return tuple(sorted(SPEC_KEYS))
 
 
 def _validate_ladder_certification(spec: Any, path: str) -> None:
@@ -285,15 +327,18 @@ def _validate_ladder_certification(spec: Any, path: str) -> None:
     Like ``performance_gate``, the table replaces the recipe's spec
     wholesale, so a partial override that drops ``oracle_probes`` is a
     load-time error, not a startup crash."""
+    from courtside_dynamics.training.ladder_certification import PROBE_KINDS
+
     if not isinstance(spec, dict):
         raise ValueError(
             f"{path}: [train.ladder_certification] must be a table (or "
             f'the "none" sentinel to disable the recipe\'s certification)'
         )
-    unknown = sorted(set(spec) - set(_LADDER_CERT_KEYS))
+    known_keys = _ladder_cert_known_keys()
+    unknown = sorted(set(spec) - set(known_keys))
     if unknown:
         suggestions = difflib.get_close_matches(
-            unknown[0], _LADDER_CERT_KEYS, n=3
+            unknown[0], known_keys, n=3
         )
         hint = (
             f"; did you mean {', '.join(map(repr, suggestions))}?"
@@ -303,14 +348,16 @@ def _validate_ladder_certification(spec: Any, path: str) -> None:
         raise ValueError(
             f"{path}: unknown [train.ladder_certification] key(s) "
             f"{unknown}{hint} (train() reads exactly "
-            f"{list(_LADDER_CERT_KEYS)}, so anything else would be "
+            f"{list(known_keys)}, so anything else would be "
             f"silently ignored)"
         )
     if "oracle_probes" not in spec:
         raise ValueError(
             f"{path}: [train.ladder_certification] replaces the recipe's "
             f"spec wholesale and must define oracle_probes (one table "
-            f'with exactly one of "run_up"/"charge_gap" per gate stage)'
+            f"with exactly one of "
+            f"{'/'.join(repr(kind) for kind in PROBE_KINDS)} per gate "
+            f"stage)"
         )
     probes = spec["oracle_probes"]
     if not isinstance(probes, list) or not probes:
@@ -319,14 +366,16 @@ def _validate_ladder_certification(spec: Any, path: str) -> None:
             f"a non-empty array of tables"
         )
     for index, probe in enumerate(probes):
-        if not isinstance(probe, dict) or set(probe) not in (
-            {"run_up"},
-            {"charge_gap"},
+        if (
+            not isinstance(probe, dict)
+            or len(probe) != 1
+            or next(iter(probe)) not in PROBE_KINDS
         ):
             raise ValueError(
                 f"{path}: [train.ladder_certification] oracle_probes"
                 f"[{index}] must be a table with exactly one of "
-                f'"run_up" or "charge_gap", got {probe!r}'
+                f"{', '.join(repr(kind) for kind in PROBE_KINDS)}, "
+                f"got {probe!r}"
             )
         value = next(iter(probe.values()))
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -347,6 +396,22 @@ def _validate_ladder_certification(spec: Any, path: str) -> None:
                     f"{path}: [train.ladder_certification] {key} must be "
                     f"an integer >= {minimum}, got {value!r}"
                 )
+    if "feasibility_ge2_floor" in spec:
+        floor = spec["feasibility_ge2_floor"]
+        if (
+            floor is None
+            or isinstance(floor, bool)
+            or not isinstance(floor, (int, float))
+            or not 0.0 < floor <= 1.0
+        ):
+            # None (the "none" sentinel) is rejected too: the certifier
+            # calls float() on the value, so omit the key to keep the
+            # stock floor instead.
+            raise ValueError(
+                f"{path}: [train.ladder_certification] "
+                f"feasibility_ge2_floor must be a number in (0, 1] "
+                f"(omit the key for the stock floor), got {floor!r}"
+            )
     if "enforce" in spec and not isinstance(spec["enforce"], bool):
         raise ValueError(
             f"{path}: [train.ladder_certification] enforce must be a "

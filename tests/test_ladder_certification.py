@@ -345,6 +345,53 @@ def test_toml_layer_validates_ladder_certification_at_load(tmp_path):
         ))
 
 
+def test_toml_layer_accepts_the_current_era_spec(tmp_path):
+    """``lead_charge`` probes (0.24.0) and ``feasibility_ge2_floor``
+    (0.25.0) are the live recipes' certification surface; the loader
+    must accept exactly what the certifier reads. Regression: both were
+    rejected at load while the loader's allowlists were hand-copied, so
+    no TOML could restate the current era's own certified spec."""
+    from courtside_dynamics.run_config import load_run_config
+
+    def write(body):
+        path = tmp_path / "run.toml"
+        path.write_text(body)
+        return path
+
+    good = write(
+        "[train.ladder_certification]\n"
+        "feasibility_ge2_floor = 0.50\n"
+        "oracle_probes = [{ lead_charge = 2.6 }]\n"
+    )
+    spec = load_run_config(good).train["ladder_certification"]
+    assert spec["oracle_probes"] == [{"lead_charge": 2.6}]
+    assert spec["feasibility_ge2_floor"] == 0.50
+
+    for body, match in (
+        (
+            "[train.ladder_certification]\n"
+            "feasibility_ge2_floor = 1.5\n"
+            "oracle_probes = [{ lead_charge = 2.6 }]\n",
+            r"feasibility_ge2_floor must be a number in \(0, 1\]",
+        ),
+        (
+            # The certifier calls float() on the value, so the "none"
+            # sentinel must be rejected at load, not crash at startup.
+            "[train.ladder_certification]\n"
+            'feasibility_ge2_floor = "none"\n'
+            "oracle_probes = [{ lead_charge = 2.6 }]\n",
+            "feasibility_ge2_floor must be a number",
+        ),
+        (
+            "[train.ladder_certification]\n"
+            "oracle_probes = [{ lead_charge = true }]\n",
+            "value must be a number",
+        ),
+    ):
+        with pytest.raises(ValueError, match=match):
+            load_run_config(write(body))
+
+
 def test_run_startup_certification_enforce_raises_on_failure(tmp_path,
                                                              monkeypatch):
     monkeypatch.setattr(

@@ -327,6 +327,12 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
                     "entropy_reset_value": cfg.performance_gate.get(
                         "entropy_reset_value"
                     ),
+                    "stage_eval_budget": cfg.performance_gate.get(
+                        "stage_eval_budget"
+                    ),
+                    "stage_eval_budget_action": cfg.performance_gate.get(
+                        "stage_eval_budget_action", "stop"
+                    ),
                     "stages": [
                         dict(stage)
                         for stage in cfg.performance_gate["stages"]

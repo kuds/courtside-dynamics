@@ -105,6 +105,29 @@ class _SaveVecNormalizeOnNewBest(BaseCallback):
         return True
 
 
+#: Every key ``train()`` reads from a ``performance_gate`` mapping.
+#: ``run_config.py`` derives its TOML allowlist from this constant and
+#: a drift test pins it to the gate callback's constructor signature --
+#: the 0.24.0 ``stage_eval_budget`` pair was accepted here but rejected
+#: by the loader for two releases because the two lists were maintained
+#: by hand.
+PERFORMANCE_GATE_KEYS = frozenset(
+    {
+        "stages",
+        "metric_key",
+        "threshold",
+        "sustain_evals",
+        "promotion_rule",
+        "advance_update_pause_steps",
+        "clear_replay_buffer_on_advance",
+        "reset_entropy_on_advance",
+        "entropy_reset_value",
+        "stage_eval_budget",
+        "stage_eval_budget_action",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class WarmStartConfig:
     """Policy-only initialization from one canonical prior best run.
@@ -1269,20 +1292,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 # that same trigger's fresh metrics.
                 gate_spec = dict(cfg.performance_gate)
                 unknown_gate_keys = sorted(
-                    set(gate_spec)
-                    - {
-                        "stages",
-                        "metric_key",
-                        "threshold",
-                        "sustain_evals",
-                        "promotion_rule",
-                        "advance_update_pause_steps",
-                        "clear_replay_buffer_on_advance",
-                        "reset_entropy_on_advance",
-                        "entropy_reset_value",
-                        "stage_eval_budget",
-                        "stage_eval_budget_action",
-                    }
+                    set(gate_spec) - PERFORMANCE_GATE_KEYS
                 )
                 if unknown_gate_keys:
                     # A typo'd gate key was previously a silent no-op --

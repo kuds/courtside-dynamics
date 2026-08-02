@@ -507,6 +507,13 @@ def test_gate_archives_stage_bests_and_writes_history(tmp_path):
         assert history["threshold"] == 1.3
         assert history["stage_count"] == len(STAGES)
         assert history["final_stage_index"] == 1
+        # The header records every optional gate lever at its resolved
+        # value -- a budget-stopped run's history must show the budget
+        # that stopped it (the 0.24.0 staleness pair was absent from
+        # this payload for two releases).
+        assert history["stage_eval_budget"] is None
+        assert history["stage_eval_budget_action"] == "stop"
+        assert history["entropy_reset_value"] is None
         rows = history["stages"]
         assert [row["stage_index"] for row in rows] == [0, 1]
         assert rows[0]["promoted"] is True

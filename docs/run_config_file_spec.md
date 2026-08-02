@@ -136,17 +136,26 @@ therefore fails loudly on everything:
   required keys (`metric_key`, `threshold`, `sustain_evals`, `stages`)
   must all be present with sane types; the optional keys
   (`promotion_rule`, `advance_update_pause_steps`,
-  `clear_replay_buffer_on_advance`) are type-checked when present; any
+  `clear_replay_buffer_on_advance`, `reset_entropy_on_advance`,
+  `entropy_reset_value`, `stage_eval_budget`,
+  `stage_eval_budget_action`) are type-checked when present; any
   other key is rejected (it would be silently ignored downstream), and
-  `stages` must be a non-empty array of non-empty tables. Deeper
-  semantics stay with `PerformanceGatedEnvStagesCallback`.
+  `stages` must be a non-empty array of non-empty tables. The
+  allowlist is derived from `train.PERFORMANCE_GATE_KEYS` — the exact
+  set `train()` reads — so a new gate lever is file-configurable the
+  release it ships. Deeper semantics (e.g.
+  `stage_eval_budget >= sustain_evals`) stay with
+  `PerformanceGatedEnvStagesCallback`.
 - `[train.ladder_certification]` is validated structurally at load:
   `oracle_probes` is required (the table replaces the recipe's spec
   wholesale) and must be a non-empty array of tables each carrying
-  exactly one of `run_up`/`charge_gap` with a numeric value; `episodes`
-  / `seed_start` / `max_episode_steps` are integer-checked and
-  `enforce` boolean-checked when present; any other key is rejected
-  with suggestions. Probe-count-vs-stage-count consistency is checked
+  exactly one of `run_up`/`charge_gap`/`lead_charge` with a numeric
+  value; `episodes` / `seed_start` / `max_episode_steps` are
+  integer-checked, `feasibility_ge2_floor` must be a number in (0, 1],
+  and `enforce` is boolean-checked when present; any other key is
+  rejected with suggestions. The allowlist is derived from
+  `ladder_certification.SPEC_KEYS` / `PROBE_KINDS`.
+  Probe-count-vs-stage-count consistency is checked
   at `train()` startup instead, where the resolved gate is known.
 - `phase_labels` keys must be strict decimal strings (`"1_0"`, `"+2"`,
   and whitespace variants are rejected rather than silently relabeling a

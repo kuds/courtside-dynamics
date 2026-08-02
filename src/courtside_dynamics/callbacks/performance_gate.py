@@ -574,6 +574,9 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                 self.clear_replay_buffer_on_advance
             ),
             "reset_entropy_on_advance": self.reset_entropy_on_advance,
+            "entropy_reset_value": self.entropy_reset_value,
+            "stage_eval_budget": self.stage_eval_budget,
+            "stage_eval_budget_action": self.stage_eval_budget_action,
             "stage_count": len(self.stages),
             "final_stage_index": self._stage_index,
             "stages": self._stage_history,
