@@ -89,6 +89,51 @@ Source: [`wall_ball_baseline_review.md`](wall_ball_baseline_review.md) (runs fro
 package). See also `CHANGELOG.md` 0.9.0 → 0.13.0. Depth-campaign entries
 below distill [`wall_ball_rally_diagnosis_20260728_review.md`](wall_ball_rally_diagnosis_20260728_review.md).
 
+### PaddleTennis P0–P2: premise measured, court scaled to paddle physics, loft is the frontier — *probe result (2026-08-02)*
+The pivot's premise is now a measurement, not an argument: on a
+two-paddle prototype (wall-ball calibrations verbatim, net at x=0),
+in-rally strokes land **mean 3.3 m past the net, 50% deeper than
+3 m** — the depth distribution the wall never produced. Two design
+facts came out non-obvious: (1) the **full-scale ITF court is
+infeasible** at the paddles' ~12.5 m/s ceiling (nothing clears from
+11.9 m at any net height) — the era's court freezes at half-length
+6.5 m with the regulation 0.914 m net, placing baseline strokes
+exactly at the power ceiling; (2) with a fixed-pitch face, **depth
+control spans a knife's edge** (hard ↔ long, soft ↔ net), and a
+strike-height offset (~0.12 m below ball center) measurably widens
+it — the first quantitative sign that paddle-pitch actuation may
+graduate from parked consistency lever to era prerequisite, a
+question for the first learned runs. Scripted reference band:
+2.0 crossings/point, max 10, ≥4 in 33% (bimodal — half of points die
+on serve-return, the wall-ball pattern repeating). P3–P5 still gate
+env code. Details:
+[`paddle_tennis_probes_20260802.md`](paddle_tennis_probes_20260802.md).
+
+### The replication splits — reliability 2/2, era skill 1/2 — and the volley loophole closes the wall-ball chapter — *result (run 20260801_144043); chapter closed*
+Seed 1 ran its full 6M budget, out-scored seed 0 everywhere (best
+window 3.072 — the first ≥3.0 window in campaign history, essentially
+uncompressed; uncapped audit 3.08; champion banked at literally step
+6,000,000 and confirmed at 3.417, the project's highest), and **failed
+the deep-receive criterion completely**: measured first contact mean
+x = −4.49 (bar ≤ −6.0), 0% of episodes deep. Mechanism: in 48% of
+episodes it *volleys the serve out of the air* at −3.4 before the
+ball bounces; the rest intercept the post-bounce leg early at −5.5.
+Two seeds, two coherent opposite styles — and the style that refuses
+the era's skill scores higher. Training reliability is settled at 2/2
+(no basin, no collapse, 384 evals). The durable lesson: **an
+environment's dominant strategy is set by its physics, not by reward
+or rule decree** — the wall only hits short (rebounds mean −1.0,
+never deeper than −6.1), so depth can never be instrumentally useful
+against it, and every decree that forces it (fences, serve energy,
+style bans) invites the next exploit. Decision: the 0.26.0
+loophole-closing and episode-cap changes are **rejected as moot**, the
+wall-ball chapter closes with its deliverables banked (calibrated
+physics, the probes-first methodology, 2/2 unattended training
+safety, two stylistically opposite champions), and the campaign moves
+to opponent play, where deep balls exist because someone hits them:
+[`design_paddle_tennis.md`](design_paddle_tennis.md). Details:
+[`wall_ball_true_baseline_replication_20260801_review.md`](wall_ball_true_baseline_replication_20260801_review.md).
+
 ### The true-baseline era opens on the first run — and the episode cap becomes the measured ceiling — *result (run 20260731_132322)*
 The first `WallBallTrueBaseline` GPU run passed every pre-registered
 primary criterion: best window 2.856 (bar 2.0), uncapped audit **3.02
