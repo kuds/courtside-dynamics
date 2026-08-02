@@ -63,6 +63,7 @@ from typing import Any
 import numpy as np
 
 import courtside_dynamics
+from courtside_dynamics.envs._base import invert_piecewise_target
 
 _GRAVITY = 9.81
 
@@ -130,13 +131,13 @@ def _map_action_x(
 ) -> float:
     """Invert the env's asymmetric x action map for a world-x target.
 
-    A stage may legally pivot ``paddle_home_x`` onto a mapping endpoint
-    (the env accepts it and degrades gracefully), which zeroes one
-    half-span; the floor keeps the inversion finite so certification
-    measures such a ladder instead of crashing on it.
+    Delegates to the shared inverse of the env's own piecewise mapping
+    (``envs._base.invert_piecewise_target``), whose span floor keeps
+    the inversion finite when a stage legally pivots ``paddle_home_x``
+    onto a mapping endpoint -- certification measures such a ladder
+    instead of crashing on it.
     """
-    span = (mapping[1] - home) if target_x >= home else (home - mapping[0])
-    return float(np.clip((target_x - home) / max(span, 1e-9), -1.0, 1.0))
+    return invert_piecewise_target(target_x, mapping[0], home, mapping[1])
 
 
 def _parked_action(

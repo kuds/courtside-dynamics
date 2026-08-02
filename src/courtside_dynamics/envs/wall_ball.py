@@ -143,7 +143,10 @@ from gymnasium import utils
 from gymnasium.spaces import Box
 
 from courtside_dynamics.assets import asset_path
-from courtside_dynamics.envs._base import CourtsideMujocoEnv
+from courtside_dynamics.envs._base import (
+    CourtsideMujocoEnv,
+    piecewise_targets,
+)
 
 # Cartesian bounds for "ball is still in play". Outside these, the
 # episode terminates. Paddle starts near x=-2, wall sits at x=4, so
@@ -583,9 +586,6 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # created the incoming trajectory.
         self._recoverable_bounce_eligible = False
         self._reset_mode = _RESET_NORMAL
-        # Most recent finite observation, echoed back if the sim ever
-        # produces a nonfinite state so NaNs can't reach VecNormalize.
-        self._last_finite_obs: np.ndarray | None = None
 
         # Obs: ball pos(3) + ball vel(3) + paddle qpos/qvel(6) +
         # paddle_hit_since_last_wall flag(1) + floor_bounce_count(1) +
@@ -1188,12 +1188,11 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         if not bool(np.isfinite(normalized).all()):
             raise ValueError("action must contain only finite values")
         normalized = np.clip(normalized, -1.0, 1.0)
-        positive_span = self._control_high - self._control_home
-        negative_span = self._control_home - self._control_low
-        targets = np.where(
-            normalized >= 0.0,
-            self._control_home + normalized * positive_span,
-            self._control_home + normalized * negative_span,
+        targets = piecewise_targets(
+            normalized,
+            self._control_low,
+            self._control_home,
+            self._control_high,
         )
         if self._paddle_x_fence is not None:
             # The fence clamps the *target*, not the mapping: in-window
@@ -1799,10 +1798,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         # instead (the episode is terminating via term_nonfinite). A
         # single NaN obs ingested by VecNormalize's running statistics
         # would silently corrupt every subsequent normalized step.
-        if obs_nonfinite and self._last_finite_obs is not None:
-            obs = self._last_finite_obs.copy()
-        else:
-            self._last_finite_obs = obs.copy()
+        obs = self._record_or_echo_observation(obs, obs_nonfinite)
 
         info = {
             # Backward-compat keys consumed by callbacks/CSV writers.
@@ -1916,8 +1912,8 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._pending_shaping = 0.0
         self._pending_bonus = 0.0
         obs = (
-            self._last_finite_obs.copy()
-            if self._last_finite_obs is not None
+            self._last_finite_observation.copy()
+            if self._last_finite_observation is not None
             else self._get_obs()
         )
         info = {
@@ -2159,7 +2155,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
 
         self.set_state(qpos, qvel)
         obs = self._get_obs()
-        self._last_finite_obs = obs.copy()
+        self._remember_finite_observation(obs)
         return obs
 
     def _get_reset_info(self) -> dict[str, Any]:

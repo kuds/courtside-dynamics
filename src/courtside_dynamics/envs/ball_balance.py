@@ -32,19 +32,44 @@ class BallBalanceEnv(CourtsideMujocoEnv, utils.EzPickle):
         )
 
     def step(self, a):
+        action = np.asarray(a, dtype=np.float64)
+        if action.shape != self.action_space.shape:
+            raise ValueError(
+                f"action must have shape {self.action_space.shape}, "
+                f"got {action.shape}"
+            )
+        if not bool(np.isfinite(action).all()) or (
+            not self._physics_state_is_finite()
+        ):
+            # A nonfinite action or state means the policy, a wrapper,
+            # or the solver has blown up. MuJoCo reacts to NaN
+            # ctrl/qpos by warning and resetting its state mid-episode,
+            # so never step physics from here: end the episode on the
+            # last finite observation (the guard every sibling env
+            # carries).
+            self.step_number += 1
+            obs = self._record_or_echo_observation(self._get_obs(), True)
+            return obs, 0.0, True, False, {}
+
         reward = 1.0
-        self.do_simulation(a, self.frame_skip)
+        self.do_simulation(action, self.frame_skip)
         self.step_number += 1
 
-        obs = self._get_obs()
-        terminated = bool(not np.isfinite(obs).all() or (obs[2] < 0))
+        raw_observation = self._get_obs()
+        nonfinite = not bool(np.isfinite(raw_observation).all())
+        # Echo the last finite observation on a solver blow-up so a NaN
+        # can never reach VecNormalize's running statistics.
+        obs = self._record_or_echo_observation(raw_observation, nonfinite)
+        terminated = bool(nonfinite or (obs[2] < 0))
         truncated = self.step_number >= self.episode_len
         return obs, reward, terminated, truncated, {}
 
     def reset_model(self):
         self.step_number = 0
         self.set_state(*self._noisy_init_state())
-        return self._get_obs()
+        observation = self._get_obs()
+        self._remember_finite_observation(observation)
+        return observation
 
     #: Human-readable labels matching each element of ``_get_obs``. The
     #: length equals ``observation_space.shape[0]``.

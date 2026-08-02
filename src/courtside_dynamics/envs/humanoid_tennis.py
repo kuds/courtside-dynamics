@@ -31,7 +31,10 @@ from gymnasium import utils
 from gymnasium.spaces import Box
 
 from courtside_dynamics.assets import asset_path
-from courtside_dynamics.envs._base import CourtsideMujocoEnv
+from courtside_dynamics.envs._base import (
+    CourtsideMujocoEnv,
+    piecewise_targets,
+)
 from courtside_dynamics.envs._tennis_events import (
     TENNIS_CONTACT_CHANNELS,
     TENNIS_CONTACT_MARKOV_LABELS,
@@ -500,10 +503,6 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._stage_attempt_complete = False
         self._target_hit = False
         self._target_miss = False
-        self._last_finite_observation = np.zeros(
-            self.observation_layout.total_size,
-            dtype=np.float64,
-        )
 
     @property
     def neutral_action(self) -> np.ndarray:
@@ -704,12 +703,11 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         if not bool(np.isfinite(normalized).all()):
             raise ValueError("action must contain only finite values")
         normalized = np.clip(normalized, -1.0, 1.0) * self._active_action_mask
-        positive_span = self._control_high - self._stand_controls
-        negative_span = self._stand_controls - self._control_low
-        return np.where(
-            normalized >= 0.0,
-            self._stand_controls + normalized * positive_span,
-            self._stand_controls + normalized * negative_span,
+        return piecewise_targets(
+            normalized,
+            self._control_low,
+            self._stand_controls,
+            self._control_high,
         )
 
     def _configure_action_mask(self, serving_side: CourtSide) -> None:
@@ -922,7 +920,7 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
         observation = self._get_obs()
         if not bool(np.isfinite(observation).all()):
             raise RuntimeError("reset produced a non-finite observation")
-        self._last_finite_observation = observation.copy()
+        self._remember_finite_observation(observation)
         return observation
 
     def _sample_initial_ball_state(
@@ -1259,11 +1257,9 @@ class HumanoidTennisCoopEnv(CourtsideMujocoEnv, utils.EzPickle):
 
         raw_observation = self._get_obs()
         observation_sanitized = not bool(np.isfinite(raw_observation).all())
-        if observation_sanitized:
-            observation = self._last_finite_observation.copy()
-        else:
-            observation = raw_observation
-            self._last_finite_observation = observation.copy()
+        observation = self._record_or_echo_observation(
+            raw_observation, observation_sanitized
+        )
 
         stage_success_terminal = bool(
             stage_success_now
