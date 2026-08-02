@@ -4060,6 +4060,11 @@ class TestSharedBaseGuards:
             env.reset(seed=0)
             healthy_obs, *_ = env.step(np.zeros(6))
             qpos_before = env.unwrapped.data.qpos.copy()
+            # The shape half of the new validation, pinned alongside
+            # the finiteness half (WallBall's identical branch already
+            # was).
+            with pytest.raises(ValueError, match="action must have shape"):
+                env.step(np.zeros(3))
             bad = np.full(6, np.nan)
             obs, reward, terminated, truncated, _ = env.step(bad)
             assert terminated

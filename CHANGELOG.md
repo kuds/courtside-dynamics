@@ -5,6 +5,35 @@ observation, action, and recipe changes that determine which saved policies,
 `VecNormalize` statistics, and learning curves remain comparable across
 versions. Newest releases first.
 
+## Unreleased
+
+Infrastructure hardening between the wall-ball and PaddleTennis
+campaigns. No physics, observation, action, or recipe changes on any
+healthy trajectory — the two behavior changes below are confined to
+already-pathological (nonfinite) states and to rendering, so saved
+policies, `VecNormalize` statistics, and learning curves all remain
+comparable with 0.25.0.
+
+- **BallBalance nonfinite guard.** BallBalance now carries the same
+  guard as every sibling env: actions are shape/finiteness-validated,
+  the physics state is checked before stepping, and a nonfinite
+  action/state ends the episode with reward 0 on the echoed last
+  finite observation. Previously a NaN action reached MuJoCo, which
+  warns and silently resets the simulation mid-episode — so on
+  solver-blow-up seeds, episode lengths and termination counts differ
+  from a stock 0.25.0 tree. Healthy episodes are bit-identical.
+- **WallBall court-style rendering fix.** The 0.25.0 coordinate ticks
+  (`court_tick_xm5..xm8`) escaped the hand-maintained style-visibility
+  list and stayed visible in `court_style="tennis"`/`"none"` footage;
+  the visibility lists are now derived from the compiled model, so the
+  ticks hide correctly. Render-only (sites cannot collide); pinned by
+  the cross-style observation-equality tests.
+- **Run-summary stop reasons.** `stage_summary.txt` gains a
+  `Stop reason` line naming which guard ended a stopped-early run
+  (early-stop patience, degenerate signal, or stage budget). Artifact
+  addition only; existing readers scan line-prefixes and are
+  unaffected.
+
 ## 0.25.0
 
 The true-baseline extension

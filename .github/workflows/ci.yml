@@ -15,9 +15,13 @@ on:
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
-# Cancel superseded runs on the same ref.
+# Cancel superseded runs on the same ref. Keyed by event too: schedule
+# and workflow_dispatch runs resolve to refs/heads/main, and in a
+# ref-only group the Monday cron and an in-flight push run on main
+# would cancel each other, leaving a head commit with a permanently
+# 'cancelled' check.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -62,8 +66,9 @@ jobs:
       - run: python -m pip install --upgrade pip build
       - run: python -m build
       # Building proves the wheel builds; it does not prove it works. The
-      # package ships 35 STL meshes, 7 MJCFs and 11 starter TOMLs as
-      # package *data* selected by hand-written globs, and its whole
+      # package ships its simulation assets -- STL meshes, MJCF XMLs,
+      # and the starter run-config TOMLs -- as package *data* selected
+      # by hand-written globs, and its whole
       # distribution path is `pip install git+...` on Colab. Drop a glob
       # and every env constructor fails at mj_loadXML for wheel users
       # while a source checkout -- where the files sit beside the code
