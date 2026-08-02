@@ -819,3 +819,22 @@ with no scaling (wall face = net at x = 3.9, baseline at x = −7.985); the serv
 line lands at x = −2.50, *inside* the paddle lane — a happy accident worth
 keeping. Metrics-producing paths always keep the default style; only the recorded
 video differs.
+
+### PaddleTennis freezes as one cooperative alternating-serve point per episode — *implemented (unreleased)*
+The phase-P1 env (`CourtsideDynamics/PaddleTennis`) shipped only after P0–P4
+measured every number it froze (`paddle_tennis_env_20260802.md`). The
+non-obvious calls: **either side's fault pays the shared −1** (a cooperative
+rally has no useful "whose fault" asymmetry — an opponent fault usually
+punishes a poor incoming ball; asymmetry waits for the scoring phase), **one
+point per episode with strict serve alternation** (keeps `crossings` an
+un-averaged per-point tail and the side statistics provably 50/50 — the P4
+mirror makes alternation exactly fair), **episode_len 1500** (the wall-ball
+750-cap lesson: never truncate a healthy rally; the scripted tail ends in
+~270 steps), **the bounded rally/contact observation tail stays unnormalized**
+(the humanoid stage-boundary variance lesson), and **no shaping at the
+freeze** (every pre-evidence shaping term this repo added was later falsified
+or exploited). The policy physically trains side A only; P4's bit-for-bit
+mirror is the reason that loses nothing, and `serve_side_is_policy` records
+the alternation in every info stream. `ladder_certification` stays
+WallBall-only — PaddleTennis certifies through the probes harness on the
+reserved held-out seed blocks instead.

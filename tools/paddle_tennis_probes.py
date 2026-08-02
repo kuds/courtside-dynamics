@@ -24,10 +24,18 @@ Scripted probes only. Seeds come from the calibration block recorded
 in the probe doc's ledger; the reserved held-out blocks (3100-3199,
 4100-4199) are never touched here.
 
+The harness also owns the held-out certification of the frozen env
+(``--certify``): the registered ``PaddleTennisEnv`` with both sides
+scripted, on the reserved seed block, against floors pre-registered
+from calibration data only (see ``certify_frozen_env``). The repo's
+``ladder_certification`` machinery is WallBall-specific and is not
+used here.
+
 Usage::
 
     python tools/paddle_tennis_probes.py            # full P3 sweep
     python tools/paddle_tennis_probes.py --quick    # smoke (tests/CI)
+    python tools/paddle_tennis_probes.py --certify  # held-out cert
 """
 from __future__ import annotations
 
@@ -38,13 +46,15 @@ from collections import Counter
 
 import numpy as np
 
-from courtside_dynamics.envs._base import invert_piecewise_target
 from courtside_dynamics.envs._paddle_court import (
     NET_HEIGHT,
     PADDLE_COURT,
     PaddleCourtScene,
     PaddleCourtServe,
+    lead_charge_local_action,
+    scripted_lead_charge_opponent,
 )
+from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
 from courtside_dynamics.envs.tennis_rules import (
     COURT_EVENT_KINDS as _COURT_EVENT_KINDS,
 )
@@ -54,85 +64,10 @@ from courtside_dynamics.envs.tennis_rules import (
     TerminationReason,
 )
 
-_GRAVITY = 9.81
-
-#: The P1-frozen scripted receiver (probe doc §3): commit gap, swing-
-#: through past the ball toward the net, strike-height offset below
-#: ball center. Values are the frozen best configuration.
-LEAD_CHARGE_GAP = 0.8
-LEAD_CHARGE_SWING = 0.4
-LEAD_CHARGE_STRIKE = -0.12
-
-#: Side-local paddle constants (paddle_court.xml): home pivot, the
-#: mapping span, and the z slide's local range around base height 1.2.
-_HOME_X = -1.7
-_X_LOW, _X_HIGH = -6.4, -0.1
-_Y_SPAN = 3.0
-_Z_BASE, _Z_LOW, _Z_HIGH = 1.2, -0.9, 2.0
-
 #: Default control-frame budget per point: 12 s of simulated time at
 #: the 100 Hz control rate. A point that exhausts it shows up honestly
 #: in the taxonomy as termination NONE (truncated), never silently.
 MAX_CONTROL_STEPS = 1200
-
-
-def lead_charge_local_action(
-    ball_position: np.ndarray,
-    ball_velocity: np.ndarray,
-    paddle_position: np.ndarray,
-    *,
-    gap: float = LEAD_CHARGE_GAP,
-    swing: float = LEAD_CHARGE_SWING,
-    strike: float = LEAD_CHARGE_STRIKE,
-) -> np.ndarray:
-    """The frozen P1 controller, in the side-local frame.
-
-    A world-frame port of the certification ``lead_charge`` oracle
-    (training/ladder_certification.py): park at home while the ball is
-    outgoing, and once an incoming ball is within ``gap`` of the
-    paddle, charge with a ballistic y/z lead aimed ``strike`` below the
-    projected ball height, driving the target ``swing`` beyond the
-    ball toward the net. Volleys are legal on this court, so unlike the
-    wall-ball oracle there is no bounce-count precondition.
-    """
-    ball_x, ball_y, ball_z = ball_position
-    vx, vy, vz = ball_velocity
-    paddle_x = paddle_position[0]
-    incoming = vx < -0.1
-
-    if incoming and (ball_x - paddle_x) <= gap:
-        target_x = min(ball_x + swing, _X_HIGH)
-        t_hit = float(
-            np.clip((ball_x - paddle_x) / max(0.5, -vx + 2.5), 0.0, 1.2)
-        )
-        target_y = ball_y + vy * t_hit
-        target_z = (
-            max(0.25, ball_z + vz * t_hit - 0.5 * _GRAVITY * t_hit**2)
-            + strike
-        )
-    elif incoming:
-        # Pre-position while the ball closes: track its y and height
-        # from the home column (the wall-ball oracle's waiting posture)
-        # so the strike is reachable when the commit gap trips.
-        target_x = _HOME_X
-        target_y = ball_y
-        target_z = max(0.25, ball_z)
-    else:
-        # Yield while the ball is outgoing: the serve launches from the
-        # server's own half and passes through the home column, so a
-        # ball-tracking park (safe for the wall-ball oracle, whose
-        # serves launched beyond the paddle) would swat the server's
-        # own feed -- an illegal WRONG_HITTER touch.
-        target_x = _HOME_X
-        target_y = 0.0
-        target_z = _Z_BASE
-
-    action_x = invert_piecewise_target(target_x, _X_LOW, _HOME_X, _X_HIGH)
-    action_y = float(np.clip(target_y / _Y_SPAN, -1.0, 1.0))
-    action_z = invert_piecewise_target(
-        target_z - _Z_BASE, _Z_LOW, 0.0, _Z_HIGH
-    )
-    return np.array([action_x, action_y, action_z], dtype=np.float64)
 
 
 @dataclasses.dataclass(slots=True)
@@ -385,6 +320,125 @@ def sweep_serve_rules(
     return cells
 
 
+#: Held-out certification contract for the frozen env definition.
+#: The seed block is the reserved one from the probe doc's ledger;
+#: every floor below was pre-registered from CALIBRATION data only
+#: (P3's committed band on seeds 1200-2639 and the env bring-up smoke
+#: on seeds 1000-1039: mean crossings 3.05, per-episode std 1.06,
+#: >=1-crossing rate 0.95), before any reserved seed was drawn.
+CERTIFICATION_SEED_START = 3100
+CERTIFICATION_EPISODES = 100
+#: Bring-up mean (3.05, same instrument as this certification) minus
+#: two combined sampling standard deviations of the 40- and
+#: 100-episode means (2 x 0.20), rounded down: the shipped env must
+#: reproduce the committed scripted band within sampling error.
+CERTIFICATION_MEAN_CROSSINGS_FLOOR = 2.6
+#: Bring-up returned-serve rate (0.95) minus two combined binomial
+#: sampling deviations (2 x ~0.04), rounded down.
+CERTIFICATION_GE1_RATE_FLOOR = 0.85
+
+
+@dataclasses.dataclass(slots=True)
+class CertificationResult:
+    """Held-out verdict for the frozen ``PaddleTennisEnv`` definition."""
+
+    episodes: int
+    seed_start: int
+    mean_crossings: float
+    std_crossings: float
+    ge1_rate: float
+    mean_valid_returns: float
+    serve_side_a_fraction: float
+    unsafe_terminations: int
+    terminations: Counter
+    passed: bool
+
+    def report(self) -> str:
+        taxonomy = ", ".join(
+            f"{name} {count}"
+            for name, count in self.terminations.most_common()
+        )
+        verdict = "PASS" if self.passed else "FAIL"
+        return "\n".join(
+            [
+                "PaddleTennis held-out certification "
+                f"(registered env, scripted pair, seeds "
+                f"{self.seed_start}-{self.seed_start + self.episodes - 1})",
+                f"  mean crossings   {self.mean_crossings:.2f} "
+                f"(floor {CERTIFICATION_MEAN_CROSSINGS_FLOOR}; "
+                f"std {self.std_crossings:.2f})",
+                f"  >=1-crossing     {self.ge1_rate:.0%} "
+                f"(floor {CERTIFICATION_GE1_RATE_FLOOR:.0%})",
+                f"  valid returns    {self.mean_valid_returns:.2f} mean",
+                f"  serve side A     {self.serve_side_a_fraction:.0%}",
+                f"  unsafe/nonfinite {self.unsafe_terminations} "
+                "(floor: exactly 0)",
+                f"  taxonomy         {taxonomy}",
+                f"  verdict          {verdict}",
+            ]
+        )
+
+
+def certify_frozen_env(
+    *,
+    episodes: int = CERTIFICATION_EPISODES,
+    seed_start: int = CERTIFICATION_SEED_START,
+) -> CertificationResult:
+    """Play the frozen task, both sides scripted, one seed per episode.
+
+    Constructs the registered env with its frozen defaults -- the
+    definition being certified is exactly the one training will see.
+    Serve sides alternate across resets by the env's own contract, so
+    the block splits 50/50 between policy-serving and receiving.
+    """
+    env = PaddleTennisEnv()
+    crossings: list[int] = []
+    valid_returns: list[float] = []
+    serve_side_a = 0
+    unsafe = 0
+    terminations: Counter = Counter()
+    try:
+        for seed in range(seed_start, seed_start + episodes):
+            observation, reset_info = env.reset(seed=seed)
+            if reset_info["serve_side"] == CourtSide.A.label:
+                serve_side_a += 1
+            info: dict = {}
+            while True:
+                observation, _, terminated, truncated, info = env.step(
+                    scripted_lead_charge_opponent(observation)
+                )
+                if terminated or truncated:
+                    break
+            crossings.append(int(info["crossings"]))
+            valid_returns.append(float(info["valid_return_count"]))
+            terminations[info["termination_reason_name"]] += 1
+            if info["term_nonfinite"]:
+                unsafe += 1
+    finally:
+        env.close()
+
+    values = np.asarray(crossings, dtype=np.float64)
+    mean_crossings = float(values.mean())
+    ge1_rate = float((values >= 1).mean())
+    passed = (
+        mean_crossings >= CERTIFICATION_MEAN_CROSSINGS_FLOOR
+        and ge1_rate >= CERTIFICATION_GE1_RATE_FLOOR
+        and unsafe == 0
+    )
+    return CertificationResult(
+        episodes=episodes,
+        seed_start=seed_start,
+        mean_crossings=mean_crossings,
+        std_crossings=float(values.std(ddof=1)) if episodes > 1 else 0.0,
+        ge1_rate=ge1_rate,
+        mean_valid_returns=float(np.mean(valid_returns)),
+        serve_side_a_fraction=serve_side_a / episodes,
+        unsafe_terminations=unsafe,
+        terminations=terminations,
+        passed=passed,
+    )
+
+
 def format_report(cells: list[CellResult]) -> str:
     lines = [
         "P3 serve-rules sweep "
@@ -413,7 +467,34 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--quick", action="store_true", help="single-cell smoke run"
     )
+    parser.add_argument(
+        "--certify",
+        action="store_true",
+        help=(
+            "held-out certification of the frozen env on the reserved "
+            "seed block (burns it; run once per definition freeze)"
+        ),
+    )
+    parser.add_argument(
+        "--certify-episodes",
+        type=int,
+        default=CERTIFICATION_EPISODES,
+        help="episodes for --certify",
+    )
+    parser.add_argument(
+        "--certify-seed-start",
+        type=int,
+        default=CERTIFICATION_SEED_START,
+        help="first seed for --certify (default: the reserved block)",
+    )
     args = parser.parse_args(argv)
+    if args.certify:
+        result = certify_frozen_env(
+            episodes=args.certify_episodes,
+            seed_start=args.certify_seed_start,
+        )
+        print(result.report())
+        return 0 if result.passed else 1
     cells = sweep_serve_rules(
         points=args.points, seed_start=args.seed_start, quick=args.quick
     )

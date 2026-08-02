@@ -37,13 +37,50 @@
              CourtGeometry(6.5, 4.115), not by surface extent. -->
         <geom name="court_surface" pos="0 0 0" size="9 6 0.1" type="plane" material="grid" contype="1" conaffinity="2" />
 
-        <!-- Court lines, render-only sites (court_* naming so a future
-             styled env can derive visibility lists from the model the
-             way WallBallEnv now does). -->
+        <!-- Court markings, all render-only sites (sites never generate
+             contacts). Visibility is style-managed by PaddleTennisEnv
+             with lists DERIVED from these names, the mechanism
+             WallBallEnv uses: court_tennis_* sites belong to the
+             presentation style, every other court_* site to the
+             diagnostic style (the serve-origin markers are
+             preset-dependent: the env repositions them from its
+             resolved serve config at reset). -->
+
+        <!-- Diagnostic geography: boundary lines, 1 m depth ticks,
+             the paddles' home columns, and the serve origins. -->
         <site name="court_line_baseline_a" type="box" pos="-6.5 0 0.006" size="0.03 4.115 0.002" rgba="1 1 1 0.8" />
         <site name="court_line_baseline_b" type="box" pos="6.5 0 0.006" size="0.03 4.115 0.002" rgba="1 1 1 0.8" />
         <site name="court_line_side_left" type="box" pos="0 -4.115 0.006" size="6.5 0.03 0.002" rgba="1 1 1 0.8" />
         <site name="court_line_side_right" type="box" pos="0 4.115 0.006" size="6.5 0.03 0.002" rgba="1 1 1 0.8" />
+        <site name="court_tick_xm6" type="box" pos="-6 0 0.004" size="0.01 4.115 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xm5" type="box" pos="-5 0 0.004" size="0.01 4.115 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xm4" type="box" pos="-4 0 0.004" size="0.01 4.115 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xm3" type="box" pos="-3 0 0.004" size="0.01 4.115 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xm2" type="box" pos="-2 0 0.004" size="0.01 4.115 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xm1" type="box" pos="-1 0 0.004" size="0.01 4.115 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xp1" type="box" pos="1 0 0.004" size="0.01 4.115 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xp2" type="box" pos="2 0 0.004" size="0.01 4.115 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xp3" type="box" pos="3 0 0.004" size="0.01 4.115 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xp4" type="box" pos="4 0 0.004" size="0.01 4.115 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xp5" type="box" pos="5 0 0.004" size="0.01 4.115 0.002" rgba="1 1 1 0.22" />
+        <site name="court_tick_xp6" type="box" pos="6 0 0.004" size="0.01 4.115 0.002" rgba="1 1 1 0.22" />
+        <site name="court_line_home_a" type="box" pos="-1.7 0 0.005" size="0.02 3 0.002" rgba="0.9 0.9 0.2 0.5" />
+        <site name="court_line_home_b" type="box" pos="1.7 0 0.005" size="0.02 3 0.002" rgba="0.2 0.6 0.9 0.5" />
+        <site name="court_line_serve_a" type="box" pos="-3.25 0 0.005" size="0.02 3 0.002" rgba="1 0.5 0 0.5" />
+        <site name="court_line_serve_b" type="box" pos="3.25 0 0.005" size="0.02 3 0.002" rgba="1 0.5 0 0.5" />
+
+        <!-- Tennis presentation overlay: a to-size acrylic-blue court
+             with painted lines, the wall-ball tennis style's look on
+             the mini court. Slightly higher z than the diagnostic
+             layer so the visible style never z-fights the hidden one. -->
+        <site name="court_tennis_apron" type="box" pos="0 0 0.002" size="8 5.2 0.001" rgba="0.13 0.35 0.22 1" />
+        <site name="court_tennis_surface" type="box" pos="0 0 0.003" size="6.5 4.115 0.001" rgba="0.16 0.32 0.55 1" />
+        <site name="court_tennis_baseline_a" type="box" pos="-6.47 0 0.008" size="0.03 4.115 0.001" rgba="1 1 1 1" />
+        <site name="court_tennis_baseline_b" type="box" pos="6.47 0 0.008" size="0.03 4.115 0.001" rgba="1 1 1 1" />
+        <site name="court_tennis_singles_left" type="box" pos="0 -4.085 0.008" size="6.5 0.03 0.001" rgba="1 1 1 1" />
+        <site name="court_tennis_singles_right" type="box" pos="0 4.085 0.008" size="6.5 0.03 0.001" rgba="1 1 1 1" />
+        <site name="court_tennis_center_mark_a" type="box" pos="-6.35 0 0.008" size="0.15 0.03 0.001" rgba="1 1 1 1" />
+        <site name="court_tennis_center_mark_b" type="box" pos="6.35 0 0.008" size="0.15 0.03 0.001" rgba="1 1 1 1" />
 
         <!-- Regulation-height net. A thin box the full playable width;
              posts are cosmetic sites. The ball's priority contact

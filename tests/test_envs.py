@@ -25,6 +25,7 @@ from courtside_dynamics.envs import (
     BallBalanceEnv,
     BallBounceEnv,
     HumanoidTennisCoopEnv,
+    PaddleTennisEnv,
     WallBallEnv,
 )
 
@@ -32,6 +33,7 @@ ENV_CLASSES = [
     BallBalanceEnv,
     BallBounceEnv,
     WallBallEnv,
+    PaddleTennisEnv,
     HumanoidTennisCoopEnv,
 ]
 
@@ -41,6 +43,7 @@ ENV_CLASSES_WITH_KWARGS = [
     (BallBalanceEnv, {}),
     (BallBounceEnv, {"min_force": 100.0}),
     (WallBallEnv, {"min_force": 1.0}),
+    (PaddleTennisEnv, {}),
     (HumanoidTennisCoopEnv, {}),
 ]
 
@@ -466,6 +469,7 @@ def test_gymnasium_make_ids():
         "CourtsideDynamics/BallBalance",
         "CourtsideDynamics/BallBounce",
         "CourtsideDynamics/WallBall",
+        "CourtsideDynamics/PaddleTennis",
         "CourtsideDynamics/HumanoidTennisCoop",
     ):
         env = gymnasium.make(env_id)

@@ -191,3 +191,9 @@ blocks **3100–3199** and **4100–4199** remain untouched, as does every
 block in the wall-ball ledger. P4's randomized-state tests generate
 states (not evaluation episodes) from seeds 8100/8150, outside every
 ledgered range.
+
+> Ledger update, 2026-08-02 (post-freeze): the env-definition
+> certification (`--certify`;
+> [`paddle_tennis_env_20260802.md`](paddle_tennis_env_20260802.md)
+> §5) burned reserved block **3100–3199**. **4100–4199 remains the
+> only clean held-out block** for the first learned runs.

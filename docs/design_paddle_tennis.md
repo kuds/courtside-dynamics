@@ -1,10 +1,14 @@
 # Design sketch: PaddleTennis — 1v1 rally play on the full court
 
-Status: **Proposed** (not implemented), 2026-08-02, written against
-v0.25.0. Nothing in this document describes shipped code. Per
-doctrine, nothing here ships until the probe battery (§6) has run and
-the task definition is frozen and certified. This sketch scopes the
-work and pre-commits the verification plan.
+Status: **Adopted — phase-P1 environment shipped**, 2026-08-02
+(originally proposed the same day against v0.25.0). The probe battery
+ran first, per doctrine: P0–P4 froze the geometry, reference band,
+premise, serve rules, and mirroring contract (§6 status notes), and
+the registered `CourtsideDynamics/PaddleTennis` env implements that
+frozen definition
+([`paddle_tennis_env_20260802.md`](paddle_tennis_env_20260802.md)).
+P5 (champion transfer) remains open and gates only the phase-P2
+opponent pool.
 
 ## 1. Why leave the wall
 
@@ -121,6 +125,12 @@ B side) and grown only as phases earn it.
 > decision. The env *definition* (registered id, rewards, recipe)
 > remains unshipped pending the freeze + certification this doctrine
 > requires.
+>
+> **Status update, 2026-08-02 (env freeze): the phase-P1 environment
+> has shipped** on the P0–P4 numbers —
+> `CourtsideDynamics/PaddleTennis` (`envs/paddle_tennis.py`), the
+> `PaddleTennis` recipe, and the frozen task definition recorded in
+> [`paddle_tennis_env_20260802.md`](paddle_tennis_env_20260802.md).
 
 All scripted, no learning, calibration seed blocks; numbers frozen
 into the task definition the way T1–T7 froze the true-baseline era:

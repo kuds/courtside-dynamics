@@ -75,6 +75,7 @@ exact results can still vary across hardware and runtime stacks.
 | `CourtsideDynamics/BallBalance` | Keep a ball on a 6-DoF tray. | Available |
 | `CourtsideDynamics/BallBounce` | Deliberately rebound a ball from a 6-DoF paddle's top face. | Available |
 | `CourtsideDynamics/WallBall` | Rally against a wall with a face-only paddle at a fixed 10° upward pitch, three target-controlled DoFs, and gated rewards. | Available |
+| `CourtsideDynamics/PaddleTennis` | Rally 1v1 across a regulation net on the probe-frozen 13 m paddle court, against a scripted (or injected) opponent through an exact side mirror. | Available |
 | `CourtsideDynamics/HumanoidTennisCoop` | Control two simulated Unitree G1 humanoids through one policy. | Available (experimental; free-standing default) |
 
 Environment IDs are unversioned — use the IDs in the table above.
@@ -116,6 +117,9 @@ available recipe keys are:
   workspace baseline; the campaign-goal recipe)
 - `WallBallTrueBaseline` (0.25.0 — the current era task on the extended
   ITF-baseline workspace)
+- `PaddleTennis` (unreleased — the first two-sided rung: 1v1 cooperative
+  rally on the probe-frozen paddle court vs the frozen scripted opponent;
+  selection follows the `crossings` rally tail)
 - `HumanoidTennisStage0Intercept`
 - `HumanoidTennisStage1AnchoredReturn`
 - `HumanoidTennisStage2RandomizedReturn`

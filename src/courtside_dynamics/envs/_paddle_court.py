@@ -340,3 +340,95 @@ class PaddleCourtScene:
             mujoco.mj_step(self.model, self.data)
             self.sampler.sample_substep(self.data, control_substep=substep)
         return self.sampler.end_control_step()
+
+#: The P1-frozen scripted controller (probe doc §3): commit gap,
+#: swing-through past the ball toward the net, strike-height offset
+#: below ball center. Frozen best configuration from the P0-P2 sweep.
+LEAD_CHARGE_GAP = 0.8
+LEAD_CHARGE_SWING = 0.4
+LEAD_CHARGE_STRIKE = -0.12
+
+#: Side-local paddle constants (paddle_court.xml): home pivot, the x
+#: mapping span, and the z slide's local range around base height 1.2.
+PADDLE_LOCAL_X_RANGE = (-6.4, -0.1)
+PADDLE_LOCAL_Y_SPAN = 3.0
+PADDLE_LOCAL_Z = (1.2, -0.9, 2.0)  # base height, low, high
+
+_GRAVITY_MPS2 = 9.81
+
+
+def lead_charge_local_action(
+    ball_position: np.ndarray,
+    ball_velocity: np.ndarray,
+    paddle_position: np.ndarray,
+    *,
+    gap: float = LEAD_CHARGE_GAP,
+    swing: float = LEAD_CHARGE_SWING,
+    strike: float = LEAD_CHARGE_STRIKE,
+) -> np.ndarray:
+    """The frozen P1 controller, in the side-local frame.
+
+    A world-frame port of the certification ``lead_charge`` oracle
+    (training/ladder_certification.py): yield at neutral park while the
+    ball is outgoing (serves launch from the controller's own half and
+    pass through the home column -- a ball-tracking park would swat the
+    server's own feed), pre-position by tracking y/z while the ball is
+    incoming, and once it is within ``gap`` of the paddle, charge with
+    a ballistic y/z lead aimed ``strike`` below the projected ball
+    height, driving the target ``swing`` beyond the ball toward the
+    net. Volleys are legal on this court, so unlike the wall-ball
+    oracle there is no bounce-count precondition.
+    """
+    from courtside_dynamics.envs._base import invert_piecewise_target
+
+    home_x = -PADDLE_HOME_X
+    x_low, x_high = PADDLE_LOCAL_X_RANGE
+    z_base, z_low, z_high = PADDLE_LOCAL_Z
+
+    ball_x, ball_y, ball_z = ball_position
+    vx, vy, vz = ball_velocity
+    paddle_x = paddle_position[0]
+    incoming = vx < -0.1
+
+    if incoming and (ball_x - paddle_x) <= gap:
+        target_x = min(ball_x + swing, x_high)
+        t_hit = float(
+            np.clip((ball_x - paddle_x) / max(0.5, -vx + 2.5), 0.0, 1.2)
+        )
+        target_y = ball_y + vy * t_hit
+        target_z = (
+            max(0.25, ball_z + vz * t_hit - 0.5 * _GRAVITY_MPS2 * t_hit**2)
+            + strike
+        )
+    elif incoming:
+        target_x = home_x
+        target_y = ball_y
+        target_z = max(0.25, ball_z)
+    else:
+        target_x = home_x
+        target_y = 0.0
+        target_z = z_base
+
+    action_x = invert_piecewise_target(target_x, x_low, home_x, x_high)
+    action_y = float(np.clip(target_y / PADDLE_LOCAL_Y_SPAN, -1.0, 1.0))
+    action_z = invert_piecewise_target(
+        target_z - z_base, z_low, 0.0, z_high
+    )
+    return np.array([action_x, action_y, action_z], dtype=np.float64)
+
+
+def scripted_lead_charge_opponent(observation: np.ndarray) -> np.ndarray:
+    """The frozen controller as an opponent over a side-local observation.
+
+    Reads the ball state and own-paddle position from the candidate
+    observation layout (indices pinned by
+    ``PADDLE_COURT_OBSERVATION_NAMES`` and its test). This is the
+    signature opponents share -- a frozen SB3 policy drops in as
+    ``lambda obs: policy.predict(obs, deterministic=True)[0]`` once P5
+    settles whether the wall-ball champions transfer.
+    """
+    return lead_charge_local_action(
+        observation[0:3],   # ball position
+        observation[3:6],   # ball linear velocity
+        observation[9:12],  # own paddle position
+    )

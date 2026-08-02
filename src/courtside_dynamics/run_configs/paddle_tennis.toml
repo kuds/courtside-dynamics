@@ -1,0 +1,27 @@
+# PaddleTennis — the first two-sided rung: 1v1 cooperative rally on the
+# probe-frozen 13 m paddle court (half-length 6.5 m, regulation 0.914 m
+# net, wall-ball paddles verbatim), against the frozen lead_charge
+# scripted opponent through the P4-verified mirror. One point per
+# episode with strict serve alternation; the serve is the P3-measured
+# band (origin 3.25 m, 9 m/s, 21° — 100% legal, 100% returnable by the
+# opponent). Selection and success follow crossings (cumulative return
+# crossings per point); the scripted-pair reference band is 3.15–3.42
+# (docs/paddle_tennis_probes_p3_p4_20260802.md).
+# Usage: build_train_config("PaddleTennis", log_dir=..., config_file=<this file>)
+# Everything here matches the recipe today; edit a value to diverge.
+# (docs/run_config_file_spec.md for merge semantics.)
+
+[train]
+total_timesteps = 2_000_000
+n_envs = 8
+early_stop_patience = 20  # evals without a new best before stopping
+eval_freq = 25_000        # steps per env between eval batches
+
+# The recipe uses SB3 SAC defaults; uncomment to tune (deep-merged, so
+# one key at a time is safe).
+# [train.model_kwargs]
+# gamma = 0.99
+# learning_rate = 3e-4
+
+# [env]
+# court_style = "tennis"  # render-only presentation for videos
