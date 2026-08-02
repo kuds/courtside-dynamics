@@ -89,6 +89,26 @@ Source: [`wall_ball_baseline_review.md`](wall_ball_baseline_review.md) (runs fro
 package). See also `CHANGELOG.md` 0.9.0 → 0.13.0. Depth-campaign entries
 below distill [`wall_ball_rally_diagnosis_20260728_review.md`](wall_ball_rally_diagnosis_20260728_review.md).
 
+### PaddleTennis P0–P2: premise measured, court scaled to paddle physics, loft is the frontier — *probe result (2026-08-02)*
+The pivot's premise is now a measurement, not an argument: on a
+two-paddle prototype (wall-ball calibrations verbatim, net at x=0),
+in-rally strokes land **mean 3.3 m past the net, 50% deeper than
+3 m** — the depth distribution the wall never produced. Two design
+facts came out non-obvious: (1) the **full-scale ITF court is
+infeasible** at the paddles' ~12.5 m/s ceiling (nothing clears from
+11.9 m at any net height) — the era's court freezes at half-length
+6.5 m with the regulation 0.914 m net, placing baseline strokes
+exactly at the power ceiling; (2) with a fixed-pitch face, **depth
+control spans a knife's edge** (hard ↔ long, soft ↔ net), and a
+strike-height offset (~0.12 m below ball center) measurably widens
+it — the first quantitative sign that paddle-pitch actuation may
+graduate from parked consistency lever to era prerequisite, a
+question for the first learned runs. Scripted reference band:
+2.0 crossings/point, max 10, ≥4 in 33% (bimodal — half of points die
+on serve-return, the wall-ball pattern repeating). P3–P5 still gate
+env code. Details:
+[`paddle_tennis_probes_20260802.md`](paddle_tennis_probes_20260802.md).
+
 ### The replication splits — reliability 2/2, era skill 1/2 — and the volley loophole closes the wall-ball chapter — *result (run 20260801_144043); chapter closed*
 Seed 1 ran its full 6M budget, out-scored seed 0 everywhere (best
 window 3.072 — the first ≥3.0 window in campaign history, essentially

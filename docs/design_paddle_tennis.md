@@ -102,6 +102,17 @@ B side) and grown only as phases earn it.
 
 ## 6. Pre-committed probe battery (before any env code ships)
 
+> **Status update, 2026-08-02: P0–P2 have run** — results in
+> [`paddle_tennis_probes_20260802.md`](paddle_tennis_probes_20260802.md).
+> Headlines: the premise holds (in-rally landings mean 3.3 m deep,
+> 50% past 3 m); the full ITF court is infeasible at the paddles'
+> power ceiling and the geometry freezes at half-length 6.5 m /
+> net 0.914 m; the scripted rally band is 2.0 crossings/point
+> (max 10, ≥4 in 33%); and loft control with the fixed-pitch face is
+> identified as the era's core difficulty, with strike height as a
+> measured control channel. P3–P5 remain open and still gate any env
+> code.
+
 All scripted, no learning, calibration seed blocks; numbers frozen
 into the task definition the way T1–T7 froze the true-baseline era:
 
