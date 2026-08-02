@@ -27,33 +27,11 @@ from courtside_dynamics.envs.robot_models import (
     get_robot_model_spec,
     initialize_humanoid_tennis_home,
 )
+from tests._helpers import fresh_model as _composite
+from tests._helpers import has_active_contact as _has_active_contact
+from tests._helpers import set_ball_toward_stringbed as _set_ball_toward_stringbed
 
 ROBOT_PREFIXES = ("player_a_", "player_b_")
-
-
-def _composite():
-    model = mujoco.MjModel.from_xml_path(asset_path("humanoid_tennis.xml"))
-    data = mujoco.MjData(model)
-    initialize_humanoid_tennis_home(model, data)
-    return model, data
-
-
-def _has_active_contact(
-    model: mujoco.MjModel,
-    data: mujoco.MjData,
-    geom_a: str,
-    geom_b: str,
-) -> bool:
-    expected = {int(model.geom(geom_a).id), int(model.geom(geom_b).id)}
-    return any(
-        int(data.contact[index].efc_address) >= 0
-        and {
-            int(data.contact[index].geom1),
-            int(data.contact[index].geom2),
-        }
-        == expected
-        for index in range(data.ncon)
-    )
 
 
 def _active_contact_categories(
@@ -93,26 +71,6 @@ def _object_names(
         )
         is not None
     ]
-
-
-def _set_ball_toward_stringbed(
-    model: mujoco.MjModel,
-    data: mujoco.MjData,
-    player: str,
-    *,
-    speed: float = 20.0,
-) -> None:
-    stringbed = model.geom(f"{player}_racket_racket_stringbed")
-    center = data.geom_xpos[stringbed.id].copy()
-    normal = data.geom_xmat[stringbed.id].reshape(3, 3)[:, 0].copy()
-    ball_joint = model.joint("ball_free")
-    qposadr = int(ball_joint.qposadr[0])
-    dofadr = int(ball_joint.dofadr[0])
-    data.qpos[qposadr : qposadr + 3] = center - 0.2 * normal
-    data.qpos[qposadr + 3 : qposadr + 7] = [1.0, 0.0, 0.0, 0.0]
-    data.qvel[dofadr : dofadr + 6] = 0.0
-    data.qvel[dofadr : dofadr + 3] = speed * normal
-    mujoco.mj_forward(model, data)
 
 
 def test_unitree_g1_is_the_only_complete_v1_registry_entry():

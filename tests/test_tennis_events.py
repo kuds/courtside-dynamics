@@ -8,7 +8,6 @@ import mujoco
 import numpy as np
 import pytest
 
-from courtside_dynamics.assets import asset_path
 from courtside_dynamics.envs._tennis_events import (
     SubstepTennisEventSampler,
     TennisEventSamplerConfig,
@@ -20,55 +19,15 @@ from courtside_dynamics.envs._tennis_physics import (
     COURT_HALF_LENGTH,
     COURT_HALF_WIDTH,
 )
-from courtside_dynamics.envs.robot_models import initialize_humanoid_tennis_home
 from courtside_dynamics.envs.tennis_rules import (
     CourtSide,
     RallyEventKind,
     RallyPhase,
     RallyStateMachine,
 )
-
-
-def _fresh_model():
-    model = mujoco.MjModel.from_xml_path(asset_path("humanoid_tennis.xml"))
-    data = mujoco.MjData(model)
-    initialize_humanoid_tennis_home(model, data)
-    return model, data
-
-
-def _set_ball_state(
-    model: mujoco.MjModel,
-    data: mujoco.MjData,
-    *,
-    position: np.ndarray | tuple[float, float, float],
-    velocity: np.ndarray | tuple[float, float, float] = (0.0, 0.0, 0.0),
-) -> None:
-    joint = model.joint("ball_free")
-    qposadr = int(joint.qposadr[0])
-    dofadr = int(joint.dofadr[0])
-    data.qpos[qposadr : qposadr + 3] = position
-    data.qpos[qposadr + 3 : qposadr + 7] = [1.0, 0.0, 0.0, 0.0]
-    data.qvel[dofadr : dofadr + 6] = 0.0
-    data.qvel[dofadr : dofadr + 3] = velocity
-    mujoco.mj_forward(model, data)
-
-
-def _set_ball_toward_stringbed(
-    model: mujoco.MjModel,
-    data: mujoco.MjData,
-    player: str,
-    *,
-    speed: float,
-) -> None:
-    stringbed = model.geom(f"{player}_racket_racket_stringbed")
-    center = data.geom_xpos[stringbed.id].copy()
-    normal = data.geom_xmat[stringbed.id].reshape(3, 3)[:, 0].copy()
-    _set_ball_state(
-        model,
-        data,
-        position=center - 0.2 * normal,
-        velocity=speed * normal,
-    )
+from tests._helpers import fresh_model as _fresh_model
+from tests._helpers import set_ball_state as _set_ball_state
+from tests._helpers import set_ball_toward_stringbed as _set_ball_toward_stringbed
 
 
 def _sample_steps(

@@ -14,6 +14,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from courtside_dynamics.callbacks.performance_gate import (
     PerformanceGatedEnvStagesCallback,
 )
+from tests._helpers import FakeGetEnvModel as _FakeModel
 
 
 class _StagedEnv(gym.Env):
@@ -82,14 +83,6 @@ class _FakeReplayBuffer:
 
     def reset(self) -> None:
         self.resets += 1
-
-
-class _FakeModel:
-    def __init__(self, training_env) -> None:
-        self._training_env = training_env
-
-    def get_env(self):
-        return self._training_env
 
 
 class _FakeOffPolicyModel(_FakeModel):
