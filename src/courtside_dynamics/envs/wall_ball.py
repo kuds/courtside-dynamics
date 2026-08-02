@@ -732,17 +732,48 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             )
 
         # Court markings are render-only sites (sites never generate
-        # contacts); capture their XML alphas so markers hidden by a
-        # style (or the fence lines when no fence is set) can be
-        # restored exactly.
+        # contacts). The style-visibility lists are DERIVED from the
+        # compiled model by name prefix rather than hand-maintained:
+        # the 0.25.0 workspace extension added court_tick_xm5..xm8 to
+        # the XML but not to the Python tuple, so court_style="tennis"/
+        # "none" never hid them. Any court_* site in the XML is now
+        # style-managed the moment it exists. Only the preset-dependent
+        # _COURT_MARKER_SITES stay hand-listed -- each has bespoke
+        # placement logic in _refresh_court_markers, so a new one needs
+        # code anyway (and a typo there fails loudly below).
+        court_sites = tuple(
+            name
+            for name in (
+                self.model.site(i).name for i in range(self.model.nsite)
+            )
+            if name.startswith("court_")
+        )
+        missing_markers = [
+            name
+            for name in self._COURT_MARKER_SITES
+            if name not in court_sites
+        ]
+        if missing_markers:
+            raise ValueError(
+                f"wall_ball.xml is missing preset marker site(s) "
+                f"{missing_markers} required by _COURT_MARKER_SITES"
+            )
+        self._court_tennis_sites = tuple(
+            name
+            for name in court_sites
+            if name.startswith("court_tennis_")
+        )
+        self._court_static_sites = tuple(
+            name
+            for name in court_sites
+            if not name.startswith("court_tennis_")
+            and name not in self._COURT_MARKER_SITES
+        )
+        # Capture the XML alphas so markers hidden by a style (or the
+        # fence lines when no fence is set) can be restored exactly.
         self._court_marker_alpha = {
             name: float(self.model.site(name).rgba[3])
-            for name in (
-                self._COURT_MARKER_SITES
-                + self._COURT_STATIC_SITES
-                + self._COURT_TENNIS_SITES
-                + self._SENSOR_TINT_SITES
-            )
+            for name in court_sites + self._SENSOR_TINT_SITES
         }
         self._refresh_court_markers()
 
@@ -901,30 +932,11 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
         "court_line_fence_max",
         "court_line_serve",
     )
-    _COURT_STATIC_SITES = (
-        "court_line_wall_base",
-        "court_line_baseline",
-        "court_tick_xm4",
-        "court_tick_xm3",
-        "court_tick_xm2",
-        "court_tick_xm1",
-        "court_tick_x0",
-        "court_tick_xp1",
-        "court_tick_xp2",
-        "court_tick_xp3",
-    )
-    _COURT_TENNIS_SITES = (
-        "court_tennis_apron",
-        "court_tennis_surface",
-        "court_tennis_baseline",
-        "court_tennis_service_line",
-        "court_tennis_singles_left",
-        "court_tennis_singles_right",
-        "court_tennis_doubles_left",
-        "court_tennis_doubles_right",
-        "court_tennis_center_service",
-        "court_tennis_center_mark",
-    )
+    # The static-diagnostic and tennis site lists are not hand-listed:
+    # __init__ derives self._court_static_sites and
+    # self._court_tennis_sites from the compiled model's court_* site
+    # names, so the XML is the single source of truth for what the
+    # styles manage.
     # Debug tints hidden in tennis presentation footage. Alpha affects
     # rendering only; the touch sensors attached to these sites keep
     # working (pinned by the cross-style observation-equality test).
@@ -971,9 +983,9 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
                 self._court_marker_alpha[name] if visible else 0.0
             )
 
-        for name in self._COURT_STATIC_SITES:
+        for name in self._court_static_sites:
             _show(name, diagnostic)
-        for name in self._COURT_TENNIS_SITES:
+        for name in self._court_tennis_sites:
             _show(name, tennis)
         for name in self._SENSOR_TINT_SITES:
             _show(name, not tennis)

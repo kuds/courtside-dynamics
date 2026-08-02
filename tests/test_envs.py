@@ -3559,6 +3559,17 @@ class TestWallBallCourtStyle:
         return env.model.site_pos[sid].copy(), env.model.site_size[sid].copy()
 
     def test_style_visibility_matrix(self):
+        """Every court_* site in the COMPILED MODEL obeys its style.
+
+        Iterating the model's own site names (not a Python tuple) is
+        the point: the 0.25.0 workspace extension added
+        court_tick_xm5..xm8 to the XML but not to the hand-maintained
+        visibility tuple, and the old version of this test iterated the
+        same incomplete tuple -- so the ticks stayed visible on top of
+        the tennis surface while the suite passed. The lists are now
+        derived from the model in __init__; this test re-derives the
+        expectation independently so a partition bug cannot hide.
+        """
         for style, diag_visible, tennis_visible in (
             ("diagnostic", True, False),
             ("tennis", False, True),
@@ -3566,19 +3577,30 @@ class TestWallBallCourtStyle:
         ):
             env = WallBallEnv(court_style=style)
             try:
-                for name in (
-                    WallBallEnv._COURT_STATIC_SITES
-                    + WallBallEnv._COURT_MARKER_SITES
-                ):
+                model = env.unwrapped.model
+                court_sites = [
+                    name
+                    for name in (
+                        model.site(i).name for i in range(model.nsite)
+                    )
+                    if name.startswith("court_")
+                ]
+                assert len(court_sites) >= 25, court_sites
+                for name in court_sites:
                     if name.startswith("court_line_fence"):
                         continue  # fence lines also need a fence set
-                    assert (self._alpha(env, name) > 0) == diag_visible, (
+                    expected = (
+                        tennis_visible
+                        if name.startswith("court_tennis_")
+                        else diag_visible
+                    )
+                    assert (self._alpha(env, name) > 0) == expected, (
                         f"{name} in {style}"
                     )
-                for name in WallBallEnv._COURT_TENNIS_SITES:
-                    assert (self._alpha(env, name) > 0) == tennis_visible, (
-                        f"{name} in {style}"
-                    )
+                # The one the stale tuple missed for a whole release:
+                assert (
+                    self._alpha(env, "court_tick_xm8") > 0
+                ) == diag_visible
                 # Sensor-debug tints are hidden only in presentation
                 # (tennis) footage.
                 for name in WallBallEnv._SENSOR_TINT_SITES:
