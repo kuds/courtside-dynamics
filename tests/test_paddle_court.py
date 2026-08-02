@@ -231,7 +231,7 @@ class TestP4MirroringIdentity:
         """obs(A, S) == obs(B, mirror(S)) bit-for-bit, over many states."""
         scene = PaddleCourtScene()
         mirrored = PaddleCourtScene()
-        rng = np.random.default_rng(4100)
+        rng = np.random.default_rng(8100)
         for _ in range(25):
             _randomize_scene(scene, rng)
             _mirror_scene_state(scene, mirrored)
@@ -278,7 +278,7 @@ class TestP4MirroringIdentity:
         """
         scene = PaddleCourtScene()
         mirrored = PaddleCourtScene()
-        rng = np.random.default_rng(4150)
+        rng = np.random.default_rng(8150)
         policy_rng = np.random.default_rng(9)
         for _ in range(5):
             _randomize_scene(scene, rng)
