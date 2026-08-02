@@ -59,6 +59,10 @@ dev = [
     # Parallel test execution. Only ever use it with OMP_NUM_THREADS=1 /
     # MKL_NUM_THREADS=1 -- see the addopts comment below.
     "pytest-xdist",
+    # Coverage visibility (xdist-aware). CI runs it on one matrix leg;
+    # deliberately no fail-under gate -- the report exists to make gaps
+    # visible before a new env lands, not to block on a number.
+    "pytest-cov",
     "ruff>=0.5",
     "mypy>=1.10",
 ]
