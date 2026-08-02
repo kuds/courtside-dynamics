@@ -220,6 +220,151 @@ def test_auto_log_handles_empty_info(tmp_path, _stub_video_recorder):
     assert rows[0] == ["reward", "total_reward", "done"]
 
 
+def test_video_callback_rejects_header_without_row_fn(tmp_path):
+    """A pinned ``csv_header`` under the auto row formatter writes rows
+    of a different width than the header -- a silently corrupt CSV. A
+    TOML can produce exactly this pairing (``csv_header`` is
+    file-configurable, ``info_row_fn`` never is), so it must fail at
+    construction, not misalign every diagnostic row."""
+    from courtside_dynamics.callbacks.video_record import VideoRecordCallback
+
+    with pytest.raises(ValueError, match="csv_header without info_row_fn"):
+        VideoRecordCallback(
+            env_fn=lambda: None,
+            save_path=str(tmp_path),
+            video_length=5,
+            csv_header=["bounce_count", "reward"],
+        )
+
+
+def test_video_recording_failure_does_not_stop_training(
+    tmp_path, monkeypatch, capsys
+):
+    """Recording is an optional diagnostic (Cardinal Rule 7): a missing
+    GL backend or codec must be logged and skipped, not propagate out
+    of ``model.learn()`` and cost the run its final artifacts."""
+    from courtside_dynamics.callbacks import video_record
+    from courtside_dynamics.callbacks.video_record import VideoRecordCallback
+
+    def broken_make_vec_env(*args, **kwargs):
+        raise RuntimeError("no GL backend")
+
+    monkeypatch.setattr(video_record, "make_vec_env", broken_make_vec_env)
+    cb = VideoRecordCallback(
+        env_fn=lambda: None,
+        save_path=str(tmp_path),
+        video_length=5,
+        save_freq=1,
+    )
+    cb.model = _FakeModel(action_dim=3)
+    cb.n_calls = cb.num_timesteps = 1
+    assert cb._on_step() is True
+    out = capsys.readouterr().out
+    assert "failed and was skipped" in out
+    assert "no GL backend" in out
+
+
+def test_auto_sum_survives_a_key_turning_non_numeric(
+    tmp_path, _stub_video_recorder
+):
+    """Once a non-numeric value drops a key from the TB averages, later
+    numeric occurrences must stay dropped: the subscript load in
+    ``auto_sums[k] += ...`` runs before ``float()``, so revisiting a
+    popped key used to raise an uncaught KeyError mid-recording."""
+    import gymnasium as gym
+    from gymnasium import spaces
+
+    from courtside_dynamics.callbacks.video_record import VideoRecordCallback
+
+    class _FlakyInfoEnv(gym.Env):
+        metadata = {"render_modes": []}
+
+        def __init__(self):
+            self.observation_space = spaces.Box(
+                -1, 1, shape=(2,), dtype=np.float32
+            )
+            self.action_space = spaces.Box(
+                -1, 1, shape=(1,), dtype=np.float32
+            )
+            self._step_count = 0
+
+        def reset(self, *, seed=None, options=None):
+            super().reset(seed=seed)
+            self._step_count = 0
+            return np.zeros(2, dtype=np.float32), {}
+
+        def step(self, action):
+            self._step_count += 1
+            # Numeric on the first step (auto-detection sees a scalar),
+            # then a string, then numeric again.
+            value = (
+                "oops" if self._step_count == 2 else float(self._step_count)
+            )
+            return (
+                np.zeros(2, dtype=np.float32),
+                0.0,
+                False,
+                False,
+                {"metric": value},
+            )
+
+    cb = VideoRecordCallback(
+        env_fn=_FlakyInfoEnv,
+        save_path=str(tmp_path),
+        video_length=6,
+        save_freq=1,
+    )
+    cb.model = _FakeModel(action_dim=1)
+    _run_callback_once(cb)  # used to raise KeyError on the third step
+    # The flaky key's average is dropped, not crashed on.
+    assert "videorecord/metric_mean" not in cb.model.logger.records
+
+
+def test_eval_normalization_sync_failure_warns_loudly(capsys):
+    """A wrapper-stack mismatch between the training and eval envs used
+    to be swallowed silently, scoring every evaluation (and best-model
+    selection) on stale stats -- the silent-no-op class this repo bans.
+    The callback keeps evaluating but must say so."""
+    from stable_baselines3.common.env_util import make_vec_env
+    from stable_baselines3.common.vec_env import VecNormalize
+
+    from courtside_dynamics.callbacks.info_dict_eval import (
+        InfoDictEvalCallback,
+    )
+    from courtside_dynamics.envs import BallBalanceEnv
+
+    train_env = VecNormalize(
+        make_vec_env(lambda: BallBalanceEnv(episode_len=8), n_envs=1)
+    )
+    eval_env = make_vec_env(lambda: BallBalanceEnv(episode_len=8), n_envs=1)
+
+    class _NormalizedFakeModel(_FakeModel):
+        def __init__(self, env):
+            super().__init__(action_dim=6)
+            self._env = env
+
+        def get_env(self):
+            return self._env
+
+        def get_vec_normalize_env(self):
+            return self._env
+
+    cb = InfoDictEvalCallback(
+        eval_env=eval_env,
+        n_eval_episodes=1,
+        eval_freq=1,
+    )
+    cb.model = _NormalizedFakeModel(train_env)
+    cb.n_calls = cb.num_timesteps = 1
+    try:
+        assert cb._on_step() is True
+    finally:
+        train_env.close()
+        eval_env.close()
+    out = capsys.readouterr().out
+    assert "could not sync normalization stats" in out
+
+
 def test_video_recorder_continues_past_episode_ends(
     tmp_path, _stub_video_recorder
 ):
@@ -710,6 +855,9 @@ def test_info_dict_eval_task_metric_selection_and_early_stop(tmp_path):
         {"bounce_count_ep_mean": 0.5, "episode_reward_mean": 99.0}
     )
     assert meta()["timestep"] == 200
+    # The stop records its reason for the run summary.
+    assert cb.stop_reason is not None
+    assert cb.stop_reason.startswith("early_stop_patience")
 
 
 def test_info_dict_eval_min_delta_ignores_noise_improvements(tmp_path):
@@ -824,10 +972,16 @@ def test_info_dict_eval_degenerate_signal_stops_dead_runs():
     dead = {"bounce_count_ep_mean": 0.0, "paddle_hit_count_ep_mean": 0.0}
     cb.num_timesteps = 1
     assert cb._update_best_and_maybe_stop(dead) is True
+    assert cb.stop_reason is None
     cb.num_timesteps = 2
     assert cb._update_best_and_maybe_stop(dead) is True
     cb.num_timesteps = 3
     assert cb._update_best_and_maybe_stop(dead) is False
+    # The durable record of WHY the run ended -- the console print
+    # vanishes with the Colab runtime; train() persists this into
+    # stage_summary.txt.
+    assert cb.stop_reason is not None
+    assert cb.stop_reason.startswith("degenerate_signal")
 
 
 def test_info_dict_eval_degenerate_guard_needs_zero_contact():

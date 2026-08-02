@@ -703,12 +703,15 @@ n ∈ {25, 30, 50, 100}.
 
 ### Isolate the video callback (and fix its render defaults) — *partially implemented*
 At 0.7.0 the callback had no error isolation, so a missing GL backend lost the
-run's artifacts (Cardinal Rule 7); the current callback has gained try/except
-around normalizer sync and the rollout. Bundle the still-worth-doing render
-fixes: encode at `env.metadata["render_fps"]` (100), not 60 (replays were 0.6×
-slow-mo); pass `camera_name="sideline"` (the default free camera renders the ball
-invisible); and drop the duplicate `rec_env.render()` that doubles the OSMesa
-cost.
+run's artifacts (Cardinal Rule 7). *(2026-08-02: the isolation actually landed —
+an earlier revision of this entry claimed try/except around the rollout that the
+code did not have. The whole record pass is now wrapped in
+except-Exception/log-and-continue with a regression test, the normalizer-sync
+fallback warns loudly instead of passing silently, and the duplicate
+`rec_env.render()` — `VecVideoRecorder.step_wait` already captures the frame —
+is gone.)* Still worth doing: encode at `env.metadata["render_fps"]` (100), not
+60 (replays were 0.6× slow-mo), and pass `camera_name="sideline"` (the default
+free camera renders the ball invisible).
 
 ### Surface the task metric in `stage_summary`; un-pin `n_envs`; observe world-frame spin — *open (major)*
 - `stage_summary.txt` renders `<key>_final` (the last eval *episode's* terminal

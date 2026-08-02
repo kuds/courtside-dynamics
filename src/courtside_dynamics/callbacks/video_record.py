@@ -115,6 +115,19 @@ class VideoRecordCallback(BaseCallback):
             raise ValueError(
                 "max_episodes must be None or a positive integer"
             )
+        if csv_header and info_row_fn is None:
+            # The auto row formatter writes the env's scalar info keys
+            # plus the reward columns; under a user-pinned header of a
+            # different width every data row silently misaligns. (A TOML
+            # can set csv_header but never info_row_fn -- callbacks are
+            # code -- so this pairing must fail loudly here.)
+            raise ValueError(
+                "csv_header without info_row_fn: the auto-detected row "
+                "formatter would write rows keyed to the env's scalar "
+                "info keys under your fixed header; supply info_row_fn "
+                "with the matching row shape, or drop csv_header to "
+                "auto-derive both"
+            )
         self.env_fn = env_fn
         self.save_path = save_path
         self.video_length = video_length
@@ -164,56 +177,87 @@ class VideoRecordCallback(BaseCallback):
         # ZeroDivisionError on the modulo below.
         if self.save_freq <= 0 or self.n_calls % self.save_freq != 0:
             return True
+        # Recording is an optional diagnostic: a missing GL backend or
+        # video codec surfacing here must not propagate out of
+        # model.learn() and cost the run its final artifacts
+        # (KeyboardInterrupt still propagates -- the salvage path owns
+        # it).
+        try:
+            self._record_rollout()
+        except Exception as error:
+            print(
+                f"[VideoRecordCallback] recording at step "
+                f"{self.num_timesteps} failed and was skipped: {error!r}"
+            )
+        return True
 
+    def _record_rollout(self) -> None:
         os.makedirs(self.save_path, exist_ok=True)
         name_prefix = f"{self.name_prefix}_{self.num_timesteps}"
 
         rec_env = make_vec_env(self.env_fn, n_envs=1, seed=self.seed)
-
-        # If the policy was trained with VecNormalize, wrap the recording
-        # env in a frozen-stats VecNormalize so the policy sees obs on
-        # the same scale it trained on. Otherwise the rollout will
-        # diverge wildly from the eval curve.
-        get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
-        train_vec_norm = get_vec_norm() if get_vec_norm is not None else None
-        if train_vec_norm is not None:
-            from stable_baselines3.common.vec_env import sync_envs_normalization
-
-            normalizer_kwargs: dict[str, Any] = {}
-            excluded_indices = getattr(
-                train_vec_norm,
-                "normalize_obs_excluded_indices",
-                None,
-            )
-            if excluded_indices is not None:
-                normalizer_kwargs["normalize_obs_excluded_indices"] = (
-                    excluded_indices
-                )
-            rec_env = type(train_vec_norm)(
-                rec_env,
-                training=False,
-                norm_obs=train_vec_norm.norm_obs,
-                norm_reward=False,
-                clip_obs=train_vec_norm.clip_obs,
-                clip_reward=train_vec_norm.clip_reward,
-                gamma=train_vec_norm.gamma,
-                epsilon=train_vec_norm.epsilon,
-                **normalizer_kwargs,
-            )
-            try:
-                sync_envs_normalization(self.training_env, rec_env)
-            except (AttributeError, AssertionError):
-                pass
-
-        rec_env = VecVideoRecorder(
-            rec_env,
-            self.save_path,
-            video_length=self.video_length,
-            record_video_trigger=lambda x: x == 0,
-            name_prefix=name_prefix,
-        )
-
+        # From here on the env must be closed on every exit: the
+        # wrap/recorder constructors can raise (and with recording
+        # isolated, training then continues past the failure), so a
+        # bare raise would leak one MuJoCo env per attempt.
+        # ``rec_env`` always names the outermost constructed layer,
+        # so closing it closes the whole stack (and finalizes the
+        # video on success).
         try:
+            # If the policy was trained with VecNormalize, wrap the recording
+            # env in a frozen-stats VecNormalize so the policy sees obs on
+            # the same scale it trained on. Otherwise the rollout will
+            # diverge wildly from the eval curve.
+            get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
+            train_vec_norm = get_vec_norm() if get_vec_norm is not None else None
+            if train_vec_norm is not None:
+                from stable_baselines3.common.vec_env import sync_envs_normalization
+
+                normalizer_kwargs: dict[str, Any] = {}
+                excluded_indices = getattr(
+                    train_vec_norm,
+                    "normalize_obs_excluded_indices",
+                    None,
+                )
+                if excluded_indices is not None:
+                    normalizer_kwargs["normalize_obs_excluded_indices"] = (
+                        excluded_indices
+                    )
+                rec_env = type(train_vec_norm)(
+                    rec_env,
+                    training=False,
+                    norm_obs=train_vec_norm.norm_obs,
+                    norm_reward=False,
+                    clip_obs=train_vec_norm.clip_obs,
+                    clip_reward=train_vec_norm.clip_reward,
+                    gamma=train_vec_norm.gamma,
+                    epsilon=train_vec_norm.epsilon,
+                    **normalizer_kwargs,
+                )
+                try:
+                    sync_envs_normalization(self.training_env, rec_env)
+                except (AttributeError, AssertionError) as error:
+                    # A wrapper-stack mismatch means the replay runs on the
+                    # constructor's frozen stats instead of the live
+                    # training stats. Keep recording -- the video is still
+                    # evidence -- but never silently: a policy replayed on
+                    # the wrong obs scale looks broken and sends the run
+                    # review chasing a phantom regression.
+                    print(
+                        f"[VideoRecordCallback] could not sync normalization "
+                        f"stats from {type(self.training_env).__name__} to "
+                        f"the recording env: {error!r}; the video will use "
+                        f"the training env's last-synced statistics"
+                    )
+
+            rec_env = VecVideoRecorder(
+                rec_env,
+                self.save_path,
+                video_length=self.video_length,
+                record_video_trigger=lambda x: x == 0,
+                name_prefix=name_prefix,
+            )
+
             obs = rec_env.reset()
             # SB3 VecEnv.reset() is typed as ndarray | dict | tuple, but
             # ``VecVideoRecorder`` over a Box obs space always yields ndarray.
@@ -261,6 +305,12 @@ class VideoRecordCallback(BaseCallback):
                     writer.writerow(_flatten_row(row))
 
                     for k in auto_keys:
+                        # Once a key is dropped, stay dropped: the
+                        # subscript load in ``auto_sums[k] += ...`` runs
+                        # before float(), so a revisit after pop() would
+                        # raise an uncaught KeyError mid-recording.
+                        if k not in auto_sums:
+                            continue
                         value = info.get(k)
                         if value is None:
                             continue
@@ -270,7 +320,9 @@ class VideoRecordCallback(BaseCallback):
                             # Non-numeric scalar slipped through; skip TB average.
                             auto_sums.pop(k, None)
 
-                    rec_env.render()
+                    # No explicit render here: VecVideoRecorder.step_wait
+                    # already captured this step's frame, so a second
+                    # env.render() would only double the offscreen cost.
                     if dones[0]:
                         episode_rewards.append(total_reward)
                         episode_lengths.append(session_length - episode_start)
@@ -317,8 +369,6 @@ class VideoRecordCallback(BaseCallback):
                 )
         finally:
             rec_env.close()
-
-        return True
 
 
 def _flatten_row(row: Sequence[object]) -> list:

@@ -916,6 +916,34 @@ def _merged_eval_cfg(tmp_path, **overrides):
     return TrainConfig(**cfg_kwargs)
 
 
+def test_completed_final_info_eval_run_closes_every_constructed_env(
+    tmp_path,
+):
+    """Success-path sibling of the warm-start close test: the inner
+    cleanup used to ``opened_envs.clear()`` before the outer finally
+    ran, so the final_info_eval base env leaked its MuJoCo resources on
+    every completed run."""
+    constructed: set[int] = set()
+    closed: set[int] = set()
+
+    def tracked_env_fn():
+        env = BallBalanceEnv(episode_len=12)
+        identity = id(env)
+        constructed.add(identity)
+        original_close = env.close
+
+        def tracked_close():
+            closed.add(identity)
+            original_close()
+
+        env.close = tracked_close
+        return env
+
+    train(_merged_eval_cfg(tmp_path, env_fn=tracked_env_fn))
+    assert constructed
+    assert constructed <= closed
+
+
 def test_final_info_eval_owns_evaluations_npz_when_reward_stream_retired(
     tmp_path,
 ):

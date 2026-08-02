@@ -162,6 +162,39 @@ def test_write_run_summary_no_regression_flag_when_final_matches_best(tmp_path):
     assert "Final vs best" in text
     assert "regressed after best" not in text
     assert "stopped early" not in text
+    assert "Stop reason" not in text
+
+
+def test_write_run_summary_records_the_stop_reason(tmp_path):
+    """A stopped-early summary must say WHICH guard fired: the stopping
+    callback printed it, but the console vanishes with the Colab
+    runtime, and a bare "(stopped early)" sends the run review back to
+    the curves to reconstruct why."""
+    from courtside_dynamics.envs import BallBalanceEnv
+    from courtside_dynamics.training import TrainConfig
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    _write_synthetic_evaluations(tmp_path, best_mean=6.0, tail_mean=5.8)
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(),
+        log_dir=str(tmp_path),
+        total_timesteps=1_000_000,
+    )
+    out = write_run_summary(
+        cfg,
+        str(tmp_path),
+        final_mean_reward=5.9,
+        final_std_reward=0.1,
+        duration_seconds=100.0,
+        actual_timesteps=650_000,
+        stop_reason=(
+            "early_stop_patience: no improvement in bounce_count_ep_mean "
+            "for the last 20 evaluations"
+        ),
+    )
+    text = open(out).read()
+    assert "Stop reason" in text
+    assert "early_stop_patience" in text
 
 
 def test_plot_learning_curve_marks_best_checkpoint(tmp_path):

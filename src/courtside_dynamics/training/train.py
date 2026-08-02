@@ -1634,6 +1634,21 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 else float(std_reward)
             )
             print(f"Mean reward: {mean_reward_value:.2f} +/- {std_reward_value:.2f}")
+            # Which guard ended a stopped-early run (patience,
+            # degenerate signal, stage budget). The stopping callback
+            # printed it, but the console vanishes with the Colab
+            # runtime; the summary is the durable record.
+            stop_reason = next(
+                (
+                    reason
+                    for reason in (
+                        getattr(callback, "stop_reason", None)
+                        for callback in callbacks
+                    )
+                    if reason
+                ),
+                None,
+            )
             write_run_summary(
                 cfg,
                 cfg.log_dir,
@@ -1643,13 +1658,20 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 device=str(getattr(model, "device", "")) or None,
                 status="interrupted" if interrupted else "completed",
                 actual_timesteps=int(model.num_timesteps),
+                stop_reason=stop_reason,
             )
         finally:
             train_env.close()
             eval_env.close()
             if info_eval_env is not None:
                 info_eval_env.close()
-            opened_envs.clear()
+            # Deliberately NOT opened_envs.clear(): the final_info_eval
+            # base env lives only in opened_envs, so clearing here made
+            # the outer finally a no-op and leaked that env on every
+            # completed run. The outer pass re-closing the three envs
+            # above is safe: DummyVecEnv.close just closes each
+            # Gymnasium env, and a MujocoEnv close is a no-op once its
+            # renderer is gone.
 
         return model
     finally:

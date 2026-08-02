@@ -761,6 +761,7 @@ def write_run_summary(
     device: str | None = None,
     status: str = "completed",
     actual_timesteps: int | None = None,
+    stop_reason: str | None = None,
 ) -> str:
     """Write a human-readable end-of-run report to ``log_dir/stage_summary.txt``.
 
@@ -770,7 +771,11 @@ def write_run_summary(
     ``actual_timesteps`` is the number of env steps actually trained --
     it differs from ``cfg.total_timesteps`` when early stopping or an
     interrupt cut the run short, and it is what the throughput figure
-    should be computed from.
+    should be computed from. ``stop_reason`` records *which* guard ended
+    a stopped-early run (patience, degenerate signal, stage budget):
+    the callbacks print it, but the console vanishes with the Colab
+    runtime, and a bare "(stopped early)" sends the run review back to
+    the curves to reconstruct why.
     """
     env_name = _env_display_name(cfg)
     git_sha = _git_sha()
@@ -801,6 +806,8 @@ def write_run_summary(
         _kv("Date", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     )
     lines.append(_kv("Status", status))
+    if stop_reason is not None:
+        lines.append(_kv("Stop reason", stop_reason))
     lines.append(_kv("Git SHA", short_sha))
     if cfg.run_config_file is not None:
         lines.append(

@@ -1070,6 +1070,10 @@ def test_stage_eval_budget_stop_ends_training_and_records_history(tmp_path):
         info_eval.finish_eval({"bounce_count_ep_mean": 0.5})
         assert gate._on_step() is False  # budget exhausted -> stop
         assert gate.stage_index == 0
+        # The stop records its reason for the run summary (the console
+        # print vanishes with the Colab runtime).
+        assert gate.stop_reason is not None
+        assert gate.stop_reason.startswith("stage_eval_budget")
 
         gate._on_training_end()
         rows = json.loads(
