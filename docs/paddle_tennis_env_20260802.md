@@ -87,10 +87,19 @@ feed's own — **not** `shot_crossing_count`, an end-state latch; P3
 measurement pitfall #2). The recipe's success (≥1) and headline
 selection both follow it. Scripted-pair reference band at the frozen
 serve: **3.15–3.42 mean crossings** (P3, seeds 1200–2639); a smoke
-reproduction through the registered env at bring-up measured 3.05 on
-calibration seeds 1000–1039. Certification floors derive from this
-committed band minus sampling error — never from the P0–P2 scratchpad
-band (2.02).
+reproduction through the registered env at bring-up measured 3.05
+(std 1.06, ≥1-crossing 0.95) on calibration seeds 1000–1039.
+
+Certification floor provenance, precisely: the probes doc
+pre-committed "band minus sampling error, never the P0–P2 scratchpad
+band (2.02)". The shipped floor (2.6) anchors on the **bring-up
+reproduction** of that band — 3.05, measured through the *same
+instrument* certification uses (the registered env, not the P3
+harness) — minus two combined 40/100-episode sampling standard
+deviations (2 × 0.20), rounded down. Anchoring on the harness band's
+lower edge instead (3.15 − 2 × 0.20 → 2.7) yields the same verdict on
+the recorded run below; both anchors are committed calibration
+numbers, and neither is the scratchpad band.
 
 **Held-out certification: PASS (2026-08-02).**
 `python tools/paddle_tennis_probes.py --certify` played the frozen
