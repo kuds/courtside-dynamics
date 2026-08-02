@@ -100,9 +100,9 @@ class PaddleCourtServe:
             half_length=PADDLE_COURT.half_length,
             half_width=PADDLE_COURT.half_width,
         )
-        for name, value, bound in (
-            ("speed", self.speed, self.speed_noise),
-            ("elevation_degrees", self.elevation_degrees, 0.0),
+        for name, value in (
+            ("speed", self.speed),
+            ("elevation_degrees", self.elevation_degrees),
         ):
             if not np.isfinite(value):
                 raise ValueError(f"serve {name} must be finite")
