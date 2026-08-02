@@ -916,6 +916,37 @@ def _merged_eval_cfg(tmp_path, **overrides):
     return TrainConfig(**cfg_kwargs)
 
 
+def test_stop_reason_lands_in_the_stage_summary(tmp_path):
+    """End-to-end pin for the stop_reason glue inside train(): the
+    callback ends training with a reason, and the summary must carry it.
+    The two ends (callbacks setting stop_reason; write_run_summary
+    rendering one) are pinned elsewhere -- this covers the extraction
+    scan in between, whose silent failure would quietly return every
+    stopped-early summary to a reason-less '(stopped early)'."""
+
+    class _StopWithReason(BaseCallback):
+        def __init__(self):
+            super().__init__()
+            self.stop_reason: str | None = None
+
+        def _on_step(self) -> bool:
+            if self.num_timesteps >= 64:
+                self.stop_reason = (
+                    "test_guard: synthetic stop for the glue test"
+                )
+                return False
+            return True
+
+    train(
+        _merged_eval_cfg(
+            tmp_path, extra_callbacks=(_StopWithReason(),)
+        )
+    )
+    text = (tmp_path / "stage_summary.txt").read_text()
+    assert "Stop reason" in text
+    assert "test_guard: synthetic stop for the glue test" in text
+
+
 def test_completed_final_info_eval_run_closes_every_constructed_env(
     tmp_path,
 ):

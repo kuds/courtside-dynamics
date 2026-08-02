@@ -242,12 +242,15 @@ class VideoRecordCallback(BaseCallback):
                     # training stats. Keep recording -- the video is still
                     # evidence -- but never silently: a policy replayed on
                     # the wrong obs scale looks broken and sends the run
-                    # review chasing a phantom regression.
+                    # review chasing a phantom regression. Do not touch
+                    # self.training_env in the message: the property can
+                    # be what raised, and re-evaluating it would turn the
+                    # warning into a second raise.
                     print(
                         f"[VideoRecordCallback] could not sync normalization "
-                        f"stats from {type(self.training_env).__name__} to "
-                        f"the recording env: {error!r}; the video will use "
-                        f"the training env's last-synced statistics"
+                        f"stats from the training env to the recording env: "
+                        f"{error!r}; the video will use the training env's "
+                        f"last-synced statistics"
                     )
 
             rec_env = VecVideoRecorder(

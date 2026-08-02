@@ -318,6 +318,17 @@ def test_auto_sum_survives_a_key_turning_non_numeric(
     _run_callback_once(cb)  # used to raise KeyError on the third step
     # The flaky key's average is dropped, not crashed on.
     assert "videorecord/metric_mean" not in cb.model.logger.records
+    # The guard, not _on_step's broad exception isolation, must be what
+    # saved the rollout: without the guard the KeyError aborts recording
+    # mid-rollout (truncated CSV, no rollout TB tags) and the isolation
+    # masks it from this test's assertion above. Requiring the full
+    # 6-step CSV and the rollout summary tags pins the guard itself.
+    csv_files = list(tmp_path.glob("*.csv"))
+    assert len(csv_files) == 1
+    with open(csv_files[0]) as f:
+        rows = list(csv.reader(f))
+    assert len(rows) == 1 + 6, "recording aborted before video_length"
+    assert "videorecord/total_reward" in cb.model.logger.records
 
 
 def test_eval_normalization_sync_failure_warns_loudly(capsys):

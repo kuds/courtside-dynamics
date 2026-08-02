@@ -594,13 +594,31 @@ def test_explicit_from_side_a_is_honored_on_the_feed():
     """``CourtSide.A`` is falsy (IntEnum value 0). The reducer used to
     evaluate ``event.from_side or self._ball_side``, silently discarding
     an explicit ``from_side=CourtSide.A``; on every consistent trace the
-    fallback coincided with the discarded value, which is why the suite
-    never caught it. Pinned so reuse with event replay or side-relative
-    mirroring (where the two can differ) stays safe."""
+    fallback coincided with the discarded value, so no end-to-end trace
+    can distinguish the two forms today. The source resolution therefore
+    lives in one unit-testable helper, ``_event_source``, and this test
+    pins its semantics directly: reverting the helper to the ``or`` form
+    fails here even though every rally trace stays green."""
     machine = RallyStateMachine(serving_side=CourtSide.A)
-    event = _crossing(CourtSide.B, 0)
-    assert event.from_side is CourtSide.A  # explicit, and falsy
-    transition = machine.advance([event])
+
+    # The unit pin: explicit A wins over a DIFFERENT fallback.
+    explicit_a = _crossing(CourtSide.B, 0)
+    assert explicit_a.from_side is CourtSide.A  # explicit, and falsy
+    assert (
+        machine._event_source(explicit_a, ball_side=CourtSide.B)
+        is CourtSide.A
+    ), "explicit from_side=CourtSide.A was discarded for the fallback"
+    # And the fallback engages only when from_side is truly absent.
+    implicit = RallyEvent(
+        kind=RallyEventKind.NET_CROSSING_TO_B, substep=0
+    )
+    assert (
+        machine._event_source(implicit, ball_side=CourtSide.B)
+        is CourtSide.B
+    )
+
+    # The end-to-end sanity check: the explicit-A feed still advances.
+    transition = machine.advance([explicit_a])
     assert transition.after.phase is RallyPhase.AWAITING_RETURN
     assert not transition.after.terminated
     assert transition.after.feed_crossed_net is True

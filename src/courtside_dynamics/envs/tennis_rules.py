@@ -738,22 +738,12 @@ class RallyStateMachine:
             and (
                 (
                     self._phase is RallyPhase.INITIAL_FEED
-                    and (
-                        self._ball_side
-                        if event.from_side is None
-                        else event.from_side
-                    )
-                    is self._serving_side
+                    and self._event_source(event) is self._serving_side
                 )
                 or (
                     self._phase is RallyPhase.RETURN_IN_FLIGHT
                     and self._pending_hitter is not None
-                    and (
-                        self._ball_side
-                        if event.from_side is None
-                        else event.from_side
-                    )
-                    is self._pending_hitter
+                    and self._event_source(event) is self._pending_hitter
                 )
             )
             for event in events
@@ -824,9 +814,7 @@ class RallyStateMachine:
             if event.kind not in CROSSING_EVENT_KINDS:
                 continue
             target = _event_side(event.kind)
-            source = (
-                ball_side if event.from_side is None else event.from_side
-            )
+            source = self._event_source(event, ball_side=ball_side)
             invalid = (
                 target is source
                 or source is not ball_side
@@ -914,11 +902,27 @@ class RallyStateMachine:
             return TerminationReason.BALL_NET
         return _UNCONDITIONAL_FAULTS[kind]
 
+    def _event_source(
+        self,
+        event: RallyEvent,
+        *,
+        ball_side: CourtSide | None = None,
+    ) -> CourtSide:
+        """Resolve the side a crossing event originated from.
+
+        An explicit ``from_side`` always wins -- including
+        ``CourtSide.A``, which is falsy (IntEnum value 0) and was
+        silently discarded by the historical ``event.from_side or ...``
+        fallback. ``ball_side`` lets the fault pre-scan resolve against
+        its projected ball side instead of the machine's committed one.
+        """
+        if event.from_side is not None:
+            return event.from_side
+        return self._ball_side if ball_side is None else ball_side
+
     def _handle_crossing(self, event: RallyEvent) -> None:
         target = _event_side(event.kind)
-        source = (
-            self._ball_side if event.from_side is None else event.from_side
-        )
+        source = self._event_source(event)
 
         if (
             target is source

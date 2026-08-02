@@ -382,13 +382,16 @@ class InfoDictEvalCallback(BaseCallback):
                 # healthy. train() always wraps both sides identically,
                 # so this fires only on hand-wired stacks (tests use
                 # unwrapped stubs); keep evaluating, but say so loudly
-                # every time rather than silently mismeasuring.
+                # every time rather than silently mismeasuring. The
+                # message must not touch self.training_env: that
+                # property can be the very thing that raised, and
+                # re-evaluating it here would escalate the warning into
+                # an uncaught crash.
                 print(
                     f"[InfoDictEvalCallback] could not sync "
-                    f"normalization stats from "
-                    f"{type(self.training_env).__name__} to the eval "
-                    f"env: {error!r}; evaluations are using the eval "
-                    f"env's existing statistics"
+                    f"normalization stats from the training env to the "
+                    f"eval env: {error!r}; evaluations are using the "
+                    f"eval env's existing statistics"
                 )
 
         self._last_episode_samples = None
