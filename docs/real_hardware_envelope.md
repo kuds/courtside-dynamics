@@ -484,6 +484,37 @@ off course by room air currents. Mitigations: use an **anti-spin or bare-wood
 blade rather than tacky spin rubber** (this is the high-leverage one — it
 attacks spin *generation* directly), strike near-normal, and turn the HVAC off.
 
+**What the ping-pong speed envelope actually looks like.** Elite play smashes at
+roughly **25–30 m/s**, with measured records around 32–34 m/s (Guinness: 116 km/h).
+Against that, the PiPER's ~2.5–3 m/s of paddle speed produces, via
+`v_out = 1.857·V + 0.857·u`:
+
+| Paddle speed *V* | vs stationary ball | vs 6 m/s incoming | vs 10 m/s incoming | vs 15 m/s incoming |
+|---|---|---|---|---|
+| 1.35 m/s (bin shot) | 2.5 m/s | 7.6 m/s | 11.1 m/s | 15.4 m/s |
+| 3.0 m/s (PiPER max) | **5.6 m/s** | 10.7 m/s | 14.1 m/s | **18.4 m/s** |
+
+**The asymmetry is the useful part.** At ACOR 0.858, incoming speed returns at
+**0.857×** — so *blocking and countering a fast ball is nearly free*, while
+*generating* speed from a slow ball is entirely paddle-limited. A PiPER can
+serve at ~5.6 m/s (a realistic table-tennis serve pace) and can counter-hit a
+15 m/s ball back at 18 m/s, but it will never smash. This is the same reason
+real table-tennis robots block competently long before they loop.
+
+**Drag caps the useful speed anyway.** At `k = 0.128 m⁻¹`, a ping-pong ball
+loses **30% of its speed over one table length (2.74 m) regardless of how hard
+it is hit** — the decay is exponential in distance, not speed. Carry distance
+from a 0.9 m launch, at the best angle:
+
+| Launch speed | 5 | 10 | 15 | 20 | 30 m/s |
+|---|---|---|---|---|---|
+| Carry | 2.7 m | 6.0 m | 8.8 m | 11.0 m | 14.2 m |
+| Drag as multiple of *g* | 0.3× | 1.3× | 2.9× | 5.2× | **11.8×** |
+
+Doubling speed from 15 to 30 m/s buys only 60% more range, because drag rises
+as *v²*. Above ~15 m/s you are mostly heating the air. For a 2.5 m target task,
+anything past ~6 m/s is wasted.
+
 **Pickleball is the surprise loser.** It needs **more paddle speed than tennis**
 (4.35 vs 3.61 m/s), because a pickleball is a dead ball — local COR ≈ 0.40
 against tennis's 0.78 — so the ACOR falls to 0.24 even though the ball is
