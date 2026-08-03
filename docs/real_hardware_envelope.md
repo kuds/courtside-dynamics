@@ -257,21 +257,29 @@ Low-Cost Robot Arm class (Dynamixel-driven, too slow and too light to swing a
 
 **Verdicts.**
 
-- **Best value: AgileX PiPER at $1,999.** Its J4–J6 run at **225 °/s — faster
-  than any cobot on this list** — the MJCF in Menagerie is MIT-licensed and
-  matches the hardware exactly, and 1.5 kg payload is 5× the racket. Caveats:
-  short 626 mm reach, no published J1–J3 speed, and the 0.36 m CoM offset eats
-  into the payload rating even though the absolute mass is small. **Confirm
-  J1–J3 speed with AgileX before buying** — that is the one number that could
-  disqualify it.
+- **Recommended: UFACTORY xArm 6 at $9,500.** 5 kg payload, 700 mm reach,
+  180 °/s. It wins on the axis that §5.4 shows actually decides this — **moment
+  margin** — with roughly 3× PiPER's wrist-moment budget, and its 700 mm reach
+  supplies enough speed that a *shorter, lighter* implement stays viable, which
+  is the cheapest way to cut shock. One real annoyance: **Menagerie ships
+  xArm 7, not xArm 6** — the sim model would be a 7-DoF proxy for a 6-DoF arm,
+  so the kinematics do not match. Buy the xArm 7 instead if sim fidelity matters
+  more than ~$2k.
 - **Best research platform: Franka FR3 (~$30k).** Fast distal joints
   (301 °/s on A5–A7), 1 kHz torque control over FCI, a maintained Menagerie
-  model. If the budget exists, this is the arm that will not be the reason the
-  project fails.
-- **Best middle: UFACTORY xArm 6 at $9,500.** 5 kg payload, 700 mm reach,
-  180 °/s. One real annoyance: **Menagerie ships xArm 7, not xArm 6** — the sim
-  model would be a 7-DoF proxy for a 6-DoF arm, so the kinematics do not match.
-  Buy the xArm 7 instead if sim fidelity matters more than $2k.
+  model, and — relevant here — **joint torque sensing in all seven axes**, so it
+  is the one arm on this list explicitly engineered for contact-rich work. If
+  the budget exists, this is the arm that will not be the reason the project
+  fails.
+- **AgileX PiPER at $1,999 — attractive on paper, and I no longer recommend it
+  for this task.** Its J4–J6 genuinely run at 225 °/s, faster than any cobot
+  here, and the MIT-licensed MJCF matches the hardware. But §5.4 shows it is
+  caught in a bind: it is **simultaneously speed-marginal and shock-marginal,
+  and the fix for each makes the other worse.** Reaching 3 m/s requires the full
+  0.49 m racket lever, and that same lever is what multiplies the ball's impulse
+  into the wrist. A 0.4 kg racket at a 0.36 m CoM offset already consumes
+  ~1.4 kg of its 1.5 kg payload budget in moment terms *before the ball
+  arrives*. Viable only as a consumable, with every mitigation in §5.4 applied.
 - **Skip the Unitree Z1 at $15,999.** Same 180 °/s as a $9,500 xArm 6, less
   payload than a UR5e, for more money than either.
 - **ARX L5 is the unresolved one.** Cheap (~$4.1k), force-controlled, 500 Hz
@@ -279,16 +287,108 @@ Low-Cost Robot Arm class (Dynamixel-driven, too slow and too light to swing a
   ARX nor the SDK publishes joint velocity limits, and the SDK explicitly says
   its default safety limits are placeholders. Ask ARX directly.
 
-### 5.4 The two integration risks
+### 5.4 The wrist-moment budget — the constraint that actually decides
 
-- **Collision detection will protective-stop on every hit.** Ball impulse is
-  `m·Δv ≈ 0.057 × (5 + 6.6) ≈ 0.66 N·s` over a ~5 ms contact — roughly **130 N
-  peak**, applied ~0.5 m from the wrist, so a **~65 N·m external moment
-  transient**. How much of that reaches the gearbox depends on reflected link
-  inertia over 5 ms, so this is not a 65 N·m *gearbox* load — but it comfortably
-  exceeds any default collision threshold. Raise the thresholds, and note that
-  **doing so means the arm is no longer collaborative in the safety-rated
-  sense** (§8). Fit a compliant, sacrificial racket coupler.
+§5.1 showed that *swinging* a racket is torque-trivial. That is not the whole
+story, because a racket is a long lever and the ball arrives at the far end of
+it. Three separate loads, in increasing order of severity.
+
+**(a) Static hold — small in force, large in moment.** Take a strung racket plus
+a mounting adapter at 0.4 kg, CoM 0.36 m from the flange:
+
+```
+M_static = 0.4 × 9.81 × 0.36 ≈ 1.4 N·m
+```
+
+Payload ratings are quoted at a *nominal CoM offset*, typically 50–100 mm. At
+360 mm, a 0.4 kg racket produces the same wrist moment as **1.4 kg hung at
+100 mm** — so on a 1.5 kg-rated arm the racket consumes ~90% of the moment
+budget while weighing barely a quarter of the rated mass. **This is the trap in
+reading "1.5 kg payload, racket is only 0.3 kg, plenty of margin."** It is not
+plenty; it is nearly all of it, before the ball is involved.
+
+**(b) Swing torque — comfortable.** Racket inertia about the flange
+`I ≈ 0.4 × 0.36² + 0.0105 ≈ 0.062 kg·m²`. Reaching 3 m/s at the stringbed
+(ω = 3/0.49 = 6.1 rad/s) in 0.2 s needs α = 30 rad/s²:
+
+```
+τ_swing = 0.062 × 30 ≈ 1.9 N·m,  plus gravity → ~3.3 N·m peak
+```
+
+**(c) Ball impact — the severe one.**
+
+| Quantity | Value |
+|---|---|
+| Impulse `m·Δv = 0.057 × (5 + 6.6)` | **0.66 N·s** |
+| Contact duration (tennis ball on strings) | ~4–5 ms |
+| Mean force | **~132 N** |
+| Peak force (half-sine, ~1.6× mean) | **~210 N** |
+| Mean moment at 0.49 m (butt-mounted) | **~65 N·m** |
+| Peak moment | **~100 N·m for ~5 ms** |
+| Angular impulse into the wrist axis | **0.32 N·m·s** |
+
+Two things stop that 100 N·m from being a 100 N·m gearbox load, and neither
+makes it safe:
+
+- **The joint cannot respond.** A 5 ms event is far inside any servo's
+  bandwidth (~10–20 ms), so this is a structural/inertial event, not a control
+  one. No amount of good control helps.
+- **Link inertia and structural compliance filter it.** A light arm's structural
+  modes sit around 20–50 Hz (20–50 ms period), so a 5 ms impulse is substantially
+  absorbed by link flex and inertia rather than delivered to the gear teeth.
+
+What reaches the reducer is therefore a *fraction* of 0.32 N·m·s, spread over
+tens of milliseconds — plausibly tens of N·m instantaneous. Against a wrist
+rated at single-digit N·m continuous and perhaps 2–3× that momentary, this lands
+in the **"survivable occasionally, damaging repeatedly"** band. And repetition is
+the whole point: a bring-up is hundreds to thousands of impacts, which is a
+fatigue and backlash-growth regime, not a one-off strength question.
+
+**The bind that disqualifies a small arm.** Lever length helps speed and hurts
+shock, and both effects are linear in the same number:
+
+| Implement | Lever to strike point | Speed from a 3.93 rad/s wrist | Impact moment |
+|---|---|---|---|
+| Tennis racket, butt-mounted | 0.49 m | 1.9 m/s | 65 N·m |
+| Tennis racket, gripped mid-handle | ~0.34 m | 1.3 m/s | 45 N·m |
+| Pickleball-style paddle | ~0.28 m | 1.1 m/s | 37 N·m |
+
+An arm with **speed margin** can spend it on a shorter implement and cut the
+moment ~40%. An arm that needs the full 0.49 m lever just to reach 3 m/s cannot.
+That is precisely PiPER's position, and it is why moment margin — not price,
+not joint speed — is the right primary selection criterion.
+
+**Mitigations, in order of leverage.**
+
+1. **A compliant coupler between flange and racket. Mandatory, not optional.**
+   Elastomer bushings or a torsion element sized for a ~5 Hz natural frequency
+   with the racket inertia (`k = I·ω_n² ≈ 0.062 × 31² ≈ 60 N·m/rad`) stretches
+   the 5 ms impulse into a ~100 ms push, cutting peak joint torque roughly
+   5–10×. The obvious objection — that compliance ruins the ±1° aiming
+   requirement of §2 — does not bite: during the 5 ms of contact the racket
+   deflects only `½ · (65/0.062) · 0.005² ≈ 0.013 rad ≈ 0.75°`. The face angle
+   *at* contact is what aims the ball, and it barely moves. The coupler mostly
+   costs a little effective restitution, which B0 calibrates out.
+2. **Rigid-mount the racket. Do not hold it in a gripper.** A parallel-jaw
+   gripper on a round handle develops maybe 25–50 N of friction hold against a
+   ~210 N impact applied 0.3 m away. It will slip and rotate, ruining aim
+   repeatability, and grippers are not rated for shock. Machine an adapter that
+   bolts the butt to the tool flange.
+3. **Align the strike point near the racket's center of percussion.** For a
+   racket pivoted at the flange, `q = I/(m·d) = 0.062/(0.4 × 0.36) ≈ 0.43 m` —
+   comfortably inside the stringbed (0.32–0.66 m). Striking there nulls the
+   *transverse reaction force* at the wrist bearing. Be precise about what this
+   buys: it removes bearing force and vibration, **not** the joint torque
+   impulse, which is `J × q` regardless. Worth having, not a substitute for (1).
+4. **Shorten the shot.** Exit speed scales the impulse, and the bin distance
+   sets the exit speed: moving the bin from 5 m to 3 m drops required exit speed
+   from 6.6 to 5.0 m/s and the impulse ~20%. Free margin during bring-up.
+
+**Two further integration risks, unchanged:**
+
+- **Collision detection will protective-stop on every hit.** The transient
+  comfortably exceeds any default threshold. Raise it, and note that **doing so
+  means the arm is no longer collaborative in the safety-rated sense** (§8).
 - **Speed limits are enforced with a Cat 0 stop.** On UR hardware, exceeding the
   *configured* TCP speed limit cuts drive power immediately. The 4 m/s
   kinematic capability is only available if the safety configuration allows it.
@@ -314,8 +414,11 @@ reach say nothing about whether it can swing.
 
 Cheapest build that plausibly completes the task:
 
-- Arm from §5.3 — PiPER if the budget is tight and its J1–J3 speed checks out,
-  FR3 if it is not — base bolted to a rigid table, intercept point at ~1.0 m.
+- Arm from §5.3 — **xArm 6/7** as the default, FR3 if the budget allows — base
+  bolted to a rigid table, intercept point at ~1.0 m. Select on **wrist-moment
+  margin** (§5.4a), not on payload rating or joint speed.
+- **Racket bolted to the flange through a compliant coupler** (§5.4 mitigation
+  1–2). Never gripped.
 - **Vendor its Menagerie MJCF into `assets/third_party/`** following the exact
   pattern already used for the G1 (`PROVENANCE.md`, `SHA256SUMS`,
   `CHANGELOG.upstream.md`). All the candidate licenses are permissive
@@ -344,6 +447,7 @@ number in §2.**
 | **B2** | Achievable stringbed speed and repeatability at the *actual* intercept pose, on the *actual* arm | Datasheet tool speed is not pose-independent; the Jacobian is worst near singularities. |
 | **B3** | Human toss variability: *u*, arrival point, arrival angle over ≥100 tosses | Sets the compensation range §2(a) must cover, and tells you whether a human toss is even repeatable enough. |
 | **B4** | **Open-loop bin shot**: fixed pre-programmed swing, ball hand-placed at the intercept point, no perception in the loop | Isolates aiming from sensing. If B4 cannot hit the bin, no amount of tracking will help. |
+| **B4-w** | **Shock wear**: log joint current/torque through 500 impacts, then re-measure backlash and repeatability against the B2 baseline | §5.4 is an estimate of a *fatigue* regime. This is the cheap experiment that turns "probably survivable" into a number, and it should run before committing to a long campaign. |
 | **B5** | Closed-loop: live toss, full pipeline | The task. |
 
 **Suggested pre-registered bar for B5**, in the style of this repo's run
