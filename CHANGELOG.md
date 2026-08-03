@@ -7,13 +7,49 @@ versions. Newest releases first.
 
 ## Unreleased
 
-Infrastructure hardening between the wall-ball and PaddleTennis
-campaigns. No physics, observation, action, or recipe changes on any
-healthy trajectory — the two behavior changes below are confined to
-already-pathological (nonfinite) states and to rendering, so saved
-policies, `VecNormalize` statistics, and learning curves all remain
-comparable with 0.25.0.
+The PaddleTennis environment — the two-sided rung between wall-ball
+and humanoid tennis — plus the infrastructure hardening between the
+campaigns. Existing environments, observations, actions, and recipes
+are unchanged on any healthy trajectory (the two behavior changes
+below are confined to already-pathological nonfinite states and to
+rendering), so saved policies, `VecNormalize` statistics, and learning
+curves all remain comparable with 0.25.0.
 
+- **PaddleTennis environment and recipe.**
+  `CourtsideDynamics/PaddleTennis` (`PaddleTennisEnv`): 1v1
+  cooperative rally on the probe-frozen paddle court — half-length
+  6.5 m, regulation 0.914 m net, singles width ±4.115 m, the wall-ball
+  ball and paddles verbatim — with every task number frozen by the
+  pre-committed probe battery before the env existed
+  (`docs/paddle_tennis_probes_20260802.md`,
+  `docs/paddle_tennis_probes_p3_p4_20260802.md`). The policy plays
+  side A through the familiar 3-action target interface; side B is an
+  injectable `opponent_controller` (default: the frozen `lead_charge`
+  scripted controller) reading the exact side-B mirror of the
+  48-value side-relative observation (24 physical + 12 rally-state +
+  12 contact-memory values; probe P4 pinned the mirror bit-for-bit).
+  One point per episode from the P3-measured serve band (origin
+  3.25 m, 9 m/s, 21°; 100% legal, 100% returnable), serve side
+  alternating every reset; +1 per rules-confirmed return by either
+  side, −1 on the ending fault, −2 on unsafe/nonfinite physics. The
+  `PaddleTennis` SAC recipe selects and succeeds on `crossings` (the
+  P3 reference band: 3.15–3.42 for the scripted pair) and normalizes
+  only the physical block; a `court_style` kwarg
+  (`diagnostic`/`tennis`/`none`) mirrors the WallBall render-only
+  presentation styles, with visibility lists derived from the
+  compiled model. The frozen definition passed held-out
+  certification (`tools/paddle_tennis_probes.py --certify`, reserved
+  seeds 3100–3199: mean crossings 3.22 against the pre-registered
+  2.6 floor, zero unsafe terminations;
+  `docs/paddle_tennis_env_20260802.md`).
+- **P5 transfer instrument.** `tools/paddle_tennis_p5_transfer.py`
+  renders the paddle court as the wall-ball world (23-value
+  observation, true-baseline action mapping) so the wall-ball
+  champions can play `PaddleTennisEnv` unmodified. Scripted
+  calibration (`docs/paddle_tennis_p5_transfer_20260802.md`): the
+  `scaled` identification plus a serve-yield overlay is the only
+  viable configuration; champion measurements and the pre-registered
+  pool-admission rule run on Colab.
 - **BallBalance nonfinite guard.** BallBalance now carries the same
   guard as every sibling env: actions are shape/finiteness-validated,
   the physics state is checked before stepping, and a nonfinite

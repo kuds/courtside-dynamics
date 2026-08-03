@@ -15,6 +15,13 @@ from courtside_dynamics.envs.humanoid_tennis import (
     TennisRewardConfig,
     TennisServeConfig,
 )
+from courtside_dynamics.envs.paddle_tennis import (
+    PADDLE_TENNIS_ACTION_NAMES,
+    PADDLE_TENNIS_NORMALIZED_SLICE,
+    PADDLE_TENNIS_OBSERVATION_NAMES,
+    PaddleCourtServe,
+    PaddleTennisEnv,
+)
 from courtside_dynamics.envs.robot_models import (
     ROBOT_MODELS,
     SUPPORTED_ROBOT_MODELS,
@@ -70,6 +77,11 @@ __all__ = [
     "HumanoidTennisCoopEnv",
     "LearnedPlayerMode",
     "MobilityMode",
+    "PADDLE_TENNIS_ACTION_NAMES",
+    "PADDLE_TENNIS_NORMALIZED_SLICE",
+    "PADDLE_TENNIS_OBSERVATION_NAMES",
+    "PaddleCourtServe",
+    "PaddleTennisEnv",
     "PartnerMode",
     "ROBOT_MODELS",
     "RallyEvent",

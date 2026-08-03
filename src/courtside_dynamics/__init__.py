@@ -144,6 +144,15 @@ register(
     max_episode_steps=750,
 )
 
+# PaddleTennis is the two-sided rung between wall-ball and humanoid
+# tennis: the calibrated paddles rally 1v1 across a regulation net on
+# the probe-frozen 13 m court (docs/design_paddle_tennis.md).
+register(
+    id="CourtsideDynamics/PaddleTennis",
+    entry_point="courtside_dynamics.envs.paddle_tennis:PaddleTennisEnv",
+    max_episode_steps=1500,
+)
+
 register(
     id="CourtsideDynamics/HumanoidTennisCoop",
     entry_point=(

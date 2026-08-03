@@ -1,10 +1,14 @@
 # Design sketch: PaddleTennis — 1v1 rally play on the full court
 
-Status: **Proposed** (not implemented), 2026-08-02, written against
-v0.25.0. Nothing in this document describes shipped code. Per
-doctrine, nothing here ships until the probe battery (§6) has run and
-the task definition is frozen and certified. This sketch scopes the
-work and pre-commits the verification plan.
+Status: **Adopted — phase-P1 environment shipped**, 2026-08-02
+(originally proposed the same day against v0.25.0). The probe battery
+ran first, per doctrine: P0–P4 froze the geometry, reference band,
+premise, serve rules, and mirroring contract (§6 status notes), and
+the registered `CourtsideDynamics/PaddleTennis` env implements that
+frozen definition
+([`paddle_tennis_env_20260802.md`](paddle_tennis_env_20260802.md)).
+P5 (champion transfer) remains open and gates only the phase-P2
+opponent pool.
 
 ## 1. Why leave the wall
 
@@ -110,8 +114,41 @@ B side) and grown only as phases earn it.
 > net 0.914 m; the scripted rally band is 2.0 crossings/point
 > (max 10, ≥4 in 33%); and loft control with the fixed-pitch face is
 > identified as the era's core difficulty, with strike height as a
-> measured control channel. P3–P5 remain open and still gate any env
-> code.
+> measured control channel.
+>
+> **Status update, 2026-08-02 (later): P3–P4 have also run** — on the
+> committed probe substrate (`envs/_paddle_court.py`, an unregistered,
+> reward-free prototype scene; results in
+> [`paddle_tennis_probes_p3_p4_20260802.md`](paddle_tennis_probes_p3_p4_20260802.md)).
+> The serve band and the mirroring identity are measured; **P5
+> (champion transfer) remains open** and gates the opponent-pool
+> decision. The env *definition* (registered id, rewards, recipe)
+> remains unshipped pending the freeze + certification this doctrine
+> requires.
+>
+> **Status update, 2026-08-02 (env freeze): the phase-P1 environment
+> has shipped** on the P0–P4 numbers —
+> `CourtsideDynamics/PaddleTennis` (`envs/paddle_tennis.py`), the
+> `PaddleTennis` recipe, and the frozen task definition recorded in
+> [`paddle_tennis_env_20260802.md`](paddle_tennis_env_20260802.md).
+>
+> **Status update, 2026-08-02 (first learned evidence + first-run
+> pre-registration):** the local SAC pilot of the frozen recipe
+> passes the scripted band at its 175k eval and reaches crossings
+> 6.40 best (final quarter oscillating 5.2–6.4)
+> ([`paddle_tennis_pilot_and_first_run_20260802.md`](paddle_tennis_pilot_and_first_run_20260802.md)),
+> which also pre-registers the first GPU run (seed 1, stock TOML,
+> primary ≥ 6.0, held-out gate on block 4100–4199).
+>
+> **Status update, 2026-08-02 (P5 instrument):** the transfer shim
+> shipped and its scripted calibration ran
+> ([`paddle_tennis_p5_transfer_20260802.md`](paddle_tennis_p5_transfer_20260802.md)):
+> the `scaled + yield` configuration is the only viable one (rigid
+> translation is broken by command-range geometry; the serve-yield
+> overlay is mandatory — wall-ball players never learned to stand
+> down during their own serve). The champion measurements themselves
+> run on Colab against a pre-registered pool-admission rule; until
+> they do, P5's opponent-pool decision stays open.
 
 All scripted, no learning, calibration seed blocks; numbers frozen
 into the task definition the way T1–T7 froze the true-baseline era:

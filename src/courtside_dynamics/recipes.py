@@ -21,9 +21,12 @@ from typing import Any
 
 from courtside_dynamics.envs import (
     HUMANOID_TENNIS_OBSERVATION_LAYOUT,
+    PADDLE_TENNIS_NORMALIZED_SLICE,
+    PADDLE_TENNIS_OBSERVATION_NAMES,
     BallBalanceEnv,
     BallBounceEnv,
     HumanoidTennisCoopEnv,
+    PaddleTennisEnv,
     TennisRewardConfig,
     WallBallEnv,
 )
@@ -198,6 +201,75 @@ _HUMANOID_TENNIS_NORMALIZATION_EXCLUSIONS = tuple(
     range(
         HUMANOID_TENNIS_OBSERVATION_LAYOUT.rally_state.start,
         HUMANOID_TENNIS_OBSERVATION_LAYOUT.total_size,
+    )
+)
+
+
+# Every key exists in every step info dict (the env routes even forced
+# nonfinite terminations through the rules machine's full schema).
+_PADDLE_TENNIS_CSV_KEYS = (
+    "serve_side_name",
+    "serve_side_is_policy",
+    "ball_side",
+    "expected_returner",
+    "rally_phase",
+    "rally_count",
+    "legal_hit_count",
+    "bounce_count",
+    "net_crossing_count",
+    "crossings",
+    "event_valid_racket_hit",
+    "event_valid_return",
+    "event_first_bounce",
+    "termination_reason",
+    "termination_reason_name",
+    "term_timeout",
+    "rew_return",
+    "rew_fault",
+    "rew_unsafe",
+)
+_PADDLE_TENNIS_CSV_HEADER = [
+    *_PADDLE_TENNIS_CSV_KEYS,
+    "reward", "total_reward", "done",
+]
+
+
+def _paddle_tennis_info_row(
+    info: dict, reward: float, total_reward: float, done: bool
+) -> Sequence[object]:
+    return [
+        *(info[key] for key in _PADDLE_TENNIS_CSV_KEYS),
+        reward,
+        total_reward,
+        done,
+    ]
+
+
+_PADDLE_TENNIS_TERMINAL_EVAL_KEYS = (
+    "duplicate_contact_suppressed_count",
+    "duplicate_event_suppressed_count",
+    "stale_event_suppressed_count",
+    # Mean = fraction of eval episodes where the policy served; with
+    # strict alternation this should sit near 0.5 in every batch.
+    "serve_side_is_policy",
+    # The grouped fault distribution (mutually exclusive flags; the
+    # env's term_* convention, one is 1.0 on each terminal step).
+    "term_out_of_bounds",
+    "term_ball_net",
+    "term_second_bounce",
+    "term_failed_to_cross",
+    "term_illegal_hit",
+    "term_net_touch",
+    "term_nonfinite",
+    "term_timeout",
+)
+
+# Same rationale as the humanoid exclusions above: normalize only the
+# continuous physical block; the bounded rally/contact tail stays raw.
+_PADDLE_TENNIS_NORMALIZATION_EXCLUSIONS = tuple(
+    range(
+        PADDLE_TENNIS_NORMALIZED_SLICE.stop,
+        len(PADDLE_TENNIS_OBSERVATION_NAMES),
     )
 )
 
@@ -997,6 +1069,62 @@ RECIPES: dict[str, Recipe] = {
             "depth ladder that walks the paddle fence from volley "
             "range to the workspace baseline each time a sustained "
             "three-exchange rally is demonstrated."
+        ),
+    ),
+    "PaddleTennis": Recipe(
+        env_cls=PaddleTennisEnv,
+        env_kwargs={"render_mode": "rgb_array"},
+        default_total_timesteps=2_000_000,
+        name_prefix="paddle_tennis",
+        extra_cfg={
+            # Colab-calibrated SAC worker count (the wall-ball value;
+            # this env steps the same physics at the same rates).
+            "n_envs": 8,
+            "early_stop_patience": 20,
+            "normalize_obs_excluded_indices": (
+                _PADDLE_TENNIS_NORMALIZATION_EXCLUSIONS
+            ),
+            "csv_header": _PADDLE_TENNIS_CSV_HEADER,
+            "info_row_fn": _paddle_tennis_info_row,
+            # An eval episode "succeeds" once any return crosses the
+            # net (crossings counts cumulative return crossings; the
+            # serve's own crossing is excluded, so 1 means the serve
+            # came back). Headline selection follows the same metric:
+            # crossings_ep_mean is the rally tail the P3 probe froze
+            # the reference band on (3.15-3.42 for the scripted pair
+            # at the committed serve; the held-out certification floor
+            # is pre-registered from the registered env's bring-up
+            # reproduction of that band -- see
+            # tools/paddle_tennis_probes.py -- not from eval reward).
+            "success_key": "crossings",
+            "success_threshold": 1.0,
+            "headline_key": "crossings",
+            "info_eval_keys": (
+                "crossings",
+                "rally_count",
+                "legal_hit_count",
+                "bounce_count",
+            ),
+            "info_eval_terminal_keys": _PADDLE_TENNIS_TERMINAL_EVAL_KEYS,
+            "info_eval_distribution_keys": ("crossings",),
+            "phase_key": "rally_phase",
+            "phase_labels": {
+                0: "initial_feed",
+                1: "awaiting_return",
+                2: "return_in_flight",
+                3: "terminal",
+            },
+        },
+        description=(
+            "Two-sided paddle rally on the probe-frozen 13 m court "
+            "(P0-P4, docs/paddle_tennis_probes_p3_p4_20260802.md): the "
+            "policy plays side A against the frozen lead_charge "
+            "opponent through the P4 mirror, one alternating-serve "
+            "point per episode, cooperative +1 per confirmed return by "
+            "either side. No certification ladder -- the definition "
+            "certified held-out through the probes harness against "
+            "floors pre-registered from committed calibration data "
+            "(docs/paddle_tennis_env_20260802.md section 5)."
         ),
     ),
     "HumanoidTennisStage0Intercept": Recipe(
