@@ -12,28 +12,44 @@ One local CPU run of the stock recipe: `build_train_config
 ("PaddleTennis", seed=0, total_timesteps=500_000, n_envs=4,
 record_video=False)` — the only deviations from the recipe are
 throughput knobs (workers, budget, no video: the runner has no GL
-context), never task definition. 2h04m at 67 FPS, tree at the P5
-instrument commit. Artifacts (including per-eval CSVs and the
-selected checkpoint) live outside the repo; the numbers below are the
-committed record.
+context), never task definition. 2h04m at 67 FPS. Provenance: the
+run's launch snapshot (`config.json`) records the tree at the env
+freeze push (`39b5ecd`); a tools/tests/docs-only commit landed
+mid-run (zero `src/` changes between the two SHAs, so the trained
+package is byte-identical at both — `stage_summary.txt` stamps the
+later SHA because it snapshots HEAD at completion). Artifacts
+(including per-eval CSVs and the selected checkpoint) live outside
+the repo; the numbers below are the committed record.
 
 ### The rally tail vs the scripted reference
 
-`crossings_ep_mean` (30-episode evals, every 25k steps):
+`crossings_ep_mean`, the complete series (30-episode evals, every
+25k steps):
 
-| steps | 25k | 75k | 150k | 200k | 300k | 375k | 425k | 475k | 500k |
-|---|---|---|---|---|---|---|---|---|---|
-| crossings | 0.63 | 2.43 | 3.07 | 3.77 | 3.90 | 5.17 | 6.13 | **6.40** | 6.13 |
+| steps | 25k | 50k | 75k | 100k | 125k | 150k | 175k | 200k | 225k | 250k |
+|---|---|---|---|---|---|---|---|---|---|---|
+| crossings | 0.63 | 0.47 | 2.43 | 2.13 | 2.80 | 3.07 | 3.27 | 3.77 | 3.50 | 4.03 |
+
+| steps | 275k | 300k | 325k | 350k | 375k | 400k | 425k | 450k | 475k | 500k |
+|---|---|---|---|---|---|---|---|---|---|---|
+| crossings | 3.63 | 3.90 | 4.40 | 4.63 | 5.17 | 5.17 | 6.13 | 5.63 | **6.40** | 6.13 |
 
 - **The learned policy passes the scripted pair's certified band
-  (3.22) by ~190k steps and nearly doubles it by 475k** (best 6.40,
-  task-metric selection; final 6.13). No plateau by budget end.
+  (3.22) at the 175k eval and nearly doubles it by 475k** (best
+  6.40, task-metric selection; final 6.13). The curve is noisy eval
+  to eval (dips at 50k, 100k, 225k, 275k, 450k) but trends up
+  through the budget; the final quarter oscillates 5.17–6.40 (last
+  four evals 6.13/5.63/6.40/6.13, mean ≈ 6.1). Whether that is a
+  slow climb or a plateau near 6 is exactly what the GPU budget
+  answers.
 - Distribution at the best window: p50 6, p90 9–10, max 11.
-- `success_rate` (serve returned) reaches 1.00 by 300k and stays.
+- `success_rate` (serve returned) is ≥ 0.90 from 75k on, and 1.00 at
+  every eval from 400k (with 0.97 dips at 325k and 375k).
 - Failure taxonomy stays task-shaped: out_of_bounds ~0.70,
   ball_net ~0.07, **zero timeouts** (the 1500-step cap never binds;
-  mean episode ~327 steps at the best window — the wall-ball 750-cap
-  lesson held) and **zero nonfinite/unsafe terminations**.
+  mean episode 311 steps at the best window, 327 at the final eval —
+  the wall-ball 750-cap lesson held) and **zero nonfinite/unsafe
+  terminations**.
 - `serve_side_is_policy` = 0.50 at every single eval: alternation
   exact under vectorized training.
 - Pipeline proof: `SelectiveVecNormalize` exclusions (tail 24–47

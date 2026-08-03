@@ -49,30 +49,59 @@ rules `bounce_count`, stall/curriculum/recovery values ← 0 (none
 exist here). Full per-index map in `wall_ball_observation`'s
 docstring; pinned by `tests/test_p5_transfer.py`.
 
+Three instrument corrections landed after the pre-push adversarial
+review (2026-08-03), before any champion measurement:
+
+1. **The decode now reproduces the trained fence.** The champions'
+   env clamped every x target to (−8.2, −2.6) before the actuator saw
+   it, so any action ≥ +0.491 physically meant "paddle to −2.6". The
+   first instrument spread that saturated interval over unreachable
+   forward targets (up to 1.6 m in front of anything the champions
+   ever occupied) — undetectable by the stub, whose scripted actions
+   are exactly {−1.0, +0.491} by construction, but exactly where a
+   saturating SAC policy lives. Stub rows are unchanged by this fix
+   for that same reason.
+2. **The rendered ball is held at the wall face while on the
+   opponent's half.** The far half does not exist in the champion's
+   world; unclamped, ~22% of policy-queried steps showed the ball up
+   to 6 m beyond the wall at scaled velocities. Held at the face, the
+   ball "waits at the wall" until the opponent's return sends it
+   back — the rebound moment wall-ball trained on.
+3. **The yield park is the champion's own neutral** (wall-ball home
+   −5.4 decoded through the shim), not the paddle court's home: the
+   release-step self-state stays inside the champion's lifelong
+   workspace, and the park sits deep, clear of the serve column.
+   This is also why the stub's `scaled + yield` row improved.
+
 ## 2. Scripted calibration — the instrument works, and it found a rule
 
 The certified true-baseline oracle (`lead_charge` 2.6, the probe that
 certified the champions' own training geometry) played 100 episodes
-per arm through the shim on calibration seeds 5000–5099, native
-paddle-court oracle on side B:
+per arm through the fixed instrument on calibration seeds 5000–5099,
+native paddle-court oracle on side B:
 
 | player (side A) | crossings | ≥1 | returns A | returns B | top terminations |
 |---|---|---|---|---|---|
 | wall-ball oracle via net | 0.00 | 0% | 0.00 | 0.00 | wrong_hitter 50, failed_to_cross 49 |
-| wall-ball oracle via net + yield | 0.49 | 49% | 0.00 | 0.24 | double_hit 58, out_of_bounds 37 |
+| wall-ball oracle via net + yield | 0.49 | 49% | 0.00 | 0.23 | failed_to_cross 62, out_of_bounds 37 |
 | wall-ball oracle via scaled | 1.00 | 47% | 0.55 | 0.24 | wrong_hitter 50, out_of_bounds 33 |
-| **wall-ball oracle via scaled + yield** | **1.57** | **96%** | 0.54 | 0.47 | out_of_bounds 71, failed_to_cross 24 |
+| **wall-ball oracle via scaled + yield** | **1.71** | **96%** | 0.69 | 0.48 | out_of_bounds 77, ball_net 11, failed_to_cross 10 |
 | native paddle-court oracle | 3.22 | 99% | 1.21 | 1.23 | out_of_bounds 92, ball_net 6 |
+
+(The pre-fix instrument measured the same rows at 1.57/96% for
+`scaled + yield` and `double_hit`-dominant for `net + yield`; the
+deltas are the yield-park correction. Both sweeps are seed-matched.)
 
 Three findings, all structural:
 
-1. **The `net` identification is broken by construction.** The
-   champion command range (−8.2 … 0.3) maps entirely behind or at the
-   paddle-court baseline (most-forward commandable point: local
-   −3.6), pinning the player out of the play band. The
-   `test_net_variant_pins_the_champion_deep` test pins the geometry.
-   Real champions need not be measured on this arm; it ships for
-   completeness of the pre-declaration.
+1. **The `net` identification is broken by construction.** With the
+   trained fence, the champion's commandable band maps to local
+   [−6.4, −3.6] — inside the court, but excluded from the front
+   ~3.5 m where the rally is actually played (the native controller
+   works around home −1.7; the shimmed player can never command
+   forward of −3.6). The `test_net_variant_pins_the_champion_deep`
+   test pins the geometry. Real champions need not be measured on
+   this arm; it ships for completeness of the pre-declaration.
 2. **The serve-yield rule is mandatory, not optional.** Without it,
    every serving point — exactly 50 of 100, the alternation's half —
    ends in `wrong_hitter`: wall-ball serves always arrived *from* the
@@ -84,26 +113,38 @@ Three findings, all structural:
    controller already follows; with it the serving half survives.
 3. **Receiving-side competence survives the scaled shim.** Under
    scaled + yield the wall-ball-frame player returns 96% of points'
-   serves and sustains ~49% of the native rally tail; the residual
+   serves and sustains ~53% of the native rally tail; the residual
    taxonomy (out long, strokes dying short) is stroke calibration for
    the shorter court, not disorientation.
 
+Known instrument limitation, kept deliberately: the yield overlay is
+**turn-scoped** — it also suppresses between-shot repositioning after
+every own hit, a window in which wall-ball did train legitimate
+recovery behavior. A champion's competent serve-time and between-shot
+play is therefore invisible on the overlay arm. That is why
+overlay-off arms are always measured and reported beside it: a
+champion that outperforms its own overlay row on the overlay-off arm
+is evidence the overlay, not the champion, is binding — and the
+admission verdict below must be read against both rows.
+
 ## 3. Pre-registered champion decision rule (phase-P2 opponent pool)
 
-Committed here, before any champion number is seen. A champion joins
-the phase-P2 warm opponent pool iff, on this same instrument
-(100 episodes, seeds 5000–5099, `scaled + yield`, native oracle on
-side B):
+Committed before any champion number is seen (amended once, with the
+instrument fixes above, still before any champion measurement). A
+champion joins the phase-P2 warm opponent pool iff, on the fixed
+instrument (100 episodes, seeds 5000–5099, `scaled + yield`, native
+oracle on side B):
 
 - mean crossings ≥ **1.0**, and
 - ≥1-crossing rate ≥ **0.60**, and
 - zero unsafe/nonfinite terminations.
 
-The floors are two-thirds-of-stub-band anchors (stub: 1.57 / 96%),
-loose enough to admit a differently-styled but functional learned
-player and tight enough to exclude a disoriented one. If neither
-champion qualifies, the phase-P2 pool starts scripted-only plus P1's
-own graduates — a measured outcome, not a failure of the campaign.
+The floors sit at ~60% of the fixed-instrument stub band
+(1.71 / 96%), loose enough to admit a differently-styled but
+functional learned player and tight enough to exclude a disoriented
+one. If neither champion qualifies, the phase-P2 pool starts
+scripted-only plus P1's own graduates — a measured outcome, not a
+failure of the campaign.
 
 ## 4. Seed ledger
 

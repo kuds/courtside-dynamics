@@ -84,6 +84,23 @@ class TestObservationShim:
         assert wall[0] == pytest.approx(-7.985)
         assert wall[3] == pytest.approx(-9.0 * shim.scale)
 
+    def test_opponent_half_ball_held_at_the_wall_face(self):
+        """The far half does not exist in the champion's world: the
+        rendered ball waits at the face (wall-ball's rebound moment)
+        instead of flying up to 6 m beyond it."""
+        from tools.paddle_tennis_p5_transfer import WB_BALL_MAX_X
+
+        for variant in ("net", "scaled"):
+            shim = SHIM_VARIANTS[variant]
+            deep = wall_ball_observation(
+                _obs(ball_position_x=5.0), shim
+            )
+            assert deep[0] == pytest.approx(WB_BALL_MAX_X)
+            # paddle_to_ball must be consistent with the held position.
+            assert deep[14] == pytest.approx(
+                deep[0] - (deep[6] - 1.7)
+            )
+
     def test_gate_flag_is_own_shot_in_flight(self):
         in_flight = _obs(ball_side_is_own=1.0, expected_returner_is_own=0.0)
         ours_to_hit = _obs(
@@ -104,14 +121,35 @@ class TestActionShim:
         assert action[1] == pytest.approx(0.4)
         assert action[2] == pytest.approx(-0.7)
 
-    def test_x_monotone_and_clamped(self):
+    def test_scaled_x_endpoints_pinned(self):
+        """Hand-computed anchors (scale 11.885/6.5 = 1.828462): the
+        decode must land these exactly, catching wrong-home,
+        wrong-scale, and swapped-range bugs the earlier monotonicity
+        check could not (adversarial-review finding)."""
         shim = SHIM_VARIANTS["scaled"]
-        xs = [
-            paddle_court_action(np.array([ax, 0, 0]), shim)[0]
-            for ax in np.linspace(-1, 1, 9)
-        ]
-        assert all(-1.0 <= x <= 1.0 for x in xs)
-        assert xs == sorted(xs)
+        # a=-1 -> wb -8.2 -> local -6.617 -> clamped -6.4 -> action -1.
+        assert paddle_court_action(np.array([-1.0, 0, 0]), shim)[
+            0
+        ] == pytest.approx(-1.0)
+        # a=0 -> wb home -5.4 -> local -5.08624 -> (x+1.7)/4.7.
+        assert paddle_court_action(np.array([0.0, 0, 0]), shim)[
+            0
+        ] == pytest.approx(-0.720477, abs=1e-5)
+        # a=+1 -> wb 0.3 -> FENCE-clamped -2.6 -> local -3.55490.
+        assert paddle_court_action(np.array([1.0, 0, 0]), shim)[
+            0
+        ] == pytest.approx(-0.394660, abs=1e-5)
+
+    def test_fence_semantics_match_training(self):
+        """In training every x action >= +0.491 meant 'paddle to the
+        fence front (-2.6)'; the decode must reproduce that plateau,
+        not spread the saturated interval over unreachable targets."""
+        shim = SHIM_VARIANTS["scaled"]
+        at_fence = paddle_court_action(np.array([0.491, 0, 0]), shim)[0]
+        for ax in (0.6, 0.8, 1.0):
+            assert paddle_court_action(np.array([ax, 0, 0]), shim)[
+                0
+            ] == pytest.approx(at_fence, abs=1e-3)
 
     def test_net_variant_pins_the_champion_deep(self):
         """The rigid translation maps the whole champion command range
@@ -137,11 +175,17 @@ class TestYieldOverlay:
             calls.append(wall_obs)
             return np.array([0.5, 0.5, 0.5])
 
-        player = transfer_policy(
-            recorder, SHIM_VARIANTS["scaled"], yield_overlay=True
-        )
+        shim = SHIM_VARIANTS["scaled"]
+        player = transfer_policy(recorder, shim, yield_overlay=True)
         parked = player(_obs(expected_returner_is_own=0.0))
-        assert np.array_equal(parked, np.zeros(3))
+        # The park is the CHAMPION'S neutral decoded through the shim
+        # (wall-ball home -5.4 -> local -5.086), never the paddle-
+        # court home: the release-step self-state must sit inside the
+        # champion's lifelong workspace.
+        assert np.array_equal(
+            parked, paddle_court_action(np.zeros(3), shim)
+        )
+        assert parked[0] == pytest.approx(-0.720477, abs=1e-5)
         assert not calls
         active = player(_obs(expected_returner_is_own=1.0))
         assert calls and active.shape == (3,)

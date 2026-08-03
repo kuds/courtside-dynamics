@@ -84,6 +84,22 @@ WB_PADDLE_ORIGIN = (-1.7, 0.0, 1.2)
 #: y/z mappings are the shared paddle calibration and pass through
 #: unchanged (y: home 0 span 3; z: home 1.2, +2.0/-0.9).
 WB_X_MAPPING = (-8.2, -5.4, 0.3)
+#: The fence the champions TRAINED under (WallBallTrueBaseline env
+#: kwargs). In training every decoded x target was clamped to this
+#: interval before it reached the actuator, so any action >= +0.491
+#: physically meant "paddle to -2.6". The decode must reproduce that
+#: clamp: without it the (0.491, 1.0] action interval -- which a
+#: saturating SAC policy lives in, and which the scripted stub never
+#: emits -- would command up to 1.6 m in front of any position the
+#: champions ever reached (adversarial-review finding, 2026-08-03).
+WB_TRAINED_FENCE = (-8.2, -2.6)
+#: The largest ball x the champions ever observed: the wall face
+#: minus the ball radius. During opponent possession the paddle
+#: court's far half would map beyond it (physically impossible in
+#: wall-ball), so the rendered ball is held at the face instead --
+#: the ball "waits at the wall" until the opponent's return sends it
+#: back, which is exactly the rebound moment wall-ball trained on.
+WB_BALL_MAX_X = 3.83
 #: The certified true-baseline oracle configuration (recipes.py
 #: ladder_certification: lead_charge 2.6 at the (-8.2, -2.6) fence).
 WB_ORACLE_FENCE = (-8.2, -2.6)
@@ -128,7 +144,13 @@ def wall_ball_observation(
 
     Index map (wall-ball name <- paddle-court source):
 
-    - 0-2   ball x/y/z        <- ball position, x through the shim
+    - 0-2   ball x/y/z        <- ball position, x through the shim,
+      then held at the wall face (``WB_BALL_MAX_X``) while the ball
+      is on the opponent's half -- the far half of the paddle court
+      does not exist in the champion's world, and an unclamped map
+      would show the ball up to 6 m beyond the wall at scaled
+      velocities (impossible-in-training states over every
+      receive-preparation window; adversarial-review finding)
     - 3-5   ball vx/vy/vz     <- ball velocity, vx scaled
     - 6-11  paddle qpos/qvel  <- own paddle world pos/vel minus the
       wall-ball origin (-1.7, 0, 1.2), interleaved per axis
@@ -142,7 +164,9 @@ def wall_ball_observation(
       curriculum, no recovery resets on the paddle court)
     """
     o = observation
-    ball_x = shim.to_wall_x(o[_IDX["ball_position_x"]])
+    ball_x = min(
+        shim.to_wall_x(o[_IDX["ball_position_x"]]), WB_BALL_MAX_X
+    )
     paddle_x = shim.to_wall_x(o[_IDX["own_paddle_position_x"]])
     return np.array(
         [
@@ -200,6 +224,11 @@ def paddle_court_action(
             np.array([high]),
         )[0]
     )
+    # Training semantics: the true-baseline env clamped every decoded
+    # target to the fence before the actuator saw it.
+    target_wb_x = float(
+        np.clip(target_wb_x, WB_TRAINED_FENCE[0], WB_TRAINED_FENCE[1])
+    )
     target_local_x = float(
         np.clip(
             shim.to_local_x(target_wb_x),
@@ -227,22 +256,30 @@ def transfer_policy(
 ) -> Callable[[np.ndarray], np.ndarray]:
     """Wrap a wall-ball-frame policy as a paddle-court side-A player.
 
-    ``yield_overlay`` parks the player neutrally (action zero = the
-    calibrated home pose) whenever the ball is not its to hit. Wall
-    ball had no yield concept -- its serves always arrived FROM the
-    wall side -- and the first stub sweep measured the consequence:
+    ``yield_overlay`` parks the player at the CHAMPION'S trained
+    neutral -- champion action zero, i.e. wall-ball home -5.4 decoded
+    through the shim -- whenever the ball is not its to hit. Wall
+    ball had no yield concept (its serves always arrived FROM the
+    wall side) and the first stub sweep measured the consequence:
     every serving point lost to ``wrong_hitter``, the transferred
     player diving through its own serve's flight path (P3's
-    documented self-touch hazard). The overlay is the minimal rule
-    the native controller already follows.
+    documented self-touch hazard). Parking at the champion's own
+    neutral (not the paddle-court home) keeps the release-step
+    self-state inside the champion's lifelong workspace AND clears
+    the serve column deep (adversarial-review finding, 2026-08-03).
+
+    Known limitation, acknowledged in the P5 snapshot: the overlay is
+    turn-scoped (it also suppresses between-shot repositioning after
+    every own hit), so overlay-off arms are always reported beside it.
     """
+    park = paddle_court_action(np.zeros(3), shim)
 
     def act(observation: np.ndarray) -> np.ndarray:
         if (
             yield_overlay
             and observation[_IDX["expected_returner_is_own"]] < 0.5
         ):
-            return np.zeros(3, dtype=np.float64)
+            return park.copy()
         wall_obs = wall_ball_observation(observation, shim)
         return paddle_court_action(policy(wall_obs), shim)
 

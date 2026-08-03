@@ -134,8 +134,8 @@ B side) and grown only as phases earn it.
 >
 > **Status update, 2026-08-02 (first learned evidence + first-run
 > pre-registration):** the local SAC pilot of the frozen recipe
-> passes the scripted band by ~190k steps and reaches crossings 6.40
-> without plateau
+> passes the scripted band at its 175k eval and reaches crossings
+> 6.40 best (final quarter oscillating 5.2–6.4)
 > ([`paddle_tennis_pilot_and_first_run_20260802.md`](paddle_tennis_pilot_and_first_run_20260802.md)),
 > which also pre-registers the first GPU run (seed 1, stock TOML,
 > primary ≥ 6.0, held-out gate on block 4100–4199).
