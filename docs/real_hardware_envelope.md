@@ -21,6 +21,13 @@ served or machine-fed. Success is **landing in the bin**, not merely making
 contact. That last clause is what makes this an *accuracy* task rather than a
 *power* task, and it inverts the usual robot-tennis difficulty ordering.
 
+**The sport is a free parameter, and it is the highest-leverage choice in the
+build.** §1–§4 work the tennis case throughout, because that is the project's
+destination. §5.5 evaluates tennis against pickleball and ping-pong *with their
+matched balls* and recommends **starting with ping-pong** — a 2.7 g ball cuts
+the impact moment 65× and the required paddle speed to a third, moving the
+entire difficulty from mechanics into aerodynamics, where it is iterable.
+
 Design point used throughout, chosen to be a comfortable underhand toss:
 
 | Parameter | Value |
@@ -373,9 +380,9 @@ shock, and both effects are linear in the same number:
 An arm with **speed margin** can spend it on a shorter implement and cut the
 moment ~40%. An arm that needs the full 0.49 m lever just to reach 3 m/s cannot.
 That is precisely PiPER's position, and it is why moment margin — not price,
-not joint speed — is the right primary selection criterion. §5.5 works the
-implement trade properly, including the effective-mass penalty a shorter
-implement carries.
+not joint speed — is the right primary selection criterion **for the tennis
+case**. §5.5 shows that switching sports dissolves this section entirely: with a
+matched ping-pong ball the impact moment falls from 65 N·m to 1 N·m.
 
 **Mitigations, in order of leverage.**
 
@@ -413,78 +420,107 @@ implement carries.
   kinematic capability is only available if the safety configuration allows it.
   Verify the configured limit, not the brochure.
 
-### 5.5 Implement choice: tennis racket, pickleball paddle, or ping-pong?
+### 5.5 Sport choice: tennis, pickleball, or ping-pong — with matched balls
 
-A shorter, lighter implement is the obvious way to buy back the moment margin
-§5.4 says you need. It is not free, and the cost is not the one people expect:
-it is **effective mass**, not length.
+The implement is not chosen alone. Picking a paddle means picking **its ball**,
+and the ball changes every number in this document. This section supersedes an
+earlier version that compared paddles against a *tennis* ball; that comparison
+answered a question nobody was asking, and its conclusion about ping-pong was
+backwards.
 
-`M_eff = 1/(1/m + d²/I_cm)` at the strike point, where *d* is the offset from the
-implement's CoM. The mass ratio `r = m_ball/M_eff` then drives §1's exit-speed
-equation. A tennis ball is 57 g — heavy enough that light implements lose badly.
+Two independent physical scalings drive everything:
 
-| Implement | Mass | Strike lever | `M_eff` | `r` | ACOR | *V* needed for the 5 m bin | Face (W × H) | Impact moment |
-|---|---|---|---|---|---|---|---|---|
-| **Tennis racket** | 0.30 kg | 0.49 m | 0.211 kg | 0.27 | **0.40** | **3.3 m/s** | 0.26 × 0.34 m | 65 N·m |
-| **Pickleball paddle** | ~0.23 kg | ~0.28 m | ~0.19 kg | 0.30 | 0.35 | **3.6 m/s** | ~0.20 × 0.20 m | **37 N·m** |
-| **Ping-pong paddle** | ~0.18 kg | ~0.19 m | **~0.12 kg** | **0.47** | **0.19** | **~4.8 m/s** | ~0.15 m dia. | 25 N·m |
+- **Impact scales with ball mass.** A 2.7 g ball delivers 1/21 the impulse of a
+  57 g one at the same speed. The entire §5.4 shock problem is a *tennis ball*
+  problem.
+- **Aerodynamics scale with area/mass.** `k = ½ρC_dA/m` is 6× larger for a
+  ping-pong ball than a tennis ball, and Magnus scales the same way. What the
+  light ball saves mechanically, it spends aerodynamically.
 
-**Ping-pong paddle: no.** Two independent reasons, either sufficient.
+Each sport is evaluated at its own natural scale (bin and toss distance
+matched to the sport), 45° launch, 1.0 m contact height, 0.5 m bin rim,
+integrating quadratic drag numerically:
 
-- **The ball is half the paddle's effective mass at the strike point.** `r ≈ 0.47`
-  collapses the ACOR from 0.40 to **~0.19** — a stationary ping-pong paddle
-  struck by a tennis ball mostly gets knocked backwards. Recovering the 6.6 m/s
-  exit needs **~4.8 m/s** of paddle speed, ~45% more than the racket, which is
-  past the comfortable range of every arm in §5.3 and defeats the entire purpose
-  of shortening the lever. (This figure is sensitive to paddle mass, which
-  varies 150–200 g across models; the sign of the conclusion is not.)
-- **Roughly a quarter of the catch area.** ~0.018 m² against the racket's
-  ~0.069 m². Contact requires the predicted intercept to land on the face, and
-  §2/§3 error sources (toss spread, tracking noise, latency jitter) are a few cm
-  at best during bring-up. Cutting linear margin from ±0.13 m to ±0.075 m turns
-  a forgiving task into a marginal one for no benefit.
+| | **Tennis** | **Pickleball** | **Ping-pong** |
+|---|---|---|---|
+| Ball mass / diameter | 57 g / 67 mm | 24 g / 74 mm | 2.7 g / 40 mm |
+| Bin & toss distance | 5.0 m | 4.0 m | 2.5 m |
+| Drag at 6.6 m/s (as % of *g*) | 9% | 22% | **57%** |
+| Magnus force / weight | 4% | 12% | **32%** |
+| Required exit speed | 6.96 m/s | 6.40 m/s | 5.17 m/s |
+| Local COR *e* | 0.78 | 0.40 | 0.90 |
+| Mass ratio `r` | 0.27 | 0.13 | **0.023** |
+| **ACOR** | 0.40 | 0.24 | **0.86** |
+| **Paddle speed needed** | 3.61 m/s | **4.35 m/s** | **1.35 m/s** |
+| Toss speed / arrival | 7.30 / 4.75 m/s | 6.77 / 4.10 m/s | 5.61 / 3.11 m/s |
+| Flight time | 0.95 s | 0.86 s | 0.70 s |
+| **Impact impulse** | 0.667 N·s | 0.252 N·s | **0.022 N·s** |
+| **Impact moment** | **65 N·m** | 14 N·m | **1 N·m** |
+| Speed tolerance (0.4 m bin) | ±0.16 m/s (2.3%) | ±0.20 m/s (3.2%) | **±0.30 m/s (5.8%)** |
+| Catch window (face + ball) | 0.367 m | 0.274 m | 0.190 m |
 
-A ping-pong paddle is sized for a 2.7 g ball. It is the wrong tool for a 57 g
-one, by a factor of about twenty in the thing that matters.
+**Ping-pong makes the mechanical problem disappear.** A 2.7 g ball against a
+120 g effective paddle mass gives `r = 0.023` — essentially the infinite-mass
+limit — so the ACOR is **0.86**, and the paddle behaves like a wall. Consequences:
 
-**Pickleball paddle: yes — and it is the right trade on a moment-limited arm.**
-Striking near its CoM keeps `d` small, which holds `M_eff` up (0.19 kg, barely
-below the racket's 0.211 kg) despite the lower mass. So the exit-speed penalty
-is mild — **3.6 m/s instead of 3.3 m/s, about 10%** — while the mechanical
-relief is large:
+- **1 N·m of impact moment**, 65× less than tennis. Every arm in §5.3 clears
+  this by two orders of magnitude, PiPER included and over-specified. §5.4, the
+  section that drove the whole arm selection, simply stops applying.
+- **1.35 m/s of paddle speed**, a third of what tennis needs. Speed stops being
+  a selection criterion too.
+- **Speed control is 2.5× more forgiving** (±5.8% vs ±2.3%), because heavy drag
+  flattens the range-versus-speed curve — it acts as a governor.
+- **The whole rig is desk-scale** (2.5 m), and a 2.7 g projectile is harmless,
+  which changes the §8 safety picture from "netting and e-stop" to "reasonable
+  care."
 
-| | Tennis racket | Pickleball paddle |
-|---|---|---|
-| Static wrist moment | 1.4 N·m | **0.65 N·m** |
-| Impact moment | 65 N·m | **37 N·m** (−43%) |
-| Tool inertia about flange | 0.062 kg·m² | **~0.020 kg·m²** |
+**What ping-pong costs, and it is not trivial.** Magnus force reaches **32% of
+the ball's weight** — 8× tennis. Spin, not speed, becomes the dominant aiming
+error, and it arrives from two uncontrolled sources: the toss, and any oblique
+contact. A ping-pong ball with modest sidespin curves by tens of centimetres
+over 2.5 m. Additionally the catch window is the smallest (0.190 m vs 0.367 m),
+the 40 mm ball is the hardest to track, and at 2.7 g it is genuinely blown
+off course by room air currents. Mitigations: use an **anti-spin or bare-wood
+blade rather than tacky spin rubber** (this is the high-leverage one — it
+attacks spin *generation* directly), strike near-normal, and turn the HVAC off.
 
-Halving the static moment is what would bring a 1.5 kg-class arm back inside
-its budget (§5.4a). The costs are ~40% of the catch area and ~22% more joint
-angular rate for the same strike speed — and angular rate is the scarcer
-resource on a small arm, so this does not rescue the PiPER so much as make it
-a closer call.
+**Pickleball is the surprise loser.** It needs **more paddle speed than tennis**
+(4.35 vs 3.61 m/s), because a pickleball is a dead ball — local COR ≈ 0.40
+against tennis's 0.78 — so the ACOR falls to 0.24 even though the ball is
+lighter. It buys a real 4.6× reduction in impact moment (14 vs 65 N·m) and it
+has the largest ball of the three (74 mm, easiest to track), but it is not the
+free middle option it looks like. *Caveat:* this treats the paddle face as
+rigid. Real pickleball paddles have measurable face deflection, which would
+raise the ACOR toward 0.3–0.4 and pull the required paddle speed down to
+~3.5–4.4 m/s. B0 settles it.
 
-**Recommendation.** On the **xArm 6 or FR3, keep the tennis racket**: those arms
-have the moment margin, and the racket's bigger face and better ACOR both work
-in your favor during bring-up, when contact rate is the thing failing. On a
-**small or moment-limited arm, use a pickleball paddle** — it is the cheapest
-real reduction in shock available, and it costs only 10% more swing speed. Under
-no configuration is a ping-pong paddle the right answer for a tennis ball.
+**Recommendation: build the ping-pong rig first, then escalate.**
 
-**One coupled effect, easy to miss.** The compliant coupler from §5.4 is a
-~5 Hz element, so over a 5 ms impact it effectively *disconnects* the implement
-from the arm — meaning the implement behaves as a near-free body and its own
-`M_eff` sets the exit speed, exactly as tabulated above. A rigid mount would
-couple in wrist-link inertia and raise `M_eff` (more ball speed for the same
-swing) at the cost of feeding the shock straight to the gearbox. **You cannot
-have both**, and the trade is real: protecting the reducer costs exit speed.
-This is why B0 must measure ACOR on the **assembled mount**, not the bare
-implement.
+The argument is about *which kind of risk you are taking*. Tennis puts the risk
+in the mechanics — gearbox wear, which is irreversible, expensive, and silent
+until it is not. Ping-pong moves the risk into aerodynamics and control, which
+is software: free to retry, iterable, and instrumented. **For a bring-up, trade
+irreversible risk for iterable risk every time.**
 
-*(If the task is ever de-scoped to a lighter ball, all of this inverts — a 2.7 g
-ping-pong ball makes the shock problem vanish and puts drag and air currents in
-charge instead. That is a different task, not an easier version of this one.)*
+Concretely: a ping-pong rig runs the entire B0–B5 battery (§7) — restitution,
+latency, achievable speed, toss variability, open-loop aiming, closed-loop —
+on a desk, on the cheapest arm, with no shock risk and no safety cell. Every
+component of the pipeline except the aerodynamic model transfers directly to
+tennis. Then escalate to tennis with a working pipeline and, by then, actual
+measurements telling you whether the arm needs replacing.
+
+This also mirrors the repo's own methodology. The project is a progression —
+BallBalance → BallBounce → WallBall → PaddleTennis → HumanoidTennis — and every
+rung was justified by proving the mechanism cheaply before scaling it. A
+ping-pong bench rig is that same argument in hardware. Note too that every
+shipped env drives a **paddle** (a 0.4 × 0.5 m slab), not a racket: a physical
+paddle rig is closer to what this repo already simulates than a tennis racket is.
+
+*(Numbers in this section come from `impl2.py`-style numerical integration of
+quadratic drag; the script is short enough to reproduce from the constants in
+the table. Drag coefficients — 0.55 tennis, ~0.45 pickleball and ping-pong —
+are literature values, and the pickleball figure is the least certain of the
+three because of the perforations.)*
 
 ### 5.6 If the roadmap escalates
 
@@ -505,6 +541,14 @@ reach say nothing about whether it can swing.
 ## 6. Recommended configuration
 
 Cheapest build that plausibly completes the task:
+
+**Stage 1 — ping-pong bench rig (§5.5).** Desk-scale, 2.5 m, 1 N·m of impact
+moment, 1.35 m/s of paddle speed. Any arm in §5.3 works; buy on price. Runs the
+whole B0–B5 battery with no shock risk and no safety cell. Use an anti-spin or
+bare-wood blade, and turn the HVAC off.
+
+**Stage 2 — tennis, once the pipeline works.** Then and only then does the arm
+selection below bind:
 
 - Arm from §5.3 — **xArm 6/7** as the default, FR3 if the budget allows — base
   bolted to a rigid table, intercept point at ~1.0 m. Select on **wrist-moment
