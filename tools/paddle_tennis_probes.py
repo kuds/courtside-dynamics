@@ -251,9 +251,9 @@ def run_cell(
         if r.serve_crossed and r.serve_first_bounce_in
     ]
     depths = [
-        parked[index].first_bounce_depth
+        depth
         for index in legal_indices
-        if parked[index].first_bounce_depth is not None
+        if (depth := parked[index].first_bounce_depth) is not None
     ]
     returned = [
         index
