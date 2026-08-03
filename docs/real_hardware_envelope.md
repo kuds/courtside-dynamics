@@ -542,10 +542,46 @@ reach say nothing about whether it can swing.
 
 Cheapest build that plausibly completes the task:
 
-**Stage 1 — ping-pong bench rig (§5.5).** Desk-scale, 2.5 m, 1 N·m of impact
-moment, 1.35 m/s of paddle speed. Any arm in §5.3 works; buy on price. Runs the
-whole B0–B5 battery with no shock risk and no safety cell. Use an anti-spin or
-bare-wood blade, and turn the HVAC off.
+**Stage 1 — ping-pong bench rig (§5.5).** Desk-scale, 2.5 m. The load case is
+tiny: a ~0.25 kg blade-plus-adapter with CoM ~0.15 m out is **0.37 N·m** static,
+the strike needs **1.35 m/s**, and the ball delivers **1 N·m** of impact moment.
+
+**Recommended arm: AgileX PiPER, $1,999.** Margins against the above:
+
+| Constraint | Required | PiPER | Margin |
+|---|---|---|---|
+| Paddle speed | 1.35 m/s | ~2.5–3 m/s | **~2×** |
+| Static wrist moment | 0.37 N·m | ~1.5 N·m equiv. | **~4×** |
+| Impact moment | 1 N·m | ≥3–5 N·m | **~3–5×** |
+| Reach vs intercept volume | ~0.5 × 0.5 × 0.4 m | 626 mm | adequate |
+
+Those are healthy margins, and the J1–J3 speed figure AgileX does not publish —
+the unknown that disqualified PiPER for tennis in §5.3 — stops mattering when
+the bar is 1.35 m/s. It also carries an exact, MIT-licensed Menagerie model.
+
+**Buy the UFACTORY xArm 7 ($11,000) instead only if tennis is likely within the
+year.** It is not more *margin* for ping-pong — it is escalation headroom, which
+is a different purchase. Note the option cost is small: PiPER now plus an xArm 7
+later is $12,999 against $11,000 today, so **preserving the choice costs about
+$2,000**. The xArm 7 is the right escalation target rather than the xArm 6
+despite lower payload (3.5 vs 5 kg, still ~10× what ping-pong needs): its
+seventh joint gives a null space for holding paddle orientation across the
+intercept volume without approaching singularities, and it is the variant
+Menagerie actually ships.
+
+**Not recommended: UFACTORY Lite 6 (~$3,000).** 440 mm reach is tight against
+the intercept volume, and a 600 g payload rating leaves the 0.37 N·m paddle
+moment with little or no margin depending on the rated CoM offset.
+
+**Buy workspace margin for $200, not $9,000.** The failure mode most likely to
+bite at Stage 1 is the intercept point landing outside the reachable volume —
+and that is driven by *toss scatter*, not by arm reach. A commodity ping-pong
+ball launcher has far lower variance than a human arm, shrinking the required
+volume directly. Use one through B0–B4 to isolate the pipeline, then reintroduce
+the human toss for B5, which is the actual task. This addresses the real risk
+far more cheaply than a larger arm does.
+
+Use an anti-spin or bare-wood blade, and turn the HVAC off (§5.5).
 
 **Stage 2 — tennis, once the pipeline works.** Then and only then does the arm
 selection below bind:
