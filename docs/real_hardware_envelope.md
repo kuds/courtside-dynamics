@@ -191,46 +191,136 @@ none of which it expresses.
   bar* — is exactly the right discipline for a hardware bring-up, and §7 is that
   rule applied.
 
-## 5. Hardware classes, for *this* task
+## 5. Candidate arms — surveyed 2026-08-03
 
-Verify every number against the current datasheet before buying; the figures
-below are order-of-magnitude guidance for sizing, not quoted specs.
+### 5.1 Torque is not the constraint
 
-**Collaborative arms — UR5e, Franka FR3, xArm 6, Kinova Gen3. Sufficient.**
-Roughly 1–2 m/s at the tool flange, which clears the 2.5–3.5 m/s stringbed
-requirement once the ~0.5 m grip-to-stringbed lever contributes. Real-time
-interfaces exist and are the thing to confirm before purchase: Franka FCI
-(~1 kHz), UR RTDE with `servoJ` (~500 Hz), xArm (~250 Hz). Two gotchas:
+State this first because it is the question everyone asks and the answer is
+boring. A tennis racket is 0.30 kg with its CoM 0.36 m from the mount
+(`tennis_racket.xml`):
+
+| Demand on the wrist | Value |
+|---|---|
+| Static holding moment | 0.30 × 9.81 × 0.36 = **1.06 N·m** |
+| Racket inertia about the mount | 0.30 × 0.36² + 0.0105 ≈ **0.049 kg·m²** |
+| Torque to reach 5 rad/s in 0.2 s | 0.049 × 25 = **1.2 N·m** |
+
+Every arm in §5.3 rates its wrist joints in the 5–33 N·m range — **5× to 30×
+margin**. No arm on the market that can hold a 1.5 kg payload will struggle to
+*swing* a racket. The two things that actually gate the build are **joint
+angular velocity** (§5.2) and **surviving the impact** (§5.4).
+
+### 5.2 Reading the speed spec correctly
+
+The relevant question is not "max TCP speed" but **max joint velocity converted
+to m/s at the stringbed**, which sits ~0.49 m beyond the flange
+(`tennis_racket.xml`, stringbed center at z = 0.49). Two corrections matter:
+
+- **Published "max TCP speed" understates the swing.** UR quotes 1 m/s for the
+  UR5e, but that is a conservative *rated* figure: the joints run at 180 °/s
+  (3.14 rad/s) and the documented maximum TCP speed is **4 m/s**. UR's own
+  forum notes that a coordinated shoulder+elbow move exceeds 1 m/s readily. The
+  racket's 0.49 m lever adds to that again.
+- **Distal speed beats proximal speed for a swing.** An arm whose *wrist* axes
+  are fast whips better than one with a fast base, because the wrist sits at the
+  end of the longest lever. This is what makes the FR3 and PiPER interesting.
+
+A useful bound: a joint at ω rad/s puts the stringbed at `ω × (r_joint→flange +
+0.49)` m/s, and coordinated joints add.
+
+### 5.3 The shortlist
+
+Prices are single-unit street/list as advertised on 2026-08-03 and move
+constantly; treat them as ±20% and re-check before buying. "Sim model" means a
+maintained MJCF in **MuJoCo Menagerie**, which matters here because this repo is
+MuJoCo-native and already vendors a third-party model (the G1) under
+`assets/third_party/` with provenance and checksums.
+
+| Arm | Price (USD) | Reach | Payload | Max joint speed | Est. stringbed speed | Menagerie model |
+|---|---|---|---|---|---|---|
+| **AgileX PiPER** | **$1,999** | 626 mm | 1.5 kg | **225 °/s (J4–J6)** | ~3–4 m/s | ✅ `agilex_piper` (MIT) |
+| ARX L5 | ~¥29,800 (~$4.1k) | ~620 mm | 2–3 kg | **not published** | unknown | ✅ `arx_l5` (BSD-3) |
+| **UFACTORY xArm 6** | **$9,500** | 700 mm | 5 kg | 180 °/s | ~4 m/s | ⚠️ **xArm 7 only** |
+| Unitree Z1 | $15,999 | 740 mm | 2–5 kg | 180 °/s, 33 N·m/joint | ~4 m/s | ✅ `unitree_z1` (BSD-3) |
+| **Franka FR3** | ~$30k | 855 mm | 3 kg | 150 °/s A1–A4, **301 °/s A5–A7** | ~4–5 m/s | ✅ `franka_fr3` (Apache-2.0) |
+| Universal Robots UR5e | ~$30–37k | 850 mm | 5 kg | 180 °/s (TCP max 4 m/s) | ~4 m/s | ✅ `universal_robots_ur5e` |
+
+Stringbed-speed estimates are derived, not measured, and assume a coordinated
+multi-joint swing with the arm near full extension. Probe B2 (§7) is what
+replaces them.
+
+Also in Menagerie and *not* recommended here: Kinova Gen3, KUKA LBR iiwa 14,
+Rethink Sawyer, Flexiv Rizon 4/4S (all fine arms, none cheaper or faster than
+the above for this task), and the ViperX 300 / WidowX 250 / SO-ARM100 /
+Low-Cost Robot Arm class (Dynamixel-driven, too slow and too light to swing a
+0.3 kg racket at 3 m/s).
+
+**Verdicts.**
+
+- **Best value: AgileX PiPER at $1,999.** Its J4–J6 run at **225 °/s — faster
+  than any cobot on this list** — the MJCF in Menagerie is MIT-licensed and
+  matches the hardware exactly, and 1.5 kg payload is 5× the racket. Caveats:
+  short 626 mm reach, no published J1–J3 speed, and the 0.36 m CoM offset eats
+  into the payload rating even though the absolute mass is small. **Confirm
+  J1–J3 speed with AgileX before buying** — that is the one number that could
+  disqualify it.
+- **Best research platform: Franka FR3 (~$30k).** Fast distal joints
+  (301 °/s on A5–A7), 1 kHz torque control over FCI, a maintained Menagerie
+  model. If the budget exists, this is the arm that will not be the reason the
+  project fails.
+- **Best middle: UFACTORY xArm 6 at $9,500.** 5 kg payload, 700 mm reach,
+  180 °/s. One real annoyance: **Menagerie ships xArm 7, not xArm 6** — the sim
+  model would be a 7-DoF proxy for a 6-DoF arm, so the kinematics do not match.
+  Buy the xArm 7 instead if sim fidelity matters more than $2k.
+- **Skip the Unitree Z1 at $15,999.** Same 180 °/s as a $9,500 xArm 6, less
+  payload than a UR5e, for more money than either.
+- **ARX L5 is the unresolved one.** Cheap (~$4.1k), force-controlled, 500 Hz
+  control loop via the open-source `arx5-sdk`, and in Menagerie — but neither
+  ARX nor the SDK publishes joint velocity limits, and the SDK explicitly says
+  its default safety limits are placeholders. Ask ARX directly.
+
+### 5.4 The two integration risks
 
 - **Collision detection will protective-stop on every hit.** Ball impulse is
   `m·Δv ≈ 0.057 × (5 + 6.6) ≈ 0.66 N·s` over a ~5 ms contact — roughly **130 N
-  peak**, applied ~0.5 m from the wrist, so a ~65 N·m moment transient. Force
-  and torque thresholds must be raised or the arm faults on contact. **Raising
-  them means the arm is no longer collaborative in the safety-rated sense** (§8).
-- **Safety-rated speed limits may cap you below the datasheet.** Check the
-  configured limit, not the brochure.
+  peak**, applied ~0.5 m from the wrist, so a **~65 N·m external moment
+  transient**. How much of that reaches the gearbox depends on reflected link
+  inertia over 5 ms, so this is not a 65 N·m *gearbox* load — but it comfortably
+  exceeds any default collision threshold. Raise the thresholds, and note that
+  **doing so means the arm is no longer collaborative in the safety-rated
+  sense** (§8). Fit a compliant, sacrificial racket coupler.
+- **Speed limits are enforced with a Cat 0 stop.** On UR hardware, exceeding the
+  *configured* TCP speed limit cuts drive power immediately. The 4 m/s
+  kinematic capability is only available if the safety configuration allows it.
+  Verify the configured limit, not the brochure.
 
-**DIY quasi-direct-drive — 3× AK80-9 / RMD-X8 class, ~$1.5–3k. Sufficient, and
-the best value if you intend to escalate.** Low gear ratios (6:1–9:1) are
-inherently impact-tolerant, 1 kHz torque control over CAN is available, and
-yaw + shoulder pitch + wrist on a carbon tube reaches 5–8 m/s at the racket —
-well past what the bin shot needs, and into ball-machine territory later.
+### 5.5 If the roadmap escalates
 
-**Industrial 6-axis — used ABB IRB 1100/1200, FANUC M-10iD, KUKA AGILUS.
-Overkill here.** Correct only if the roadmap goes to a machine-fed groundstroke.
-If so, the external-guidance interface is the gating question (FANUC Stream
-Motion, ABB EGM, KUKA RSI — ~4–12 ms command cycles), along with a compliant or
-sacrificial racket coupler to keep repeated shock out of the reducers.
+Beyond the bin shot — machine-fed groundstrokes at 15–20 m/s — the published
+precedent is worth copying rather than re-deriving. DeepMind's 2024
+human-competitive table-tennis system uses a **6-DoF ABB IRB 1100 mounted on two
+Festo linear gantries**, with perception from a pair of Ximea MQ013CG-ON cameras
+at **125 Hz**. Two lessons transfer directly: the speed comes from *adding a
+linear axis*, not from buying a faster arm; and 125 Hz sufficed for a sport with
+roughly half this task's flight time, which independently corroborates §3's
+90–120 fps recommendation. A DIY quasi-direct-drive build (3× AK80-9 / RMD-X8
+class, ~$1.5–3k) is the other escalation path — low gear ratios are inherently
+impact-tolerant, and yaw + shoulder + wrist on a carbon tube reaches 5–8 m/s.
 
 **Check joint velocity before buying any arm marketed on payload.** Payload and
-reach say nothing about whether it can swing. The number that matters is degrees
-per second at the shoulder and wrist, converted to m/s at your intercept radius.
+reach say nothing about whether it can swing.
 
 ## 6. Recommended configuration
 
 Cheapest build that plausibly completes the task:
 
-- Cobot or QDD arm, base bolted to a rigid table, intercept point at ~1.0 m.
+- Arm from §5.3 — PiPER if the budget is tight and its J1–J3 speed checks out,
+  FR3 if it is not — base bolted to a rigid table, intercept point at ~1.0 m.
+- **Vendor its Menagerie MJCF into `assets/third_party/`** following the exact
+  pattern already used for the G1 (`PROVENANCE.md`, `SHA256SUMS`,
+  `CHANGELOG.upstream.md`). All the candidate licenses are permissive
+  (MIT / BSD-3 / Apache-2.0). This gives a sim of the *real* arm, which is the
+  thing no shipped env currently has (§4).
 - Racket on a **compliant, sacrificial coupler** — cheap to replace, and it
   attenuates the shock transient into the wrist.
 - Two global-shutter cameras at 90–120 fps, wide baseline, both seeing the full
@@ -291,9 +381,29 @@ modeled, faithfully, in exactly one env. Magnus really is absent everywhere —
 `ball_drag_force` is the only force written to `xfrc_applied`, and it has no
 lift term.
 
+**Hardware survey (§5), conducted 2026-08-03.** Vendor sources: the
+[MuJoCo Menagerie model list](https://github.com/google-deepmind/mujoco_menagerie);
+[UFACTORY xArm 6](https://www.ufactory.us/product/ufactory-xarm-6) ($9,500,
+180 °/s, 5 kg, 700 mm); [AgileX PiPER](https://global.agilex.ai/products/piper)
+($1,999, 1.5 kg, 626 mm) with the 225 °/s J4–J6 figure from the AgileX manual
+table surfaced via the `piper_sdk` / `piper_ros` documentation; the
+[Franka Research 3 datasheet](https://franka.de/hubfs/Digital_Datasheet%20Franka%20Research%203_R02212_2.1_EN.pdf)
+(150 °/s A1–A4, 301 °/s A5–A7, A6 239 °/s under FCI);
+[UR5e technical specifications](https://www.universal-robots.com/media/1807465/ur5e_e-series_datasheets_web.pdf)
+plus the [UR forum thread on rated vs achievable TCP speed](https://forum.universal-robots.com/t/understanding-tcp-max-speed-from-datasheet/39665);
+[Unitree Z1](https://shop.unitree.com/products/unitree-z1) ($15,999, 180 °/s,
+33 N·m); ARX L5 pricing from Chinese trade press (¥29,800 / ¥49,800 Pro) with
+control-rate and safety-limit caveats from
+[`real-stanford/arx5-sdk`](https://github.com/real-stanford/arx5-sdk). The
+escalation precedent is
+[*Achieving Human Level Competitive Robot Table Tennis*](https://arxiv.org/html/2408.03906v2)
+(ABB IRB 1100 on two Festo gantries, Ximea cameras at 125 Hz). **Prices are
+advertised single-unit figures on one day and are the least durable numbers in
+this document.**
+
 Everything else — toss model, exit-speed table, restitution algebra,
-sensitivity partials, impulse and latency budgets — is analytic, derived here,
-and **unmeasured**. Drag coefficient (Cd ≈ 0.55) and restitution range
+sensitivity partials, impulse and latency budgets, and the stringbed-speed
+estimates in §5.3 — is analytic, derived here, and **unmeasured**. Drag coefficient (Cd ≈ 0.55) and restitution range
 (*e* ≈ 0.35–0.60) are textbook values for a tennis ball, not measurements of
 your ball on your racket; B0 replaces them. Hardware figures in §5 are
 order-of-magnitude and must be checked against current datasheets.
