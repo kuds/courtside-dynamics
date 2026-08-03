@@ -57,17 +57,34 @@ D = (v cosθ / g) · ( v sinθ + sqrt(v² sin²θ + 2 g Δh) )
 | **5 m** | **6.6 m/s** |
 | 6 m | 7.4 m/s |
 
-The racket speed that produces that exit speed follows from the apparent
-coefficient of restitution *e*:
+The racket speed that produces that exit speed follows from a two-body impact
+with the implement's **effective mass at the impact point**, `M_eff`. Writing
+`r = m_ball/M_eff` for the mass ratio and *e* for the *local* coefficient of
+restitution (ball against the striking surface, ≈ 0.75–0.78 — the repo's own
+measured court COR is 0.763):
 
 ```
-v_out = V·(1 + e) + e·u
+v_out = [ V·(1 + e) + u·(e − r) ] / (1 + r)
 ```
 
 where *V* is stringbed speed along the outgoing axis and *u* is the incoming
-ball speed component being reversed (≈ 5 m/s of the 7.1 m/s arrival). With
-*e* = 0.45, `6.6 = 1.45·V + 2.25` ⇒ **V = 3.0 m/s**. Sweeping the plausible
-restitution range *e* ∈ [0.35, 0.60] gives V ∈ [2.3, 3.6] m/s.
+ball speed component being reversed (≈ 5 m/s of the 7.1 m/s arrival). This
+reduces to the familiar `V(1+e) + e·u` only in the heavy-implement limit
+`r → 0`, which is **not** a safe assumption for light implements (§5.5).
+
+For a tennis racket struck at the stringbed center,
+`M_eff = 1/(1/m + d²/I_cm) = 1/(1/0.30 + 0.13²/0.012) ≈ 0.211 kg`, so
+`r ≈ 0.27` and:
+
+```
+v_out = 1.40·V + 0.40·u
+```
+
+**The model self-validates:** setting V = 0 gives an apparent COR (ACOR) of
+**0.40**, which is the textbook measured value for a tennis racket struck at the
+sweet spot. Solving for the 5 m bin: `6.6 = 1.40V + 2.0` ⇒ **V = 3.3 m/s**.
+Sweeping plausible restitution and mass-ratio values keeps V within
+**2.5–3.6 m/s**.
 
 **Consequence: a collaborative arm is sufficient for this task.** The usual
 "cobots are too slow for tennis" verdict is about groundstrokes at 20+ m/s. At
@@ -83,21 +100,21 @@ Speed is not the binding constraint. Sensitivity is. All partials taken at the
 | Error source | Sensitivity | Tolerance to hit the bin |
 |---|---|---|
 | Exit speed | dD/dv ≈ **1.4 m per m/s** | **±0.14 m/s (±2%)** |
-| Racket speed | dv_out/dV = 1 + e ≈ 1.45 | **±0.10 m/s** |
-| **Incoming ball speed** | dv_out/du = e ≈ 0.45 | **±0.31 m/s of toss variation** |
+| Racket speed | dv_out/dV ≈ **1.40** (§1) | **±0.10 m/s** |
+| **Incoming ball speed** | dv_out/du ≈ **0.40** (§1) | **±0.35 m/s of toss variation** |
 | Launch elevation | 45° is the range maximum; ±5° costs ~0.5–0.7 m | **±2°**, and errors are one-signed (always short) |
 | Face azimuth | maps ~1:1–2:1 into outgoing direction | **±1°** |
 
 Three things fall out of that table.
 
 **(a) Per-throw compensation is mandatory, not optional.** A human underhand
-toss varies by well over ±0.5 m/s throw to throw. At *e* = 0.45 that is ±0.22
-m/s of exit speed, i.e. ±0.31 m of range — comparable to the whole bin. The
+toss varies by well over ±0.5 m/s throw to throw. At a 0.40 coefficient that is
+±0.20 m/s of exit speed, i.e. ±0.28 m of range — comparable to the whole bin. The
 controller must **measure *u* from the observed track and correct the commanded
 racket speed**:
 
 ```
-ΔV = −( e / (1 + e) ) · Δu  ≈  −0.31 · Δu
+ΔV = −(0.40 / 1.40) · Δu  ≈  −0.29 · Δu
 ```
 
 An open-loop swing that ignores incoming speed will scatter around the bin even
@@ -356,7 +373,9 @@ shock, and both effects are linear in the same number:
 An arm with **speed margin** can spend it on a shorter implement and cut the
 moment ~40%. An arm that needs the full 0.49 m lever just to reach 3 m/s cannot.
 That is precisely PiPER's position, and it is why moment margin — not price,
-not joint speed — is the right primary selection criterion.
+not joint speed — is the right primary selection criterion. §5.5 works the
+implement trade properly, including the effective-mass penalty a shorter
+implement carries.
 
 **Mitigations, in order of leverage.**
 
@@ -394,7 +413,80 @@ not joint speed — is the right primary selection criterion.
   kinematic capability is only available if the safety configuration allows it.
   Verify the configured limit, not the brochure.
 
-### 5.5 If the roadmap escalates
+### 5.5 Implement choice: tennis racket, pickleball paddle, or ping-pong?
+
+A shorter, lighter implement is the obvious way to buy back the moment margin
+§5.4 says you need. It is not free, and the cost is not the one people expect:
+it is **effective mass**, not length.
+
+`M_eff = 1/(1/m + d²/I_cm)` at the strike point, where *d* is the offset from the
+implement's CoM. The mass ratio `r = m_ball/M_eff` then drives §1's exit-speed
+equation. A tennis ball is 57 g — heavy enough that light implements lose badly.
+
+| Implement | Mass | Strike lever | `M_eff` | `r` | ACOR | *V* needed for the 5 m bin | Face (W × H) | Impact moment |
+|---|---|---|---|---|---|---|---|---|
+| **Tennis racket** | 0.30 kg | 0.49 m | 0.211 kg | 0.27 | **0.40** | **3.3 m/s** | 0.26 × 0.34 m | 65 N·m |
+| **Pickleball paddle** | ~0.23 kg | ~0.28 m | ~0.19 kg | 0.30 | 0.35 | **3.6 m/s** | ~0.20 × 0.20 m | **37 N·m** |
+| **Ping-pong paddle** | ~0.18 kg | ~0.19 m | **~0.12 kg** | **0.47** | **0.19** | **~4.8 m/s** | ~0.15 m dia. | 25 N·m |
+
+**Ping-pong paddle: no.** Two independent reasons, either sufficient.
+
+- **The ball is half the paddle's effective mass at the strike point.** `r ≈ 0.47`
+  collapses the ACOR from 0.40 to **~0.19** — a stationary ping-pong paddle
+  struck by a tennis ball mostly gets knocked backwards. Recovering the 6.6 m/s
+  exit needs **~4.8 m/s** of paddle speed, ~45% more than the racket, which is
+  past the comfortable range of every arm in §5.3 and defeats the entire purpose
+  of shortening the lever. (This figure is sensitive to paddle mass, which
+  varies 150–200 g across models; the sign of the conclusion is not.)
+- **Roughly a quarter of the catch area.** ~0.018 m² against the racket's
+  ~0.069 m². Contact requires the predicted intercept to land on the face, and
+  §2/§3 error sources (toss spread, tracking noise, latency jitter) are a few cm
+  at best during bring-up. Cutting linear margin from ±0.13 m to ±0.075 m turns
+  a forgiving task into a marginal one for no benefit.
+
+A ping-pong paddle is sized for a 2.7 g ball. It is the wrong tool for a 57 g
+one, by a factor of about twenty in the thing that matters.
+
+**Pickleball paddle: yes — and it is the right trade on a moment-limited arm.**
+Striking near its CoM keeps `d` small, which holds `M_eff` up (0.19 kg, barely
+below the racket's 0.211 kg) despite the lower mass. So the exit-speed penalty
+is mild — **3.6 m/s instead of 3.3 m/s, about 10%** — while the mechanical
+relief is large:
+
+| | Tennis racket | Pickleball paddle |
+|---|---|---|
+| Static wrist moment | 1.4 N·m | **0.65 N·m** |
+| Impact moment | 65 N·m | **37 N·m** (−43%) |
+| Tool inertia about flange | 0.062 kg·m² | **~0.020 kg·m²** |
+
+Halving the static moment is what would bring a 1.5 kg-class arm back inside
+its budget (§5.4a). The costs are ~40% of the catch area and ~22% more joint
+angular rate for the same strike speed — and angular rate is the scarcer
+resource on a small arm, so this does not rescue the PiPER so much as make it
+a closer call.
+
+**Recommendation.** On the **xArm 6 or FR3, keep the tennis racket**: those arms
+have the moment margin, and the racket's bigger face and better ACOR both work
+in your favor during bring-up, when contact rate is the thing failing. On a
+**small or moment-limited arm, use a pickleball paddle** — it is the cheapest
+real reduction in shock available, and it costs only 10% more swing speed. Under
+no configuration is a ping-pong paddle the right answer for a tennis ball.
+
+**One coupled effect, easy to miss.** The compliant coupler from §5.4 is a
+~5 Hz element, so over a 5 ms impact it effectively *disconnects* the implement
+from the arm — meaning the implement behaves as a near-free body and its own
+`M_eff` sets the exit speed, exactly as tabulated above. A rigid mount would
+couple in wrist-link inertia and raise `M_eff` (more ball speed for the same
+swing) at the cost of feeding the shock straight to the gearbox. **You cannot
+have both**, and the trade is real: protecting the reducer costs exit speed.
+This is why B0 must measure ACOR on the **assembled mount**, not the bare
+implement.
+
+*(If the task is ever de-scoped to a lighter ball, all of this inverts — a 2.7 g
+ping-pong ball makes the shock problem vanish and puts drag and air currents in
+charge instead. That is a different task, not an easier version of this one.)*
+
+### 5.6 If the roadmap escalates
 
 Beyond the bin shot — machine-fed groundstrokes at 15–20 m/s — the published
 precedent is worth copying rather than re-deriving. DeepMind's 2024
