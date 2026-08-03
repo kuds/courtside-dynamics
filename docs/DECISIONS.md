@@ -753,6 +753,30 @@ without a GPU).
 
 ## Physics reference values
 
+### Ball aerodynamics live in Python, and only in the humanoid env — *characteristic (2026-08-03)*
+Two facts that an XML search actively misleads you about. **(1) Drag is not in
+any MJCF.** No scene sets `<option density=…>`, so grepping the assets says the
+project has no aerodynamics — but `ball_drag_force()`
+(`_tennis_physics.py:123`) applies quadratic drag through `xfrc_applied` at
+every substep, deliberately, because MuJoCo's ellipsoid-fluid approximation is
+not calibrated for a felt ball. **(2) It has exactly one caller**
+(`humanoid_tennis.py:1069`). PaddleTennis, WallBall, and BallBounce therefore
+fly a **drag-free** ball — and a **2.1× oversized** one (r = 0.07 m vs the
+regulation 0.0335 m the humanoid scene uses), so ~4.4× the frontal area for the
+same mass and a much larger contact target. Their contact-rate and rally-length
+numbers are internally consistent but not physically transferable. **Magnus is
+absent everywhere**: `ball_drag_force` is the only force written to
+`xfrc_applied` and carries no lift term, so no scene curves a spinning ball,
+which caps how far spin tactics can ever be studied here (cf. the low
+oblique-bounce friction noted below — same conclusion from the other side).
+Consequence for anyone eyeing hardware: the shipped envs' actuator is a 3-DoF
+*translating* paddle inside a 6.3 × 6 × 2.9 m box, i.e. **a six-metre gantry,
+not an arm** — no reach limit, no rotational inertia, no gravity torque — so
+**no trained policy transfers to a physical arm**. What does transfer:
+`ball_drag_force()` and `tennis_racket.xml`'s mass/geometry. Full envelope
+analysis, including what a bench build would actually require:
+[`real_hardware_envelope.md`](real_hardware_envelope.md).
+
 Measured characteristics of the ball/court model (not bugs — reference points for
 anyone tuning spin or bounce play). Source: `humanoid_env_review.md` §3.
 

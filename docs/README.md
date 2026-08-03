@@ -15,11 +15,16 @@ mistaken for a point-in-time snapshot:
   behavior.
 - **Review snapshot** — an analysis pinned to a specific commit/date; not
   updated. Its durable conclusions are distilled into `DECISIONS.md`.
+- **Reference (external)** — a durable reference about something *outside* this
+  repo (physical hardware, third-party specs) that no code here implements. Like
+  a living doc it is kept current, but nothing in it describes this codebase's
+  behavior.
 
 | Document | Kind | Pinned to | What it covers |
 |---|---|---|---|
 | [`DECISIONS.md`](DECISIONS.md) | Living | — | Decisions & lessons-learned journal: the non-obvious choices, bugs, and dead ends, distilled from the reviews and version history. **Start here** for "why is it built this way." |
 | [`run_config_file_spec.md`](run_config_file_spec.md) | Living | spec v1.1 (impl. 0.13.0) | The per-experiment TOML run-config format: tables, precedence, deep-merge semantics, validation, and provenance. Referenced by the README, the training notebook, and `run_config.py`. |
+| [`real_hardware_envelope.md`](real_hardware_envelope.md) | Reference (external) | `main`@`aec8cd1`, v0.25.0, 2026-08-03 | The physical envelope of the mounted-arm bin shot: a fixed-base arm with a real racket returning an underhand-tossed ball into a bucket. Derives the requirement (**2.5–3.5 m/s stringbed speed — ~1/7th of a groundstroke**, so a collaborative arm suffices) and shows the binding constraint is aiming, not power (±2% exit-speed and ±1° face tolerance; per-throw compensation for incoming speed is mandatory). Tabulates the sim→real gap against this repo's frozen calibrations — the paddle/wall scenes run a **2.1× oversized, drag-free ball**, no scene models Magnus, and the 3-DoF translating paddle is **a six-metre gantry, not an arm** — and states plainly that no trained policy transfers, while `ball_drag_force()` and `tennis_racket.xml` do. Pre-registers the B0–B5 bench probes. **All numbers analytic and unmeasured.** |
 | [`design_court_and_config_updates.md`](design_court_and_config_updates.md) | Implemented design | 0.13.0 | Design for the WallBallBaseline recalibration, notebook auto-resolution of run configs, and the tennis-court replay style. Shipped in 0.13.0. |
 | [`humanoid_env_review.md`](humanoid_env_review.md) | Review snapshot | `main`@`0d294f2`, v0.7.0, 2026-07-13 | Deep review of the humanoid tennis environment and shared infrastructure (rules, curriculum, promotion gate, training, video, learning feasibility). |
 | [`wall_ball_baseline_review.md`](wall_ball_baseline_review.md) | Review snapshot | `cdb17d4`, v0.9.0, 2026-07-14/16 (+ addenda) | Post-mortems of two WallBallBaseline SAC runs: the "one-and-done" and "never-touches-the-ball" failures, geometry calibration, and the 0.11.0 bootstrap package. |
