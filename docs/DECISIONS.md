@@ -751,6 +751,37 @@ without a GPU).
 
 ---
 
+## Campaign positioning
+
+### The campaign's destination has been reached by someone else — *characteristic (2026-08-03)*
+A field scan run while writing
+[`real_hardware_envelope.md`](real_hardware_envelope.md) turned up **LATENT**
+(Tsinghua, Zhang et al.), "Learning Athletic Humanoid Tennis Skills from
+Imperfect Human Motion Data": a **Unitree G1** learning tennis from ~5 h of
+human motion capture, transferring sim→real, reporting **~90% forehand / ~80%
+backhand success with a real racket and a real tennis ball**, open source. That
+is this repo's stated long-term goal — "teach humanoid agents to rally and play
+tennis," on the same robot — already demonstrated and published. Adjacent:
+Sony's **Ace** (Nature, 2026) beats elite players at table tennis with a custom
+8-DoF arm, and **HITTER** reports 106-shot humanoid table-tennis rallies.
+*(Sourced from secondary coverage; the papers and code have not yet been read —
+do that before acting on any detail.)*
+
+**What this does and does not change.** It does not invalidate the campaign: the
+calibrated envs, the probes-first methodology, the certification discipline, and
+the wall-ball/paddle physics all stand on their own, and LATENT being open
+source is an accelerator rather than a competitor. It does invalidate any
+positioning built on being first, and it means **a novelty claim must now be
+made against LATENT, not in a vacuum**. The differentiated direction the field
+scan identified as still open: **fast, accurate strokes from a fixed-base arm at
+real stroke speeds (20–35 m/s)**, where the impact and wrist-moment mechanics in
+`real_hardware_envelope.md` §5.4 actually bind — LATENT is a humanoid, Ace plays
+a 2.7 g ball, and nobody has published a dedicated arm driving a 57 g ball at
+groundstroke pace under learned control. **Status: open — read LATENT's paper
+and code, then decide whether to reproduce, extend, or differentiate.**
+
+---
+
 ## Physics reference values
 
 ### Ball aerodynamics live in Python, and only in the humanoid env — *characteristic (2026-08-03)*

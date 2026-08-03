@@ -553,6 +553,68 @@ the table. Drag coefficients — 0.55 tennis, ~0.45 pickleball and ping-pong —
 are literature values, and the pickleball figure is the least certain of the
 three because of the perforations.)*
 
+### 5.7 Stage 1 as a credential, not a capability
+
+If the purpose of the ping-pong rig is to earn a research collaboration on a
+*tennis* robot — not to build a ping-pong robot — then it should be scoped as
+**evidence**, and the evidence should be chosen for what it proves about tennis.
+
+**What Stage 1 proves, and what it cannot.**
+
+| Transfers to tennis | Does not transfer |
+|---|---|
+| Perception → predict → commit → strike pipeline | Impact and wrist-moment handling (§5.4) — ping-pong has none |
+| Latency budgeting and jitter characterisation | High-speed arm dynamics (3.6 m/s vs 1.35) |
+| Aero modelling: drag **and Magnus** | Anything about heavy implements |
+| Restitution/contact calibration methodology | |
+| Sim→real gap measurement (B0–B5) | |
+| Training pipeline, reward design, domain randomisation | |
+
+The hole is exactly the mechanical half — which is *the half the collaboration is
+for*. That is a feature, not a defect: it makes the ask specific. The pitch is
+"I own the pipeline, the arm is what I cannot buy," not "look, a robot."
+
+**The strongest available framing: ping-pong is aerodynamically *harder* than
+tennis.** From §5.5, Magnus force is **32% of ball weight against tennis's 4%**,
+and drag is 57% of *g* against 9%. A system that puts a ping-pong ball into a
+target from a tossed feed has solved a strictly harder prediction-and-aiming
+problem than tennis presents. This inverts the natural reading of a ping-pong
+demo as "the easy version," and it is quantified rather than asserted.
+
+**Minimum viable credential: one closed loop, measured.** A single
+target-hitting env, trained in sim, deployed on the PiPER, with an honest sim-vs-real
+table and an account of the gap. The bounce env and a second task are optional
+polish. Labs discount demo videos heavily; they do not discount measured tables,
+and a documented negative result reads as maturity. This repo's existing culture
+— pre-registered criteria, published failures, probe-before-code — is itself a
+substantial part of the credential.
+
+**Know the field before pitching (as of 2026-08).** Racket sports are a crowded
+benchmark area, and a reviewer will know these:
+
+- **Table tennis is solved.** Sony's *Ace* (Nature, 2026) — custom 8-DoF arm,
+  event-based vision plus RL — beats elite and professional players. A ping-pong
+  demo therefore has **zero novelty value** and must be pitched purely as
+  competence.
+- **Humanoid tennis has been demonstrated.** *LATENT* (Tsinghua, Zhang et al.) —
+  "Learning Athletic Humanoid Tennis Skills from Imperfect Human Motion Data" —
+  runs on a **Unitree G1**, learns from ~5 h of human motion capture, transfers
+  sim→real, and reports ~90% forehand / ~80% backhand success **with a real
+  racket and real ball**. It is open source. This is essentially this repo's
+  stated long-term goal, already published. *(Details here are from secondary
+  coverage; read the paper and code before relying on them.)*
+- Also active: *HITTER* (humanoid table tennis, 106-shot rallies) and humanoid
+  badminton via multi-stage RL.
+
+**What is still open, and it is what needs the lab's arm.** Fast, accurate
+strokes from a **fixed-base arm at real stroke speeds** — the 20–35 m/s regime
+where §5.4's impact and moment analysis actually binds. LATENT is a humanoid;
+Ace plays a 2.7 g ball. Nobody has published a dedicated arm hitting a 57 g
+tennis ball at groundstroke pace under learned control, and §5.4 explains why:
+the mechanics are genuinely hard and the hardware is expensive. **That is the
+differentiated proposal, it aligns exactly with wanting a powerful arm, and this
+document is its feasibility analysis.**
+
 ### 5.6 If the roadmap escalates
 
 Beyond the bin shot — machine-fed groundstrokes at 15–20 m/s — the published
