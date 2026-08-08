@@ -376,8 +376,13 @@ def lead_charge_local_action(
     incoming, and once it is within ``gap`` of the paddle, charge with
     a ballistic y/z lead aimed ``strike`` below the projected ball
     height, driving the target ``swing`` beyond the ball toward the
-    net. Volleys are legal on this court, so unlike the wall-ball
-    oracle there is no bounce-count precondition.
+    net. Volleys were legal under the original (now superseded)
+    ``volley_rule="legal"`` profile, so unlike the wall-ball oracle
+    there is no bounce-count precondition -- which is why this frozen
+    controller faults every point under the ground-rules default
+    (probe: 100% ``volley_return``); the era's reference is
+    :func:`ground_lead_charge_local_action`. Kept frozen verbatim for
+    the volley-era artifacts and the P3 instruments.
     """
     from courtside_dynamics.envs._base import invert_piecewise_target
 
@@ -431,4 +436,210 @@ def scripted_lead_charge_opponent(observation: np.ndarray) -> np.ndarray:
         observation[0:3],   # ball position
         observation[3:6],   # ball linear velocity
         observation[9:12],  # own paddle position
+    )
+
+
+#: Index of the rules ``bounce_count`` in the full PaddleTennis
+#: observation (24 physical values, then the rally block: 4 phase
+#: one-hots and 5 flags precede it). Pinned against
+#: ``PADDLE_TENNIS_OBSERVATION_NAMES`` by the env tests; this module
+#: cannot import the env (the env imports this module).
+OBS_BOUNCE_COUNT_INDEX = 33
+#: Index of the own-relative ``ball_side_is_own`` flag, same layout.
+OBS_BALL_SIDE_INDEX = 30
+
+
+#: How far behind the predicted landing point the ground oracle waits
+#: out an incoming ball's pre-bounce flight, and the bounce height the
+#: landing prediction solves for (the ball's radius).
+GROUND_WAIT_MARGIN = 0.9
+_BALL_BOUNCE_HEIGHT = 0.07
+
+
+#: The ground stroke's calibrated swing-through: soft, because a
+#: 6.5 m court must catch the return (the frozen 0.4 slam lands mean
+#: 11.0 m from the net -- every stroke long).
+GROUND_SWING = 0.1
+
+
+def ground_lead_charge_local_action(
+    ball_position: np.ndarray,
+    ball_velocity: np.ndarray,
+    paddle_position: np.ndarray,
+    *,
+    bounce_count: float,
+    ball_on_own_side: float = 0.0,
+    wait_margin: float = GROUND_WAIT_MARGIN,
+    gap: float = LEAD_CHARGE_GAP,
+    swing: float = GROUND_SWING,
+    strike: float = LEAD_CHARGE_STRIKE,
+) -> np.ndarray:
+    """The ground-rules era's oracle: wait behind the bounce, then charge.
+
+    Restores the wall-ball certification oracle's
+    ``floor_bounce_count >= 1`` charge precondition that the P1 port
+    deliberately dropped ("volleys are legal on this court") -- and
+    fixes the two failure modes the ground-rules bring-up measured:
+
+    - the frozen port's pre-positioning tracks the ball's y/z at the
+      home column, INSIDE the incoming serve's descent path, so under
+      ``require_bounce_before_return`` the passive touch is an
+      instant VOLLEY_RETURN fault (under the old profile it was a
+      silent volley -- the P1-era oracle's returns were largely
+      volleys);
+    - charging a post-bounce ball from a fixed deep park slams a
+      high, fast ball flat and long (0/12 confirmed returns across
+      the whole swing x strike calibration grid at swing >= 0.3; the
+      misses land mean 11.0 m from the net, so the fix is the soft
+      ``GROUND_SWING``, not aim);
+    - the frozen post-hit recovery races back to the home column,
+      chasing straight through the soft outgoing return's path
+      (double_hit 9-12/16 in the swing sweep) -- so while the ball is
+      outgoing on the hitter's own side (``ball_on_own_side``), the
+      controller HOLDS position with the face dropped low, and only
+      re-homes once the ball has crossed.
+
+    So the controller ballistically predicts the landing point (the
+    wall-ball ``run_up`` instrument), waits ``wait_margin`` behind it
+    with the face LOW, and charges the frozen ``lead_charge`` logic
+    only after the bounce -- meeting the ball low on the rise, where
+    the fixed +10-degree face supplies the loft (the P0-P2 measured
+    strike-height control channel).
+    """
+    from courtside_dynamics.envs._base import invert_piecewise_target
+
+    incoming = float(ball_velocity[0]) < -0.1
+    if not incoming and ball_on_own_side >= 0.5:
+        # Own soft return still outbound: hold ground, face low --
+        # never chase it toward the net.
+        x_low, x_high = PADDLE_LOCAL_X_RANGE
+        z_base, z_low, z_high = PADDLE_LOCAL_Z
+        action_x = invert_piecewise_target(
+            float(np.clip(float(paddle_position[0]), x_low, x_high)),
+            x_low,
+            -PADDLE_HOME_X,
+            x_high,
+        )
+        action_z = invert_piecewise_target(
+            0.25 - z_base, z_low, 0.0, z_high
+        )
+        return np.array([action_x, 0.0, action_z], dtype=np.float64)
+    if incoming and bounce_count < 1.0:
+        x_low, x_high = PADDLE_LOCAL_X_RANGE
+        z_base, z_low, z_high = PADDLE_LOCAL_Z
+        ball_x, ball_y, ball_z = (float(v) for v in ball_position[:3])
+        vx, vy, vz = (float(v) for v in ball_velocity[:3])
+        drop = max(0.0, ball_z - _BALL_BOUNCE_HEIGHT)
+        t_land = (
+            vz + float(np.sqrt(vz * vz + 2.0 * _GRAVITY_MPS2 * drop))
+        ) / _GRAVITY_MPS2
+        land_x = ball_x + vx * t_land
+        land_y = ball_y + vy * t_land
+        wait_x = land_x - wait_margin
+        wait_y = land_y
+        if land_x < x_low + 0.3:
+            # Workspace-margin collapse: the ball lands within 0.3 m
+            # of the paddle's deepest reach (or beyond it), so a
+            # y-tracking low face pinned at x_low sits in the descent
+            # path and self-volleys (the probe's measured 1/100
+            # receiver fault, seed 5117: landing 6.32 vs reach 6.4).
+            # Dodge laterally for just these; an ordinary clipped
+            # wait with >= 0.3 m of margin keeps the y-track (a
+            # broader dodge trigger measurably degraded deep-serve
+            # returns: ge1 97% -> 82% on the probe block).
+            wait_y = land_y + (0.6 if land_y <= 0.0 else -0.6)
+        action_x = invert_piecewise_target(
+            float(np.clip(wait_x, x_low, x_high)),
+            x_low,
+            -PADDLE_HOME_X,
+            x_high,
+        )
+        action_y = float(
+            np.clip(wait_y / PADDLE_LOCAL_Y_SPAN, -1.0, 1.0)
+        )
+        action_z = invert_piecewise_target(
+            0.25 - z_base, z_low, 0.0, z_high
+        )
+        return np.array([action_x, action_y, action_z], dtype=np.float64)
+    return lead_charge_local_action(
+        ball_position,
+        ball_velocity,
+        paddle_position,
+        gap=gap,
+        swing=swing,
+        strike=strike,
+    )
+
+
+def scripted_ground_opponent(observation: np.ndarray) -> np.ndarray:
+    """The bounce-waiting oracle over the full env observation.
+
+    Unlike :func:`scripted_lead_charge_opponent` (which reads only the
+    24-value physical block and stays usable on the prototype scene),
+    this opponent also needs the rules ``bounce_count`` from the env's
+    rally block, so it requires the full 48-value observation.
+    """
+    return ground_lead_charge_local_action(
+        observation[0:3],
+        observation[3:6],
+        observation[9:12],
+        bounce_count=float(observation[OBS_BOUNCE_COUNT_INDEX]),
+        ball_on_own_side=float(observation[OBS_BALL_SIDE_INDEX]),
+    )
+
+
+def net_patting_local_action(
+    ball_position: np.ndarray,
+    ball_velocity: np.ndarray,
+    paddle_position: np.ndarray,
+    *,
+    net_gap: float = 0.45,
+    strike_below: float = 0.15,
+) -> np.ndarray:
+    """Adversarial probe controller: reproduce the close-net volley loop.
+
+    The first learned GPU run (20260803_004559) maximized cooperative
+    return rate by patting the ball across the net at close range (a
+    crossing every ~14 control steps, 91.6% of time in
+    ``return_in_flight``). This scripted approximation exists so the
+    ground-rules probe can measure volley-style net play with a
+    reproducible instrument: park ``net_gap`` behind the net, track
+    the ball's y, rise ``strike_below`` under the incoming ball (the
+    fixed +10-degree pitch lifts each touch back over), and retract
+    low while the ball is outgoing so the face never double-touches.
+    It volleys every return it makes; it does NOT reproduce the
+    learned loop's cadence or persistence (bring-up measured ~1.4
+    crossings at a ~97-step cadence under the legal profile before a
+    net or crossing fault) -- the loop's full signature remains
+    documented by the GPU run itself. Not a frozen reference
+    controller: an exploit-style witness.
+    """
+    from courtside_dynamics.envs._base import invert_piecewise_target
+
+    x_low, x_high = PADDLE_LOCAL_X_RANGE
+    z_base, z_low, z_high = PADDLE_LOCAL_Z
+
+    incoming = float(ball_velocity[0]) < -0.05
+    target_x = max(x_low, min(-net_gap, x_high))
+    target_y = float(ball_position[1])
+    target_z = (
+        max(0.25, float(ball_position[2]) - strike_below)
+        if incoming
+        else 0.25
+    )
+
+    action_x = invert_piecewise_target(target_x, x_low, -PADDLE_HOME_X, x_high)
+    action_y = float(np.clip(target_y / PADDLE_LOCAL_Y_SPAN, -1.0, 1.0))
+    action_z = invert_piecewise_target(
+        target_z - z_base, z_low, 0.0, z_high
+    )
+    return np.array([action_x, action_y, action_z], dtype=np.float64)
+
+
+def scripted_net_patting_opponent(observation: np.ndarray) -> np.ndarray:
+    """The exploit witness over a side-local observation."""
+    return net_patting_local_action(
+        observation[0:3],
+        observation[3:6],
+        observation[9:12],
     )

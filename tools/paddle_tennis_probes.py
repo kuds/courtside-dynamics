@@ -52,7 +52,7 @@ from courtside_dynamics.envs._paddle_court import (
     PaddleCourtScene,
     PaddleCourtServe,
     lead_charge_local_action,
-    scripted_lead_charge_opponent,
+    scripted_ground_opponent,
 )
 from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
 from courtside_dynamics.envs.tennis_rules import (
@@ -320,22 +320,24 @@ def sweep_serve_rules(
     return cells
 
 
-#: Held-out certification contract for the frozen env definition.
-#: The seed block is the reserved one from the probe doc's ledger;
-#: every floor below was pre-registered from CALIBRATION data only
-#: (P3's committed band on seeds 1200-2639 and the env bring-up smoke
-#: on seeds 1000-1039: mean crossings 3.05, per-episode std 1.06,
-#: >=1-crossing rate 0.95), before any reserved seed was drawn.
-CERTIFICATION_SEED_START = 3100
+#: Held-out certification contract for the frozen env definition,
+#: GROUND-RULES era (volley_rule="fault" default; the superseded
+#: volley-era contract -- seeds 3100-3199, floors 2.6 / 0.85, PASS at
+#: 3.22 -- is recorded in docs/paddle_tennis_env_20260802.md). The
+#: seed block is the reserved one designated in the ground-rules
+#: snapshot's ledger; every floor below was pre-registered from
+#: CALIBRATION data only (the ground-rules probe's ground/fault cell
+#: on seeds 5100-5199: mean crossings 7.04, per-episode std 3.96,
+#: >=1-crossing rate 0.97), before any reserved seed was drawn.
+CERTIFICATION_SEED_START = 4200
 CERTIFICATION_EPISODES = 100
-#: Bring-up mean (3.05, same instrument as this certification) minus
-#: two combined sampling standard deviations of the 40- and
-#: 100-episode means (2 x 0.20), rounded down: the shipped env must
-#: reproduce the committed scripted band within sampling error.
-CERTIFICATION_MEAN_CROSSINGS_FLOOR = 2.6
-#: Bring-up returned-serve rate (0.95) minus two combined binomial
-#: sampling deviations (2 x ~0.04), rounded down.
-CERTIFICATION_GE1_RATE_FLOOR = 0.85
+#: Probe mean (7.04, same instrument as this certification) minus two
+#: combined sampling standard errors of two 100-episode means
+#: (2 x sqrt(2) x 0.396), rounded down.
+CERTIFICATION_MEAN_CROSSINGS_FLOOR = 5.9
+#: Probe returned-serve rate (0.97) minus two combined binomial
+#: sampling deviations (2 x ~0.024), rounded down.
+CERTIFICATION_GE1_RATE_FLOOR = 0.90
 
 
 @dataclasses.dataclass(slots=True)
@@ -389,7 +391,9 @@ def certify_frozen_env(
     Constructs the registered env with its frozen defaults -- the
     definition being certified is exactly the one training will see.
     Serve sides alternate across resets by the env's own contract, so
-    the block splits 50/50 between policy-serving and receiving.
+    the block splits 50/50 between policy-serving and receiving. The
+    scripted player is the era's reference controller (the ground
+    oracle under ground rules).
     """
     env = PaddleTennisEnv()
     crossings: list[int] = []
@@ -405,7 +409,7 @@ def certify_frozen_env(
             info: dict = {}
             while True:
                 observation, _, terminated, truncated, info = env.step(
-                    scripted_lead_charge_opponent(observation)
+                    scripted_ground_opponent(observation)
                 )
                 if terminated or truncated:
                     break

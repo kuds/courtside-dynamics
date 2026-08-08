@@ -260,6 +260,7 @@ _PADDLE_TENNIS_TERMINAL_EVAL_KEYS = (
     "term_failed_to_cross",
     "term_illegal_hit",
     "term_net_touch",
+    "term_volley",
     "term_nonfinite",
     "term_timeout",
 )
@@ -1090,12 +1091,12 @@ RECIPES: dict[str, Recipe] = {
             # net (crossings counts cumulative return crossings; the
             # serve's own crossing is excluded, so 1 means the serve
             # came back). Headline selection follows the same metric:
-            # crossings_ep_mean is the rally tail the P3 probe froze
-            # the reference band on (3.15-3.42 for the scripted pair
-            # at the committed serve; the held-out certification floor
-            # is pre-registered from the registered env's bring-up
-            # reproduction of that band -- see
-            # tools/paddle_tennis_probes.py -- not from eval reward).
+            # crossings_ep_mean is the rally tail the ground-rules
+            # probe froze the era band on (7.78 for the scripted
+            # ground pair; held-out certification passed at 7.68 --
+            # see tools/paddle_tennis_probes.py --certify and
+            # docs/paddle_tennis_ground_rules_20260803.md -- selection
+            # never follows eval reward).
             "success_key": "crossings",
             "success_threshold": 1.0,
             "headline_key": "crossings",
@@ -1117,14 +1118,14 @@ RECIPES: dict[str, Recipe] = {
         },
         description=(
             "Two-sided paddle rally on the probe-frozen 13 m court "
-            "(P0-P4, docs/paddle_tennis_probes_p3_p4_20260802.md): the "
-            "policy plays side A against the frozen lead_charge "
-            "opponent through the P4 mirror, one alternating-serve "
-            "point per episode, cooperative +1 per confirmed return by "
-            "either side. No certification ladder -- the definition "
-            "certified held-out through the probes harness against "
-            "floors pre-registered from committed calibration data "
-            "(docs/paddle_tennis_env_20260802.md section 5)."
+            "under ground rules (pre-bounce returns fault; "
+            "docs/paddle_tennis_ground_rules_20260803.md): the policy "
+            "plays side A against the bounce-waiting ground oracle "
+            "through the P4 mirror, one alternating-serve point per "
+            "episode, cooperative +1 per confirmed return by either "
+            "side. No certification ladder -- the definition certified "
+            "held-out through the probes harness against floors "
+            "pre-registered from the ground-era probe band."
         ),
     ),
     "HumanoidTennisStage0Intercept": Recipe(

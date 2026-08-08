@@ -1,5 +1,15 @@
 # PaddleTennis local pilot — the task learns fast, and the first GPU run is pre-registered
 
+> **SUPERSEDED (volley era), 2026-08-03**
+> ([`paddle_tennis_ground_rules_20260803.md`](paddle_tennis_ground_rules_20260803.md)):
+> both halves of this document describe the superseded volley-rules
+> profile. The pilot record stands as that era's evidence
+> (reproducible via `volley_rule="legal"`), but the §2
+> pre-registration is **void and was never consumed** — do NOT run
+> it, and do NOT touch reserved block 4100–4199 on its authority.
+> The ground-era first run gets a fresh pre-registration once a
+> ground-era pilot exists; 4100–4199 is held for that run's gate.
+
 Status: review snapshot + pre-registration, 2026-08-02. Part 1
 records the local SAC calibration pilot of the frozen `PaddleTennis`
 recipe (the era's first learned run anywhere). Part 2 pre-registers

@@ -16,16 +16,25 @@ docs/paddle_tennis_probes_p3_p4_20260802.md):
   the pair keeps the rally alive together, exactly the shared-outcome
   design of ``HumanoidTennisCoopEnv``'s rally target), and unsafe or
   non-finite physics pays ``-unsafe_physics_penalty``.
+- **Ground rules** (the era default, ``volley_rule="fault"``):
+  striking the incoming ball before it bounces on your side is a
+  ``VOLLEY_RETURN`` fault — the first learned run maximized return
+  rate with a close-net volley loop, and one bounce per exchange puts
+  a physical floor under the rally cadence
+  (docs/paddle_tennis_ground_rules_20260803.md). ``"legal"``
+  reproduces the superseded volley era.
 - **Serve**: the P3-measured band (origin 3.25 m behind the net,
   9 m/s, 21°, probe-standard jitter — 100% legal, mean landing
-  4.55 m, 100% returnable by the scripted opponent). One point per
+  4.55 m; the ground pair returns 97-99% of serves). One point per
   episode; the serving side alternates on every reset, matching the
   humanoid env's alternation contract. The episode terminates when
   the rules machine terminates the point and truncates at
   ``episode_len``.
 - **Opponent**: side B is driven through the side-relative mirror by
-  ``opponent_controller`` (default: the frozen ``lead_charge``
-  scripted controller). A frozen policy drops in via the same
+  ``opponent_controller`` (default: the era's rule-matched scripted
+  controller — the bounce-waiting ground oracle under
+  ``volley_rule="fault"``, the frozen ``lead_charge`` port under
+  ``"legal"``). A frozen policy drops in via the same
   observation-in/action-out signature once probe P5 settles champion
   transfer.
 
@@ -67,6 +76,7 @@ from courtside_dynamics.envs._paddle_court import (
     PADDLE_COURT,
     PADDLE_HOME_X,
     PaddleCourtServe,
+    scripted_ground_opponent,
     scripted_lead_charge_opponent,
 )
 from courtside_dynamics.envs._serve import mirror_for_side
@@ -81,6 +91,7 @@ from courtside_dynamics.envs.tennis_rules import (
     RallyEvent,
     RallyEventKind,
     RallyPhase,
+    RallyRules,
     RallyStateMachine,
     RallyTransition,
     TerminationReason,
@@ -151,6 +162,7 @@ _TERM_GROUPS: tuple[tuple[str, frozenset[TerminationReason]], ...] = (
             }
         ),
     ),
+    ("term_volley", frozenset({TerminationReason.VOLLEY_RETURN})),
     ("term_nonfinite", _UNSAFE_REASONS),
 )
 
@@ -208,12 +220,19 @@ OpponentController = Callable[[np.ndarray], np.ndarray]
 class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
     """Cooperative 1v1 paddle rally on the probe-frozen court."""
 
+    #: Rally-rule profiles: "fault" (the ground-rules era default;
+    #: striking the incoming ball pre-bounce is a VOLLEY_RETURN fault)
+    #: and "legal" (the original freeze; volleys confirm returns --
+    #: reproduces the first-run volley-loop era).
+    _VOLLEY_RULES = ("fault", "legal")
+
     def __init__(
         self,
         episode_len: int = 1500,
         serve_config: PaddleCourtServe | None = None,
         opponent_controller: OpponentController | None = None,
         court_style: str = "diagnostic",
+        volley_rule: str = "fault",
         return_reward: float = 1.0,
         fault_penalty: float = 1.0,
         unsafe_physics_penalty: float = 2.0,
@@ -225,11 +244,18 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             serve_config=serve_config,
             opponent_controller=opponent_controller,
             court_style=court_style,
+            volley_rule=volley_rule,
             return_reward=return_reward,
             fault_penalty=fault_penalty,
             unsafe_physics_penalty=unsafe_physics_penalty,
             **kwargs,
         )
+        if volley_rule not in self._VOLLEY_RULES:
+            raise ValueError(
+                f"volley_rule must be one of {self._VOLLEY_RULES}, "
+                f"got {volley_rule!r}"
+            )
+        self.volley_rule = volley_rule
         self.return_reward = finite_nonnegative(
             "return_reward", return_reward
         )
@@ -240,10 +266,20 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             "unsafe_physics_penalty", unsafe_physics_penalty
         )
         self.serve_config = serve_config or PaddleCourtServe()
+        # The default opponent plays by the active rules: the
+        # bounce-waiting oracle under ground rules, the frozen
+        # volley-capable P1 port under the original profile.
         self.opponent_controller: OpponentController = (
             opponent_controller
             if opponent_controller is not None
-            else scripted_lead_charge_opponent
+            else (
+                scripted_ground_opponent
+                if volley_rule == "fault"
+                else scripted_lead_charge_opponent
+            )
+        )
+        self._rally_rules = RallyRules(
+            require_bounce_before_return=(volley_rule == "fault")
         )
         self.court_style = court_style  # validated by the setter
 
@@ -317,7 +353,9 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             self.model, index=self._index, court=PADDLE_COURT
         )
         self._rules = RallyStateMachine(
-            serving_side=CourtSide.A, court=PADDLE_COURT
+            serving_side=CourtSide.A,
+            rules=self._rally_rules,
+            court=PADDLE_COURT,
         )
         ball_joint = self.model.joint("ball_free")
         self._ball_qposadr = int(ball_joint.qposadr[0])
@@ -791,7 +829,9 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.set_state(qpos, qvel)
 
         self._rules = RallyStateMachine(
-            serving_side=self._serving_side, court=PADDLE_COURT
+            serving_side=self._serving_side,
+            rules=self._rally_rules,
+            court=PADDLE_COURT,
         )
         self._event_sampler.reset(
             self.data, ball_side=self._serving_side

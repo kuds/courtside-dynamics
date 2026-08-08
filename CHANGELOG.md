@@ -9,13 +9,19 @@ versions. Newest releases first.
 
 The PaddleTennis environment — the two-sided rung between wall-ball
 and humanoid tennis — plus the infrastructure hardening between the
-campaigns. Existing environments, observations, actions, and recipes
-are unchanged on any healthy trajectory (the two behavior changes
-below are confined to already-pathological nonfinite states and to
-rendering), so saved policies, `VecNormalize` statistics, and learning
-curves all remain comparable with 0.25.0.
+campaigns. Existing environments other than the new PaddleTennis are
+unchanged on any healthy trajectory (the BallBalance and WallBall
+changes below are confined to already-pathological nonfinite states
+and to rendering), so their saved policies, `VecNormalize`
+statistics, and learning curves all remain comparable with 0.25.0.
+Within the unreleased PaddleTennis itself there are two eras: the
+initial volley-rules freeze and the ground-rules amendment that
+supersedes it (see the ground-rules bullet).
 
-- **PaddleTennis environment and recipe.**
+- **PaddleTennis environment and recipe.** *(Partially superseded by
+  the ground-rules bullet below: the default opponent, rally-rule
+  profile, reference band, and certification described here are the
+  volley era's, reproducible via `volley_rule="legal"`.)*
   `CourtsideDynamics/PaddleTennis` (`PaddleTennisEnv`): 1v1
   cooperative rally on the probe-frozen paddle court — half-length
   6.5 m, regulation 0.914 m net, singles width ±4.115 m, the wall-ball
@@ -42,7 +48,32 @@ curves all remain comparable with 0.25.0.
   seeds 3100–3199: mean crossings 3.22 against the pre-registered
   2.6 floor, zero unsafe terminations;
   `docs/paddle_tennis_env_20260802.md`).
-- **P5 transfer instrument.** `tools/paddle_tennis_p5_transfer.py`
+- **PaddleTennis ground rules (behavior change).** The first learned
+  GPU run maximized cooperative return rate with a close-net volley
+  loop (a net crossing every ~14 control steps, crossings 37.6 and
+  climbing at the 2M budget). Pre-bounce returns are now
+  `VOLLEY_RETURN` faults via `RallyRules.require_bounce_before_return`
+  (off for wall-ball/humanoid consumers) and the new `PaddleTennisEnv`
+  kwarg `volley_rule` — **default `"fault"`**, with `"legal"`
+  reproducing the superseded volley era exactly. The scripted
+  reference is the recalibrated ground oracle (run-up wait behind the
+  predicted landing, soft `GROUND_SWING` stroke, hold-low recovery;
+  the frozen P1 port's returns were measured to be largely volleys),
+  giving a new reference band of 7.78 crossings at a 126-step cadence
+  (probed: both volley witnesses collapse to 100% volley faults;
+  ground play is rule-neutral; a volley fault confirms nothing, so
+  touching a doomed ball earns nothing) and a new held-out
+  certification (PASS 7.68 on reserved block 4200–4299, floors
+  5.9/0.90 pre-registered from the pre-fix calibration band). `term_volley`
+  joins the env's terminal flags and the recipe's eval keys.
+  Volley-era artifacts (run `20260803_004559`, the local pilot, the
+  3100-block certification at 3.22) are not comparable with
+  ground-era numbers; docs/paddle_tennis_ground_rules_20260803.md is
+  the amendment record.
+- **P5 transfer instrument.** *(Recalibrated under ground rules —
+  see the ground-rules snapshot §6; the numbers below are the
+  volley-era stub calibration, and the baseline row now runs the
+  ground oracle.)* `tools/paddle_tennis_p5_transfer.py`
   renders the paddle court as the wall-ball world (23-value
   observation, true-baseline action mapping) so the wall-ball
   champions can play `PaddleTennisEnv` unmodified. Scripted

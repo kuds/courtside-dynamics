@@ -1,5 +1,16 @@
 # PaddleTennis env freeze — the phase-P1 task definition
 
+> **Era amendment, 2026-08-03**
+> ([`paddle_tennis_ground_rules_20260803.md`](paddle_tennis_ground_rules_20260803.md)):
+> the first learned GPU run found the cooperative close-net volley
+> loop this freeze permitted; the registered default is now the
+> ground-rules profile (`volley_rule="fault"`: pre-bounce returns are
+> `VOLLEY_RETURN` faults), the scripted reference is the recalibrated
+> ground oracle (band 7.78, certified held-out 7.68 on block
+> 4200–4299), and §4's volley legality plus §5's band/certification
+> describe the superseded volley era (reproducible via
+> `volley_rule="legal"`). Everything else here stands.
+
 Status: task-definition record, 2026-08-02, for the registered
 `CourtsideDynamics/PaddleTennis` environment
 (`envs/paddle_tennis.py`) and the `PaddleTennis` recipe. Every number
