@@ -533,9 +533,12 @@ class DiagnosisProbeCallback(BaseCallback):
         def act(observation: np.ndarray) -> np.ndarray:
             normalized = observation
             if vec_normalize is not None:
-                normalized = vec_normalize.normalize_obs(
+                batch = vec_normalize.normalize_obs(
                     observation[None, :].astype(np.float64)
-                )[0]
+                )
+                # Box observations normalize to an array, never a dict.
+                assert isinstance(batch, np.ndarray)
+                normalized = batch[0]
             action, _ = self.model.predict(
                 normalized, deterministic=True
             )
