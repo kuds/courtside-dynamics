@@ -289,6 +289,15 @@ class TrainConfig:
         Save a full ``CheckpointCallback`` snapshot every
         ``checkpoint_freq`` environment steps. Same n_envs-independent
         semantics as ``eval_freq``. Set ``<= 0`` to skip checkpointing.
+    checkpoint_diagnosis:
+        Run the PaddleTennis behavioral-diagnosis instrument
+        (``training.paddle_diagnosis``) against the live model at
+        every checkpoint save, writing per-checkpoint reports plus a
+        cached oracle reference row to ``reports/diagnosis/``. ``None``
+        disables. Mapping keys: ``episodes`` (default 30) and
+        ``seed_start`` (default 5200, the diagnosis calibration
+        block). Requires ``checkpoint_freq > 0``; the callback is
+        exception-isolated and disables itself on failure.
     video_freq:
         Record a rollout video every ``video_freq`` environment steps.
         Same n_envs-independent semantics. Set ``<= 0`` to skip videos
@@ -587,6 +596,11 @@ class TrainConfig:
     degenerate_min_evals: int | None = None
     performance_gate: Mapping[str, Any] | None = None
     ladder_certification: Mapping[str, Any] | None = None
+    # Behavioral diagnosis at checkpoint cadence (PaddleTennis: the
+    # exchange/positioning instrument). None disables; a mapping with
+    # optional keys {"episodes", "seed_start"} enables it alongside
+    # CheckpointCallback (requires checkpoint_freq > 0).
+    checkpoint_diagnosis: Mapping[str, Any] | None = None
     final_info_eval: bool = False
     reward_eval_episodes: int | None = None
     final_eval_episodes: int | None = None
@@ -1156,6 +1170,38 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     save_path=artifact_path(cfg.log_dir, "checkpoints_dir"),
                     name_prefix=cfg.name_prefix,
                     save_vecnormalize=use_vec_normalize,
+                )
+            )
+        if cfg.checkpoint_diagnosis is not None:
+            diagnosis_cfg = dict(cfg.checkpoint_diagnosis)
+            unknown_keys = set(diagnosis_cfg) - {"episodes", "seed_start"}
+            if unknown_keys:
+                raise ValueError(
+                    "checkpoint_diagnosis has unknown keys "
+                    f"{sorted(unknown_keys)}; allowed: episodes, "
+                    "seed_start"
+                )
+            if cfg.checkpoint_freq <= 0:
+                raise ValueError(
+                    "checkpoint_diagnosis requires checkpoint_freq > 0 "
+                    "(it runs at checkpoint cadence)"
+                )
+            from courtside_dynamics.training.paddle_diagnosis import (
+                DiagnosisProbeCallback,
+            )
+
+            callbacks.append(
+                DiagnosisProbeCallback(
+                    save_dir=artifact_path(cfg.log_dir, "diagnosis_dir"),
+                    save_freq=_calls(cfg.checkpoint_freq),
+                    episodes=int(diagnosis_cfg.get("episodes", 30)),
+                    seed_start=int(diagnosis_cfg.get("seed_start", 5200)),
+                    # The run's own evaluation factory, so an [env]
+                    # override reaches the diagnosis env too (the
+                    # instrument must measure the task this run trains
+                    # on, not the stock definition).
+                    env_fn=resolved_eval_env_fn,
+                    verbose=cfg.verbose,
                 )
             )
         if cfg.record_video and cfg.video_freq > 0:

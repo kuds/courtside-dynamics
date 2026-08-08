@@ -109,3 +109,109 @@ class TestDiagnosisInstrument:
         assert "exchange survival" in text
         assert "ready position" in text
         assert "recovery hold" in text
+
+
+class TestDiagnosisProbeCallback:
+    """Checkpoint-cadence automation: reports written, failures isolated."""
+
+    @staticmethod
+    def _stub_model(fail: bool = False):
+        class _Stub:
+            def get_vec_normalize_env(self):
+                return None
+
+            def predict(self, observation, deterministic=True):
+                if fail:
+                    raise RuntimeError("boom")
+                return np.zeros(3), None
+
+        return _Stub()
+
+    def test_writes_reports_at_cadence_and_caches_oracle(self, tmp_path):
+        from courtside_dynamics.training.paddle_diagnosis import (
+            DiagnosisProbeCallback,
+        )
+
+        callback = DiagnosisProbeCallback(
+            save_dir=str(tmp_path),
+            save_freq=2,
+            episodes=2,
+            seed_start=1000,
+        )
+        callback.model = self._stub_model()
+        callback.n_calls = 1
+        callback.num_timesteps = 100
+        assert callback._on_step() is True
+        assert not list(tmp_path.iterdir())  # off-cadence: nothing
+
+        callback.n_calls = 2
+        callback.num_timesteps = 200
+        assert callback._on_step() is True
+        names = {p.name for p in tmp_path.iterdir()}
+        assert names == {
+            "diagnosis_probe_oracle.txt",
+            "diagnosis_probe_200.txt",
+        }
+        oracle_text = (tmp_path / "diagnosis_probe_oracle.txt").read_text()
+        assert "ground oracle" in oracle_text
+
+        # The oracle row is measured once; later triggers add only the
+        # new checkpoint file.
+        callback.n_calls = 4
+        callback.num_timesteps = 400
+        assert callback._on_step() is True
+        names = {p.name for p in tmp_path.iterdir()}
+        assert "diagnosis_probe_400.txt" in names
+        assert len(names) == 3
+
+    def test_probes_through_the_provided_env_factory(self, tmp_path):
+        """Both rows (oracle + checkpoint) run on env_fn's env, so a
+        run-config [env] override reaches the diagnosis measurements
+        instead of a silently different stock env."""
+        from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
+        from courtside_dynamics.training.paddle_diagnosis import (
+            DiagnosisProbeCallback,
+        )
+
+        constructed = []
+
+        def factory():
+            constructed.append(1)
+            return PaddleTennisEnv()
+
+        callback = DiagnosisProbeCallback(
+            save_dir=str(tmp_path),
+            save_freq=1,
+            episodes=1,
+            seed_start=1000,
+            env_fn=factory,
+        )
+        callback.model = self._stub_model()
+        callback.n_calls = 1
+        callback.num_timesteps = 100
+        assert callback._on_step() is True
+        assert not callback._disabled
+        assert len(constructed) == 2  # oracle row + checkpoint row
+
+    def test_failure_disables_and_never_raises(self, tmp_path):
+        from courtside_dynamics.training.paddle_diagnosis import (
+            DiagnosisProbeCallback,
+        )
+
+        callback = DiagnosisProbeCallback(
+            save_dir=str(tmp_path),
+            save_freq=1,
+            episodes=1,
+            seed_start=1000,
+        )
+        callback.model = self._stub_model(fail=True)
+        callback.n_calls = 1
+        callback.num_timesteps = 100
+        assert callback._on_step() is True  # isolated, not raised
+        assert callback._disabled
+        assert not any(
+            p.name.startswith("diagnosis_probe_1")
+            for p in tmp_path.iterdir()
+        )
+        callback.n_calls = 2
+        assert callback._on_step() is True  # stays disabled quietly

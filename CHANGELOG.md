@@ -48,6 +48,16 @@ supersedes it (see the ground-rules bullet).
   seeds 3100–3199: mean crossings 3.22 against the pre-registered
   2.6 floor, zero unsafe terminations;
   `docs/paddle_tennis_env_20260802.md`).
+- **Checkpoint behavioral diagnosis.** The exchange/positioning
+  instrument that diagnosed the ground-era pilot (one memorized
+  serve-return macro, no general ball-reaching;
+  docs/paddle_tennis_diagnosis_20260808.md) now lives in the package
+  (`training/paddle_diagnosis.py`; `tools/paddle_tennis_diagnosis_probe.py`
+  stays as the CLI) and runs automatically at every checkpoint save
+  via `TrainConfig.checkpoint_diagnosis` (enabled in the
+  `PaddleTennis` recipe): per-checkpoint reports plus a cached oracle
+  reference row under `reports/diagnosis/`, exception-isolated so a
+  probe failure can never kill a run.
 - **PaddleTennis ground rules (behavior change).** The first learned
   GPU run maximized cooperative return rate with a close-net volley
   loop (a net crossing every ~14 control steps, crossings 37.6 and
