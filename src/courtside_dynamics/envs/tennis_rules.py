@@ -132,6 +132,7 @@ class TerminationReason(IntEnum):
     DOUBLE_HIT = 15
     PREMATURE_HIT = 16
     SIMULTANEOUS_RACKET_CONTACT = 17
+    VOLLEY_RETURN = 18
 
 
 TERMINATION_REASON_NAMES: Final[Mapping[TerminationReason, str]] = MappingProxyType(
@@ -149,6 +150,17 @@ class RallyRules:
     ball_net_is_fault: bool = True
     strict_reverse_crossing: bool = True
     strict_double_hit: bool = True
+    # Ground-rules profile: striking the incoming ball before it has
+    # bounced on the hitter's side is a VOLLEY_RETURN fault (real
+    # tennis allows volleys; the default keeps that). Added after the
+    # first learned PaddleTennis run maximized cooperative return
+    # rate with a close-net volley loop (a net crossing every ~14
+    # control steps): requiring one bounce per exchange puts a
+    # physical floor under the rally cadence that no patting loop can
+    # beat. The fault confirms nothing -- not even the incoming shot
+    # (crediting it would make touching a doomed out-bound ball
+    # strictly better than letting it land).
+    require_bounce_before_return: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1024,6 +1036,21 @@ class RallyStateMachine:
             return None, None
         if self._phase is RallyPhase.RETURN_IN_FLIGHT and not self._pending_crossed_net:
             self._terminate(TerminationReason.PREMATURE_HIT)
+            return None, None
+        if (
+            self.rules.require_bounce_before_return
+            and self._bounce_count < 1
+        ):
+            # Ground rules (see RallyRules): striking the incoming
+            # ball pre-bounce is the hitter's fault, and it confirms
+            # NOTHING. Confirming the incoming shot here (the first
+            # draft's real-tennis attribution) was measured to create
+            # a reward exploit in the cooperative env: touching a
+            # doomed out-bound ball banked its +1 against the same
+            # fault penalty an untouched landing would cost, so
+            # lunge-volleying predicted-out balls became strictly
+            # reward-optimal (adversarial review, 2026-08-08).
+            self._terminate(TerminationReason.VOLLEY_RETURN)
             return None, None
 
         confirmed = self._confirm_pending_return()

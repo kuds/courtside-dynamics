@@ -18,6 +18,9 @@ import pytest
 import courtside_dynamics  # noqa: F401  (triggers registration)
 from courtside_dynamics.envs import PaddleCourtServe, PaddleTennisEnv
 from courtside_dynamics.envs._paddle_court import (
+    OBS_BALL_SIDE_INDEX,
+    OBS_BOUNCE_COUNT_INDEX,
+    scripted_ground_opponent,
     scripted_lead_charge_opponent,
 )
 from courtside_dynamics.envs.paddle_tennis import (
@@ -155,8 +158,8 @@ class TestMirrorIdentity:
             # drift only by MuJoCo constraint-ordering ulps (the P4
             # dynamics bound).
             for _ in range(40):
-                action_a = scripted_lead_charge_opponent(obs_a)
-                action_b = scripted_lead_charge_opponent(obs_b)
+                action_a = scripted_ground_opponent(obs_a)
+                action_b = scripted_ground_opponent(obs_b)
                 obs_a, _, term_a, trunc_a, _ = env_a.step(action_a)
                 obs_b, _, term_b, trunc_b, _ = env_b.step(action_b)
                 np.testing.assert_allclose(
@@ -185,7 +188,7 @@ class TestRewardAccounting:
                 total_return = 0.0
                 while True:
                     obs, reward, term, trunc, info = env.step(
-                        scripted_lead_charge_opponent(obs)
+                        scripted_ground_opponent(obs)
                     )
                     assert reward == pytest.approx(
                         info["rew_return"]
@@ -197,13 +200,19 @@ class TestRewardAccounting:
                     if term or trunc:
                         break
                 # Cooperative accounting: the returns component equals
-                # the rules' confirmed-return count, and the terminal
-                # step pays exactly one fault.
+                # the rules' confirmed-return count; a terminated point
+                # pays exactly one fault, a cap-truncated rally none
+                # (the ground era's scripted pair reaches the 1500-step
+                # cap in ~17% of episodes).
                 assert total_return == pytest.approx(
                     float(info["valid_return_count"])
                 )
-                assert total == pytest.approx(total_return - 1.0)
-                assert info["rew_fault"] == -1.0
+                if trunc:
+                    assert total == pytest.approx(total_return)
+                    assert info["rew_fault"] == 0.0
+                else:
+                    assert total == pytest.approx(total_return - 1.0)
+                    assert info["rew_fault"] == -1.0
                 assert info["rew_unsafe"] == 0.0
                 best_crossings = max(best_crossings, info["crossings"])
                 # Exactly one grouped termination flag fires.
@@ -216,13 +225,19 @@ class TestRewardAccounting:
                         "term_failed_to_cross",
                         "term_illegal_hit",
                         "term_net_touch",
+                        "term_volley",
                         "term_nonfinite",
                         "term_timeout",
                     )
                 ]
+                # Exactly one flag fires on every episode end --
+                # term_timeout carries the truncation case.
                 assert sum(flags) == 1.0
-            # The P3 band puts the scripted pair at ~3 crossings/point;
-            # across three seeds at least one real rally must appear.
+                if trunc:
+                    assert info["term_timeout"] == 1.0
+            # The ground-era band puts the scripted pair at ~7
+            # crossings/point; across three seeds a real rally must
+            # appear.
             assert best_crossings >= 2
         finally:
             env.close()
@@ -234,7 +249,7 @@ class TestRewardAccounting:
             total_return = 0.0
             while True:
                 obs, reward, term, trunc, info = env.step(
-                    scripted_lead_charge_opponent(obs)
+                    scripted_ground_opponent(obs)
                 )
                 total_return += info["rew_return"]
                 if term or trunc:
@@ -242,9 +257,164 @@ class TestRewardAccounting:
             assert total_return == pytest.approx(
                 2.5 * float(info["valid_return_count"])
             )
-            assert info["rew_fault"] == -0.5
+            if not trunc:
+                assert info["rew_fault"] == -0.5
         finally:
             env.close()
+
+
+class TestVolleyRule:
+    """The ground-rules era: volleys fault, the legacy profile survives."""
+
+    def test_kwarg_validation_and_default(self):
+        env = PaddleTennisEnv()
+        try:
+            assert env.volley_rule == "fault"
+            assert (
+                env.opponent_controller is scripted_ground_opponent
+            )
+        finally:
+            env.close()
+        env = PaddleTennisEnv(volley_rule="legal")
+        try:
+            assert (
+                env.opponent_controller
+                is scripted_lead_charge_opponent
+            )
+        finally:
+            env.close()
+        with pytest.raises(ValueError, match="volley_rule"):
+            PaddleTennisEnv(volley_rule="bogus")
+
+    def test_obs_index_pins_for_ground_controller(self):
+        """envs/_paddle_court.py cannot import the env, so its obs
+        indices are literals -- pin them against the frozen names."""
+        assert (
+            PADDLE_TENNIS_OBSERVATION_NAMES[OBS_BOUNCE_COUNT_INDEX]
+            == "bounce_count"
+        )
+        assert (
+            PADDLE_TENNIS_OBSERVATION_NAMES[OBS_BALL_SIDE_INDEX]
+            == "ball_side_is_own"
+        )
+
+    def test_volley_capable_player_faults_under_ground_rules(self):
+        """The frozen P1 oracle's serve intercept is a volley; under
+        the era default it must terminate as term_volley with the
+        fault penalty, crediting no crossings."""
+        env = PaddleTennisEnv()
+        try:
+            obs, _ = env.reset(seed=_SMOKE_SEEDS[0])
+            while True:
+                obs, reward, term, trunc, info = env.step(
+                    scripted_lead_charge_opponent(obs)
+                )
+                if term or trunc:
+                    break
+            assert term
+            assert info["termination_reason_name"] == "volley_return"
+            assert info["term_volley"] == 1.0
+            # At most the opponent's own legal return precedes the
+            # fault (the volleyer contributes no crossing).
+            assert info["crossings"] <= 1
+        finally:
+            env.close()
+
+    def test_legal_profile_reproduces_the_volley_era(self):
+        """Under volley_rule='legal' the frozen pair still rallies
+        (the superseded era stays reproducible for its artifacts)."""
+        env = PaddleTennisEnv(volley_rule="legal")
+        try:
+            best = 0
+            for seed in _SMOKE_SEEDS:
+                obs, _ = env.reset(seed=seed)
+                while True:
+                    obs, _, term, trunc, info = env.step(
+                        scripted_lead_charge_opponent(obs)
+                    )
+                    if term or trunc:
+                        break
+                assert info["term_volley"] == 0.0
+                best = max(best, info["crossings"])
+            assert best >= 2
+        finally:
+            env.close()
+
+    def test_volley_fault_confirms_nothing(self):
+        """Rules-level pin: a pre-bounce racket touch under ground
+        rules terminates VOLLEY_RETURN and credits NOTHING -- not
+        even the incoming shot. Crediting it would make touching a
+        doomed out-bound ball strictly better than letting it land
+        (+return_reward against the same fault penalty), a learnable
+        exploit the adversarial review measured."""
+        from courtside_dynamics.envs.tennis_rules import (
+            RallyEvent,
+            RallyEventKind,
+            RallyRules,
+            RallyStateMachine,
+            TerminationReason,
+        )
+
+        machine = RallyStateMachine(
+            serving_side=CourtSide.A,
+            rules=RallyRules(require_bounce_before_return=True),
+        )
+        # Feed crosses to B, bounces, B returns legally.
+        machine.advance(
+            [
+                RallyEvent(
+                    kind=RallyEventKind.NET_CROSSING_TO_B, substep=0
+                )
+            ]
+        )
+        machine.advance(
+            [
+                RallyEvent(
+                    kind=RallyEventKind.BALL_COURT_B,
+                    substep=1,
+                    position=(3.0, 0.0, 0.0),
+                )
+            ]
+        )
+        machine.advance(
+            [RallyEvent(kind=RallyEventKind.BALL_RACKET_B, substep=2)]
+        )
+        machine.advance(
+            [
+                RallyEvent(
+                    kind=RallyEventKind.NET_CROSSING_TO_A, substep=3
+                )
+            ]
+        )
+        # A volleys the incoming return before it bounces.
+        transition = machine.advance(
+            [RallyEvent(kind=RallyEventKind.BALL_RACKET_A, substep=4)]
+        )
+        assert (
+            transition.after.termination_reason
+            is TerminationReason.VOLLEY_RETURN
+        )
+        assert transition.confirmed_returns == ()
+        assert transition.valid_racket_hits == ()
+        # Legacy profile: the same sequence is a legal volley return.
+        machine = RallyStateMachine(serving_side=CourtSide.A)
+        for event in (
+            RallyEvent(kind=RallyEventKind.NET_CROSSING_TO_B, substep=0),
+            RallyEvent(
+                kind=RallyEventKind.BALL_COURT_B,
+                substep=1,
+                position=(3.0, 0.0, 0.0),
+            ),
+            RallyEvent(kind=RallyEventKind.BALL_RACKET_B, substep=2),
+            RallyEvent(kind=RallyEventKind.NET_CROSSING_TO_A, substep=3),
+        ):
+            machine.advance([event])
+        transition = machine.advance(
+            [RallyEvent(kind=RallyEventKind.BALL_RACKET_A, substep=4)]
+        )
+        assert not transition.after.terminated
+        assert transition.confirmed_returns == (CourtSide.B,)
+        assert transition.valid_racket_hits == (CourtSide.A,)
 
     def test_reward_kwargs_validated(self):
         with pytest.raises(ValueError, match="return_reward"):
@@ -359,7 +529,7 @@ class TestCourtStyles:
                 steps = [obs]
                 for _ in range(30):
                     obs, _, term, trunc, _ = env.step(
-                        scripted_lead_charge_opponent(obs)
+                        scripted_ground_opponent(obs)
                     )
                     steps.append(obs)
                     if term or trunc:
@@ -485,7 +655,7 @@ class TestGuards:
 class TestCertificationHarness:
     """The held-out certification instrument stays runnable and its
     pre-registered contract stays pinned. The real verdict (seeds
-    3100-3199, PASS) is recorded in docs/paddle_tennis_env_20260802.md;
+    4200-4299) is recorded in the ground-rules snapshot;
     tests must never draw from the reserved blocks."""
 
     def test_floor_constants_pin(self):
@@ -496,10 +666,10 @@ class TestCertificationHarness:
             CERTIFICATION_SEED_START,
         )
 
-        assert CERTIFICATION_SEED_START == 3100
+        assert CERTIFICATION_SEED_START == 4200
         assert CERTIFICATION_EPISODES == 100
-        assert CERTIFICATION_MEAN_CROSSINGS_FLOOR == 2.6
-        assert CERTIFICATION_GE1_RATE_FLOOR == 0.85
+        assert CERTIFICATION_MEAN_CROSSINGS_FLOOR == 5.9
+        assert CERTIFICATION_GE1_RATE_FLOOR == 0.90
 
     def test_certify_smoke_on_calibration_seeds(self):
         from tools.paddle_tennis_probes import certify_frozen_env
@@ -523,7 +693,7 @@ class TestDeterminism:
                 steps = [obs]
                 for _ in range(120):
                     obs, _, term, trunc, _ = env.step(
-                        scripted_lead_charge_opponent(obs)
+                        scripted_ground_opponent(obs)
                     )
                     steps.append(obs)
                     if term or trunc:

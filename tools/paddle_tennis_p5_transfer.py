@@ -59,7 +59,7 @@ from courtside_dynamics.envs._base import (
 from courtside_dynamics.envs._paddle_court import (
     PADDLE_HOME_X,
     PADDLE_LOCAL_X_RANGE,
-    scripted_lead_charge_opponent,
+    scripted_ground_opponent,
 )
 from courtside_dynamics.envs.paddle_tennis import (
     PADDLE_TENNIS_OBSERVATION_NAMES,
@@ -498,8 +498,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.baseline:
         results.append(
             run_transfer(
-                scripted_lead_charge_opponent,
-                label="native paddle-court oracle",
+                scripted_ground_opponent,
+                label="native ground oracle",
                 episodes=args.episodes,
                 seed_start=args.seed_start,
             )

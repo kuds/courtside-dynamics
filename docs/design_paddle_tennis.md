@@ -132,6 +132,18 @@ B side) and grown only as phases earn it.
 > `PaddleTennis` recipe, and the frozen task definition recorded in
 > [`paddle_tennis_env_20260802.md`](paddle_tennis_env_20260802.md).
 >
+> **Status update, 2026-08-03 (ground rules):** the first GPU run
+> (volley era, seed 0, unregistered) maximized return rate with a
+> close-net volley loop — crossings 37.6 at a 14-step cadence. The
+> probed fix
+> ([`paddle_tennis_ground_rules_20260803.md`](paddle_tennis_ground_rules_20260803.md))
+> makes pre-bounce returns a fault (`volley_rule="fault"`, now the
+> registered default), recalibrates the scripted reference (ground
+> band 7.78; the frozen P1 oracle's returns were largely volleys),
+> and re-certifies held-out (7.68 on block 4200–4299). The volley-era
+> first-run pre-registration is superseded unconsumed; 4100–4199
+> stays reserved for the ground-era first run.
+>
 > **Status update, 2026-08-02 (first learned evidence + first-run
 > pre-registration):** the local SAC pilot of the frozen recipe
 > passes the scripted band at its 175k eval and reaches crossings

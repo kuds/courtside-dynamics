@@ -1,5 +1,17 @@
 # PaddleTennis probe P5 — the transfer shim works, the yield rule is mandatory, the champions await Colab
 
+> **Ground-era recalibration, 2026-08-03**
+> ([`paddle_tennis_ground_rules_20260803.md`](paddle_tennis_ground_rules_20260803.md)
+> §6): the instrument now runs on the ground-rules default. The
+> `scaled + yield` stub row becomes 1.42 crossings / 97% ≥1 — the
+> pre-committed admission floors (1.0 / 0.60 / zero unsafe) stand
+> unconsumed — but the stub's confirmed returns collapse 0.69 → 0.04
+> (wall-ball's flat stroke calibration lands out under ground
+> confirmation; native ground oracle on the same block: 6.86
+> crossings, 3.38 returns/side). Champion rows on Colab should read
+> the returns column beside the binary verdict. The matrix below is
+> the volley-era record.
+
 Status: review snapshot, 2026-08-02, of probe P5 (wall-ball champion
 transfer) from the pre-committed battery
 ([`design_paddle_tennis.md`](design_paddle_tennis.md) §6), run against
