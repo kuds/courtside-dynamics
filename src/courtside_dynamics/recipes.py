@@ -1108,6 +1108,17 @@ RECIPES: dict[str, Recipe] = {
             ),
             "info_eval_terminal_keys": _PADDLE_TENNIS_TERMINAL_EVAL_KEYS,
             "info_eval_distribution_keys": ("crossings",),
+            # Behavioral diagnosis at every checkpoint save: the
+            # exchange/positioning instrument that separated the
+            # ground-era pilot's plateau (one memorized serve-return
+            # macro, no general ball-reaching) from the stroke- and
+            # opponent-side explanations. 30 episodes on the
+            # diagnosis calibration block; ~90 s of CPU per
+            # checkpoint while the GPU idles at the save boundary.
+            "checkpoint_diagnosis": {
+                "episodes": 30,
+                "seed_start": 5200,
+            },
             "phase_key": "rally_phase",
             "phase_labels": {
                 0: "initial_feed",

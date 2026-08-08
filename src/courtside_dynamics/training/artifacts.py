@@ -346,6 +346,11 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
                 if cfg.ladder_certification is not None
                 else None
             ),
+            "checkpoint_diagnosis": (
+                dict(cfg.checkpoint_diagnosis)
+                if cfg.checkpoint_diagnosis is not None
+                else None
+            ),
             "final_info_eval": cfg.final_info_eval,
         },
     }
@@ -636,6 +641,11 @@ RUN_LAYOUT: dict[str, str] = {
     "best_long_eval_episodes": "reports/best_model_long_horizon_episodes.csv",
     "curriculum_stages": "reports/curriculum_stages.json",
     "ladder_certification": "reports/ladder_certification.json",
+    # Per-checkpoint behavioral diagnosis reports (PaddleTennis: the
+    # exchange/positioning instrument that separated the ground-era
+    # pilot's failure hypotheses; one file per checkpoint plus one
+    # cached policy-independent oracle reference row).
+    "diagnosis_dir": "reports/diagnosis",
     # media/: replay footage.
     "best_model_video": "media/best_model.mp4",
     "videos_dir": "media/videos",
@@ -711,6 +721,9 @@ _CONDITIONAL_ARTIFACTS: frozenset[str] = frozenset(
         # Written only by runs whose recipe opts into startup
         # ladder certification.
         "ladder_certification",
+        # Written only by runs with checkpoint diagnosis enabled
+        # (``TrainConfig.checkpoint_diagnosis``, PaddleTennis recipe).
+        "diagnosis_dir",
     }
 )
 

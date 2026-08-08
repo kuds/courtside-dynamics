@@ -27,6 +27,7 @@ _DIRECTORY_NAMES = {
     "videos_dir",
     "checkpoints_dir",
     "stage_bests_dir",
+    "diagnosis_dir",
 }
 
 
@@ -135,9 +136,11 @@ def test_expected_artifacts_derive_from_run_layout():
         "best_model_video",
     } <= names
     # Conditional extras stay out of the default expectations: TOML
-    # copies and WallBall long-horizon outputs are recipe-dependent.
+    # copies, WallBall long-horizon outputs, and checkpoint-diagnosis
+    # reports are recipe-dependent.
     assert "run_config_toml" not in names
     assert "best_long_eval" not in names
     assert "best_long_eval_episodes" not in names
+    assert "diagnosis_dir" not in names
     # The retired single mega-plot is gone from the registry entirely.
     assert "eval_info.png" not in {rel for _name, rel in EXPECTED_ARTIFACTS}

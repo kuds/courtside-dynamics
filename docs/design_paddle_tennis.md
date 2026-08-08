@@ -132,6 +132,15 @@ B side) and grown only as phases earn it.
 > `PaddleTennis` recipe, and the frozen task definition recorded in
 > [`paddle_tennis_env_20260802.md`](paddle_tennis_env_20260802.md).
 >
+> **Status update, 2026-08-08 (pilot diagnosis):** the ground-era
+> pilot early-stopped at 1.37 crossings (band 7.78); the behavioral
+> probe ([`paddle_tennis_diagnosis_20260808.md`](paddle_tennis_diagnosis_20260808.md))
+> shows one memorized serve-return macro and no general
+> ball-reaching (serving-side survival 0%, touch rate 37%), rejects
+> the stroke-authority and opponent-asymmetry explanations, and
+> ranks sustained exploration and n-point episodes as the next
+> probed changes. The instrument now runs at every checkpoint.
+>
 > **Status update, 2026-08-03 (ground rules):** the first GPU run
 > (volley era, seed 0, unregistered) maximized return rate with a
 > close-net volley loop — crossings 37.6 at a 14-step cadence. The
