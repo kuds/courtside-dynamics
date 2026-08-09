@@ -1,7 +1,8 @@
 # Design: escrowed contact shaping — paying the touch→in gap
 
-Status: **Implemented; S1 + S2 PASS — L1 pilot pending**,
-2026-08-09 (§4). The remedy the
+Status: **Implemented; S1 + S2 PASS; L1 complete — the declared
+middle (D2′ peak 46%), one budget extension recommended**,
+2026-08-09 (§4, §5). The remedy the
 exploration-pilot verdict points at
 ([`paddle_tennis_exploration_20260808.md`](paddle_tennis_exploration_20260808.md)
 §3): the pilot proved exploration reaches the ball (27% serving-side
@@ -228,7 +229,65 @@ Reserved **4100–4199 remains untouched**. Next: the L1 learning
 pilot per §3 (recipe + `contact_shaping=0.25` via `[env]` override,
 seed 0, 1M steps, n_envs 4, checkpoint cadence 100k).
 
-## 5. What this is not
+## 5. L1 results — the declared middle, with the mechanism visibly working
+
+Run `20260809_161704` (Colab L4, commit `a29883c`, TOML sha
+`4c1376ae`, 1M steps in 4 h 04 m at 68 FPS). Criteria:
+
+| criterion | outcome | evidence |
+|---|---|---|
+| M | **pass** | package + shaping verified in `config.json`/resolved model; `train/std` 0.036 final; the critic is *alive* at 3.0e-4 — three times the exploration pilot's dead floor, the shaping stream finally gave it something to predict |
+| N1 (landed-in ≥ 500k) | **pass** | 8 landed-in policy shots per 30-episode row at 500k **and every later row**; receiving strokes 50–64% in at 3.3–4.7 m (oracle: ~100% at 3.9) |
+| D2′ (touch ≥ 55%) | **fail — in the declared middle** | peak 46% (800k); 35–46% sustained from 200k |
+| P′ (crossings ≥ 2.5) | **fail** | best eval 1.23 (850k), final 1.07 |
+
+Checkpoint rows (30 probe episodes each; 600k row in the run's
+`reports/diagnosis/`):
+
+| ckpt | hits | rec k=1 | serv k=1 | touch | landed-in | crossings |
+|---|---|---|---|---|---|---|
+| 100k | 2 | 0% | 13% | 7% | 0 | 0.50 |
+| 200k | 13 | 60% | 27% | 42% | 1 | 0.77 |
+| 300k | 9 | 33% | 27% | 29% | 2 | 0.80 |
+| 400k | 11 | 53% | 20% | 35% | 1 | 0.77 |
+| 500k | 16 | 80% | 27% | 42% | 8 | 1.23 |
+| 700k | 14 | 73% | 20% | 39% | 7 | 1.00 |
+| 800k | 16 | 87% | 20% | 46% | 8 | 0.93 |
+| 900k | 16 | 87% | 20% | 42% | 8 | 1.20 |
+| 1M | 16 | 93% | 13% | 43% | 8 | 1.23 |
+
+Against the exploration pilot: touch 46% peak vs 17; landed-in 8/row
+vs zero after 200k; receiving k=1 93% vs 13% peak; crossings 1.23 vs
+0.67. Against the stock run's 1.37: that number came from one
+memorized macro the diagnosis rejected; this 1.23 is real strokes
+the opponent must actually play — including the first
+`opponent_never_reached` enders in any run (1–2 per row from 800k):
+the policy now occasionally hits shots the oracle cannot reach.
+
+**The next bottleneck, measured:** k=2 survival is 0% in every row
+of every run so far. The policy's stroke is now good (93% k=1
+receiving) but it never survives the opponent's reply — and the
+instrument says why: recovery-hold travel *worsened* as the stroke
+improved (6.4 → 8.2 m; oracle 2.2), i.e. the policy still wanders
+after swinging instead of re-readying, so ball 2 lands unreachable.
+Serving-side k=1 also decayed (27% → 13%) as receiving specialized.
+
+**Decision (post-hoc analysis, labeled as such):** D2′ peaked at 46%
+— inside the declared non-forcing middle `[30%, 55%)`. The frozen
+lean applies: the rows were still improving at 1M (receiving k=1
+53 → 93 over the back half; landed-ins steady at 8), so **extend the
+budget once before any new change** — a single 2M-step run of the
+*identical* configuration (same TOML, seed 0, n_envs 4, checkpoint
+cadence 100k). k=2 exposure only began once k=1 became reliable
+(~500k), so the extension gives the recovery behavior its first real
+training window. If the extension flattens with k=2 still at 0%, the
+named follow-up is n-point episodes (its own probe, new era) — the
+"once" in the lean is binding; budget does not get extended twice.
+
+Seed ledger: unchanged (run on seed 0; diagnosis calibration 5200+;
+4100–4199 untouched).
+
+## 6. What this is not
 
 Not a change to the frozen task semantics (default off; rules,
 serve, observations, termination untouched), not the own-credit

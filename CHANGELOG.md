@@ -61,8 +61,19 @@ supersedes it (see the ground-rules bullet).
   `rew_shaping`/`rew_shaping_clawback` components in the
   decomposition, info, and CSV schema; `scripted_hard_slam_witness`
   joins the scripted controllers. S1 (seeds 5300–5399, now burned)
-  and S2 both PASS with exact identities; the recipe does NOT enable
-  shaping until the pre-registered L1 pilot's verdict.
+  and S2 both PASS with exact identities. The L1 pilot (run
+  `20260809_161704`, 1M steps, shaping via `[env]` TOML) landed in
+  the rule's declared middle: real strokes emerged (receiving k=1
+  93%, 8 landed-in shots per diagnosis row from 500k, touch peak
+  46% vs the exploration pilot's 17%, crossings 1.23 vs 0.67) but
+  short of the 55%-touch and 2.5-crossings bars, with k=2 survival
+  still 0% (the policy wanders post-swing instead of re-readying —
+  the next measured bottleneck). Per the frozen lean, one 2M budget
+  extension of the identical configuration is the next run; the
+  recipe still does NOT enable shaping. The notebook's replay cell
+  now applies `court_style="tennis"` to every court that supports
+  it (previously WallBall-only), so PaddleTennis replay footage
+  renders on the mini tennis court.
 - **PaddleTennis exploration package (training change).** The
   ground-era diagnosis's ranked remedy, shipped recipe-level:
   `model_kwargs` gains `use_sde=True`, `ent_coef="auto_0.02"`,
