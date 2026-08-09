@@ -652,6 +652,27 @@ class TestGuards:
             env.close()
 
 
+class TestRecipeExplorationPackage:
+    """The ground-era exploration remedy is part of the training
+    definition (docs/paddle_tennis_exploration_20260808.md): auto
+    entropy from a safe init with the raised target as the floor,
+    plus gSDE. Pinned so a revert to stock SAC (whose auto-tuning
+    collapsed ent_coef to 5e-5 in the pilot) is a deliberate new
+    comparability decision, not drift."""
+
+    def test_model_kwargs_pin(self):
+        from courtside_dynamics.recipes import RECIPES
+
+        assert RECIPES["PaddleTennis"].extra_cfg["model_kwargs"] == {
+            "use_sde": True,
+            "ent_coef": "auto_0.02",
+            "target_entropy": -1.5,
+            # Without a multi-step train_freq, SAC resets the gSDE
+            # noise matrix every collect (= every step): iid noise.
+            "train_freq": (64, "step"),
+        }
+
+
 class TestCertificationHarness:
     """The held-out certification instrument stays runnable and its
     pre-registered contract stays pinned. The real verdict (seeds

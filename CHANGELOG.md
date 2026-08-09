@@ -48,6 +48,22 @@ supersedes it (see the ground-rules bullet).
   seeds 3100–3199: mean crossings 3.22 against the pre-registered
   2.6 floor, zero unsafe terminations;
   `docs/paddle_tennis_env_20260802.md`).
+- **PaddleTennis exploration package (training change).** The
+  ground-era diagnosis's ranked remedy, shipped recipe-level:
+  `model_kwargs` gains `use_sde=True`, `ent_coef="auto_0.02"`,
+  `target_entropy=-1.5`, and `train_freq=(64, "step")`
+  (docs/paddle_tennis_exploration_20260808.md). The raised target is
+  the mechanism fix — the stock run's 5e-5 coefficient was SB3's
+  tuner resting at the too-low default target (−3.0), so the target
+  is what moves, not the coefficient — and the multi-step
+  `train_freq` is what makes gSDE real under SAC at all (the
+  off-policy collector resets the noise matrix every rollout;
+  at `train_freq=1` that is every step — iid noise). iid per-step
+  noise cannot produce coherent ball-reaching runs (83/100 points
+  ended `policy_never_reached`). Task definition, reference band,
+  and certification unchanged; learning curves start a new
+  training-configuration regime. Pilot criteria pre-registered in
+  the doc before the pilot ran.
 - **Checkpoint behavioral diagnosis.** The exchange/positioning
   instrument that diagnosed the ground-era pilot (one memorized
   serve-return macro, no general ball-reaching;

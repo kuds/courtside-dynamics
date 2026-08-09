@@ -141,6 +141,11 @@ B side) and grown only as phases earn it.
 > ranks sustained exploration and n-point episodes as the next
 > probed changes. The instrument now runs at every checkpoint.
 >
+> **Status update, 2026-08-08 (exploration package):** the ranked
+> remedy shipped recipe-level (gSDE + auto-entropy from a raised
+> target) with its pilot criteria pre-registered before the run —
+> [`paddle_tennis_exploration_20260808.md`](paddle_tennis_exploration_20260808.md).
+>
 > **Status update, 2026-08-03 (ground rules):** the first GPU run
 > (volley era, seed 0, unregistered) maximized return rate with a
 > close-net volley loop — crossings 37.6 at a 14-step cadence. The

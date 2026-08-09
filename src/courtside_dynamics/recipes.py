@@ -1082,6 +1082,34 @@ RECIPES: dict[str, Recipe] = {
             # this env steps the same physics at the same rates).
             "n_envs": 8,
             "early_stop_patience": 20,
+            # Exploration package, from the ground-era pilot diagnosis
+            # (docs/paddle_tennis_diagnosis_20260808.md; provenance
+            # and pre-registered pilot in
+            # docs/paddle_tennis_exploration_20260808.md). The raised
+            # target is the actual entropy floor: SB3's dual update
+            # anneals the multiplier low when entropy meets the
+            # target and raises it when entropy sags below -- the
+            # stock run's 5e-5 coefficient was the tuner resting at
+            # the too-low default target (-3.0), so the fix is the
+            # target, not the coefficient. auto_0.02/-1.5 is the
+            # WallBall bootstrap *design* (DECISIONS.md 0.11.0 --
+            # never trained; adopted as design precedent, and pinning
+            # a float instead is a measured poison per
+            # lessons_learned.md's ent_coef x episode_len budget).
+            # gSDE (humanoid C2, measured under PPO) needs train_freq
+            # here to work at all under SAC: the off-policy collector
+            # resets the gSDE noise matrix every rollout, and at the
+            # default train_freq=1 that is every single step -- iid
+            # noise in a gSDE costume. 64 vec-steps holds one matrix
+            # through a coherent approach (half the 126-step exchange
+            # cadence); gradient_steps=-1 (set by train()) keeps the
+            # 1:1 update-per-transition ratio.
+            "model_kwargs": {
+                "use_sde": True,
+                "ent_coef": "auto_0.02",
+                "target_entropy": -1.5,
+                "train_freq": (64, "step"),
+            },
             "normalize_obs_excluded_indices": (
                 _PADDLE_TENNIS_NORMALIZATION_EXCLUSIONS
             ),
