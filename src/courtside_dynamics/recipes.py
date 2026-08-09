@@ -227,6 +227,8 @@ _PADDLE_TENNIS_CSV_KEYS = (
     "rew_return",
     "rew_fault",
     "rew_unsafe",
+    "rew_shaping",
+    "rew_shaping_clawback",
 )
 _PADDLE_TENNIS_CSV_HEADER = [
     *_PADDLE_TENNIS_CSV_KEYS,

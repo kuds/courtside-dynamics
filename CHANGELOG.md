@@ -48,6 +48,21 @@ supersedes it (see the ground-rules bullet).
   seeds 3100–3199: mean crossings 3.22 against the pre-registered
   2.6 floor, zero unsafe terminations;
   `docs/paddle_tennis_env_20260802.md`).
+- **PaddleTennis escrowed contact shaping (implemented, default
+  off).** The touch→in remedy
+  (docs/design_paddle_tennis_contact_shaping.md): new env kwarg
+  `contact_shaping` (default 0.0 — the frozen task's reward stream
+  is bit-identical until enabled). When on: a legal side-A hit pays
+  the shaping immediately, the advance is kept when that return
+  confirms and clawed back on **every** episode ending (termination,
+  truncation, both nonfinite guards), so episode totals are exactly
+  `shaping × side-A confirms` — farm-proof — while contact-time
+  Q-values separate "hit then miss" from "never hit". New
+  `rew_shaping`/`rew_shaping_clawback` components in the
+  decomposition, info, and CSV schema; `scripted_hard_slam_witness`
+  joins the scripted controllers. S1 (seeds 5300–5399, now burned)
+  and S2 both PASS with exact identities; the recipe does NOT enable
+  shaping until the pre-registered L1 pilot's verdict.
 - **PaddleTennis exploration package (training change).** The
   ground-era diagnosis's ranked remedy, shipped recipe-level:
   `model_kwargs` gains `use_sde=True`, `ent_coef="auto_0.02"`,

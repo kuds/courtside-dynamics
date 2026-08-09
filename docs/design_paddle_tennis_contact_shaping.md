@@ -1,6 +1,7 @@
 # Design: escrowed contact shaping — paying the touch→in gap
 
-Status: **Proposed** (not implemented), 2026-08-09. The remedy the
+Status: **Implemented; S1 + S2 PASS — L1 pilot pending**,
+2026-08-09 (§4). The remedy the
 exploration-pilot verdict points at
 ([`paddle_tennis_exploration_20260808.md`](paddle_tennis_exploration_20260808.md)
 §3): the pilot proved exploration reaches the ball (27% serving-side
@@ -181,7 +182,53 @@ touched).
     any new change; if they have flattened, combine with n-point
     episodes. In every branch the exploration package stays.
 
-## 4. What this is not
+## 4. S1/S2 results — PASS
+
+S1 ran as pre-registered (`tools/paddle_tennis_shaping_probe.py`,
+100 episodes per witness per arm on seeds 5300–5399, shaping 0.25
+vs 0.0). **Every criterion passed**, with every identity exact to
+0.00e+00 and all arms bit-identical:
+
+| witness | hits | confirms | paid | clawed | mean total reward |
+|---|---|---|---|---|---|
+| statue | 0 | 0 | 0.00 | 0.00 | −0.700 |
+| hard-slam | 96 | 1 | 24.00 | −23.75 | −0.517 |
+| ground oracle | 393 | 346 | 98.25 | −11.75 | 7.035 |
+| volley-patting | 0 | 0 | 0.00 | 0.00 | −1.000 |
+
+- Witness-validity preconditions held: the hard-slam touched in 95%
+  of episodes and confirmed 1 of 96 hits — the designed
+  touch-then-out prototype, matching its bring-up character.
+- The escrow's whole undiscounted effect is exactly
+  `0.25 × side-A confirms` for every witness on every seed (the
+  hard-slam banked exactly its one confirm; nothing else).
+- Fault contacts opened no escrow (patting: 96→0 — zero paid),
+  witnessing the exploit seal at the reward level.
+- Note on operationalization: the §3 precondition wording is
+  measured through two decidable event-level proxies, recorded here
+  as deviations-by-refinement. *Touch* is counted as at least one
+  **legal** hit per episode (`event_valid_racket_hit_a`; a faulting
+  graze counts as no touch — conservative for the precondition).
+  *Majority of strokes out* is counted as *majority of legal hits
+  unconfirmed* — a strict superset of landed-out that also covers
+  net faults and shots still in flight at the cap. On this block the
+  hard-slam's misses in fact terminated `out_of_bounds`, so the
+  proxy and the literal wording agree on the S1 verdict.
+
+S2 passed as `TestContactShaping` in `tests/test_paddle_tennis.py`:
+the every-step decomposition identity over the five components, the
+shaped/unshaped bit-identity (lockstep-stepped, observations
+asserted equal), and clawback on all four pre-registered ending
+cases — truncation-with-pending, confirmed-then-capped (via the
+escrow-identity drive), the NaN-action guard, and the
+forced-nonfinite branch.
+
+Seed ledger: block **5300–5399 burned** (S1 calibration).
+Reserved **4100–4199 remains untouched**. Next: the L1 learning
+pilot per §3 (recipe + `contact_shaping=0.25` via `[env]` override,
+seed 0, 1M steps, n_envs 4, checkpoint cadence 100k).
+
+## 5. What this is not
 
 Not a change to the frozen task semantics (default off; rules,
 serve, observations, termination untouched), not the own-credit
