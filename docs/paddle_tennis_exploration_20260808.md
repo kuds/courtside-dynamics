@@ -166,6 +166,19 @@ labeled as such):
    never converged on the easy receiving macro. Sustained
    stochasticity prevented both the collapse *and* the
    exploitation.
+3. **The optimizer was quiet the whole time.** `train/critic_loss`
+   sat at ~1e-4 from 100k to 1M with no spike or drift anywhere —
+   including across the 800k engagement peak and its 900k washout —
+   and `train/actor_loss` held ~0.24 throughout. The value function
+   converged in the first 100k and never saw anything new: the
+   environment genuinely returns the same outcome for everything
+   the policy can currently do. This rules out off-policy
+   value-function instability as the washout's cause (the
+   behavioral oscillation happened on a flat landscape, not a
+   drifting one) and removes the main motivation for an
+   algorithm-control (PPO) arm before the reward landscape is
+   changed: both algorithms starve identically on a landscape whose
+   critic is already exactly right.
 
 **Reading:** exploration was not the binding constraint at this
 budget — *reward attainability* is. The +1 sits on "legal return
