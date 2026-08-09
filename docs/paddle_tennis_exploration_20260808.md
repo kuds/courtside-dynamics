@@ -1,11 +1,14 @@
 # Ground-era exploration package — the H1 remedy, pre-registered
 
-Status: **adopted (recipe change) + pilot pre-registered**, 2026-08-08.
-The remedy the ground-era pilot diagnosis ranked first
+Status: **adopted (recipe change); pilot complete — mechanism
+confirmed, stroke acquisition absent**, 2026-08-09 (§3). The remedy
+the ground-era pilot diagnosis ranked first
 ([`paddle_tennis_diagnosis_20260808.md`](paddle_tennis_diagnosis_20260808.md)
 §3): sustained exploration, shipped as `PaddleTennis` recipe
-`model_kwargs`. This document freezes the falsification criteria
-**before** the pilot runs; its results section is appended after.
+`model_kwargs`. §2's falsification criteria were frozen **before**
+the pilot ran; §3 records the measured verdict (M/D1/D3 pass, D2/P
+fail — the decision rule's middle case) and points the next probed
+change at the touch→in credit gap.
 
 > Provenance note: the package's first draft (no `train_freq`, an
 > `ent_coef`-based mechanism check, and an overstated provenance
@@ -102,6 +105,87 @@ diagnosis: serving-side exchange survival 0%, touched-after-bounce
    that died despite it, is a bug to fix, not evidence about the
    hypothesis).
 
-## 3. Results
+## 3. Results — mechanism confirmed, stroke acquisition absent
 
-*(appended after the pilot completes)*
+Run `20260809_005951` (Colab L4, commit `1c1e8e1`, 1,000,000 steps
+in 3 h 58 m at 70 FPS, completed 2026-08-09 04:57 UTC; the packaged
+starter TOML rode along via `CONFIG_FILE="auto"` but every
+divergent field was overridden by the pre-registered explicit
+values, recorded in `config.json` provenance).
+
+**Criteria (frozen in §2) against the measured run:**
+
+| criterion | outcome | evidence |
+|---|---|---|
+| M1 plumbing | **pass** | `config.json` records all four keys; resolved model reports `TrainFreq(frequency=64, unit=STEP)`, `target_entropy=-1.5`, cuda |
+| M2 exploration alive | **pass** | `train/std` 0.0502 → 0.0475 (500k) → 0.0325 (final); floor 5e-3 never approached. (`train/ent_coef` ended at 4e-5 — per §2, not a mechanism signal.) |
+| D1 serving-side unlock | **pass** | k=1 survival > 0% at every diagnosis checkpoint from 200k except 900k; 7–13% typical, **27% at 800k** (stock run: hard 0% at 1.75M) |
+| D3 positioning | **pass** (by the letter) | ready error ≤ 2.0 m at 100k (1.98), 300k (1.82), 900k (1.90); but oscillating 1.8–2.7, not trending |
+| D2 ball-reaching | **fail** | touched-after-bounce peak **17%** (800k) vs the ≥ 55% bar; series 0→10→10→7→7→3→7→17→0→7% |
+| P crossings ≥ 2.5 | **fail** | best eval 0.67 (550k), final 0.53; flat ~0.5 across the whole run |
+
+**No decision-rule branch fires.** Rule 1 needs P; rule 2 needs D1
+to fail; rule 3 needs M to fail. The run landed in the middle case
+the rules deliberately do not force: the exploration mechanism is
+real and verified, the stock run's two structural signatures
+(entropy collapse; serving-side zero under one memorized
+receiving-macro) did not reproduce — and the policy still never
+acquired a stroke.
+
+**The checkpoint-by-checkpoint behavior** (30 probe episodes each,
+seeds 5200+; oracle reference: ~120 hits, 98% touch, 0.89 m ready,
+in-depth 3.9 m):
+
+| ckpt | policy hits | serving k=1 | receiving k=1 | touch | ready m | crossings |
+|---|---|---|---|---|---|---|
+| 100k | 0 | 0% | 0% | 0% | 1.98 | 0.50 |
+| 200k | 3 | 13% | 7% | 10% | 2.50 | 0.57 |
+| 300k | 3 | 7% | 13% | 10% | 1.82 | 0.57 |
+| 400k | 2 | 13% | 0% | 7% | 2.36 | 0.53 |
+| 500k | 2 | 13% | 0% | 7% | 2.70 | 0.50 |
+| 600k | 1 | 7% | 0% | 3% | 2.64 | 0.53 |
+| 700k | 2 | 13% | 0% | 7% | 2.38 | 0.53 |
+| 800k | **5** | **27%** | 7% | **17%** | 2.39 | 0.63 |
+| 900k | 0 | 0% | 0% | 0% | 1.90 | 0.50 |
+| 1M | 2 | 13% | 0% | 7% | 2.01 | 0.57 |
+
+Two facts carry the mechanism story (post-hoc analysis, clearly
+labeled as such):
+
+1. **Engagement oscillates without an attractor.** It builds to the
+   800k peak and washes out entirely by 900k. Nothing the policy
+   does when it reaches the ball ever pays: from 300k onward,
+   **every** policy shot that crossed landed out, 9.2–16.0 m deep
+   (the oracle lands at 3.9 m; the same hard-slam failure the
+   scripted oracle had at bring-up, fixed there by softening the
+   swing). A touch that always ends −1 is indistinguishable from
+   never touching, so learned engagement decays as fast as it
+   forms.
+2. **The macro never formed either.** Unlike the stock run (98%
+   receiving k=1 by 1.75M — one memorized serve-return), this run
+   never converged on the easy receiving macro. Sustained
+   stochasticity prevented both the collapse *and* the
+   exploitation.
+
+**Reading:** exploration was not the binding constraint at this
+budget — *reward attainability* is. The +1 sits on "legal return
+that lands in", and the un-shaped gap between touching the ball and
+landing it in is where all the remaining difficulty lives; sampling
+that gap by noise alone did not produce a single landed-in policy
+shot after 300k. This sharpens the diagnosis doc's §3 ranking with
+new evidence: n-point episodes multiply *rewarded configurations*
+but do not by themselves pay the touch→in gap; the repo's measured
+pattern for exactly this shape is escrowed contact shaping
+(humanoid 0.16.0's `valid_hit_shaping=0.25`, adopted after "a flat
+−1 for all outcomes gives no aim gradient"). The next probed change
+should target the touch→in credit gap first — as a reward-side
+amendment with its own probe and era bookkeeping — with n-point
+episodes as its complement, not its substitute. The exploration
+package itself stays: it measurably removed the entropy collapse
+and the serving-side zero, and reverting it would reintroduce a
+solved failure.
+
+The registered-run pre-registration remains deferred until that
+next change is probed; reserved block **4100–4199 stays untouched**.
+Seed ledger: unchanged (pilot on seed 0 + diagnosis calibration
+5200+ only).

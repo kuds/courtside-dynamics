@@ -146,6 +146,14 @@ B side) and grown only as phases earn it.
 > target) with its pilot criteria pre-registered before the run —
 > [`paddle_tennis_exploration_20260808.md`](paddle_tennis_exploration_20260808.md).
 >
+> **Status update, 2026-08-09 (exploration pilot verdict):** the 1M
+> GPU pilot confirmed the mechanism (entropy sustained; serving-side
+> zero and macro memorization both gone) but acquired no stroke —
+> every crossed policy shot from 300k on landed 9–16 m out, and
+> engagement oscillated without an attractor. The package stays;
+> the next probed change targets the touch→in credit gap
+> (exploration doc §3).
+>
 > **Status update, 2026-08-03 (ground rules):** the first GPU run
 > (volley era, seed 0, unregistered) maximized return rate with a
 > close-net volley loop — crossings 37.6 at a 14-step cadence. The

@@ -63,7 +63,14 @@ supersedes it (see the ground-rules bullet).
   ended `policy_never_reached`). Task definition, reference band,
   and certification unchanged; learning curves start a new
   training-configuration regime. Pilot criteria pre-registered in
-  the doc before the pilot ran.
+  the doc before the pilot ran; the pilot (run `20260809_005951`,
+  1M steps) confirmed the mechanism (entropy sustained; the stock
+  run's serving-side zero and macro memorization both gone) but
+  acquired no stroke — every policy shot from 300k on landed
+  9–16 m out and engagement oscillated without an attractor
+  (crossings ≤ 0.67 vs the ≥ 2.5 bar). The package stays; the
+  evidence points the next probed change at the touch→in credit
+  gap (doc §3).
 - **Checkpoint behavioral diagnosis.** The exchange/positioning
   instrument that diagnosed the ground-era pilot (one memorized
   serve-return macro, no general ball-reaching;
