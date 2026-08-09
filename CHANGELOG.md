@@ -67,7 +67,8 @@ supersedes it (see the ground-rules bullet).
   1M steps) confirmed the mechanism (entropy sustained; the stock
   run's serving-side zero and macro memorization both gone) but
   acquired no stroke — every policy shot from 300k on landed
-  9–16 m out and engagement oscillated without an attractor
+  9.2–16.0 m deep (2.7–9.5 m past the 6.5 m baseline) and
+  engagement oscillated without an attractor
   (crossings ≤ 0.67 vs the ≥ 2.5 bar). The package stays; the
   evidence points the next probed change at the touch→in credit
   gap (doc §3).

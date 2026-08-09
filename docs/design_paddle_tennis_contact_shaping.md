@@ -1,0 +1,190 @@
+# Design: escrowed contact shaping — paying the touch→in gap
+
+Status: **Proposed** (not implemented), 2026-08-09. The remedy the
+exploration-pilot verdict points at
+([`paddle_tennis_exploration_20260808.md`](paddle_tennis_exploration_20260808.md)
+§3): the pilot proved exploration reaches the ball (27% serving-side
+k=1 at its peak) and that reaching pays nothing — every crossed shot
+from 300k on landed 9.2–16.0 m deep (2.7–9.5 m past the 6.5 m
+baseline), the critic sat converged at ~1e-4 for 900k steps, and
+engagement washed away as fast as it formed. The +1 sits on "legal
+return that lands in"; everything between touch and in is a flat −1.
+This design pays the gap without making the gap farmable.
+
+## 1. Mechanism — the humanoid escrow, ported with its audit
+
+Provenance, stated honestly: the repo **measured the problem** this
+pattern answers (humanoid M3: 30/30 episodes at exactly −1.000
+reward; the stage oracle got 12/20 hits and 0/20 target returns —
+hit-vs-aim entirely unrewarded) and **designed and
+accounting-audited the answer** — `valid_hit_shaping=0.25` shipped
+in the humanoid Stage 1–2 recipes in 0.16.0, escrow audited for
+double-pay paths. **No training run ever exercised it**: the repo
+pivoted to WallBall before a humanoid campaign ran. The escrow is
+design precedent with a verified accounting core, not a measured
+training result; its first learning evidence will be this design's
+own L1 pilot. Mechanics (from `humanoid_tennis.py`):
+
+- on a `valid_racket_hit` by a side: pay `+shaping` **now** and
+  record it as pending for that side;
+- when that side's return **confirms**: clear its pending (the
+  advance is kept);
+- at episode end — on **every** ending path (termination,
+  truncation, and both nonfinite guards; see §2): claw back
+  whatever is still pending (`rew_shaping_clawback = −pending`).
+
+The sum over any episode is therefore exactly
+`shaping × (confirmed policy returns)` — an unconfirmed hit
+contributes **zero** to the undiscounted total, so shaping cannot be
+farmed. What it changes is the *contact-time* value: the clawback
+lands when the point ends, so the advance surviving at the moment of
+the hit is `shaping × (1 − γ^d)` with `d` the point's remaining
+length. For a failed shot, `d` is roughly that shot's own remaining
+flight — tens of steps — so at γ=0.99 the surviving advance is
+≈ 26–45% of the shaping for typical 30–60-step failure flights, and
+grows toward 100% only for shots that keep the point alive long.
+The gradient is real but modest for the earliest failure modes, and
+— usefully — a miss that keeps the ball in play longer pays more
+than a miss that ends the point at once. "Hit then miss" and "never
+hit" finally have different Q-values, which is precisely the
+gradient the pilot showed is missing — while "hit then confirm"
+keeps the full advance on top of the +1.
+
+## 2. PaddleTennis specifics
+
+- **Policy-side only (side A).** This deliberately deviates from
+  the shared cooperative `+1`: the ground-era diagnosis measured
+  the shared stream as the dilution mechanism (serving episodes pay
+  regardless of the policy's play). The shaping's entire purpose is
+  policy-own credit; opponent hits open no escrow and trigger no
+  shaping. The frozen cooperative `+1` for either side's confirmed
+  return is untouched. Consequence: a confirmed policy return
+  totals `1 + shaping`, an opponent's totals `1` — an intentional,
+  documented asymmetry. (Side A is the policy by the frozen P4
+  mirror contract, so "side A" and "policy" coincide by
+  construction.)
+- **Clawback on every ending path — the implementation contract.**
+  Unlike the humanoid env's single reward path, `PaddleTennisEnv`
+  assembles reward in **three** places: the main step reward
+  (currently computed *before* truncation is resolved), the
+  forced-nonfinite branch, and the nonfinite guard's early return
+  (a NaN action or physics state, reachable mid-point from a
+  blown-up policy). The implementation must make the clawback fire
+  and the decomposition identity hold on **all three** — including
+  a NaN action arriving one step after a hit opened an escrow —
+  which requires resolving truncation before the reward is final
+  and adding the shaping components to both guard paths. S2
+  witnesses each path explicitly. (Without this, an episode ending
+  through a guard with a pending escrow keeps the advance and the
+  §1 sum identity silently breaks — not profitably exploitable,
+  since the escrow is far smaller than the −2 unsafe penalty, but
+  false as specified.)
+- **The rules stack guards the contact-side exploits.** Verified
+  in `tennis_rules.py::_handle_racket_contact`: every fault path
+  (WRONG_HITTER, DOUBLE_HIT, PREMATURE_HIT, and the ground-rules
+  VOLLEY_RETURN branch) returns before the hit is recorded, so a
+  faulting contact can never appear in `valid_racket_hits` and can
+  never open an escrow. Strict double-hit means at most **one**
+  pending escrow at a time, and every point ends within the
+  1500-step cap, so the discount-level gain from deliberately
+  unconfirmed hits is bounded at **< 1 × shaping per point** (a
+  delay-maximizing shot banks at most the full advance once, then
+  the point is over — and a whole point spent doing that forfeits
+  the +1s that dominate it).
+- **Magnitude: 0.25** — the audited humanoid design value (see §1:
+  precedent, not a measurement), carried by the budget analysis: at
+  most one escrow per point and `0.25 × confirms` per episode in
+  totals — a 25% bonus on the policy's own confirmed returns,
+  strictly dominated by the task reward. Not a per-step stream; the
+  `ent_coef × episode_len` poison shape does not apply. The L1
+  pilot is the value's first measurement.
+- **Plumbing.** New env kwarg `contact_shaping: float = 0.0`
+  (validated finite non-negative), **default off — the frozen task
+  definition is unchanged** until the probe passes. New reward
+  components `rew_shaping` and `rew_shaping_clawback` join the
+  decomposition identity (`reward == rew_return + rew_fault +
+  rew_unsafe + rew_shaping + rew_shaping_clawback` on every step,
+  every path), the info dict, and the recipe CSV header.
+  `config.json` records the kwarg via constructor provenance
+  automatically.
+- **Comparability.** Enabling shaping starts a new
+  reward-comparability era: learning curves and eval rewards do not
+  compare across the boundary. Everything behavioral is unaffected:
+  `crossings` metrics, the scripted band (7.78), and the held-out
+  certification (7.68 on 4200–4299) are reward-independent and
+  remain valid. Selection already follows `crossings`, never eval
+  reward.
+
+## 3. Pre-registered probe battery (before the recipe ships it)
+
+Calibration seed block **5300–5399 is reserved for S1** (fresh
+block; 5200+ stays the diagnosis block; reserved 4100–4199 is not
+touched).
+
+- **S1 — incentive-ordering witnesses** (scripted, no learning;
+  100 episodes each on 5300–5399, shaping 0.25 vs 0.0). Because
+  shaping is reward-side only, the shaped and unshaped arms of the
+  same seed produce **bit-identical trajectories** — so every
+  criterion is an exact per-seed identity, not a statistical band:
+  - *witness-validity precondition:* the **hard-slam witness**
+    (ground oracle driven with the 0.4 swing — measured on the
+    bring-up calibration grid to land mean 11.0 m from the net,
+    ~4.5 m past the baseline, every stroke long; that grid ran
+    from a fixed deep park, not these serve draws) must touch the
+    ball in ≥ 50% of episodes and land the majority of its strokes
+    out on this block. If not, recalibrate the witness before
+    reading the identities.
+  - *statue* (zero action): exactly 0 shaping paid, 0 clawed back.
+  - *hard-slam*: per episode,
+    `rew_shaping + rew_shaping_clawback == 0.25 × side-A confirmed
+    returns` exactly, and the per-seed shaped-vs-unshaped total
+    reward difference equals the same quantity exactly.
+  - *ground oracle* (touch-and-in): per-seed total reward rises by
+    exactly `0.25 × its side-A confirmed-return count`.
+  - *volley-patting witness* (the ground-rules exploit
+    controller): exactly 0 shaping paid — fault contacts open no
+    escrow, witnessed at the reward level.
+- **S2 — decomposition invariant on every ending path**: the
+  existing every-step `reward == Σ rew_*` test extends over the two
+  new components, with explicit cases for (a) forced truncation
+  with a pending escrow (clawback fires), (b) a confirmed hit then
+  cap truncation (advance kept), (c) **a NaN action arriving with
+  an escrow pending** (the early-return guard claws back alongside
+  the −2), and (d) **a forced-nonfinite ending with an escrow
+  pending** (same).
+- **L1 — learning pilot** (only if S1/S2 pass): recipe + shaping
+  0.25, the pilot convention (seed 0, 1M steps, n_envs 4,
+  checkpoint/diagnosis cadence 100k). Criteria, frozen here:
+  - **P′: best `crossings_ep_mean` ≥ 2.5** by 1M (unchanged bar).
+  - **D2′: touched-after-bounce ≥ 55%** at some checkpoint
+    (exploration pilot peak: 17%).
+  - **N1: at least one checkpoint ≥ 500k whose 30-episode
+    diagnosis row contains ≥ 1 landed-in policy shot** (the
+    exploration pilot had zero landed-in policy shots after 200k).
+  - **M: mechanism intact** (same two-part check as the
+    exploration doc §2 — package keys in artifacts, `train/std`
+    ≥ 5e-3).
+  - Decision rule, frozen: (1) P′ ∧ D2′ ∧ N1 → pre-register the
+    ground-era GPU run (held-out gate on 4100–4199) and hand it to
+    Colab. (2) D2′ ≥ 55% ∧ N1 fails → the gap is aim, not credit:
+    probe strike-height/velocity control (the P0-measured loft
+    channel) before touching rewards again. (3) D2′ < 30% →
+    contact shaping alone does not buy reach at this budget:
+    combine with n-point episodes (its own probe, new era) before
+    re-piloting. **Declared non-forcing middles** (the exploration
+    doc's precedent, this time named in advance): D2′ ∈ [30%, 55%)
+    — partial reach recovery — and the success-adjacent
+    D2′ ∧ N1 with P′ failing — credit repaired, rally length
+    lagging. Neither forces a branch; the post-hoc analysis must
+    be labeled as such, with the default lean: if the diagnosis
+    rows are still improving at 1M, extend the budget once before
+    any new change; if they have flattened, combine with n-point
+    episodes. In every branch the exploration package stays.
+
+## 4. What this is not
+
+Not a change to the frozen task semantics (default off; rules,
+serve, observations, termination untouched), not the own-credit
+restructuring of the shared `+1` (diagnosis §3's #3 — stays behind
+this), and not a paddle-pitch actuation change (H2 remains rejected;
+only L1 branch 2 could reopen that question, with direct evidence).

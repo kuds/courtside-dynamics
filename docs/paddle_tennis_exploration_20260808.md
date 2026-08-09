@@ -202,3 +202,7 @@ The registered-run pre-registration remains deferred until that
 next change is probed; reserved block **4100–4199 stays untouched**.
 Seed ledger: unchanged (pilot on seed 0 + diagnosis calibration
 5200+ only).
+
+> **Status update, 2026-08-09:** the touch→in remedy is designed
+> and its probes pre-registered —
+> [`design_paddle_tennis_contact_shaping.md`](design_paddle_tennis_contact_shaping.md).
