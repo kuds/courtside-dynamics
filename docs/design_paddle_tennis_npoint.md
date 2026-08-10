@@ -1,6 +1,9 @@
 # Design: n-point episodes — continuous play with position carryover
 
-Status: **Proposed** (not implemented), 2026-08-10. The committed
+Status: **Implemented and certified** (default off), 2026-08-10 —
+NP0/NP1 PASS, the NP2 band recorded with the frozen L2 bars, and
+NP3 held-out certification PASS (all in §4a); the L2 pilot
+remains. The committed
 follow-up from the contact-shaping extension verdict
 ([`design_paddle_tennis_contact_shaping.md`](design_paddle_tennis_contact_shaping.md)
 §5): k=1 is close to mastered on both sides (receiving survival
@@ -88,16 +91,23 @@ assuming one number covers both parities.
      latched stale contact can silently suppress real feed events.
      The clearance check in (1) guarantees no **ball** contact of
      any latchable channel exists at prime time. One non-ball
-     channel remains latchable across a boundary: a paddle in
-     sustained contact with the net. Its semantics are pinned
+     channel could in principle latch across a boundary: a paddle
+     in sustained contact with the net. Its semantics are pinned
      rather than cleared: net-touch faults fire on contact rising
      edges, so a net touch persisting across a boundary is not
      re-faulted in the new point (one fault per contact episode —
      and if the prior point ended on a *different* fault in the
      same step batch, the sustained touch goes unfaulted
      entirely). Accepted: no reward channel involves the net, so
-     leaning on it gains nothing; NP1 witnesses the case so the
-     semantics are measured, not assumed.
+     leaning on it gains nothing. **Measured at NP1**: on the
+     paddle-court scene the case is unreachable — the collision
+     masks never pair the racket faces with the net panel
+     (contype/conaffinity product 0 both sides) and the frozen
+     workspace keeps both faces 0.017 m short of the net plane —
+     so the probe asserts both from the compiled model instead of
+     staging a live hold-against-net witness; the pinned semantics
+     stay the contract for any future scene where the channel is
+     live (the humanoid court).
   3. *Alternation and step budget.* The server flips per point,
      within and across episodes; **a truncation-cut partial point
      consumes its alternation turn** (the next episode's first
@@ -137,6 +147,10 @@ assuming one number covers both parities.
     snapshot's `rally_terminal`/`termination_reason*` keys DO
     describe the point's fault (they reset with the machine next
     step); the `point_end_*` counters are the durable record.
+    `serve_side_is_policy` likewise names the step's own
+    (just-ended) point on boundary steps, agreeing with the
+    snapshot's `serve_side` keys — the returned observation is
+    what describes the relaunched point.
   - Recipe CSV/eval keys extend accordingly.
 - **Diagnosis instrument: point segmentation.** The rules machine
   still emits a terminated transition at each point's end (the env
@@ -192,14 +206,20 @@ the bridge metric reported on both sides of the boundary.
     latch-suppressed contact; feed lands where the serve model
     says), the nudge fires and is counted; a point ending with
     the ball on the far side → the next point's opening steps emit
-    no spurious reverse-crossing fault; a paddle held against the
-    net across a boundary → the pinned one-fault-per-contact
-    semantics hold and the feed's events stay intact;
+    no spurious reverse-crossing fault; the net-touch case → the
+    probe asserts from the compiled model that racket–net contact
+    is unreachable on this scene (mask product 0, workspace short
+    of the net plane), making the pinned one-fault-per-contact
+    semantics vacuously safe here;
   - *escrow point-boundary identity*: per point, S1-style exact,
     with a pending-escrow-at-point-end case witnessed;
-  - *statue under `None`*: collects one −1 per completed point,
-    `points_played` matches the completed-fault count, episodes
-    always truncate at the cap;
+  - *statue under `None`*: nets exactly −1 on each of its receiving
+    points; a serving point nets exactly 0 when the opponent's
+    serve-return confirms (the shared +1 offsets the fault —
+    measured at implementation smoke) and exactly −1 when the feed
+    or the return itself faults, so serving points read in
+    {0, −1} with the 0 case witnessed; `points_played` matches the
+    completed-fault count, episodes always truncate at the cap;
   - *alternation*: strict across points and episode boundaries,
     including the partial-point-consumes-a-turn rule.
 - **NP2 — the oracle-pair band, recalibrated** (seeds 5400+, 100
@@ -227,6 +247,122 @@ the bridge metric reported on both sides of the boundary.
   - **P″/D2″**: crossings-per-completed-point and touch bars from
     NP2;
   - **M**: mechanism intact (unchanged two-part check).
+
+## 4a. Results and the frozen L2 pre-registration (2026-08-10)
+
+**NP0 — PASS, cross-version.** Beyond the in-tree lockstep test,
+the default env was run against the actual pre-amendment code (the
+merge commit, in a separate worktree) on seeds 5400–5402:
+observations, rewards, and every pre-era info column bit-identical
+over 2,613 steps (episodes of 1500/794/319); the post-amendment
+info stream differs only by the ten additive n-point keys.
+
+**NP1 — PASS (30/30)** (`tools/paddle_tennis_npoint_probe.py`,
+seeds 5400+): 315 un-nudged
+boundaries continuous (max jump 0.123 m vs the 0.5 m bound); every
+relaunch spawn inside the mirrored serve cell, clearing both
+paddles by ≥ 0.451 m at ≤ 9.96 m/s (a serve draw, never the
+41 m/s deflection hazard); the parked-paddle witness drew 6 nudges
+over 107 boundaries, every one coincident with its counter; 116
+hard-slam far-side points opened with zero illegal-hit faults (the
+reverse-crossing hazard absent); escrow identities exact
+(0.00e+00) on bit-identical shaped/unshaped arms with 58 boundary
+clawbacks witnessed; statue economics exact — every receiving
+point −1, serving points 30 offset to 0 / 10 at −1 (the feed or
+return faulting kills the offset; the probe's criterion was
+corrected from "serving points net 0" to "read in {0, −1} with
+the 0 case witnessed" before the battery ran); alternation strict
+across 397 launches. The net-touch case measured **unreachable**
+on this scene: collision-mask pairing product 0 both sides and a
+0.017 m workspace margin short of the net plane, asserted from
+the compiled model (§2's pinned semantics stay the contract for
+scenes with a live channel).
+
+**NP2 — the era's reference band** (100 episodes, seeds
+5400–5499, `points_per_episode=None`, scripted pair):
+
+- crossings/episode mean **11.40** (std 1.58, min 8, max 14);
+- completed points/episode mean **1.13** (std 0.91) — the pair's
+  rallies often outlive the cap; 113 completed points total;
+- crossings per completed point (bridge metric) **4.46**;
+- nudges **0** of 113 relaunches (the referee never stepped in on
+  the scripted pair; the parker witness covers the path);
+- inter-point recovery travel mean **2.10 m** (p90 3.97) — the R2
+  oracle reference;
+- within-point recovery hold mean **2.22 m** (p90 3.59) — the R1
+  oracle reference, matching the old era's 2.2;
+- touched-after-bounce 99% (the D2″ oracle reference); ready
+  error 0.89 m vs the designed 0.90 (instrument self-check);
+- zero unsafe episodes.
+
+Under carryover the oracle pair's own exchange survival drops
+(receiving k=1 92%/k=2 75%; serving 88%/68% vs ~100% from the
+engineered park) — exactly why NP2 is the era's reference and the
+ground band retires at the boundary.
+
+**The frozen L2 bars** (pre-registered here, before any L2 step
+runs; each metric reads from the automated diagnosis rows/CSV at
+its own best checkpoint; run shape: recipe + TOML
+`[env] points_per_episode = "none"`, `contact_shaping = 0.25`,
+seed 0, 2M steps, n_envs 4, cadence 100k):
+
+| criterion | metric | FAIL | declared middle | PASS |
+|---|---|---|---|---|
+| **K** (headline) | k=2 exchange survival, either parity | 0% at every checkpoint | — (binary) | > 0% at some checkpoint |
+| R1 | within-point recovery-hold mean | ≥ 8.33 m (the extension's end) | (5.0, 8.33) | ≤ 5.0 m |
+| R2 | inter-point recovery mean | > 8.4 m (4× oracle) | (4.2, 8.4] | ≤ 4.2 m (2× oracle) |
+| P″ | crossings per completed point | < 1.8 (k=1-only ceiling) | [1.8, 2.5) | ≥ 2.5 |
+| D2″ | touched-after-bounce rate | < 46% (the L1 peak) | [46%, 60%) | ≥ 60% |
+| M | mechanism (ent-coef anneal + train/std ≥ 5e-3) | broken | — | intact |
+
+The P″ FAIL floor is the k=1-only ceiling translated into
+per-completed-point units from the extension's measured rates
+(receiving ≈ 1.7 crossings/point at 100%·78%-in, serving ≈
+1.5–1.9 at 53%; an approximation, labeled as such). R2 has no
+policy baseline (the metric is new), so its bars anchor to the
+only measured reference, the oracle, at a priori factors 2× and
+4×. Two PASS bars are labeled a-priori choices rather than NP2
+read-offs (deviating from §4's "bars from NP2" shorthand): P″
+PASS 2.5 is the L1-era P′ crossings bar restated in
+per-completed-point units (≈ 0.56× the oracle's 4.46 bridge
+metric), and D2″ PASS 60% sits between the L1-era measured touch
+peak (46%) and the oracle's 99% reference; their FAIL floors are
+the measured anchors.
+
+**Decision rule** (three branches, the L1 shape):
+
+- **Adopt**: K PASS, M intact, and ≥ 2 of R1/R2/P″/D2″ PASS →
+  the recipe adopts `points_per_episode=None` (+ shaping) and the
+  6M registered run is pre-registered with its held-out gate on
+  4100–4199.
+- **Extend once** (declared middle, non-forcing): M intact and
+  either K PASS with < 2 others passing, or K FAIL with ≥ 2
+  others in PASS-or-middle → a single 2M extension of the frozen
+  lean (the shaping playbook); its verdict re-applies this rule
+  with the extend branch removed.
+- **Stop/pivot**: M broken, or K FAIL with < 2 others in
+  PASS-or-middle → n-point stays default-off; the next probed
+  change targets the opponent/curriculum side.
+
+**NP3 floors** (pre-registered here from NP2's band, before the
+reserved block 4300–4399 was opened; scripted pair, 100 episodes,
+`points_per_episode=None`, one shot):
+
+- mean crossings/episode ≥ **9.0** (0.79× the NP2 mean — the
+  prior certifications' convention);
+- total completed points ≥ **50** (NP2 measured 113);
+- nudge rate ≤ **2%** of relaunches (NP2 measured 0%);
+- zero unsafe terminations.
+
+**NP3 — PASS** (`--certify`, the block's single sanctioned
+opening, 2026-08-10): mean crossings/episode **11.51** (std 1.47),
+**106** completed points, **0%** nudges, **0** unsafe — every
+floor cleared, and the held-out band replicates the calibration
+band closely (crossings 11.51 vs 11.40; bridge metric 4.56 vs
+4.46; inter-point recovery 1.99 m vs 2.10 m; ready error 0.89
+both). Seeds 4300–4399 are now consumed. The definition is
+certified; what remains before recipe adoption is the L2 pilot
+against the bars above.
 
 ## 5. What this is not
 

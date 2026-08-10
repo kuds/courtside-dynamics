@@ -8,6 +8,7 @@ injection, and the nonfinite guards. Cross-env API smoke (check_env,
 truncation, registration ids) lives in ``test_envs.py``'s shared
 tables.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -85,9 +86,7 @@ class TestObservationContract:
         )
         assert PADDLE_TENNIS_NORMALIZED_SLICE == slice(0, 24)
         assert (
-            PADDLE_TENNIS_OBSERVATION_NAMES[
-                PADDLE_TENNIS_NORMALIZED_SLICE.stop
-            ]
+            PADDLE_TENNIS_OBSERVATION_NAMES[PADDLE_TENNIS_NORMALIZED_SLICE.stop]
             == "rally_phase_initial_feed"
         )
 
@@ -95,9 +94,11 @@ class TestObservationContract:
         import gymnasium
 
         spec = gymnasium.spec("CourtsideDynamics/PaddleTennis")
-        default = inspect.signature(PaddleTennisEnv.__init__).parameters[
-            "episode_len"
-        ].default
+        default = (
+            inspect.signature(PaddleTennisEnv.__init__)
+            .parameters["episode_len"]
+            .default
+        )
         assert spec.max_episode_steps == default == 1500
 
     def test_reset_observation_shape_and_reset_info(self):
@@ -115,9 +116,7 @@ class TestObservationContract:
             assert velocity[0] > 0.0
             # The serving side's own view of itself must be identical
             # to the policy's view of the reset (side A serves here).
-            assert np.array_equal(
-                obs, env.observation_for_side(CourtSide.A)
-            )
+            assert np.array_equal(obs, env.observation_for_side(CourtSide.A))
         finally:
             env.close()
 
@@ -147,12 +146,8 @@ class TestMirrorIdentity:
             assert info_b["serve_side_is_policy"] == 0.0
 
             # Bit-for-bit at the mirrored reset.
-            assert np.array_equal(
-                obs_b, env_a.observation_for_side(CourtSide.B)
-            )
-            assert np.array_equal(
-                obs_a, env_b.observation_for_side(CourtSide.B)
-            )
+            assert np.array_equal(obs_b, env_a.observation_for_side(CourtSide.B))
+            assert np.array_equal(obs_a, env_b.observation_for_side(CourtSide.B))
 
             # Through contact-rich physics the mirrored trajectories
             # drift only by MuJoCo constraint-ordering ulps (the P4
@@ -191,9 +186,7 @@ class TestRewardAccounting:
                         scripted_ground_opponent(obs)
                     )
                     assert reward == pytest.approx(
-                        info["rew_return"]
-                        + info["rew_fault"]
-                        + info["rew_unsafe"]
+                        info["rew_return"] + info["rew_fault"] + info["rew_unsafe"]
                     )
                     total += reward
                     total_return += info["rew_return"]
@@ -204,9 +197,7 @@ class TestRewardAccounting:
                 # pays exactly one fault, a cap-truncated rally none
                 # (the ground era's scripted pair reaches the 1500-step
                 # cap in ~17% of episodes).
-                assert total_return == pytest.approx(
-                    float(info["valid_return_count"])
-                )
+                assert total_return == pytest.approx(float(info["valid_return_count"]))
                 if trunc:
                     assert total == pytest.approx(total_return)
                     assert info["rew_fault"] == 0.0
@@ -248,9 +239,7 @@ class TestRewardAccounting:
             obs, _ = env.reset(seed=_SMOKE_SEEDS[0])
             total_return = 0.0
             while True:
-                obs, reward, term, trunc, info = env.step(
-                    scripted_ground_opponent(obs)
-                )
+                obs, reward, term, trunc, info = env.step(scripted_ground_opponent(obs))
                 total_return += info["rew_return"]
                 if term or trunc:
                     break
@@ -270,17 +259,12 @@ class TestVolleyRule:
         env = PaddleTennisEnv()
         try:
             assert env.volley_rule == "fault"
-            assert (
-                env.opponent_controller is scripted_ground_opponent
-            )
+            assert env.opponent_controller is scripted_ground_opponent
         finally:
             env.close()
         env = PaddleTennisEnv(volley_rule="legal")
         try:
-            assert (
-                env.opponent_controller
-                is scripted_lead_charge_opponent
-            )
+            assert env.opponent_controller is scripted_lead_charge_opponent
         finally:
             env.close()
         with pytest.raises(ValueError, match="volley_rule"):
@@ -289,13 +273,9 @@ class TestVolleyRule:
     def test_obs_index_pins_for_ground_controller(self):
         """envs/_paddle_court.py cannot import the env, so its obs
         indices are literals -- pin them against the frozen names."""
+        assert PADDLE_TENNIS_OBSERVATION_NAMES[OBS_BOUNCE_COUNT_INDEX] == "bounce_count"
         assert (
-            PADDLE_TENNIS_OBSERVATION_NAMES[OBS_BOUNCE_COUNT_INDEX]
-            == "bounce_count"
-        )
-        assert (
-            PADDLE_TENNIS_OBSERVATION_NAMES[OBS_BALL_SIDE_INDEX]
-            == "ball_side_is_own"
+            PADDLE_TENNIS_OBSERVATION_NAMES[OBS_BALL_SIDE_INDEX] == "ball_side_is_own"
         )
 
     def test_volley_capable_player_faults_under_ground_rules(self):
@@ -360,13 +340,7 @@ class TestVolleyRule:
             rules=RallyRules(require_bounce_before_return=True),
         )
         # Feed crosses to B, bounces, B returns legally.
-        machine.advance(
-            [
-                RallyEvent(
-                    kind=RallyEventKind.NET_CROSSING_TO_B, substep=0
-                )
-            ]
-        )
+        machine.advance([RallyEvent(kind=RallyEventKind.NET_CROSSING_TO_B, substep=0)])
         machine.advance(
             [
                 RallyEvent(
@@ -376,24 +350,13 @@ class TestVolleyRule:
                 )
             ]
         )
-        machine.advance(
-            [RallyEvent(kind=RallyEventKind.BALL_RACKET_B, substep=2)]
-        )
-        machine.advance(
-            [
-                RallyEvent(
-                    kind=RallyEventKind.NET_CROSSING_TO_A, substep=3
-                )
-            ]
-        )
+        machine.advance([RallyEvent(kind=RallyEventKind.BALL_RACKET_B, substep=2)])
+        machine.advance([RallyEvent(kind=RallyEventKind.NET_CROSSING_TO_A, substep=3)])
         # A volleys the incoming return before it bounces.
         transition = machine.advance(
             [RallyEvent(kind=RallyEventKind.BALL_RACKET_A, substep=4)]
         )
-        assert (
-            transition.after.termination_reason
-            is TerminationReason.VOLLEY_RETURN
-        )
+        assert transition.after.termination_reason is TerminationReason.VOLLEY_RETURN
         assert transition.confirmed_returns == ()
         assert transition.valid_racket_hits == ()
         # Legacy profile: the same sequence is a legal volley return.
@@ -528,18 +491,16 @@ class TestCourtStyles:
                 obs, _ = env.reset(seed=_SMOKE_SEEDS[2])
                 steps = [obs]
                 for _ in range(30):
-                    obs, _, term, trunc, _ = env.step(
-                        scripted_ground_opponent(obs)
-                    )
+                    obs, _, term, trunc, _ = env.step(scripted_ground_opponent(obs))
                     steps.append(obs)
                     if term or trunc:
                         break
                 traces[style] = np.concatenate(steps)
             finally:
                 env.close()
-            assert np.array_equal(
-                traces[style], traces["diagnostic"]
-            ), f"style {style} altered the physics trace"
+            assert np.array_equal(traces[style], traces["diagnostic"]), (
+                f"style {style} altered the physics trace"
+            )
 
 
 class TestOpponentInjection:
@@ -557,9 +518,7 @@ class TestOpponentInjection:
                 env.step(_zero_action())
             assert len(seen) == 3
             for observation in seen:
-                assert observation.shape == (
-                    len(PADDLE_TENNIS_OBSERVATION_NAMES),
-                )
+                assert observation.shape == (len(PADDLE_TENNIS_OBSERVATION_NAMES),)
                 # Side B's own-paddle x sits in its own half (negative
                 # in side-local coordinates), like side A's own view.
                 assert observation[9] < 0.0
@@ -567,9 +526,7 @@ class TestOpponentInjection:
             env.close()
 
     def test_bad_opponent_action_fails_loudly(self):
-        env = PaddleTennisEnv(
-            opponent_controller=lambda observation: np.zeros(2)
-        )
+        env = PaddleTennisEnv(opponent_controller=lambda observation: np.zeros(2))
         try:
             env.reset(seed=_SMOKE_SEEDS[0])
             with pytest.raises(ValueError, match="opponent_controller"):
@@ -596,9 +553,7 @@ class TestGuards:
             env_limit.reset(seed=_SMOKE_SEEDS[0])
             env_clipped.step(np.array([5.0, -5.0, 5.0]))
             env_limit.step(np.array([1.0, -1.0, 1.0]))
-            assert np.array_equal(
-                env_clipped.data.ctrl, env_limit.data.ctrl
-            )
+            assert np.array_equal(env_clipped.data.ctrl, env_limit.data.ctrl)
         finally:
             env_clipped.close()
             env_limit.close()
@@ -608,9 +563,7 @@ class TestGuards:
         try:
             obs, _ = env.reset(seed=_SMOKE_SEEDS[0])
             qpos_before = env.data.qpos.copy()
-            echoed, reward, term, trunc, info = env.step(
-                np.array([np.nan, 0.0, 0.0])
-            )
+            echoed, reward, term, trunc, info = env.step(np.array([np.nan, 0.0, 0.0]))
             assert term and not trunc
             assert reward == -2.0
             assert info["rew_unsafe"] == -2.0
@@ -644,9 +597,7 @@ class TestGuards:
         try:
             env.reset(seed=_SMOKE_SEEDS[0])
             *_, info = env.step(np.array([np.nan, 0.0, 0.0]))
-            missing = [
-                key for key in _PADDLE_TENNIS_CSV_KEYS if key not in info
-            ]
+            missing = [key for key in _PADDLE_TENNIS_CSV_KEYS if key not in info]
             assert not missing
         finally:
             env.close()
@@ -710,9 +661,7 @@ class TestContactShaping:
             totals["reward"] += reward
             confirms += int(bool(info["event_valid_return_a"]))
             if mirror_env is not None:
-                mirror_obs, mirror_reward, mterm, mtrunc, _ = (
-                    mirror_env.step(action)
-                )
+                mirror_obs, mirror_reward, mterm, mtrunc, _ = mirror_env.step(action)
                 np.testing.assert_array_equal(obs, mirror_obs)
                 assert (term, trunc) == (mterm, mtrunc)
                 totals["mirror_reward"] += mirror_reward
@@ -734,9 +683,9 @@ class TestContactShaping:
                 assert sums["rew_shaping"] + sums[
                     "rew_shaping_clawback"
                 ] == pytest.approx(expected, abs=1e-12)
-                assert totals["reward"] - totals[
-                    "mirror_reward"
-                ] == pytest.approx(expected, abs=1e-12)
+                assert totals["reward"] - totals["mirror_reward"] == pytest.approx(
+                    expected, abs=1e-12
+                )
         finally:
             shaped.close()
             unshaped.close()
@@ -787,9 +736,7 @@ class TestContactShaping:
                     scripted_ground_opponent(obs)
                 )
                 assert not (term or trunc), "point ended before a confirm"
-                if bool(info["event_valid_return_a"]) and (
-                    env._pending_shaping == 0.0
-                ):
+                if bool(info["event_valid_return_a"]) and (env._pending_shaping == 0.0):
                     confirmed = True
                     break
             assert confirmed, "ground pair never confirmed a side-A return"
@@ -812,9 +759,7 @@ class TestContactShaping:
         try:
             env.reset(seed=_SMOKE_SEEDS[0])
             env._pending_shaping = 0.25
-            obs, reward, term, trunc, info = env.step(
-                np.array([np.nan, 0.0, 0.0])
-            )
+            obs, reward, term, trunc, info = env.step(np.array([np.nan, 0.0, 0.0]))
             assert term and not trunc
             assert info["rew_unsafe"] == -2.0
             assert info["rew_shaping_clawback"] == -0.25
@@ -894,6 +839,305 @@ class TestContactShaping:
         assert "contact_shaping" not in env_kwargs
 
 
+class TestNPointEpisodes:
+    """The n-point contract of design_paddle_tennis_npoint.md: the
+    frozen default stays bit-identical, boundaries carry paddles
+    over, the escrow claws back per point, alternation is strict, and
+    the relaunch protocol's hazards stay witnessed."""
+
+    def test_np0_default_bit_identical_lockstep(self):
+        """The default arm locksteps an n=3 arm bit-for-bit — obs,
+        reward, and the FULL info dict — up to the first point end,
+        where the default terminates and the n-point arm absorbs.
+        Any drift in the shared step path fails loudly (an
+        identically-constructed pair could not detect one)."""
+        diverged = 0
+        # Burned-block seeds whose one-point episode ends in a rally
+        # fault before the cap (measured: 200/178 steps), so the
+        # absorption divergence is actually reached. Fresh instances
+        # per seed: after an absorption, arm b's alternation state
+        # has legitimately advanced past arm a's (the
+        # partial-point-consumes-turn rule), so instances cannot be
+        # reused across seeds.
+        for seed in (1008, 1010):
+            a = PaddleTennisEnv()
+            b = PaddleTennisEnv(points_per_episode=3)
+            try:
+                oa, _ = a.reset(seed=seed)
+                ob, _ = b.reset(seed=seed)
+                np.testing.assert_array_equal(oa, ob)
+                while True:
+                    action = scripted_ground_opponent(oa)
+                    oa, ra, ta, tra, ia = a.step(action)
+                    ob, rb, tb, trb, ib = b.step(action)
+                    assert ra == rb
+                    if ta and not tb:
+                        # The first point end: arm a ends its episode
+                        # while arm b absorbs the boundary. Both count
+                        # the completed point.
+                        diverged += 1
+                        assert ia["points_played"] == 1.0
+                        assert ib["points_played"] == 1.0
+                        break
+                    np.testing.assert_array_equal(oa, ob)
+                    assert (ta, tra) == (tb, trb)
+                    assert set(ia) == set(ib)
+                    for key, va in ia.items():
+                        if isinstance(va, (int, float)):
+                            assert va == ib[key], key
+                    if ta or tra:
+                        break
+            finally:
+                a.close()
+                b.close()
+        assert diverged >= 1  # a real absorption was witnessed
+
+    def test_statue_nets_minus_one_per_receiving_point(self):
+        env = PaddleTennisEnv(points_per_episode=None, episode_len=1500)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            total = 0.0
+            receiving = serving = prev = 0
+            while True:
+                policy_serves = env._serving_side is CourtSide.A
+                _obs, reward, term, trunc, info = env.step(_zero_action())
+                total += reward
+                if info["points_played"] > prev:
+                    prev = int(info["points_played"])
+                    if policy_serves:
+                        serving += 1
+                    else:
+                        receiving += 1
+                if term or trunc:
+                    break
+            assert trunc and not term
+            assert info["term_timeout"] == 1.0
+            assert prev == receiving + serving >= 2
+            # -1 per receiving point; the shared +1 from the
+            # opponent's serve-return offsets each serving fault.
+            assert total == pytest.approx(-receiving)
+            # Episode-scoped term_* never fired for the absorbed
+            # faults; the durable record is the point_end counters.
+            end_counts = sum(
+                info[f"point_end_{name}"]
+                for name in (
+                    "out_of_bounds",
+                    "ball_net",
+                    "second_bounce",
+                    "failed_to_cross",
+                    "illegal_hit",
+                    "net_touch",
+                    "volley",
+                )
+            )
+            assert end_counts == prev
+        finally:
+            env.close()
+
+    def test_escrow_identity_across_point_boundaries(self):
+        env = PaddleTennisEnv(points_per_episode=None, contact_shaping=0.25)
+        try:
+            obs, _ = env.reset(seed=_SMOKE_SEEDS[1])
+            paid = clawed = confirms = 0.0
+            prev_points = 0
+            boundary_clawbacks = 0
+            while True:
+                obs, _r, term, trunc, info = env.step(scripted_ground_opponent(obs))
+                paid += info["rew_shaping"]
+                clawed += info["rew_shaping_clawback"]
+                confirms += float(bool(info["event_valid_return_a"]))
+                if info["points_played"] > prev_points and not (term or trunc):
+                    prev_points = int(info["points_played"])
+                    if info["rew_shaping_clawback"] != 0.0:
+                        boundary_clawbacks += 1
+                if term or trunc:
+                    break
+            assert paid + clawed == pytest.approx(0.25 * confirms)
+            # The identity must actually be exercised ACROSS a
+            # boundary: at least one mid-episode point end clawed a
+            # pending advance back (a terminal clawback alone would
+            # leave the boundary path untested).
+            assert boundary_clawbacks >= 1
+        finally:
+            env.close()
+
+    def test_carryover_paddles_continuous_at_boundaries(self):
+        """At each un-nudged boundary the policy paddle moves by at
+        most one step of motion — never a re-park jump. The moving
+        hard-slam witness (not a statue, whose parked paddle cannot
+        distinguish carryover from a re-park) is self-validated
+        below: at least one checked boundary catches the paddle
+        genuinely away from its reset pose."""
+        from courtside_dynamics.envs._paddle_court import (
+            scripted_hard_slam_witness,
+        )
+
+        env = PaddleTennisEnv(points_per_episode=None)
+        try:
+            obs, _ = env.reset(seed=_SMOKE_SEEDS[1])
+            reset_pose = env._paddle_position(CourtSide.A).copy()
+            prev_points = 0
+            boundaries = displaced = 0
+            while True:
+                before = env._paddle_position(CourtSide.A).copy()
+                obs, _r, term, trunc, info = env.step(scripted_hard_slam_witness(obs))
+                after = env._paddle_position(CourtSide.A)
+                if info["points_played"] > prev_points:
+                    prev_points = int(info["points_played"])
+                    if info["point_serve_nudged"] == 0.0 and not (term or trunc):
+                        boundaries += 1
+                        if float(np.linalg.norm(before - reset_pose)) > 0.5:
+                            displaced += 1
+                        assert float(np.linalg.norm(after - before)) < 0.5, (
+                            "paddle jumped at a point boundary"
+                        )
+                if term or trunc:
+                    break
+            assert boundaries >= 1
+            # Self-validation: a re-park regression would have
+            # tripped the jump bound on these displaced boundaries.
+            assert displaced >= 1
+        finally:
+            env.close()
+
+    def test_alternation_strict_across_points_and_episodes(self):
+        env = PaddleTennisEnv(points_per_episode=None, episode_len=1200)
+        try:
+            servers: list[str] = []
+            for seed in _SMOKE_SEEDS[:2]:
+                env.reset(seed=seed)
+                servers.append(env._serving_side.name)
+                prev = 0
+                while True:
+                    _obs, _r, term, trunc, info = env.step(_zero_action())
+                    if info["points_played"] > prev and not (term or trunc):
+                        prev = int(info["points_played"])
+                        servers.append(env._serving_side.name)
+                    if term or trunc:
+                        break
+            for first, second in zip(servers, servers[1:], strict=False):
+                assert first != second, servers
+        finally:
+            env.close()
+
+    def test_nudge_clears_launch_envelope(self):
+        env = PaddleTennisEnv(points_per_episode=None)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            target = env._paddle_position(CourtSide.A) + np.array([0.05, 0.0, 0.05])
+            assert not env._clear_launch_envelope(target)
+            env._nudge_paddle_clear(target)
+            env.set_state(env.data.qpos.copy(), env.data.qvel.copy())
+            assert env._clear_launch_envelope(target)
+        finally:
+            env.close()
+
+    def test_hard_slam_far_side_deaths_cause_no_spurious_faults(self):
+        """NP1 relaunch-hazard witness: points ending with the ball
+        beyond the far baseline must not open the next point with a
+        reverse-crossing (illegal-hit-group) fault."""
+        from courtside_dynamics.envs._paddle_court import (
+            scripted_hard_slam_witness,
+        )
+
+        env = PaddleTennisEnv(points_per_episode=None)
+        try:
+            obs, _ = env.reset(seed=_SMOKE_SEEDS[2])
+            last_ball_x = float(env._ball_position()[0])
+            prev_points = 0
+            far_side_ends = 0
+            while True:
+                obs, _r, term, trunc, info = env.step(scripted_hard_slam_witness(obs))
+                if info["points_played"] > prev_points:
+                    prev_points = int(info["points_played"])
+                    # Pre-boundary ball position: past the far (+x)
+                    # baseline at 6.5 m — the hazard's precondition.
+                    if last_ball_x > 6.5:
+                        far_side_ends += 1
+                last_ball_x = float(env._ball_position()[0])
+                if term or trunc:
+                    break
+            assert info["points_played"] >= 2
+            # Self-validation: the witness really died far-side (a
+            # statue banks out_of_bounds endings with zero far-side
+            # deaths, so the counter alone proves nothing).
+            assert far_side_ends >= 2
+            assert info["point_end_illegal_hit"] == 0.0
+        finally:
+            env.close()
+
+    def test_instrument_segments_points_and_measures_recovery(self):
+        from courtside_dynamics.training.paddle_diagnosis import (
+            run_player,
+        )
+
+        statue = lambda observation: np.zeros(3)  # noqa: E731
+        traces, travels = run_player(
+            statue,
+            episodes=2,
+            seed_start=_SMOKE_SEEDS[0],
+            env_fn=lambda: PaddleTennisEnv(points_per_episode=None),
+        )
+        assert len(traces) > 2  # multiple points per episode
+        assert travels  # inter-point recovery measured
+        receiving = [t for t in traces if not t.serve_side_is_policy]
+        assert receiving
+        for trace in receiving:
+            if trace.termination == "second_bounce":
+                assert trace.ender == "policy_never_reached"
+
+    def test_recipe_does_not_enable_npoint_yet(self):
+        from courtside_dynamics.recipes import RECIPES
+
+        assert "points_per_episode" not in RECIPES["PaddleTennis"].env_kwargs
+
+    def test_np3_floor_constants_pin(self):
+        """The n-point certification's pre-registered contract: the
+        reserved block and the floors frozen from NP2's band before
+        the block was opened (design doc §4a). Constants only — the
+        reserved seeds are never drawn here."""
+        from tools.paddle_tennis_npoint_probe import (
+            NP3_CERT_EPISODES,
+            NP3_CERT_SEED_START,
+            NP3_COMPLETED_POINTS_FLOOR,
+            NP3_MEAN_CROSSINGS_FLOOR,
+            NP3_NUDGE_RATE_CEILING,
+            PROBE_SEED_START,
+        )
+
+        assert NP3_CERT_SEED_START == 4300
+        assert NP3_CERT_EPISODES == 100
+        assert NP3_MEAN_CROSSINGS_FLOOR == 9.0
+        assert NP3_COMPLETED_POINTS_FLOOR == 50
+        assert NP3_NUDGE_RATE_CEILING == 0.02
+        assert PROBE_SEED_START == 5400
+
+    def test_l2_toml_spelling_reaches_both_envs(self, tmp_path):
+        """The L2 pilot's TOML contract: TOML has no null, so the
+        run-config loader's ``"none"`` sentinel is the fill-the-cap
+        spelling — it must reach the training AND eval env
+        constructors as Python ``None``."""
+        from courtside_dynamics.recipes import build_train_config
+
+        config = tmp_path / "npoint_pilot.toml"
+        config.write_text(
+            '[env]\npoints_per_episode = "none"\ncontact_shaping = 0.25\n'
+        )
+        cfg = build_train_config(
+            "PaddleTennis",
+            total_timesteps=1_000,
+            log_dir=str(tmp_path / "run"),
+            config_file=str(config),
+        )
+        for factory in (cfg.env_fn, cfg.eval_env_fn or cfg.env_fn):
+            env = factory()
+            try:
+                assert env.points_per_episode is None
+                assert env.contact_shaping == 0.25
+            finally:
+                env.close()
+
+
 class TestCertificationHarness:
     """The held-out certification instrument stays runnable and its
     pre-registered contract stays pinned. The real verdict (seeds
@@ -916,9 +1160,7 @@ class TestCertificationHarness:
     def test_certify_smoke_on_calibration_seeds(self):
         from tools.paddle_tennis_probes import certify_frozen_env
 
-        result = certify_frozen_env(
-            episodes=2, seed_start=_SMOKE_SEEDS[0]
-        )
+        result = certify_frozen_env(episodes=2, seed_start=_SMOKE_SEEDS[0])
         assert result.episodes == 2
         assert result.serve_side_a_fraction == 0.5
         assert result.unsafe_terminations == 0
@@ -934,9 +1176,7 @@ class TestDeterminism:
                 obs, _ = env.reset(seed=seed)
                 steps = [obs]
                 for _ in range(120):
-                    obs, _, term, trunc, _ = env.step(
-                        scripted_ground_opponent(obs)
-                    )
+                    obs, _, term, trunc, _ = env.step(scripted_ground_opponent(obs))
                     steps.append(obs)
                     if term or trunc:
                         break

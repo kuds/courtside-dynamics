@@ -56,6 +56,7 @@ Recipes normalize the continuous physical block ``[0:24]`` and leave
 the bounded tail raw (the humanoid convention: freshly active flags
 must not inherit near-zero variance from a transferred normalizer).
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -199,14 +200,9 @@ _CONTACT_CHANNEL_LABELS = (
 )
 _CONTACT_NAMES = tuple(
     f"contact_latched_{label}" for label in _CONTACT_CHANNEL_LABELS
-) + tuple(
-    f"contact_release_progress_{label}"
-    for label in _CONTACT_CHANNEL_LABELS
-)
+) + tuple(f"contact_release_progress_{label}" for label in _CONTACT_CHANNEL_LABELS)
 
-PADDLE_TENNIS_OBSERVATION_NAMES = (
-    _PHYSICAL_NAMES + _RALLY_NAMES + _CONTACT_NAMES
-)
+PADDLE_TENNIS_OBSERVATION_NAMES = _PHYSICAL_NAMES + _RALLY_NAMES + _CONTACT_NAMES
 
 #: Slice of the observation the recipes normalize (the continuous
 #: physical block); the bounded rally/contact tail stays raw.
@@ -237,6 +233,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         fault_penalty: float = 1.0,
         unsafe_physics_penalty: float = 2.0,
         contact_shaping: float = 0.0,
+        points_per_episode: int | None = 1,
         **kwargs: Any,
     ) -> None:
         utils.EzPickle.__init__(
@@ -250,20 +247,16 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             fault_penalty=fault_penalty,
             unsafe_physics_penalty=unsafe_physics_penalty,
             contact_shaping=contact_shaping,
+            points_per_episode=points_per_episode,
             **kwargs,
         )
         if volley_rule not in self._VOLLEY_RULES:
             raise ValueError(
-                f"volley_rule must be one of {self._VOLLEY_RULES}, "
-                f"got {volley_rule!r}"
+                f"volley_rule must be one of {self._VOLLEY_RULES}, got {volley_rule!r}"
             )
         self.volley_rule = volley_rule
-        self.return_reward = finite_nonnegative(
-            "return_reward", return_reward
-        )
-        self.fault_penalty = finite_nonnegative(
-            "fault_penalty", fault_penalty
-        )
+        self.return_reward = finite_nonnegative("return_reward", return_reward)
+        self.fault_penalty = finite_nonnegative("fault_penalty", fault_penalty)
         self.unsafe_physics_penalty = finite_nonnegative(
             "unsafe_physics_penalty", unsafe_physics_penalty
         )
@@ -271,10 +264,29 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         # frozen task definition — docs/design_paddle_tennis_contact_shaping.md):
         # pay at a legal policy hit, keep on that hit's confirmed
         # return, claw back on EVERY episode ending.
-        self.contact_shaping = finite_nonnegative(
-            "contact_shaping", contact_shaping
-        )
+        self.contact_shaping = finite_nonnegative("contact_shaping", contact_shaping)
         self._pending_shaping = 0.0
+        # n-point continuous play (docs/design_paddle_tennis_npoint.md):
+        # 1 = the frozen one-point episode (default, bit-identical);
+        # None = as many points as fit the step cap; ints >= 2 exist
+        # for probes. Rally faults inside a multi-point episode pay
+        # their penalty and relaunch the next point with both paddles
+        # where play left them.
+        if points_per_episode is not None:
+            if (
+                isinstance(points_per_episode, bool)
+                or not isinstance(points_per_episode, int)
+                or points_per_episode < 1
+            ):
+                raise ValueError(
+                    "points_per_episode must be None or an int >= 1, "
+                    f"got {points_per_episode!r}"
+                )
+        self.points_per_episode = points_per_episode
+        self._points_played = 0
+        self._crossings_base = 0
+        self._point_serve_nudged = 0
+        self._point_end_counts: dict[str, int] = {}
         self.serve_config = serve_config or PaddleCourtServe()
         # The default opponent plays by the active rules: the
         # bounce-waiting oracle under ground rules, the frozen
@@ -305,8 +317,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         # carries both sides' actuators, so the public action space is
         # NOT MuJoCo's default.
         compiled = tuple(
-            self.model.actuator(index).name
-            for index in range(self.model.nu)
+            self.model.actuator(index).name for index in range(self.model.nu)
         )
         expected = tuple(
             f"player_{side}_target_{axis}"
@@ -314,12 +325,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             for axis in ("x", "y", "z")
         )
         if compiled != expected:
-            raise ValueError(
-                "paddle_court actuator order differs from the public API"
-            )
-        self.action_space = Box(
-            low=-1.0, high=1.0, shape=(3,), dtype=np.float32
-        )
+            raise ValueError("paddle_court actuator order differs from the public API")
+        self.action_space = Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
 
         mujoco.mj_forward(self.model, self.data)
         self._paddles = {
@@ -386,26 +393,17 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         # reset.
         court_sites = tuple(
             name
-            for name in (
-                self.model.site(i).name for i in range(self.model.nsite)
-            )
+            for name in (self.model.site(i).name for i in range(self.model.nsite))
             if name.startswith("court_")
         )
         self._court_preset_sites = ("court_line_serve_a", "court_line_serve_b")
-        missing = [
-            name
-            for name in self._court_preset_sites
-            if name not in court_sites
-        ]
+        missing = [name for name in self._court_preset_sites if name not in court_sites]
         if missing:
             raise ValueError(
-                f"paddle_court.xml is missing preset marker site(s) "
-                f"{missing}"
+                f"paddle_court.xml is missing preset marker site(s) {missing}"
             )
         self._court_tennis_sites = tuple(
-            name
-            for name in court_sites
-            if name.startswith("court_tennis_")
+            name for name in court_sites if name.startswith("court_tennis_")
         )
         self._court_static_sites = tuple(
             name
@@ -414,8 +412,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             and name not in self._court_preset_sites
         )
         self._court_marker_alpha = {
-            name: float(self.model.site(name).rgba[3])
-            for name in court_sites
+            name: float(self.model.site(name).rgba[3]) for name in court_sites
         }
         self._refresh_court_markers()
 
@@ -438,8 +435,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             value = "none"
         if value not in self._COURT_STYLES:
             raise ValueError(
-                f"court_style must be one of {self._COURT_STYLES}, "
-                f"got {value!r}"
+                f"court_style must be one of {self._COURT_STYLES}, got {value!r}"
             )
         self._court_style = value
 
@@ -473,25 +469,17 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
     # -- observations (side-relative; P4-pinned mirroring) ----------------
 
     def _ball_position(self) -> np.ndarray:
-        return self.data.qpos[
-            self._ball_qposadr : self._ball_qposadr + 3
-        ].copy()
+        return self.data.qpos[self._ball_qposadr : self._ball_qposadr + 3].copy()
 
     def _ball_velocity(self) -> np.ndarray:
-        return self.data.qvel[
-            self._ball_dofadr : self._ball_dofadr + 3
-        ].copy()
+        return self.data.qvel[self._ball_dofadr : self._ball_dofadr + 3].copy()
 
     def _ball_angular_velocity(self) -> np.ndarray:
-        return self.data.qvel[
-            self._ball_dofadr + 3 : self._ball_dofadr + 6
-        ].copy()
+        return self.data.qvel[self._ball_dofadr + 3 : self._ball_dofadr + 6].copy()
 
     def _paddle_position(self, side: CourtSide) -> np.ndarray:
         head = "player_a_head" if side is CourtSide.A else "player_b_head"
-        return np.asarray(
-            self.data.body(head).xpos, dtype=np.float64
-        ).copy()
+        return np.asarray(self.data.body(head).xpos, dtype=np.float64).copy()
 
     def _paddle_velocity(self, side: CourtSide) -> np.ndarray:
         joints = (
@@ -505,9 +493,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         )
         return np.array(
             [
-                float(
-                    self.data.qvel[int(self.model.joint(name).dofadr[0])]
-                )
+                float(self.data.qvel[int(self.model.joint(name).dofadr[0])])
                 for name in joints
             ],
             dtype=np.float64,
@@ -553,9 +539,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             dtype=np.float64,
         )
 
-        markov = np.asarray(
-            self._event_sampler.markov_state(), dtype=np.float64
-        )
+        markov = np.asarray(self._event_sampler.markov_state(), dtype=np.float64)
         channel_count = len(TENNIS_CONTACT_CHANNELS)
         indices = (
             _LIVE_CHANNEL_INDICES
@@ -575,9 +559,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
 
     # -- stepping ----------------------------------------------------------
 
-    def _apply_side_action(
-        self, side: CourtSide, local_action: np.ndarray
-    ) -> None:
+    def _apply_side_action(self, side: CourtSide, local_action: np.ndarray) -> None:
         world_action = mirror_for_side(
             np.asarray(local_action, dtype=np.float64).copy(), side
         )
@@ -623,8 +605,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         action = np.asarray(a, dtype=np.float64)
         if action.shape != self.action_space.shape:
             raise ValueError(
-                f"action must have shape {self.action_space.shape}, "
-                f"got {action.shape}"
+                f"action must have shape {self.action_space.shape}, got {action.shape}"
             )
         if not bool(np.isfinite(action).all()):
             # Never step physics from a blown-up policy/wrapper: end
@@ -636,9 +617,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         # The opponent reads its side-local view BEFORE physics, like
         # the policy did (both act on the same pre-step state).
         opponent_action = np.asarray(
-            self.opponent_controller(
-                self.observation_for_side(CourtSide.B)
-            ),
+            self.opponent_controller(self.observation_for_side(CourtSide.B)),
             dtype=np.float64,
         )
         if opponent_action.shape != (3,) or not bool(
@@ -649,9 +628,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
                 f"shape (3,), got {opponent_action!r}"
             )
         self._apply_side_action(CourtSide.A, np.clip(action, -1.0, 1.0))
-        self._apply_side_action(
-            CourtSide.B, np.clip(opponent_action, -1.0, 1.0)
-        )
+        self._apply_side_action(CourtSide.B, np.clip(opponent_action, -1.0, 1.0))
         # Not gymnasium's do_simulation: its ctrl-shape gate compares
         # against model.nu (both sides' actuators), but the public
         # action is one side's three targets and both controls were
@@ -666,14 +643,12 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         )
         self._last_transition = transition
         after = transition.after
-        self._crossings = max(
+        self._crossings = self._crossings_base + max(
             0,
             int(after.net_crossing_count) - int(after.feed_crossed_net),
         )
 
-        rew_return = self.return_reward * len(
-            transition.confirmed_returns
-        )
+        rew_return = self.return_reward * len(transition.confirmed_returns)
         rew_fault = 0.0
         rew_unsafe = 0.0
         if transition.terminated_now:
@@ -705,23 +680,59 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             rew_unsafe = -self.unsafe_physics_penalty
 
         # The reward is final only after the ending is resolved: the
-        # escrow claws back on EVERY ending path, truncation included
-        # (the design contract in
-        # docs/design_paddle_tennis_contact_shaping.md §2).
+        # escrow claws back on EVERY ending path — episode endings and
+        # (under n-point play) point boundaries alike
+        # (docs/design_paddle_tennis_contact_shaping.md §2,
+        # docs/design_paddle_tennis_npoint.md §2).
         terminated = bool(after.terminated or nonfinite)
-        truncated = bool(
-            not terminated and self.step_number >= self.episode_len
+        point_completed = bool(
+            terminated
+            and not nonfinite
+            and transition.terminated_now
+            and after.termination_reason not in _UNSAFE_REASONS
         )
+        absorbed_point = point_completed and self._points_remaining()
+        if absorbed_point:
+            terminated = False
+        truncated = bool(not terminated and self.step_number >= self.episode_len)
         rew_shaping_clawback = 0.0
-        if terminated or truncated:
+        if absorbed_point or terminated or truncated:
             rew_shaping_clawback = -self._pending_shaping
             self._pending_shaping = 0.0
+        serving_side_of_step = self._serving_side
+        if point_completed:
+            # Every completed point enters the durable counters —
+            # including the episode-ending fault point under a finite
+            # points_per_episode (points_played is "completed points
+            # only", the design's sole exclusion being the
+            # truncation-cut partial).
+            self._record_point_end(after.termination_reason)
+            self._crossings_base = self._crossings
+            self._points_played += 1
+        if absorbed_point:
+            # The boundary absorbs: if the cap has not been reached,
+            # flip the server and relaunch per the design's protocol
+            # (clear, teleport, re-prime; the flip belongs to the
+            # launch so alternation stays consistent across the
+            # episode boundary too).
+            if not truncated:
+                self._serving_side = self._next_serving_side
+                self._next_serving_side = self._serving_side.opponent
+                self._launch_point(mid_episode=True)
+                relaunch_observation = self._get_obs()
+                relaunch_nonfinite = not bool(np.isfinite(relaunch_observation).all())
+                obs = self._record_or_echo_observation(
+                    relaunch_observation, relaunch_nonfinite
+                )
+                if relaunch_nonfinite:
+                    # A nonfinite relaunch is an unsafe ending like
+                    # any other (vanishing rare: a fresh serve from a
+                    # finite state).
+                    terminated = True
+                    forced_nonfinite = True
+                    rew_unsafe = -self.unsafe_physics_penalty
         reward = (
-            rew_return
-            + rew_fault
-            + rew_unsafe
-            + rew_shaping
-            + rew_shaping_clawback
+            rew_return + rew_fault + rew_unsafe + rew_shaping + rew_shaping_clawback
         )
         info = self._build_info(
             transition,
@@ -732,8 +743,23 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             rew_shaping_clawback=rew_shaping_clawback,
             truncated=truncated,
             forced_nonfinite=forced_nonfinite,
+            absorbed_point=absorbed_point,
+            serving_side=serving_side_of_step,
         )
         return obs, float(reward), terminated, truncated, info
+
+    def _points_remaining(self) -> bool:
+        """More points may launch in this episode after the current one."""
+        if self.points_per_episode is None:
+            return True
+        return self._points_played + 1 < self.points_per_episode
+
+    def _record_point_end(self, reason: TerminationReason) -> None:
+        for name, reasons in _TERM_GROUPS:
+            if reason in reasons:
+                key = "point_end_" + name.removeprefix("term_")
+                self._point_end_counts[key] = self._point_end_counts.get(key, 0) + 1
+                return
 
     def _nonfinite_termination(self):
         """End the episode without physics on a nonfinite action/state."""
@@ -783,6 +809,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         rew_shaping_clawback: float,
         truncated: bool,
         forced_nonfinite: bool = False,
+        absorbed_point: bool = False,
+        serving_side: CourtSide | None = None,
     ) -> dict[str, Any]:
         if transition is not None:
             info = transition.to_info()
@@ -792,34 +820,53 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             reason = TerminationReason.NONE
         if forced_nonfinite:
             reason = TerminationReason.NONFINITE_STATE
+        elif absorbed_point:
+            # The env's group flags are strictly episode-ending
+            # descriptors (npoint design §2): an absorbed point
+            # boundary is not an episode ending. The rules snapshot's
+            # own keys in ``info`` still describe the point's fault;
+            # the durable record is the point_end_* counters.
+            reason = TerminationReason.NONE
+        # On absorbed-boundary steps the server has already flipped
+        # for the relaunched point; serve_side_is_policy must agree
+        # with the snapshot's serve_side keys, which describe the
+        # step's own (just-ended) point — so step() passes the
+        # pre-flip side.
+        side = serving_side if serving_side is not None else self._serving_side
         info.update(
             {
                 "crossings": self._crossings,
-                "serve_side_is_policy": (
-                    1.0 if self._serving_side is CourtSide.A else 0.0
-                ),
+                "serve_side_is_policy": (1.0 if side is CourtSide.A else 0.0),
                 "rew_return": rew_return,
                 "rew_fault": rew_fault,
                 "rew_unsafe": rew_unsafe,
                 "rew_shaping": rew_shaping,
                 "rew_shaping_clawback": rew_shaping_clawback,
                 "term_timeout": 1.0 if truncated else 0.0,
+                "points_played": float(self._points_played),
+                "completed_point_crossings": float(self._crossings_base),
+                "point_serve_nudged": float(self._point_serve_nudged),
             }
         )
         for name, reasons in _TERM_GROUPS:
             info[name] = 1.0 if reason in reasons else 0.0
+            if name != "term_nonfinite":
+                key = "point_end_" + name.removeprefix("term_")
+                info[key] = float(self._point_end_counts.get(key, 0))
         return info
 
     # -- reset -------------------------------------------------------------
 
-    def reset_model(self):
-        self.step_number = 0
-        self._crossings = 0
-        self._pending_shaping = 0.0
-        self._last_transition = None
-        self._serving_side = self._next_serving_side
-        self._next_serving_side = self._serving_side.opponent
+    #: Point-relaunch clearance (docs/design_paddle_tennis_npoint.md
+    #: §2): the drawn serve origin must sit at least this far from
+    #: both paddle heads, or the draw is retried; after the retries a
+    #: minimal displacement of the offending paddle is the sanctioned
+    #: exception to carryover (counted in ``point_serve_nudged``).
+    _SERVE_CLEARANCE = 0.45
+    _SERVE_REDRAWS = 10
 
+    def _draw_serve(self) -> tuple[np.ndarray, np.ndarray]:
+        """One jittered serve draw in world frame for the serving side."""
         serve = self.serve_config
         rng = self.np_random
         position_noise = rng.uniform(
@@ -864,9 +911,73 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         )
         mirror_for_side(position, self._serving_side)
         mirror_for_side(velocity, self._serving_side)
+        return position, velocity
 
-        qpos = self.init_qpos.copy()
-        qvel = self.init_qvel.copy()
+    def _clear_launch_envelope(self, position: np.ndarray) -> bool:
+        """True when both paddle heads clear the drawn serve origin."""
+        for side in (CourtSide.A, CourtSide.B):
+            head = self._paddle_position(side)
+            if float(np.linalg.norm(head - position)) < self._SERVE_CLEARANCE:
+                return False
+        return True
+
+    def _nudge_paddle_clear(self, position: np.ndarray) -> None:
+        """Displace any paddle inside the launch envelope minimally out.
+
+        The one sanctioned exception to carryover; the moved paddle's
+        joint velocities are zeroed so it cannot re-enter the envelope
+        in the same instant.
+        """
+        for side, names in (
+            (
+                CourtSide.A,
+                ("player_a_slide_x", "player_a_slide_y", "player_a_slide_z"),
+            ),
+            (
+                CourtSide.B,
+                ("player_b_slide_x", "player_b_slide_y", "player_b_slide_z"),
+            ),
+        ):
+            head = self._paddle_position(side)
+            offset = head - position
+            distance = float(np.linalg.norm(offset))
+            if distance >= self._SERVE_CLEARANCE:
+                continue
+            direction = (
+                offset / distance if distance > 1e-9 else np.array([0.0, 0.0, 1.0])
+            )
+            world_delta = direction * (self._SERVE_CLEARANCE - distance + 1e-3)
+            for name in names:
+                joint = self.model.joint(name)
+                axis = np.asarray(self.data.joint(name).xaxis, dtype=np.float64)
+                self.data.qpos[int(joint.qposadr[0])] += float(world_delta @ axis)
+                self.data.qvel[int(joint.dofadr[0])] = 0.0
+
+    def _launch_point(self, *, mid_episode: bool) -> None:
+        """Start a point: draw + clearance, place the ball, fresh rules.
+
+        On the episode reset path (``mid_episode=False``) the whole
+        state is rebuilt from the init template — the frozen one-point
+        behavior, bit-identical to the pre-amendment env. Mid-episode
+        the ball alone is teleported to the cleared draw and the
+        paddles stay exactly where play left them (the design's
+        carryover), with the ordering the design pins: clear, teleport,
+        THEN re-prime the event sampler from the new state.
+        """
+        position, velocity = self._draw_serve()
+        if mid_episode:
+            for _ in range(self._SERVE_REDRAWS):
+                if self._clear_launch_envelope(position):
+                    break
+                position, velocity = self._draw_serve()
+            if not self._clear_launch_envelope(position):
+                self._nudge_paddle_clear(position)
+                self._point_serve_nudged += 1
+            qpos = self.data.qpos.copy()
+            qvel = self.data.qvel.copy()
+        else:
+            qpos = self.init_qpos.copy()
+            qvel = self.init_qvel.copy()
         qpos[self._ball_qposadr : self._ball_qposadr + 3] = position
         qpos[self._ball_qposadr + 3 : self._ball_qposadr + 7] = [
             1.0,
@@ -883,11 +994,23 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             rules=self._rally_rules,
             court=PADDLE_COURT,
         )
-        self._event_sampler.reset(
-            self.data, ball_side=self._serving_side
-        )
+        self._event_sampler.reset(self.data, ball_side=self._serving_side)
         self._latest_event_batch = None
         self._last_serve_state = (position.copy(), velocity.copy())
+
+    def reset_model(self):
+        self.step_number = 0
+        self._crossings = 0
+        self._crossings_base = 0
+        self._points_played = 0
+        self._point_serve_nudged = 0
+        self._point_end_counts = {}
+        self._pending_shaping = 0.0
+        self._last_transition = None
+        self._serving_side = self._next_serving_side
+        self._next_serving_side = self._serving_side.opponent
+
+        self._launch_point(mid_episode=False)
         self._refresh_court_markers()
 
         observation = self._get_obs()
@@ -901,9 +1024,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         position, velocity = self._last_serve_state
         return {
             "serve_side": self._serving_side.label,
-            "serve_side_is_policy": (
-                1.0 if self._serving_side is CourtSide.A else 0.0
-            ),
+            "serve_side_is_policy": (1.0 if self._serving_side is CourtSide.A else 0.0),
             # Full initial ball state, so recordings and audits can
             # reproduce the exact serve (the humanoid contract, and the
             # wall-ball review lesson: serve draws must be recoverable

@@ -11,6 +11,7 @@ The notebook picks a recipe name and may override its algorithm explicitly;
 otherwise each recipe's default algorithm and worker count survive. Adding a
 new env is one entry in :data:`RECIPES`; the notebook needs no edits.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -68,11 +69,23 @@ def _ball_bounce_info_row(
 
 
 _BALL_BOUNCE_CSV_HEADER = [
-    "ball_velocity_x", "ball_velocity_y", "ball_velocity_z",
-    "ball_accelerometer_x", "ball_accelerometer_y", "ball_accelerometer_z",
-    "from_to_x1", "from_to_y1", "from_to_z1",
-    "from_to_x2", "from_to_y2", "from_to_z2",
-    "bounce_count", "touch_sensor", "reward", "total_reward", "done",
+    "ball_velocity_x",
+    "ball_velocity_y",
+    "ball_velocity_z",
+    "ball_accelerometer_x",
+    "ball_accelerometer_y",
+    "ball_accelerometer_z",
+    "from_to_x1",
+    "from_to_y1",
+    "from_to_z1",
+    "from_to_x2",
+    "from_to_y2",
+    "from_to_z2",
+    "bounce_count",
+    "touch_sensor",
+    "reward",
+    "total_reward",
+    "done",
 ]
 
 
@@ -109,7 +122,9 @@ _HUMANOID_TENNIS_CSV_KEYS = (
 )
 _HUMANOID_TENNIS_CSV_HEADER = [
     *_HUMANOID_TENNIS_CSV_KEYS,
-    "reward", "total_reward", "done",
+    "reward",
+    "total_reward",
+    "done",
 ]
 
 _HUMANOID_TENNIS_CURRICULUM_CSV_KEYS = (
@@ -129,7 +144,9 @@ _HUMANOID_TENNIS_CURRICULUM_CSV_KEYS = (
 _HUMANOID_TENNIS_CURRICULUM_CSV_HEADER = [
     *_HUMANOID_TENNIS_CSV_KEYS,
     *_HUMANOID_TENNIS_CURRICULUM_CSV_KEYS,
-    "reward", "total_reward", "done",
+    "reward",
+    "total_reward",
+    "done",
 ]
 
 
@@ -229,10 +246,15 @@ _PADDLE_TENNIS_CSV_KEYS = (
     "rew_unsafe",
     "rew_shaping",
     "rew_shaping_clawback",
+    "points_played",
+    "completed_point_crossings",
+    "point_serve_nudged",
 )
 _PADDLE_TENNIS_CSV_HEADER = [
     *_PADDLE_TENNIS_CSV_KEYS,
-    "reward", "total_reward", "done",
+    "reward",
+    "total_reward",
+    "done",
 ]
 
 
@@ -265,6 +287,20 @@ _PADDLE_TENNIS_TERMINAL_EVAL_KEYS = (
     "term_volley",
     "term_nonfinite",
     "term_timeout",
+    # n-point era counters (cumulative per-episode, so the terminal
+    # read gives episode totals; under the frozen one-point default a
+    # fault-ended episode records its single completed point and a
+    # truncation-cut one records zero).
+    "points_played",
+    "completed_point_crossings",
+    "point_serve_nudged",
+    "point_end_out_of_bounds",
+    "point_end_ball_net",
+    "point_end_second_bounce",
+    "point_end_failed_to_cross",
+    "point_end_illegal_hit",
+    "point_end_net_touch",
+    "point_end_volley",
 )
 
 # Same rationale as the humanoid exclusions above: normalize only the
@@ -292,9 +328,7 @@ def _tennis_curriculum_extra_cfg(
     return {
         "n_envs": 1,
         "early_stop_patience": early_stop_patience,
-        "normalize_obs_excluded_indices": (
-            _HUMANOID_TENNIS_NORMALIZATION_EXCLUSIONS
-        ),
+        "normalize_obs_excluded_indices": (_HUMANOID_TENNIS_NORMALIZATION_EXCLUSIONS),
         # The stage reward is hand-scaled and sparse: terminal outcomes
         # in {-2, -1, 0, +1}, plus (stages 1-2) an escrowed +/-0.25
         # contact pulse that commits on success and claws back otherwise.
@@ -327,9 +361,7 @@ def _tennis_curriculum_extra_cfg(
             "valid_return_rate",
             "legal_hit_count",
         ),
-        "info_eval_terminal_keys": (
-            _HUMANOID_TENNIS_CURRICULUM_TERMINAL_EVAL_KEYS
-        ),
+        "info_eval_terminal_keys": (_HUMANOID_TENNIS_CURRICULUM_TERMINAL_EVAL_KEYS),
         "info_eval_distribution_keys": ("rally_count",),
         "success_key": "stage_success",
         "success_threshold": 1.0,
@@ -411,9 +443,7 @@ RECIPES: dict[str, Recipe] = {
             ),
             "info_eval_distribution_keys": ("bounce_count",),
         },
-        description=(
-            "Deliberately juggle a ball from the top face of a 6-DOF paddle."
-        ),
+        description=("Deliberately juggle a ball from the top face of a 6-DOF paddle."),
     ),
     "WallBall": Recipe(
         env_cls=WallBallEnv,
@@ -815,12 +845,12 @@ RECIPES: dict[str, Recipe] = {
             # the goal, so 100% of audited episodes returned the serve
             # and then had no runway to re-load -- the measured cause of
             # the 1.14-return plateau. Every stage now clears >= 1.3 m.
-# 2.1 m is the widest constant width that still leaves the
-# ladder without an all-stage refuge: the fence travels 2.4 m
-# back (-2.3 -> -4.7), so any width >= 2.4 would hand every
-# stage a shared front-court interval again -- the exact flaw
-# run 20260722_124613 exposed. 2.1 keeps a 0.3 m separation,
-# matching the ladder it replaces.
+            # 2.1 m is the widest constant width that still leaves the
+            # ladder without an all-stage refuge: the fence travels 2.4 m
+            # back (-2.3 -> -4.7), so any width >= 2.4 would hand every
+            # stage a shared front-court interval again -- the exact flaw
+            # run 20260722_124613 exposed. 2.1 keeps a 0.3 m separation,
+            # matching the ladder it replaces.
             "paddle_x_fence": (-2.3, -0.2),
             "paddle_start_x": -1.6,
             # Serve energy co-moves with depth via the gate (5.2 -> 7.0)
@@ -1112,9 +1142,7 @@ RECIPES: dict[str, Recipe] = {
                 "target_entropy": -1.5,
                 "train_freq": (64, "step"),
             },
-            "normalize_obs_excluded_indices": (
-                _PADDLE_TENNIS_NORMALIZATION_EXCLUSIONS
-            ),
+            "normalize_obs_excluded_indices": (_PADDLE_TENNIS_NORMALIZATION_EXCLUSIONS),
             "csv_header": _PADDLE_TENNIS_CSV_HEADER,
             "info_row_fn": _paddle_tennis_info_row,
             # An eval episode "succeeds" once any return crosses the
@@ -1180,9 +1208,7 @@ RECIPES: dict[str, Recipe] = {
         default_algo="PPO",
         name_prefix="humanoid_tennis_stage0_intercept",
         # patience 8 of a 20-eval budget: earliest stop at eval 16.
-        extra_cfg=_tennis_curriculum_extra_cfg(
-            video_length=150, early_stop_patience=8
-        ),
+        extra_cfg=_tennis_curriculum_extra_cfg(video_length=150, early_stop_patience=8),
         description=(
             "Experimental fixed-pelvis, two-shoulder physical intercept task. "
             "Success is the first legal racket contact; convergence is not "
@@ -1408,9 +1434,7 @@ def _make_goal_rally(base: Recipe) -> Recipe:
     )
 
 
-RECIPES["WallBallGoalRally"] = _make_goal_rally(
-    RECIPES["WallBallDepthCurriculum"]
-)
+RECIPES["WallBallGoalRally"] = _make_goal_rally(RECIPES["WallBallDepthCurriculum"])
 
 
 def _make_true_baseline(base: Recipe) -> Recipe:
@@ -1518,9 +1542,7 @@ def _make_true_baseline(base: Recipe) -> Recipe:
     )
 
 
-RECIPES["WallBallTrueBaseline"] = _make_true_baseline(
-    RECIPES["WallBallGoalRally"]
-)
+RECIPES["WallBallTrueBaseline"] = _make_true_baseline(RECIPES["WallBallGoalRally"])
 
 
 # Quick-test overrides applied on top of the recipe defaults so a notebook
@@ -1644,9 +1666,7 @@ def build_train_config(
         and win over every other layer.
     """
     if env_name not in RECIPES:
-        raise KeyError(
-            f"Unknown env '{env_name}'. Choose one of {sorted(RECIPES)}."
-        )
+        raise KeyError(f"Unknown env '{env_name}'. Choose one of {sorted(RECIPES)}.")
     if "run_config_file" in overrides:
         raise ValueError(
             "run_config_file is set by build_train_config itself and "
