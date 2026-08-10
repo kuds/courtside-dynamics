@@ -320,11 +320,19 @@ original H1, one rung up the ladder.
 unpaid because nothing after the swing matters until the ball
 returns. n-point episodes fix this *only if paddle positions carry
 over between points* (no re-park between points): then post-swing
-wander in point k directly costs point k+1's serve-return — a +1.25
-the policy already knows how to collect at 100%. Carryover turns
-the recovery problem from never-sampled k=2 credit into
-densely-sampled inter-point credit, and it is therefore the load-
-bearing design decision the n-point probe must freeze first.
+wander in point k directly costs point k+1's k=1 credit — under
+strict alternation, the 100%-collected receiving serve-return on
+half the boundaries and the 53%-collected serving-side reply on the
+other half (the archetypal receiving-point wander is followed by a
+policy-served point, so the weaker channel covers exactly that
+case). Carryover turns the recovery problem from never-sampled k=2
+credit into already-sampled inter-point credit, and it is therefore
+the load-bearing design decision the n-point probe must freeze
+first.
+
+> **Status update, 2026-08-10:** the n-point era is designed with
+> exactly that carryover requirement frozen first —
+> [`design_paddle_tennis_npoint.md`](design_paddle_tennis_npoint.md).
 
 ## 6. What this is not
 
