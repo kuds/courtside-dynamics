@@ -63,6 +63,15 @@ def test_sac_respects_explicit_gradient_steps(env, tmp_path):
     assert model.gradient_steps == 2
 
 
+def test_sac_train_freq_list_from_toml_is_coerced_to_tuple(env, tmp_path):
+    """A TOML ``train_freq = [64, "step"]`` arrives as a list, which SB3
+    rejects at construction; the chokepoint coerces so a run-config
+    override cannot fail late inside ``train()``."""
+    model = _build_algo("SAC", env, str(tmp_path), train_freq=[4, "step"])
+    assert model.train_freq.frequency == 4
+    assert model.train_freq.unit.value == "step"
+
+
 def test_ppo_does_not_receive_gradient_steps(env, tmp_path):
     """PPO is on-policy and has no ``gradient_steps``; building must not
     error from the SAC-only default leaking through."""

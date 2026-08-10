@@ -58,6 +58,10 @@ therefore uninformative about its own actions.
 
 ## 3. What this points at (for the next probed change — not shipped here)
 
+> **Status update, 2026-08-08:** #1 has since shipped as the recipe's
+> exploration package with its pilot pre-registered —
+> [`paddle_tennis_exploration_20260808.md`](paddle_tennis_exploration_20260808.md).
+
 Ranked, per the evidence and the repo's lessons:
 
 1. **Sustained exploration** — an entropy floor (fixed small

@@ -18,8 +18,12 @@ n_envs = 8
 early_stop_patience = 20  # evals without a new best before stopping
 eval_freq = 25_000        # steps per env between eval batches
 
-# The recipe uses SB3 SAC defaults; uncomment to tune (deep-merged, so
-# one key at a time is safe).
+# The recipe pins the ground-era exploration package (gSDE with a
+# 64-step noise hold, auto-entropy from a raised -1.5 target;
+# docs/paddle_tennis_exploration_20260808.md): use_sde=true,
+# ent_coef="auto_0.02", target_entropy=-1.5, train_freq=[64, "step"].
+# Other model kwargs are SB3 SAC defaults. Uncomment to tune
+# (deep-merged, so one key at a time is safe).
 # [train.model_kwargs]
 # gamma = 0.99
 # learning_rate = 3e-4

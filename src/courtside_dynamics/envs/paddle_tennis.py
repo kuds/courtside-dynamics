@@ -236,6 +236,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         return_reward: float = 1.0,
         fault_penalty: float = 1.0,
         unsafe_physics_penalty: float = 2.0,
+        contact_shaping: float = 0.0,
         **kwargs: Any,
     ) -> None:
         utils.EzPickle.__init__(
@@ -248,6 +249,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             return_reward=return_reward,
             fault_penalty=fault_penalty,
             unsafe_physics_penalty=unsafe_physics_penalty,
+            contact_shaping=contact_shaping,
             **kwargs,
         )
         if volley_rule not in self._VOLLEY_RULES:
@@ -265,6 +267,14 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.unsafe_physics_penalty = finite_nonnegative(
             "unsafe_physics_penalty", unsafe_physics_penalty
         )
+        # Escrowed contact shaping (side A only; default off keeps the
+        # frozen task definition — docs/design_paddle_tennis_contact_shaping.md):
+        # pay at a legal policy hit, keep on that hit's confirmed
+        # return, claw back on EVERY episode ending.
+        self.contact_shaping = finite_nonnegative(
+            "contact_shaping", contact_shaping
+        )
+        self._pending_shaping = 0.0
         self.serve_config = serve_config or PaddleCourtServe()
         # The default opponent plays by the active rules: the
         # bounce-waiting oracle under ground rules, the frozen
@@ -671,7 +681,18 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
                 rew_unsafe = -self.unsafe_physics_penalty
             else:
                 rew_fault = -self.fault_penalty
-        reward = rew_return + rew_fault + rew_unsafe
+
+        # Escrowed contact shaping (side A only): commit a confirmed
+        # advance before opening a new one (a confirm and the next hit
+        # can share a step), pay at hit time. Amounts are exact zeros
+        # when the kwarg is off, so the default reward stream is
+        # bit-identical to the pre-shaping definition.
+        if CourtSide.A in transition.confirmed_returns:
+            self._pending_shaping = 0.0
+        rew_shaping = 0.0
+        if CourtSide.A in transition.valid_racket_hits:
+            rew_shaping = self.contact_shaping
+            self._pending_shaping += self.contact_shaping
 
         raw_observation = self._get_obs()
         nonfinite = not bool(np.isfinite(raw_observation).all())
@@ -682,17 +703,33 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             # termination still ends the episode with the unsafe
             # penalty; the guard means VecNormalize never sees it.
             rew_unsafe = -self.unsafe_physics_penalty
-            reward = rew_return + rew_fault + rew_unsafe
 
+        # The reward is final only after the ending is resolved: the
+        # escrow claws back on EVERY ending path, truncation included
+        # (the design contract in
+        # docs/design_paddle_tennis_contact_shaping.md §2).
         terminated = bool(after.terminated or nonfinite)
         truncated = bool(
             not terminated and self.step_number >= self.episode_len
+        )
+        rew_shaping_clawback = 0.0
+        if terminated or truncated:
+            rew_shaping_clawback = -self._pending_shaping
+            self._pending_shaping = 0.0
+        reward = (
+            rew_return
+            + rew_fault
+            + rew_unsafe
+            + rew_shaping
+            + rew_shaping_clawback
         )
         info = self._build_info(
             transition,
             rew_return=rew_return,
             rew_fault=rew_fault,
             rew_unsafe=rew_unsafe,
+            rew_shaping=rew_shaping,
+            rew_shaping_clawback=rew_shaping_clawback,
             truncated=truncated,
             forced_nonfinite=forced_nonfinite,
         )
@@ -717,15 +754,23 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._last_transition = transition
         obs = self._record_or_echo_observation(self._get_obs(), True)
         rew_unsafe = -self.unsafe_physics_penalty
+        # This guard is an episode ending like any other: a pending
+        # escrow (a hit whose ball was still in flight when the policy
+        # blew up) claws back here too, or the §1 sum identity breaks.
+        rew_shaping_clawback = -self._pending_shaping
+        self._pending_shaping = 0.0
+        reward = rew_unsafe + rew_shaping_clawback
         info = self._build_info(
             transition,
             rew_return=0.0,
             rew_fault=0.0,
             rew_unsafe=rew_unsafe,
+            rew_shaping=0.0,
+            rew_shaping_clawback=rew_shaping_clawback,
             truncated=False,
             forced_nonfinite=True,
         )
-        return obs, float(rew_unsafe), True, False, info
+        return obs, float(reward), True, False, info
 
     def _build_info(
         self,
@@ -734,6 +779,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         rew_return: float,
         rew_fault: float,
         rew_unsafe: float,
+        rew_shaping: float,
+        rew_shaping_clawback: float,
         truncated: bool,
         forced_nonfinite: bool = False,
     ) -> dict[str, Any]:
@@ -754,6 +801,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
                 "rew_return": rew_return,
                 "rew_fault": rew_fault,
                 "rew_unsafe": rew_unsafe,
+                "rew_shaping": rew_shaping,
+                "rew_shaping_clawback": rew_shaping_clawback,
                 "term_timeout": 1.0 if truncated else 0.0,
             }
         )
@@ -766,6 +815,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
     def reset_model(self):
         self.step_number = 0
         self._crossings = 0
+        self._pending_shaping = 0.0
         self._last_transition = None
         self._serving_side = self._next_serving_side
         self._next_serving_side = self._serving_side.opponent

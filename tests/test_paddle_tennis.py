@@ -652,6 +652,248 @@ class TestGuards:
             env.close()
 
 
+class TestRecipeExplorationPackage:
+    """The ground-era exploration remedy is part of the training
+    definition (docs/paddle_tennis_exploration_20260808.md): auto
+    entropy from a safe init with the raised target as the floor,
+    plus gSDE. Pinned so a revert to stock SAC (whose auto-tuning
+    collapsed ent_coef to 5e-5 in the pilot) is a deliberate new
+    comparability decision, not drift."""
+
+    def test_model_kwargs_pin(self):
+        from courtside_dynamics.recipes import RECIPES
+
+        assert RECIPES["PaddleTennis"].extra_cfg["model_kwargs"] == {
+            "use_sde": True,
+            "ent_coef": "auto_0.02",
+            "target_entropy": -1.5,
+            # Without a multi-step train_freq, SAC resets the gSDE
+            # noise matrix every collect (= every step): iid noise.
+            "train_freq": (64, "step"),
+        }
+
+
+_SHAPING_COMPONENTS = (
+    "rew_return",
+    "rew_fault",
+    "rew_unsafe",
+    "rew_shaping",
+    "rew_shaping_clawback",
+)
+
+
+class TestContactShaping:
+    """The escrow contract of design_paddle_tennis_contact_shaping.md:
+    pay at a side-A legal hit, keep on confirm, claw back on EVERY
+    ending path — with the default-off stream bit-identical to the
+    frozen task."""
+
+    @staticmethod
+    def _drive(env, policy, seed, mirror_env=None):
+        """Step ``env`` (and optionally ``mirror_env`` in lockstep)
+        with ``policy``; return per-step info sums and totals."""
+        obs, _ = env.reset(seed=seed)
+        if mirror_env is not None:
+            mirror_obs, _ = mirror_env.reset(seed=seed)
+            np.testing.assert_array_equal(obs, mirror_obs)
+        totals = {"reward": 0.0, "mirror_reward": 0.0}
+        sums = dict.fromkeys(_SHAPING_COMPONENTS, 0.0)
+        confirms = 0
+        while True:
+            action = policy(obs)
+            obs, reward, term, trunc, info = env.step(action)
+            for key in _SHAPING_COMPONENTS:
+                sums[key] += info[key]
+            assert reward == pytest.approx(
+                sum(info[key] for key in _SHAPING_COMPONENTS), abs=1e-12
+            )
+            totals["reward"] += reward
+            confirms += int(bool(info["event_valid_return_a"]))
+            if mirror_env is not None:
+                mirror_obs, mirror_reward, mterm, mtrunc, _ = (
+                    mirror_env.step(action)
+                )
+                np.testing.assert_array_equal(obs, mirror_obs)
+                assert (term, trunc) == (mterm, mtrunc)
+                totals["mirror_reward"] += mirror_reward
+            if term or trunc:
+                return totals, sums, confirms
+
+    def test_escrow_identity_and_default_bit_identity(self):
+        """Shaped-vs-unshaped arms of the same seed are bit-identical
+        trajectories, and the escrow's whole undiscounted effect is
+        exactly 0.25 x side-A confirms."""
+        shaped = PaddleTennisEnv(contact_shaping=0.25)
+        unshaped = PaddleTennisEnv()
+        try:
+            for seed in _SMOKE_SEEDS:
+                totals, sums, confirms = self._drive(
+                    shaped, scripted_ground_opponent, seed, unshaped
+                )
+                expected = 0.25 * confirms
+                assert sums["rew_shaping"] + sums[
+                    "rew_shaping_clawback"
+                ] == pytest.approx(expected, abs=1e-12)
+                assert totals["reward"] - totals[
+                    "mirror_reward"
+                ] == pytest.approx(expected, abs=1e-12)
+        finally:
+            shaped.close()
+            unshaped.close()
+
+    def test_default_off_components_are_exact_zero(self):
+        env = PaddleTennisEnv()
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            for _ in range(50):
+                *_, term, trunc, info = env.step(_zero_action())
+                assert info["rew_shaping"] == 0.0
+                assert info["rew_shaping_clawback"] == 0.0
+                if term or trunc:
+                    break
+        finally:
+            env.close()
+
+    def test_truncation_claws_back_pending_escrow(self):
+        env = PaddleTennisEnv(contact_shaping=0.25, episode_len=3)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            env._pending_shaping = 0.25
+            term = trunc = False
+            info: dict = {}
+            reward = 0.0
+            while not (term or trunc):
+                _obs, reward, term, trunc, info = env.step(_zero_action())
+            # Three zero-action steps cannot end the point (the serve
+            # is still in flight), so the cap must truncate.
+            assert trunc and not term
+            assert info["rew_shaping_clawback"] == -0.25
+            assert info["term_timeout"] == 1.0
+            assert reward == pytest.approx(-0.25)
+            assert env._pending_shaping == 0.0
+        finally:
+            env.close()
+
+    def test_confirmed_advance_survives_cap_truncation(self):
+        """S2 case (b): a confirmed hit's advance is kept — truncation
+        with an empty escrow claws back nothing. Asserted explicitly
+        (not left to a lucky smoke-seed trajectory)."""
+        env = PaddleTennisEnv(contact_shaping=0.25)
+        try:
+            obs, _ = env.reset(seed=_SMOKE_SEEDS[0])
+            confirmed = False
+            for _ in range(env.episode_len):
+                obs, _reward, term, trunc, info = env.step(
+                    scripted_ground_opponent(obs)
+                )
+                assert not (term or trunc), "point ended before a confirm"
+                if bool(info["event_valid_return_a"]) and (
+                    env._pending_shaping == 0.0
+                ):
+                    confirmed = True
+                    break
+            assert confirmed, "ground pair never confirmed a side-A return"
+            env.step_number = env.episode_len
+            _obs, reward, term, trunc, info = env.step(_zero_action())
+            assert trunc and not term
+            assert info["term_timeout"] == 1.0
+            assert info["rew_shaping_clawback"] == 0.0
+            assert reward == pytest.approx(
+                sum(info[key] for key in _SHAPING_COMPONENTS)
+            )
+        finally:
+            env.close()
+
+    def test_nan_action_guard_claws_back_pending_escrow(self):
+        """The early-return guard is an ending like any other (the
+        design's §2 contract): pending escrow claws back next to the
+        unsafe penalty."""
+        env = PaddleTennisEnv(contact_shaping=0.25)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            env._pending_shaping = 0.25
+            obs, reward, term, trunc, info = env.step(
+                np.array([np.nan, 0.0, 0.0])
+            )
+            assert term and not trunc
+            assert info["rew_unsafe"] == -2.0
+            assert info["rew_shaping_clawback"] == -0.25
+            assert reward == pytest.approx(-2.25)
+            assert env._pending_shaping == 0.0
+            assert reward == pytest.approx(
+                sum(info[key] for key in _SHAPING_COMPONENTS)
+            )
+        finally:
+            env.close()
+
+    def test_forced_nonfinite_obs_claws_back_pending_escrow(self):
+        """A nonfinite observation after a finite physics step (the
+        forced_nonfinite branch) must also claw back."""
+        env = PaddleTennisEnv(contact_shaping=0.25)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            env._pending_shaping = 0.25
+            real_get_obs = env._get_obs
+
+            def poisoned():
+                obs = real_get_obs().copy()
+                obs[0] = np.nan
+                return obs
+
+            env._get_obs = poisoned
+            obs, reward, term, trunc, info = env.step(_zero_action())
+            assert term and not trunc
+            assert info["rew_unsafe"] == -2.0
+            assert info["rew_shaping_clawback"] == -0.25
+            assert reward == pytest.approx(
+                sum(info[key] for key in _SHAPING_COMPONENTS)
+            )
+            assert bool(np.isfinite(obs).all())
+        finally:
+            env.close()
+
+    def test_s1_probe_harness_smoke(self):
+        """The S1 tool's identities hold on smoke seeds (the real
+        verdict runs on the reserved 5300+ block, never in tests)."""
+        from tools.paddle_tennis_shaping_probe import (
+            WITNESSES,
+            evaluate_criteria,
+            run_witness,
+        )
+
+        results = {}
+        for name, witness in WITNESSES:
+            shaped = run_witness(
+                witness,
+                shaping=0.25,
+                episodes=2,
+                seed_start=_SMOKE_SEEDS[0],
+            )
+            unshaped = run_witness(
+                witness,
+                shaping=0.0,
+                episodes=2,
+                seed_start=_SMOKE_SEEDS[0],
+            )
+            results[name] = (shaped, unshaped)
+        checks = evaluate_criteria(results)
+        # The exact identities and the exploit checks must hold even on
+        # smoke seeds; the hard-slam preconditions are block-specific
+        # measurements and may legitimately differ off-block.
+        for check_name, passed, detail in checks:
+            if check_name.startswith("precondition"):
+                continue
+            assert passed, f"{check_name}: {detail}"
+
+    def test_recipe_does_not_enable_shaping_yet(self):
+        """The frozen task ships with shaping OFF until the L1 pilot
+        verdict (design doc §3); the recipe must not flip it early."""
+        from courtside_dynamics.recipes import RECIPES
+
+        env_kwargs = RECIPES["PaddleTennis"].env_kwargs
+        assert "contact_shaping" not in env_kwargs
+
+
 class TestCertificationHarness:
     """The held-out certification instrument stays runnable and its
     pre-registered contract stays pinned. The real verdict (seeds

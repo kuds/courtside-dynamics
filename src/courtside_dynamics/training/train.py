@@ -657,6 +657,13 @@ def _build_algo(
     if name.upper() in _OFF_POLICY_ALGOS:
         model_kwargs.setdefault("gradient_steps", -1)
 
+    # A TOML ``train_freq = [64, "step"]`` arrives as a list, which SB3
+    # rejects only at construction time deep inside ``train()``; a TOML
+    # file cannot express the tuple SB3 wants, so coerce it here at the
+    # single chokepoint every config path flows through.
+    if isinstance(model_kwargs.get("train_freq"), list):
+        model_kwargs["train_freq"] = tuple(model_kwargs["train_freq"])
+
     # ``verbose`` flows through ``model_kwargs`` (not an explicit param) so a
     # caller-supplied ``model_kwargs["verbose"]`` can't collide with a second
     # ``verbose=`` keyword and raise TypeError at construction.

@@ -250,10 +250,12 @@ def test_sb3_notebook_replay_uses_tennis_court_style() -> None:
     assert 'REPLAY_COURT_STYLE = "tennis"' in source
     # The replay env derives from the run's own factory (so a TOML's
     # [env]/[eval_env] overrides survive), with only the render-only
-    # style applied on top -- and only for wall-ball recipes.
-    assert "replay_env_fn = cfg.eval_env_fn or cfg.env_fn" in source
+    # style applied on top -- on every court that supports styles
+    # (WallBall and PaddleTennis both expose ``court_style``; envs
+    # without it pass through untouched).
+    assert "base_replay_env_fn = cfg.eval_env_fn or cfg.env_fn" in source
+    assert 'if hasattr(env, "court_style"):' in source
     assert "env.court_style = REPLAY_COURT_STYLE" in source
-    assert "if is_wall_ball_recipe:" in source
     # Metrics paths must not restyle their envs.
     assert "court_style" not in source.split("REPLAY_COURT_STYLE")[0]
 

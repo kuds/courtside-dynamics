@@ -588,6 +588,29 @@ def scripted_ground_opponent(observation: np.ndarray) -> np.ndarray:
     )
 
 
+def scripted_hard_slam_witness(observation: np.ndarray) -> np.ndarray:
+    """S1 touch-then-out witness: the ground oracle at the frozen swing.
+
+    ``swing=0.4`` is the bring-up calibration grid's hard stroke —
+    0/12 confirmed returns across the swing x strike grid at
+    swing >= 0.3, misses landing mean 11.0 m from the net (~4.5 m past
+    the 6.5 m baseline). Reaching the ball reliably while (almost)
+    never landing a return makes it the contact-shaping probe's
+    "hit then miss" prototype
+    (docs/design_paddle_tennis_contact_shaping.md §3); its actual
+    touch/miss rates on the probe block are the S1 precondition, not
+    an assumption.
+    """
+    return ground_lead_charge_local_action(
+        observation[0:3],
+        observation[3:6],
+        observation[9:12],
+        bounce_count=float(observation[OBS_BOUNCE_COUNT_INDEX]),
+        ball_on_own_side=float(observation[OBS_BALL_SIDE_INDEX]),
+        swing=0.4,
+    )
+
+
 def net_patting_local_action(
     ball_position: np.ndarray,
     ball_velocity: np.ndarray,

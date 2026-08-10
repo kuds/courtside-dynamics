@@ -48,6 +48,62 @@ supersedes it (see the ground-rules bullet).
   seeds 3100–3199: mean crossings 3.22 against the pre-registered
   2.6 floor, zero unsafe terminations;
   `docs/paddle_tennis_env_20260802.md`).
+- **PaddleTennis escrowed contact shaping (implemented, default
+  off).** The touch→in remedy
+  (docs/design_paddle_tennis_contact_shaping.md): new env kwarg
+  `contact_shaping` (default 0.0 — the frozen task's reward stream
+  is bit-identical until enabled). When on: a legal side-A hit pays
+  the shaping immediately, the advance is kept when that return
+  confirms and clawed back on **every** episode ending (termination,
+  truncation, both nonfinite guards), so episode totals are exactly
+  `shaping × side-A confirms` — farm-proof — while contact-time
+  Q-values separate "hit then miss" from "never hit". New
+  `rew_shaping`/`rew_shaping_clawback` components in the
+  decomposition, info, and CSV schema; `scripted_hard_slam_witness`
+  joins the scripted controllers. S1 (seeds 5300–5399, now burned)
+  and S2 both PASS with exact identities. The L1 pilot (run
+  `20260809_161704`, 1M steps, shaping via `[env]` TOML) landed in
+  the rule's declared middle: real strokes emerged (receiving k=1
+  93%, 8 landed-in shots per diagnosis row from 500k, touch peak
+  46% vs the exploration pilot's 17%, crossings 1.23 vs 0.67) but
+  short of the 55%-touch and 2.5-crossings bars, with k=2 survival
+  still 0% (the policy wanders post-swing instead of re-readying —
+  the next measured bottleneck). The frozen lean's single 2M
+  extension (run `20260809_211147`) then nearly completed k=1:
+  receiving survival 100%, serving 53%, policy shots 78% in at
+  oracle depth, best crossings 1.77 and still climbing at the cap —
+  but k=2 stayed exactly 0% in all twenty rows (recovery wander
+  8.3 m), so the committed branch fired: the next probed change is
+  n-point episodes, with between-point position carryover as its
+  load-bearing design decision. The recipe still does NOT enable
+  shaping. The notebook's replay cell
+  now applies `court_style="tennis"` to every court that supports
+  it (previously WallBall-only), so PaddleTennis replay footage
+  renders on the mini tennis court.
+- **PaddleTennis exploration package (training change).** The
+  ground-era diagnosis's ranked remedy, shipped recipe-level:
+  `model_kwargs` gains `use_sde=True`, `ent_coef="auto_0.02"`,
+  `target_entropy=-1.5`, and `train_freq=(64, "step")`
+  (docs/paddle_tennis_exploration_20260808.md). The raised target is
+  the mechanism fix — the stock run's 5e-5 coefficient was SB3's
+  tuner resting at the too-low default target (−3.0), so the target
+  is what moves, not the coefficient — and the multi-step
+  `train_freq` is what makes gSDE real under SAC at all (the
+  off-policy collector resets the noise matrix every rollout;
+  at `train_freq=1` that is every step — iid noise). iid per-step
+  noise cannot produce coherent ball-reaching runs (83/100 points
+  ended `policy_never_reached`). Task definition, reference band,
+  and certification unchanged; learning curves start a new
+  training-configuration regime. Pilot criteria pre-registered in
+  the doc before the pilot ran; the pilot (run `20260809_005951`,
+  1M steps) confirmed the mechanism (entropy sustained; the stock
+  run's serving-side zero and macro memorization both gone) but
+  acquired no stroke — every policy shot from 300k on landed
+  9.2–16.0 m deep (2.7–9.5 m past the 6.5 m baseline) and
+  engagement oscillated without an attractor
+  (crossings ≤ 0.67 vs the ≥ 2.5 bar). The package stays; the
+  evidence points the next probed change at the touch→in credit
+  gap (doc §3).
 - **Checkpoint behavioral diagnosis.** The exchange/positioning
   instrument that diagnosed the ground-era pilot (one memorized
   serve-return macro, no general ball-reaching;
