@@ -287,6 +287,45 @@ named follow-up is n-point episodes (its own probe, new era) — the
 Seed ledger: unchanged (run on seed 0; diagnosis calibration 5200+;
 4100–4199 untouched).
 
+### The budget extension (run `20260809_211147`) — k=1 mastered on both sides; k=2 exactly 0%
+
+The frozen lean's single extension: identical configuration, 2M
+steps (commit `b57c3d2`, same TOML sha, 8 h 17 m, 67 FPS). The
+committed branch point **fires**: k=2 survival stayed at exactly 0%
+in all twenty diagnosis rows, so the follow-up is **n-point
+episodes** — no second extension.
+
+What the doubled budget bought first, though, is close to complete
+k=1 mastery (2M row, 30 probe episodes):
+
+- policy hits 23/30 episodes; **96% crossed, 78% in, at 3.73 m** —
+  oracle-grade depth (oracle: 3.9);
+- **receiving k=1 survival 100%**; **serving k=1 53%** — the
+  serving-side decay (27→13% in L1) fully reversed with budget;
+- touch 50% (the D2′ middle's upper edge, still climbing at 2M);
+- best eval crossings **1.77 at 1,975,000 steps** — still improving
+  when the budget ended; final 1.50;
+- the opponent now sometimes loses the exchange
+  (`opponent_shot_net` 2 in the final row).
+
+And the barrier, sharper than ever: **recovery-hold travel 8.33 m**
+(worse than L1's 8.2; oracle 2.2). The policy has never sampled a
+k=2 legal return in 3M cumulative steps of this configuration — it
+swings well and is then 8 m out of position when the reply arrives,
+so the escrow's k=2 payment (which is sitting right there in the
+reward) is never collected. The same credit-starvation shape as the
+original H1, one rung up the ladder.
+
+**Design requirement this hands the n-point probe:** the wander is
+unpaid because nothing after the swing matters until the ball
+returns. n-point episodes fix this *only if paddle positions carry
+over between points* (no re-park between points): then post-swing
+wander in point k directly costs point k+1's serve-return — a +1.25
+the policy already knows how to collect at 100%. Carryover turns
+the recovery problem from never-sampled k=2 credit into
+densely-sampled inter-point credit, and it is therefore the load-
+bearing design decision the n-point probe must freeze first.
+
 ## 6. What this is not
 
 Not a change to the frozen task semantics (default off; rules,

@@ -68,9 +68,15 @@ supersedes it (see the ground-rules bullet).
   46% vs the exploration pilot's 17%, crossings 1.23 vs 0.67) but
   short of the 55%-touch and 2.5-crossings bars, with k=2 survival
   still 0% (the policy wanders post-swing instead of re-readying —
-  the next measured bottleneck). Per the frozen lean, one 2M budget
-  extension of the identical configuration is the next run; the
-  recipe still does NOT enable shaping. The notebook's replay cell
+  the next measured bottleneck). The frozen lean's single 2M
+  extension (run `20260809_211147`) then nearly completed k=1:
+  receiving survival 100%, serving 53%, policy shots 78% in at
+  oracle depth, best crossings 1.77 and still climbing at the cap —
+  but k=2 stayed exactly 0% in all twenty rows (recovery wander
+  8.3 m), so the committed branch fired: the next probed change is
+  n-point episodes, with between-point position carryover as its
+  load-bearing design decision. The recipe still does NOT enable
+  shaping. The notebook's replay cell
   now applies `court_style="tennis"` to every court that supports
   it (previously WallBall-only), so PaddleTennis replay footage
   renders on the mini tennis court.
