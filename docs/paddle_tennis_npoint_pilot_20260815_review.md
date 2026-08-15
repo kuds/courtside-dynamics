@@ -186,8 +186,14 @@ Statue + Gaussian noise, 20 episodes (≈140 points) per arm:
   1e-8 reward tie-break. Here crossings noise (±0.2 of opponent
   behavior) plus reward drift kept re-crowning best_model and
   resetting patience for 80 straight evaluations. A degenerate guard
-  on `legal_hit_count_ep_mean` (already collected in
-  `info_eval_keys`) would have stopped the run ~500k in.
+  on the side-A hit count would have stopped the run within ~5 evals
+  of contact dying. Precision matters on the key: the collected
+  `legal_hit_count` is BOTH sides (it sat at a nonzero ~0.37 mean
+  across all 80 evals of this zero-contact run — the opponent's hits
+  in the timeout-cut final point), so a guard on it would never fire;
+  the side-A-only `legal_hit_count_a` is already in every step info
+  (tennis_rules.py:226–276) and reads exactly 0.000 for a dead
+  policy.
 - **Every eval surface is deterministic** (reward eval, info eval,
   diagnosis, video): exploration health is invisible to all of them,
   and the diagnosis probes that did record the collapse are
@@ -264,24 +270,26 @@ should ride along on every future run regardless.
    `build_train_config(..., warm_start=...)` call like the notebook's.*
 
 2. **Arm the guards the stack already owns** (recipe one-liners,
-   no era impact, WallBall precedent recipes.py:626–649):
-   `degenerate_guard_keys=("legal_hit_count_ep_mean",)` +
+   no era impact, WallBall precedent recipes.py:626–649): add
+   `legal_hit_count_a` to `info_eval_keys` (the side-A-only counter
+   the rules snapshot already emits — plain `legal_hit_count` is
+   both sides and never reads zero, see §4c), then
+   `degenerate_guard_keys=("legal_hit_count_a_ep_mean",)` +
    `early_stop_degenerate_evals≈5` (kills a zero-contact run in
    ~125k steps), `best_metric_min_delta≈0.25` (above opponent
-   crossings noise), `confirm_best_eval=True`. Add a
-   policy-attributable headline: `crossings` counts both sides, so
-   selection tracked the opponent all run — until a side-A crossings
-   info key exists, `legal_hit_count` is the honest headline/success
-   key for this era. The current `success_key="crossings"` with
-   threshold 1.0 is degenerate under n-point play (success_rate read
-   1.000 at all 80 evals — the opponent's serve-returns clear it
-   alone); it must move with the headline.
+   crossings noise), `confirm_best_eval=True`. The current
+   `success_key="crossings"` with threshold 1.0 is degenerate under
+   n-point play (success_rate read 1.000 at all 80 evals — the
+   opponent's serve-returns clear it alone); move it to
+   `legal_hit_count_a` ≥ 1.0. The `crossings` headline can stay for
+   era comparability: it only tracked the opponent because the
+   policy never played, and the guard now catches that case.
 
 3. **If from-scratch must stay on the table: a `points_per_episode`
    ladder, not `None`-from-scratch.** The gate callback applies
    arbitrary stage values via `set_wrapper_attr` and can carry
    `reset_entropy_on_advance` + replay-wipe; int stages 1→2→4→8
-   keyed to `legal_hit_count_ep_mean`/`crossings` reproduce the
+   keyed to `legal_hit_count_a_ep_mean`/`crossings` reproduce the
    working one-point bootstrap and then anneal toward continuous
    play (8 points ≥ the ~7 that fit the cap, ≈ `None`). Needs only a
    smoke test that gate stages accept int values; `points_per_episode`
@@ -329,7 +337,74 @@ should ride along on every future run regardless.
    lessons_learned #8: when two runs agree on a ceiling, change the
    task or reward, not the count).
 
-## 6. Workpapers
+## 6. L2W execution recipe (sb3_training notebook)
+
+Verified against this checkout: the TOML below loads through
+`build_train_config` with every field resolving, and
+`legal_hit_count_a` is confirmed present in step info. Four notebook
+deltas, in cell order:
+
+1. **Install cell (§1)** — the n-point code is not on `main`:
+   `REPO_REF = "2e597b1"` (the certified implementation SHA both
+   pilots ran), or this review's branch.
+2. **Configs root** — drop this TOML next to the others
+   (`…/courtside-dynamics/configs/paddle_tennis_npoint_warmstart_l2w.toml`):
+
+   ```toml
+   [env]
+   points_per_episode = "none"
+   contact_shaping = 0.25
+
+   [train]
+   checkpoint_freq = 100_000
+   best_metric_min_delta = 0.25
+   confirm_best_eval = true
+   early_stop_degenerate_evals = 5
+   degenerate_guard_keys = ["legal_hit_count_a_ep_mean"]
+   info_eval_keys = ["crossings", "rally_count", "legal_hit_count", "legal_hit_count_a", "bounce_count"]
+   success_key = "legal_hit_count_a"
+   success_threshold = 1.0
+
+   [train.model_kwargs]
+   learning_starts = 25_000
+   ```
+
+3. **Settings cell (§2)** — `ENV = "PaddleTennis"`, `SEED = 0`,
+   `N_ENVS = 4`, `TOTAL_TIMESTEPS = 1_000_000`, and `CONFIG_FILE` set
+   to the explicit TOML path above (not `"auto"`, which resolves
+   `paddle_tennis.toml`).
+4. **Config-build cell (§5)** — add the warm start before
+   `build_train_config` (it is deliberately not TOML-settable):
+
+   ```python
+   from courtside_dynamics.training.train import WarmStartConfig
+
+   overrides["warm_start"] = WarmStartConfig(
+       source_run_dir="/content/drive/MyDrive/Finding Theta/"
+       "courtside-dynamics/training_runs/PaddleTennis/sac/20260809_211147",
+   )
+   ```
+
+   The loader resolves `model/best_model.zip` +
+   `best_vec_normalize.pkl` + `config.json` from the run root and
+   validates algo, spaces, and normalization compatibility.
+   `reset_observation_indices` stays empty — the layout is unchanged.
+
+Entropy caveat, decided before launch: the transfer block
+(train.py:1521–1534) hands over the source's auto-tuned temperature
+(1.54e-4 at its end) — there is no skip flag today. Running as-is is
+defensible (that temperature is the regime the source was still
+improving under; a fresh `auto` restarting at 1.0 would churn the
+policy) and the guard plus the §5.5 behavioral gauge catch the
+failure case; the strict version of this pilot adds a
+`WarmStartConfig` flag to skip the copy so `auto_0.02`'s init
+applies, and re-pins the SHA. Reading the verdict: K and the
+retention floor from `reports/diagnosis/diagnosis_probe_*.txt`
+(oracle row included, measured on the n-point env); R2/D2″ from the
+same rows; the degenerate guard aborts a no-retention run ≈125k
+steps in (~1 GPU-hour), full budget ≈6–8 h.
+
+## 7. Workpapers
 
 Local artifacts backing §4 (session scratchpad, reproducible from
 the scripts): `reward_experiments.py/.json` (statue/oracle/noise
