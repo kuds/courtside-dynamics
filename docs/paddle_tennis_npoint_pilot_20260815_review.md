@@ -35,6 +35,11 @@ Outcome: 12h22m on an L4 at 44 FPS, completed (no guard fired).
 Final eval −3.033 ± 0.180; best-by-headline crowned at 200k on
 crossings_ep_mean 3.20 (final 3.00). Training health at end:
 `train/ent_coef` 5.34e-5, `train/std` 0.0183, critic_loss 3.9e-5.
+The collapse timeline (progress.csv): ent_coef 0.02 → **9.8e-4
+inside the first 12k steps** (before the first log row), < 1e-4 by
+372k; std started at the SB3 default `log_std_init=-3` (0.050) and
+only ever shrank. There was never a phase of the run with enough
+action noise to discover contact.
 
 Bookkeeping resolves cleanly despite the deviation: the literal,
 spec-conformant L2 is **`20260810_211754`** (seed 0, n_envs 4,
@@ -63,7 +68,7 @@ opponent/curriculum side."
 ## 3. What the run did, checkpoint by checkpoint
 
 From the automated diagnosis probes (30 episodes each, seeds 5200+;
-full table in the review workpapers):
+full table in the appendix §B):
 
 - **100k**: 6 contacts, 83% crossed, **0% in** — out-depths 13.79 m,
   the exploration pilot's hard-slam signature. k=1 receiving 2%,
@@ -73,6 +78,10 @@ full table in the review workpapers):
   shot landing in (500k). k=2: never sampled once.
 - **1.6M–2.0M**: strictly zero contact. Point enders collapse to two
   categories: `policy_never_reached` 183–184 + cap 30.
+- Precision note: the probe's "policy hits" are rules-*legal* hits.
+  The 1–5 `policy_volley_fault` enders at most checkpoints are
+  physical touches punished as instant faults — the volley trap of
+  §4d in action, not extra competence.
 - Ready-position error **worsens** over training: ~2.6 m (first
   half) → ~3.55 m (last 800k); oracle 0.89. Inter-point travel flat
   at 7.65–9.28 m (oracle 1.95). Touched-after-bounce decays to hard 0%.
@@ -82,6 +91,15 @@ full table in the review workpapers):
   headline (crossings ≈ 3/episode) is entirely the opponent's
   serve-returns on policy-serve points: best-model selection ran on
   opponent noise (lessons_learned #11, verbatim).
+- The reward "improvement" decomposes exactly as fault-avoidance
+  (eval_info/evaluations.npz): episode rewards are integer-quantized
+  point penalties; the gain is mass moving from −5/−4 to −3, and the
+  only ender trends over 2M steps are volley 0.137 → 0.023 and
+  illegal_hit 0.050 → 0.010 (penalized) traded for second_bounce
+  0.143 → 0.213 (slow death). The contact-shaping bonus fired in
+  **3 of 2,400 eval episodes (0.125%) and 0 of 332 sampled training
+  episodes** — the replay buffer carried essentially no contact
+  experience for the critic to propagate, all run.
 
 ## 4. Validation experiments (this review)
 
@@ -107,8 +125,11 @@ A 16-point gap separates the statue from the oracle **in the reward
 the run optimized** — the destination gradient exists and is rich.
 The trained policy's edge over the raw statue is reproducible without
 touching a ball: constant held actions that park off-center score
-−3.15 by slowing point turnover (6.15 vs 6.97 completed points/ep).
-Two million GPU steps bought a better-parked statue.
+−3.15 by slowing point turnover (6.15 vs 6.97 completed points/ep) —
+and the trained policy's own eval trace shows exactly that mechanism
+(points_played 6.63 → 6.13 over the run, volley and illegal-hit
+enders traded for second-bounce deaths). Two million GPU steps bought
+a better-parked statue.
 
 ### 4b. The exploration cliff: contact is not discoverable from scratch under carryover
 
@@ -172,7 +193,28 @@ Statue + Gaussian noise, 20 episodes (≈140 points) per arm:
   and the diagnosis probes that did record the collapse are
   write-only text files nothing parses.
 
-### 4d. Why this differs from the one-point era that worked
+### 4d. The volley trap: the valley between passivity and legal touching
+
+The branch code review measured the full incentive ordering on this
+checkout (seeds 5300–5309, scripted witnesses): net-patting toucher
+(volleys every feed) **−13.5**/episode, statue **−4.5**, hard-slam
+witness (legal post-bounce touch, shots out) **−1.6**, oracle +11.6.
+Under continuous play, point *throughput* is the dominant reward
+term: a pre-bounce touch is an instant `VOLLEY_RETURN` fault
+(~39–49 steps/point) while an untouched feed dies slowly (~150–300
+steps/point), so wrong-time touching triples the fault rate. A noisy
+policy near the ball's descent path samples volley faults first —
+the one-point era had no such valley (every policy paid exactly one
+fault per episode there). Legal touching does beat the statue even
+undiscounted (−1.6 vs −4.5, a point-length effect) — but the road
+to it runs through −13.5, and §4b shows noise never even reaches
+the road. This ordering is the amendment's *designed* accounting
+working as specified; the implementation itself was reviewed
+adversarially and found faithful (appendix §D), and the diagnosis
+pipeline's normalization parity was verified — the zero-contact
+result is real, not an instrument artifact.
+
+### 4e. Why this differs from the one-point era that worked
 
 The shaping era learned k=1 from scratch in this same reward scheme
 because each episode re-parked the paddle and served into its reach:
@@ -226,7 +268,10 @@ should ride along on every future run regardless.
    policy-attributable headline: `crossings` counts both sides, so
    selection tracked the opponent all run — until a side-A crossings
    info key exists, `legal_hit_count` is the honest headline/success
-   key for this era.
+   key for this era. The current `success_key="crossings"` with
+   threshold 1.0 is degenerate under n-point play (success_rate read
+   1.000 at all 80 evals — the opponent's serve-returns clear it
+   alone); it must move with the headline.
 
 3. **If from-scratch must stay on the table: a `points_per_episode`
    ladder, not `None`-from-scratch.** The gate callback applies
@@ -246,11 +291,12 @@ should ride along on every future run regardless.
    proximity pay at first-bounce time, `s·max(0, 1 − d/3 m)` with
    s ≤ 0.25, escrowed against *touch* (clawed back if the point ends
    untouched) so a camping statue collects nothing; (b) fault
-   asymmetry — attempted-return faults −0.5 vs unreturned deaths
-   −1.0, making touch strictly dominant undiscounted (the diagnosis
-   doc's #3 own-credit direction). Either changes statue economics —
-   the NP1 statue witnesses must be re-derived, which is exactly
-   what the S-probe pattern is for.
+   asymmetry — attempt faults (`VOLLEY_RETURN`, out, net) at −0.5 vs
+   unreturned deaths at −1.0, which both makes touch strictly
+   dominant undiscounted and halves the §4d volley-trap penalty (the
+   diagnosis doc's #3 own-credit direction). Either changes statue
+   economics — the NP1 statue witnesses must be re-derived, which is
+   exactly what the S-probe pattern is for.
 
 5. **Fix the mechanism criterion (M) before it certifies another
    dead run.** Replace/augment the std floor with a behavioral
@@ -263,7 +309,13 @@ should ride along on every future run regardless.
    pattern is chronic, not specific to this run: every run in the
    campaign, under target −3.0 and −1.5 alike, ends at ent_coef
    1e-4–5e-5 with std 0.018–0.036 — the raised target changed
-   nothing measurable about where the tuner rests.
+   nothing measurable about where the tuner rests. Two concrete
+   knobs for any from-scratch arm: the run's initial std was the
+   SB3 default `log_std_init=-3` (0.050) — the "exploration
+   package" never raised it — and the ent_coef floor a pinned-float
+   would provide is poisonous (lessons_learned) but a *higher
+   log_std_init* (−2 ≈ 0.135) plus the behavioral contact gate is
+   not.
 
 6. **What not to spend on**, per the measurements: a serve-easing-only
    curriculum (§4b: insufficient alone); an opponent-softening run
