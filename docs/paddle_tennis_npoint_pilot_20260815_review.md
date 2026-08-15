@@ -202,7 +202,11 @@ witness (legal post-bounce touch, shots out) **−1.6**, oracle +11.6.
 Under continuous play, point *throughput* is the dominant reward
 term: a pre-bounce touch is an instant `VOLLEY_RETURN` fault
 (~39–49 steps/point) while an untouched feed dies slowly (~150–300
-steps/point), so wrong-time touching triples the fault rate. A noisy
+steps/point), so wrong-time touching triples the fault rate — and
+the independent verification pass measured the extreme: a
+ball-chasing toucher scores **−52/episode** (52 points at ~29
+steps each) versus exactly −1.0 for the same policy in the
+one-point env. The 3× is a lower bound; the trap runs to ~10×. A noisy
 policy near the ball's descent path samples volley faults first —
 the one-point era had no such valley (every policy paid exactly one
 fault per episode there). Legal touching does beat the statue even
