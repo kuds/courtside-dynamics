@@ -200,9 +200,14 @@ Per-episode means, essentially constant for 2M steps (linear slopes all ~0):
 
 Adversarial review of `git diff 4f91053..2e597b1` (~1,800 added lines: env,
 recipes, diagnosis, probe tool, tests), every finding traced through the
-checkout and several verified by direct simulation.
+checkout and several verified by direct simulation. The two findings flagged
+as able to explain or worsen the zero-contact result (D.1, D.4) were then
+handed to independent adversarial verifiers instructed to refute them;
+both came back CONFIRMED (D.1 by code trace of the fault/absorb path,
+D.4 by code trace plus a runtime reproduction of a mid-corridor paddle
+taking the feed).
 
-### D.1 (HIGH, explains zero contact) — continuous play inverts the contact incentive at low skill
+### D.1 (HIGH, explains zero contact, independently CONFIRMED) — continuous play inverts the contact incentive at low skill
 
 
 **File**: `src/courtside_dynamics/envs/paddle_tennis.py`, `step()` absorbed-boundary
@@ -296,7 +301,7 @@ Explicitly checked, as tasked:
 Conclusion: the zero-contact number is trustworthy as "zero legal hits by the
 deterministic policy under the exact training observation statistics."
 
-### D.4 (MEDIUM, worsener) — relaunch clearance
+### D.4 (MEDIUM, worsener, independently CONFIRMED by code trace + runtime repro) — relaunch clearance
 
 **File**: `src/courtside_dynamics/envs/paddle_tennis.py:916–922`
 (`_clear_launch_envelope`), `_launch_point` 967–975. Under carryover, a paddle parked
