@@ -1,9 +1,19 @@
 # Design: n-point episodes — continuous play with position carryover
 
-Status: **Implemented and certified** (default off), 2026-08-10 —
-NP0/NP1 PASS, the NP2 band recorded with the frozen L2 bars, and
-NP3 held-out certification PASS (all in §4a); the L2 pilot
-remains. The committed
+Status: **Implemented and certified (default off); L2 pilot FAILED —
+Stop/pivot fired**, 2026-08-15. NP0/NP1 PASS, the NP2 band recorded
+with the frozen L2 bars, and NP3 held-out certification PASS (all in
+§4a). The L2 pilot then ran twice from scratch at SHA 2e597b1 —
+`20260810_211754` (the pre-registered shape: seed 0, n_envs 4;
+early-stopped at 1.125M) and `20260815_015143` (seed 1, n_envs 8,
+full 2M) — and both collapsed to zero policy contact from the first
+checkpoints (K FAIL at every row; R2/P″/D2″ FAIL; M intact by the
+letter). §4a's Stop/pivot branch fires: the recipe does **not**
+adopt `points_per_episode=None`; the next probed change targets the
+opponent/curriculum side. Verdict, causal analysis (the from-scratch
+exploration cliff under carryover; statue economics), and the
+recommended warm-started retest of this design's §1 mechanism:
+[`paddle_tennis_npoint_pilot_20260815_review.md`](paddle_tennis_npoint_pilot_20260815_review.md). The committed
 follow-up from the contact-shaping extension verdict
 ([`design_paddle_tennis_contact_shaping.md`](design_paddle_tennis_contact_shaping.md)
 §5): k=1 is close to mastered on both sides (receiving survival

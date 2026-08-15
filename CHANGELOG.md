@@ -96,7 +96,17 @@ supersedes it (see the ground-rules bullet).
   (reserved seeds 4300–4399, now consumed: mean crossings 11.51 vs
   the 9.0 floor, 106 completed points vs 50, 0% nudges, zero
   unsafe). The recipe does NOT enable n-point play; adoption waits
-  on the L2 pilot against the frozen bars.
+  on the L2 pilot against the frozen bars. **L2 verdict
+  (2026-08-15): Stop/pivot.** Two from-scratch pilots at the
+  implementation SHA — `20260810_211754` (the pre-registered shape,
+  seed 0, early-stopped 1.125M) and `20260815_015143` (seed 1,
+  n_envs 8, full 2M) — both collapsed to zero policy contact from
+  the first checkpoint (K FAIL every row; R2/P″/D2″ FAIL; M intact
+  by the letter). n-point stays default-off; verdict, validation
+  experiments (statue economics −4.4 vs oracle +11.6 in-mode; the
+  from-scratch exploration cliff under carryover), and the
+  recommended warm-started retest:
+  `docs/paddle_tennis_npoint_pilot_20260815_review.md`.
 - **PaddleTennis escrowed contact shaping (implemented, default
   off).** The touch→in remedy
   (docs/design_paddle_tennis_contact_shaping.md): new env kwarg
