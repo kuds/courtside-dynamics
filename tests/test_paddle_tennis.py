@@ -832,20 +832,12 @@ class TestContactShaping:
                 continue
             assert passed, f"{check_name}: {detail}"
 
-    def test_recipe_does_not_enable_shaping_yet(self):
-        """The frozen task ships with shaping OFF until the L1 pilot
-        verdict (design doc §3); the recipe must not flip it early."""
+    def test_recipe_adopts_contact_shaping(self):
+        """The adopted era (reach design doc §4a): the recipe ships
+        the contact escrow at its audited 0.25."""
         from courtside_dynamics.recipes import RECIPES
 
-        env_kwargs = RECIPES["PaddleTennis"].env_kwargs
-        assert "contact_shaping" not in env_kwargs
-
-
-#: Off-line camper for the reach-shaping anti-farming witness: parked
-#: near the serve landing depth (side-local x ~= -4.55) but offset ~1 m
-#: laterally, so bounces pay proximity while the ball never reaches the
-#: paddle face.
-_REACH_CAMPER_ACTION = np.array([-0.61, 0.33, 0.0])
+        assert RECIPES["PaddleTennis"].env_kwargs["contact_shaping"] == 0.25
 
 
 class TestReachShaping:
@@ -877,11 +869,15 @@ class TestReachShaping:
                 sum(info[key] for key in _SHAPING_COMPONENTS), abs=1e-12
             )
             totals["reward"] += reward
+            # The env's escrow rule: a hit keeps any prior pending
+            # advance, and a same-step payment is the bounce that hit
+            # just took — kept immediately, never escrowed.
             if info["event_valid_racket_hit_a"]:
                 hits += 1
-                kept += pending
+                kept += pending + info["rew_reach"]
                 pending = 0.0
-            pending += info["rew_reach"]
+            else:
+                pending += info["rew_reach"]
             if mirror_env is not None:
                 mirror_obs, mirror_reward, mterm, mtrunc, _ = mirror_env.step(action)
                 np.testing.assert_array_equal(obs, mirror_obs)
@@ -1018,16 +1014,42 @@ class TestReachShaping:
             shaped.close()
             plain.close()
 
+    def test_same_step_take_is_kept_not_escrowed(self):
+        """The §2 ordering amendment: a payment coexisting with the
+        hit that takes it is kept immediately — never pending, so a
+        later boundary cannot claw back a tight interception's pay —
+        while a hit alone keeps exactly the prior pending advance."""
+        env = PaddleTennisEnv(reach_shaping=0.25)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            # Hit and qualifying bounce in the same step: prior
+            # pending is kept, the new payment never enters escrow.
+            env._pending_reach = 0.125
+            assert env._reach_escrow_step(took=True, payment=0.2) == 0.2
+            assert env._pending_reach == 0.0
+            # Bounce alone: the payment escrows.
+            assert env._reach_escrow_step(took=False, payment=0.2) == 0.2
+            assert env._pending_reach == 0.2
+            # Hit alone: pending kept (cleared without clawback).
+            assert env._reach_escrow_step(took=True, payment=0.0) == 0.0
+            assert env._pending_reach == 0.0
+        finally:
+            env.close()
+
     def test_camper_collects_nothing_net(self):
         """The anti-farming witness: parked near the landing, off the
         ball line — proximity is paid every receiving bounce and
         clawed back in full (no hit ever keeps it)."""
+        from courtside_dynamics.envs._paddle_court import (
+            scripted_reach_camper_witness,
+        )
+
         env = PaddleTennisEnv(reach_shaping=0.25)
         try:
             paid_any = False
             for seed in _SMOKE_SEEDS:
                 totals, sums, kept, hits = self._drive(
-                    env, lambda _obs: _REACH_CAMPER_ACTION, seed
+                    env, scripted_reach_camper_witness, seed
                 )
                 assert hits == 0
                 assert kept == 0.0
@@ -1062,9 +1084,10 @@ class TestReachShaping:
                     mirror_total += mirror_reward
                     confirms += int(bool(info["event_valid_return_a"]))
                     if info["event_valid_racket_hit_a"]:
-                        kept_reach += pending_reach
+                        kept_reach += pending_reach + info["rew_reach"]
                         pending_reach = 0.0
-                    pending_reach += info["rew_reach"]
+                    else:
+                        pending_reach += info["rew_reach"]
                     if term or trunc:
                         break
                 assert total - mirror_total == pytest.approx(
@@ -1083,13 +1106,21 @@ class TestReachShaping:
             with pytest.raises(ValueError):
                 PaddleTennisEnv(reach_shaping=0.25, reach_shaping_radius=radius)
 
-    def test_recipe_does_not_enable_reach_yet(self):
-        """Reach shaping ships OFF until the LR1 pilot verdict
-        (design doc §4); the recipe must not flip it early."""
+    def test_recipe_adopts_reach_shaping_and_guards(self):
+        """The LR1 ADOPT verdict (design doc §4a): reach escrow on at
+        0.25, and the L2W-hardened guard set rides with it."""
         from courtside_dynamics.recipes import RECIPES
 
-        env_kwargs = RECIPES["PaddleTennis"].env_kwargs
-        assert "reach_shaping" not in env_kwargs
+        recipe = RECIPES["PaddleTennis"]
+        assert recipe.env_kwargs["reach_shaping"] == 0.25
+        extra = recipe.extra_cfg
+        assert extra["success_key"] == "legal_hit_count_a"
+        assert "legal_hit_count_a" in extra["info_eval_keys"]
+        assert extra["degenerate_guard_keys"] == ("legal_hit_count_a_ep_mean",)
+        assert extra["early_stop_degenerate_evals"] == 5
+        assert extra["best_metric_min_delta"] == 0.25
+        assert extra["confirm_best_eval"] is True
+        assert extra["headline_key"] == "crossings"
 
 
 class TestNPointEpisodes:
@@ -1339,10 +1370,18 @@ class TestNPointEpisodes:
             if trace.termination == "second_bounce":
                 assert trace.ender == "policy_never_reached"
 
-    def test_recipe_does_not_enable_npoint_yet(self):
+    def test_recipe_adopts_npoint_continuous_play(self):
+        """The LR1 ADOPT verdict: the recipe plays continuous n-point
+        (the ENV default stays 1 — the frozen one-point task is
+        untouched for direct construction and the NP0 lockstep)."""
         from courtside_dynamics.recipes import RECIPES
 
-        assert "points_per_episode" not in RECIPES["PaddleTennis"].env_kwargs
+        assert RECIPES["PaddleTennis"].env_kwargs["points_per_episode"] is None
+        env = PaddleTennisEnv()
+        try:
+            assert env.points_per_episode == 1
+        finally:
+            env.close()
 
     def test_np3_floor_constants_pin(self):
         """The n-point certification's pre-registered contract: the

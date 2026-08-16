@@ -1108,7 +1108,21 @@ RECIPES: dict[str, Recipe] = {
     ),
     "PaddleTennis": Recipe(
         env_cls=PaddleTennisEnv,
-        env_kwargs={"render_mode": "rgb_array"},
+        # The adopted era (LR1 ADOPT verdict,
+        # docs/design_paddle_tennis_reach_shaping.md §4a): continuous
+        # n-point play with position carryover, the contact escrow,
+        # and the reach escrow. Each shipped default-off first and was
+        # certified bit-identical + farm-proof by its own battery
+        # (NP0-NP3, S1/S2, RS0-RS2) before adoption; the pilots that
+        # justified the flip are L2W (20260815_180815) and LR1
+        # (20260816_135919 — k=2 above zero at five checkpoints, the
+        # era headline's first movement).
+        env_kwargs={
+            "render_mode": "rgb_array",
+            "points_per_episode": None,
+            "contact_shaping": 0.25,
+            "reach_shaping": 0.25,
+        },
         default_total_timesteps=2_000_000,
         name_prefix="paddle_tennis",
         extra_cfg={
@@ -1147,25 +1161,36 @@ RECIPES: dict[str, Recipe] = {
             "normalize_obs_excluded_indices": (_PADDLE_TENNIS_NORMALIZATION_EXCLUSIONS),
             "csv_header": _PADDLE_TENNIS_CSV_HEADER,
             "info_row_fn": _paddle_tennis_info_row,
-            # An eval episode "succeeds" once any return crosses the
-            # net (crossings counts cumulative return crossings; the
-            # serve's own crossing is excluded, so 1 means the serve
-            # came back). Headline selection follows the same metric:
-            # crossings_ep_mean is the rally tail the ground-rules
-            # probe froze the era band on (7.78 for the scripted
-            # ground pair; held-out certification passed at 7.68 --
-            # see tools/paddle_tennis_probes.py --certify and
-            # docs/paddle_tennis_ground_rules_20260803.md -- selection
-            # never follows eval reward).
-            "success_key": "crossings",
+            # Headline selection stays on crossings (the era's bridge
+            # metric), but success moves to the side-A-only hit count:
+            # under continuous play the opponent's serve-returns alone
+            # clear any crossings threshold (success_rate read 1.000
+            # at all 80 evals of the failed L2 pilot), and the plain
+            # legal_hit_count counts both sides (~0.37 nonzero mean on
+            # a zero-contact run). legal_hit_count_a is the policy's
+            # own final-point hit count — exactly zero for a dead
+            # policy, which is also what arms the degenerate guard
+            # below (review doc §4c; the L2W-hardened guard set).
+            "success_key": "legal_hit_count_a",
             "success_threshold": 1.0,
             "headline_key": "crossings",
             "info_eval_keys": (
                 "crossings",
                 "rally_count",
                 "legal_hit_count",
+                "legal_hit_count_a",
                 "bounce_count",
             ),
+            # Selection/stop hygiene, measured in on the pilots: the
+            # min-delta sits above the ±0.2 opponent-crossings noise
+            # that re-crowned best_model for 80 straight evals on the
+            # L2 run; confirm_best_eval is the WallBall precedent; the
+            # degenerate guard kills a zero-contact run in ~5 evals
+            # (~125k steps) instead of a full budget.
+            "best_metric_min_delta": 0.25,
+            "confirm_best_eval": True,
+            "early_stop_degenerate_evals": 5,
+            "degenerate_guard_keys": ("legal_hit_count_a_ep_mean",),
             "info_eval_terminal_keys": _PADDLE_TENNIS_TERMINAL_EVAL_KEYS,
             "info_eval_distribution_keys": ("crossings",),
             # Behavioral diagnosis at every checkpoint save: the
@@ -1192,11 +1217,14 @@ RECIPES: dict[str, Recipe] = {
             "under ground rules (pre-bounce returns fault; "
             "docs/paddle_tennis_ground_rules_20260803.md): the policy "
             "plays side A against the bounce-waiting ground oracle "
-            "through the P4 mirror, one alternating-serve point per "
-            "episode, cooperative +1 per confirmed return by either "
-            "side. No certification ladder -- the definition certified "
-            "held-out through the probes harness against floors "
-            "pre-registered from the ground-era probe band."
+            "through the P4 mirror in continuous n-point play "
+            "(1500-step episodes, alternating serves, paddle "
+            "positions carried over between points), cooperative +1 "
+            "per confirmed return by either side plus the escrowed "
+            "contact and reach shapings (0.25 each; farm-proof, paid "
+            "only when the milestone is taken). The era certified "
+            "held-out through the n-point probes harness (NP3) and "
+            "adopted on the LR1 pilot verdict."
         ),
     ),
     "HumanoidTennisStage0Intercept": Recipe(

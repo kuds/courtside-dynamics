@@ -126,6 +126,27 @@ paid*. The pay is dense where the failure is.
   follows task metrics (and the L2W-hardened guards), never eval
   reward.
 
+### 2a. Ordering amendment (2026-08-16, post-LR1, pre-registered-run)
+
+The shipped §1 ordering ("commit before opening") had a blind edge
+the adoption code review caught: a qualifying bounce and the legal
+hit that takes it can share one 50 ms control step (the tight
+interception the shaping exists to teach), and the original ordering
+escrowed that payment — to be clawed back at the next boundary
+unless another hit followed. Coexistence in a batch always orders
+bounce → hit (one ball; an untaken earlier bounce would have ended
+the point as a second bounce), so the amendment keeps a same-step
+payment immediately: only an *untaken* payment enters escrow
+(`_reach_escrow_step`, unit-pinned). This changes the shaped reward
+stream in exactly this edge; both pilots ran the original ordering
+(their recorded results stand as-is) and the registered run runs the
+amendment. The RS1 battery re-ran under the amended tracker rule and
+passed with results **byte-identical to §3a's table** (identity gap
+0.00e+00) — no same-step take occurs on the 5500 block for these
+witnesses, so the edge is pinned by the
+`test_same_step_take_is_kept_not_escrowed` unit witness rather than
+the block. The default-off stream is untouched (RS0 unaffected).
+
 ## 3. Pre-registered probe battery
 
 Calibration seed block **5500–5599 is reserved for RS1** (verified
@@ -297,12 +318,14 @@ frozen bars, each at its own best checkpoint:
 | M | `legal_hit_count_a` > 0 at ≥ half the evals | nonzero at 39 of 40 evals | intact |
 
 **Decision: K PASS + M intact + three of E1/E2/E3/R2 PASS →
-ADOPT.** Committed follow-ups per the branch: the recipe adopts
-`points_per_episode=None`, `contact_shaping=0.25`, and
-`reach_shaping=0.25` (bringing the L2W-hardened guard set with it),
-and the 6M registered run is pre-registered with its held-out gate
-on reserved block 4100–4199. Both ship as their own change with the
-recipe-pin tests updated; this document freezes the verdict only.
+ADOPT.** Both committed follow-ups have since shipped: the recipe
+adopts `points_per_episode=None`, `contact_shaping=0.25`, and
+`reach_shaping=0.25` with the L2W-hardened guard set (recipe-pin
+tests flipped to adoption pins), and the registered run is
+pre-registered —
+[`paddle_tennis_registered_run_prereg_20260816.md`](paddle_tennis_registered_run_prereg_20260816.md)
+(3M warm-started steps, bars frozen from this run's band, held-out
+gate on reserved 4100–4199).
 
 The run's headline numbers, for the era record: final eval
 **+0.143 ± 2.12** (the campaign's first positive learned final;

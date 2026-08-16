@@ -142,9 +142,36 @@ supersedes it (see the ground-rules bullet).
   68–83% across the last three rows, and the first positive learned
   final evaluation (+0.14; the from-scratch era's floor was −4.4).
   The recipe change (adopting n-point + both shapings + the hardened
-  guard set) and the 6M registered-run pre-registration on reserved
-  4100–4199 are the committed follow-ups and ship separately; as of
-  this entry the recipe still does NOT enable reach shaping.
+  guard set) and the registered-run pre-registration on reserved
+  4100–4199 were the committed follow-ups — **both now shipped**:
+  the `PaddleTennis` recipe defaults to `points_per_episode=None`,
+  `contact_shaping=0.25`, `reach_shaping=0.25`, success/guards on
+  the side-A-only `legal_hit_count_a`, `best_metric_min_delta=0.25`,
+  `confirm_best_eval`, and the 5-eval degenerate stop (the three
+  recipe-pin tests flip to adoption pins; the ENV defaults are
+  untouched, so direct construction and every lockstep identity stay
+  frozen). The registered run — 3M warm-started steps, seed 1, bars
+  frozen from the LR1 band, held-out gate on 4100–4199 — is
+  pre-registered in
+  `docs/paddle_tennis_registered_run_prereg_20260816.md` with its
+  run config frozen verbatim in that document (Drive-side at launch,
+  sha-pinned by run provenance, per the pilots' convention). The
+  adoption code review then landed the reach escrow's **ordering
+  amendment** (design doc §2a): a payment whose bounce and taking
+  hit share one control step is kept immediately instead of escrowed
+  — the original ordering could claw back a tight interception's pay
+  — plus probe-tool hardening (NP2 band no longer crashes on zero
+  completed points; the statue/camper witnesses consolidate into
+  `envs/_paddle_court.py` so tools and tests measure one frozen
+  policy; dead NP1 bookkeeping dropped). Both pilots ran the
+  pre-amendment ordering; the registered run runs the amendment.
+  The pre-registration also gains **LS1**, a frozen from-scratch
+  gate pilot (§1a): the adopted recipe with no warm start is now a
+  live from-scratch entry point (the reach escrow pays a positional
+  gradient before any touch — the structure whose absence killed the
+  L2 from-scratch pilots), and LS1's verdict decides whether the
+  registered run launches warm-started (§2 as frozen) or from
+  scratch under its own budget addendum.
 - **PaddleTennis escrowed contact shaping (implemented, default
   off).** The touch→in remedy
   (docs/design_paddle_tennis_contact_shaping.md): new env kwarg

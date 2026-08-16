@@ -8,9 +8,14 @@ with the frozen L2 bars, and NP3 held-out certification PASS (all in
 early-stopped at 1.125M) and `20260815_015143` (seed 1, n_envs 8,
 full 2M) — and both collapsed to zero policy contact from the first
 checkpoints (K FAIL at every row; R2/P″/D2″ FAIL; M intact by the
-letter). §4a's Stop/pivot branch fires: the recipe does **not**
-adopt `points_per_episode=None`; the next probed change targets the
-opponent/curriculum side. Verdict, causal analysis (the from-scratch
+letter). §4a's Stop/pivot branch fires for the from-scratch shape: the recipe
+did **not** adopt on this design's own pilot; the next probed change
+targeted the opponent/curriculum side. **Superseded 2026-08-16**: the
+warm-started reach-shaping pilot (LR1,
+[`design_paddle_tennis_reach_shaping.md`](design_paddle_tennis_reach_shaping.md)
+§4a) fired its ADOPT branch — this design's mechanism validated with
+the missing credit paid — and the recipe now ships
+`points_per_episode=None`. Verdict, causal analysis (the from-scratch
 exploration cliff under carryover; statue economics), and the
 recommended warm-started retest of this design's §1 mechanism:
 [`paddle_tennis_npoint_pilot_20260815_review.md`](paddle_tennis_npoint_pilot_20260815_review.md). The committed

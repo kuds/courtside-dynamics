@@ -47,6 +47,8 @@ from courtside_dynamics.envs._paddle_court import (
     scripted_ground_opponent,
     scripted_hard_slam_witness,
     scripted_net_patting_opponent,
+    scripted_reach_camper_witness,
+    scripted_statue_witness,
 )
 from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
 
@@ -63,13 +65,9 @@ _IDENTITY_TOL = 1e-9
 _RESERVED_BLOCKS = ((4100, 4199), (4300, 4399), (5200, 5299), (5300, 5399), (5400, 5499))
 
 
-def _statue(_observation: np.ndarray) -> np.ndarray:
-    return np.zeros(3)
-
-
-def _camper(_observation: np.ndarray) -> np.ndarray:
-    """Parked near the serve landing depth, ~1 m off the ball line."""
-    return np.array([-0.61, 0.33, 0.0])
+# The statue and off-line camper are frozen scripted witnesses in
+# envs/_paddle_court.py, shared with TestReachShaping so the probe and
+# the tests measure the same policies.
 
 
 @dataclasses.dataclass
@@ -120,13 +118,18 @@ def _run_witness(
                 shaped_total += reward
                 unshaped_total += mirror_reward
                 confirms += int(bool(info["event_valid_return_a"]))
+                # Mirror the env's escrow rule: a hit keeps any prior
+                # pending advance, and a payment coexisting with the
+                # hit is the bounce that hit just took — kept
+                # immediately, never escrowed.
                 if info["event_valid_racket_hit_a"]:
                     totals.hits += 1
-                    kept += pending
+                    kept += pending + info["rew_reach"]
                     pending = 0.0
+                else:
+                    pending += info["rew_reach"]
                 if info["rew_reach"] > 0.0 and not info["event_first_bounce"]:
                     totals.pay_without_bounce += 1
-                pending += info["rew_reach"]
                 episode_paid += info["rew_reach"]
                 episode_clawed += info["rew_reach_clawback"]
                 if term or trunc:
@@ -176,8 +179,8 @@ def main() -> None:
     _refuse_reserved(args.seed_start, args.episodes)
 
     witnesses: list[tuple[str, Callable[[np.ndarray], np.ndarray], bool]] = [
-        ("statue", _statue, False),
-        ("camper", _camper, False),
+        ("statue", scripted_statue_witness, False),
+        ("camper", scripted_reach_camper_witness, False),
         ("ground_oracle", scripted_ground_opponent, False),
         ("hard_slam", scripted_hard_slam_witness, False),
         ("volley_patting", scripted_net_patting_opponent, False),
