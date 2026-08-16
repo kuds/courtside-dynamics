@@ -19,7 +19,59 @@ mechanism (k=2 above zero at five checkpoints, every engagement bar
 passing); the registered run asks whether the k≥2 channel *grows*
 with budget now that it exists, and certifies the result held-out.
 
-## 2. Run shape (frozen)
+## 1a. LS1 — the from-scratch gate pilot (added 2026-08-16, frozen
+before any run)
+
+From-scratch training is now a live question rather than a measured
+dead end: the L2 pilots died in a reward where nothing paid before a
+legal return; the adopted recipe pays proximity at every incoming
+bounce, so a from-scratch policy has a discounted positional
+gradient from step one. Whether that gradient can *bootstrap*
+reach → touch → k=1 (rather than merely organize an existing stroke,
+which LR1 measured) has never been run. LS1 answers it cheaply and
+gates the registered run's shape.
+
+Anyone wanting to train PaddleTennis from scratch needs nothing
+beyond the adopted recipe — `build_train_config("PaddleTennis",
+log_dir=..., seed=...)` is the whole configuration; the armed
+degenerate guard bounds a dead run at ~125k steps (~1 GPU-hour).
+
+**LS1 shape (frozen)**: adopted recipe, no warm start, seed 0,
+n_envs 4, 1M steps, eval 25k, checkpoint/diagnosis cadence 100k —
+the pilot convention; run config:
+
+```toml
+[train]
+n_envs = 4
+eval_freq = 25_000
+checkpoint_freq = 100_000
+```
+
+(No `learning_starts` override — that knob is the warm-start
+pairing; from scratch uses the stack default.)
+
+**LS1 bars (frozen; anchors: the from-scratch L2 band and the
+reach-era references):**
+
+| criterion | metric | FAIL | declared middle | PASS |
+|---|---|---|---|---|
+| LS-C (contact bootstraps) | touched-after-bounce | < 5% at every checkpoint (the L2 band: ≤ 4%) | [5%, 10%) | ≥ 10% at some checkpoint by 500k |
+| LS-K1 (stroke forms) | k=1 receiving survival | ≤ 2% everywhere (L2 noise floor) | (2%, 10%) | ≥ 10% at some checkpoint |
+| LS-G (the reach gradient is live) | ready-position error mean | never < 2.4 m (the no-gradient band's floor) | [2.0, 2.4) | ≤ 2.0 m at some checkpoint |
+| guards | degenerate stop | a guard abort before 500k books LS-C FAIL directly | — | — |
+
+**LS1 decision (frozen)**: LS-C ∧ LS-K1 PASS → the registered run
+goes **from scratch**, with its own pre-registration addendum
+written before launch (budget chosen from LS1's trajectory — a
+10M-class budget is ~63 h at the measured 44 FPS and must come with
+a wall-clock plan: staged legs or a surviving runtime). LS-C or
+LS-K1 FAIL → the §2 warm-started shape proceeds unchanged and
+from-scratch bootstrapping is booked as still-unpaid (routing the
+next reward design, not more budget). Middle → maintainer's call,
+documented with the post-hoc label.
+
+## 2. Run shape (frozen — the warm-started shape; §1a's LS1 verdict
+decides whether this shape or a from-scratch addendum launches)
 
 - Recipe `PaddleTennis` at the adoption commit; run config frozen
   here verbatim (the Drive-side convention all three recent runs

@@ -165,6 +165,13 @@ supersedes it (see the ground-rules bullet).
   `envs/_paddle_court.py` so tools and tests measure one frozen
   policy; dead NP1 bookkeeping dropped). Both pilots ran the
   pre-amendment ordering; the registered run runs the amendment.
+  The pre-registration also gains **LS1**, a frozen from-scratch
+  gate pilot (§1a): the adopted recipe with no warm start is now a
+  live from-scratch entry point (the reach escrow pays a positional
+  gradient before any touch — the structure whose absence killed the
+  L2 from-scratch pilots), and LS1's verdict decides whether the
+  registered run launches warm-started (§2 as frozen) or from
+  scratch under its own budget addendum.
 - **PaddleTennis escrowed contact shaping (implemented, default
   off).** The touch→in remedy
   (docs/design_paddle_tennis_contact_shaping.md): new env kwarg
