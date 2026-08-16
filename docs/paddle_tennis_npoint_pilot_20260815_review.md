@@ -460,8 +460,10 @@ an update-ratio control (cap `gradient_steps` early) alongside
 nothing (it *is* the source policy). The reach-shaping design is now
 drafted, implemented (default off), and probe-certified —
 [`design_paddle_tennis_reach_shaping.md`](design_paddle_tennis_reach_shaping.md)
-(RS0–RS2 PASS); its pre-registered LR1 pilot is the run to make
-next.
+(RS0–RS2 PASS). Its LR1 pilot then ran and **the ADOPT branch
+fired** (that doc's §4a): k=2 > 0% at five checkpoints, touch 41%,
+ready error 1.08 m, final eval +0.14 — this review's causal chain
+is closed by measurement.
 
 ## 7. Workpapers
 

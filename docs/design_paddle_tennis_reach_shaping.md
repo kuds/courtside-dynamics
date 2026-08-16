@@ -1,7 +1,14 @@
 # Design: escrowed reach shaping — paying the position→touch gap
 
-Status: **Implemented; RS0 + RS1 + RS2 PASS (§3a); LR1 pre-registered,
-not yet run**, 2026-08-16. The remedy
+Status: **Implemented; RS0–RS2 PASS (§3a); LR1 run — the ADOPT branch
+fires (§4a): K, E1, E2, E3 PASS**, 2026-08-16. The era's number
+moved: k=2 exchange survival above zero at five checkpoints
+(including a confirmed, in-bounds second-exchange return at 700k —
+the first in the campaign), the first positive learned final
+evaluation (+0.14), and the recipe is cleared to adopt
+`points_per_episode=None` + `contact_shaping=0.25` +
+`reach_shaping=0.25` with the 6M registered run to be pre-registered
+on the standing 4100–4199 held-out gate. The remedy
 the L2W warm-start pilot points at
 ([`paddle_tennis_npoint_pilot_20260815_review.md`](paddle_tennis_npoint_pilot_20260815_review.md)
 §6a): handed a k=1-mastered policy, n-point training re-converged the
@@ -271,6 +278,59 @@ own best checkpoint):
 
 Budget: ~6.5 GPU-hours on an L4 at L2W's measured 43 FPS; the armed
 guards bound a dead run at ~1 GPU-hour.
+
+## 4a. LR1 results — the ADOPT branch fires (2026-08-16)
+
+Run `20260816_135919` (Colab L4, SHA 9d76f6a, TOML sha `84669842`,
+seed 0, n_envs 4, 1M steps in 6h17m at 44 FPS; the single reward-side
+change against the L2W baseline, everything else byte-matched
+including the warm-start source hashes). Scored against the §4
+frozen bars, each at its own best checkpoint:
+
+| criterion | bar | measured | outcome |
+|---|---|---|---|
+| **K** (headline) | k=2 > 0% at some checkpoint | **1% at five checkpoints** (400k, 700k, 800k, 900k, 1M); the 700k instance a confirmed in-bounds second-exchange return at oracle depth (3.90 m) — the campaign's first | **PASS** |
+| E1 engagement | touch ≥ 40% | **41% at 900k** (series 18→26→23→29→23→29→30→36→41→38; L2W peak 27%) | **PASS** |
+| E2 position | ready error ≤ 2.0 m | ≤ 2.0 at **eight consecutive checkpoints**, best **1.08 m** at 700k (oracle 0.89; L2W never below 2.15 and worsening) | **PASS** |
+| E3 retention | k=1 receiving ≥ 60% twice consecutive | **68% → 83% → 68%** (800k–1M; L2W matched steps: ~20%) | **PASS** |
+| R2 | inter-point recovery ≤ 6.0 m | 8.0–9.3 m, flat all run | FAIL |
+| M | `legal_hit_count_a` > 0 at ≥ half the evals | nonzero at 39 of 40 evals | intact |
+
+**Decision: K PASS + M intact + three of E1/E2/E3/R2 PASS →
+ADOPT.** Committed follow-ups per the branch: the recipe adopts
+`points_per_episode=None`, `contact_shaping=0.25`, and
+`reach_shaping=0.25` (bringing the L2W-hardened guard set with it),
+and the 6M registered run is pre-registered with its held-out gate
+on reserved block 4100–4199. Both ship as their own change with the
+recipe-pin tests updated; this document freezes the verdict only.
+
+The run's headline numbers, for the era record: final eval
+**+0.143 ± 2.12** (the campaign's first positive learned final;
+statue −4.4, L2W final −1.88), recent-train −0.51, headline
+crossings final 4.97 (best model remains the pristine 25k transfer
+at 6.37 — no trained eval crossed the 6.62 confirmation bar).
+Behavioral endpoint (1M row): 72 policy hits per 30-episode probe,
+receiving 75% crossed / 53% in at 3.23 m, touch 38%,
+`policy_never_reached` down to 61% of points (from 84% at the L2
+era's floor), the opponent losing 5–7 points per row from 800k, and
+— first sign of life in the dead channel — **serving-side k=1 12%**
+at 1M (11 serve-side hits, up from 0–3% everywhere since the
+one-point era).
+
+Mechanism read, consistent across all ten rows: the paid window
+organized (ready error 2.49 → 1.08 m, the cleanest monotone
+improvement in the campaign) while the unpaid windows stayed noisy
+(recovery-hold 4.5–7.3 m, inter-point 8.0–9.3 m — R2's FAIL). The
+same paid-vs-unpaid split that ranked this design now names the next
+amendment if the registered run stalls at k=2 ≈ 1%: extend the
+event-escrow family to the post-swing hold window (pay position at
+the opponent's strike), not a motion tax — the statue attractor
+stays the failure mode to respect. The quiet-optimizer pattern
+persists even in success (ent_coef 1.5e-4, std 0.021 at end) and
+remains a logged non-signal under the behavioral M.
+
+Seed ledger: unchanged (run on seed 0; diagnosis calibration 5200+;
+4100–4199 and 4300–4399 still reserved and untouched).
 
 ## 5. What this is not
 

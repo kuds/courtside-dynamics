@@ -134,8 +134,17 @@ supersedes it (see the ground-rules bullet).
   burned; `tools/paddle_tennis_reach_probe.py`), and RS2 (ending-path
   invariants, `TestReachShaping`) ship with the change; the LR1
   learning pilot — the single reward-side change against the L2W
-  baseline, bars frozen in the design doc §4 — is pre-registered but
-  not yet run. The recipe does NOT enable reach shaping.
+  baseline, bars frozen in the design doc §4 — then ran
+  (`20260816_135919`, 1M warm-started steps) and **the ADOPT branch
+  fired** (design doc §4a): k=2 exchange survival above zero at five
+  checkpoints (a confirmed second-exchange return at 700k — the
+  campaign's first), touch 41%, ready error to 1.08 m, k=1 receiving
+  68–83% across the last three rows, and the first positive learned
+  final evaluation (+0.14; the from-scratch era's floor was −4.4).
+  The recipe change (adopting n-point + both shapings + the hardened
+  guard set) and the 6M registered-run pre-registration on reserved
+  4100–4199 are the committed follow-ups and ship separately; as of
+  this entry the recipe still does NOT enable reach shaping.
 - **PaddleTennis escrowed contact shaping (implemented, default
   off).** The touch→in remedy
   (docs/design_paddle_tennis_contact_shaping.md): new env kwarg
