@@ -23,7 +23,7 @@ from tools.paddle_tennis_diagnosis_probe import (
 
 class TestDiagnosisInstrument:
     def test_oracle_reference_row_is_coherent(self):
-        traces = run_player(
+        traces, _travels = run_player(
             scripted_ground_opponent, episodes=6, seed_start=1000
         )
         assert len(traces) == 6
@@ -53,7 +53,7 @@ class TestDiagnosisInstrument:
         """The bounce-time ready error must reproduce the ground
         oracle's designed wait margin -- the instrument's numeric
         self-check (bring-up measured 0.90 vs the 0.9 constant)."""
-        traces = run_player(
+        traces, _travels = run_player(
             scripted_ground_opponent, episodes=6, seed_start=1000
         )
         errors = [e for t in traces for e in t.ready_errors]
@@ -69,7 +69,7 @@ class TestDiagnosisInstrument:
         with going out when the untouched ball's second bounce
         skipped past the baseline, inverting H1 evidence into H3."""
         statue = lambda observation: np.zeros(3)  # noqa: E731
-        traces = run_player(statue, episodes=6, seed_start=1000)
+        traces, _travels = run_player(statue, episodes=6, seed_start=1000)
         receiving = [t for t in traces if not t.serve_side_is_policy]
         assert receiving
         for trace in receiving:
@@ -86,7 +86,7 @@ class TestDiagnosisInstrument:
             scripted_lead_charge_opponent,
         )
 
-        traces = run_player(
+        traces, _travels = run_player(
             scripted_lead_charge_opponent, episodes=4, seed_start=1000
         )
         for trace in traces:
@@ -101,7 +101,7 @@ class TestDiagnosisInstrument:
                 )
 
     def test_report_renders(self):
-        traces = run_player(
+        traces, _travels = run_player(
             scripted_ground_opponent, episodes=2, seed_start=1000
         )
         text = report(traces, "smoke")

@@ -48,6 +48,103 @@ supersedes it (see the ground-rules bullet).
   seeds 3100–3199: mean crossings 3.22 against the pre-registered
   2.6 floor, zero unsafe terminations;
   `docs/paddle_tennis_env_20260802.md`).
+- **PaddleTennis n-point episodes (implemented, default off).** The
+  committed follow-up from the shaping extension's verdict
+  (`docs/design_paddle_tennis_npoint.md`): new env kwarg
+  `points_per_episode` (default 1 — the frozen one-point task stays
+  bit-identical until changed; `None`, spelled `"none"` in a TOML
+  `[env]` table, fills the 1500-step cap with continuous play). A
+  rally fault inside a multi-point episode pays its −1, claws back
+  any pending escrow (the escrow's clawback boundary becomes the
+  point), resets the rules machine, alternates the server, and
+  relaunches the next feed with **paddle positions carried over** —
+  the load-bearing decision that prices post-swing wander with the
+  next point's already-sampled serve-return credit instead of the
+  never-sampled k=2 return. The relaunch protocol clearance-checks
+  the drawn serve cell against both paddle heads (0.45 m envelope,
+  up to 10 redraws, then a minimal sanctioned nudge counted in
+  `point_serve_nudged`) and re-primes the event sampler only after
+  the ball teleport — the review's two reproduced hazards (a feed
+  spawned into a parked paddle deflecting at 41 m/s with no events;
+  a stale crossing detector faulting the new point as a reverse
+  crossing). New info/CSV keys: `points_played` (completed points
+  only), `completed_point_crossings`, `point_serve_nudged`, and
+  seven cumulative `point_end_*` counters; the eight `term_*` group
+  flags become strictly episode-ending descriptors. The diagnosis
+  instrument segments episodes into per-point traces and adds the
+  era's second recovery metric — **inter-point recovery travel**
+  (point end to next feed arrival) — kept distinct from the
+  within-point recovery hold. NP0 (bit-identity of the default,
+  lockstep) and NP1 (30 mechanics witnesses: carryover continuity,
+  nudge coincidence, spawn clearance/cell/velocity, the
+  reverse-crossing hazard absent over 116 far-side slam points,
+  exact escrow identities on bit-identical shaped/unshaped arms,
+  statue point economics, strict alternation across points and
+  episodes; racket–net contact measured **unreachable** on this
+  scene, making the pinned cross-boundary latch semantics vacuously
+  safe) all PASS (`tools/paddle_tennis_npoint_probe.py`, seeds
+  5400–5499 now burned as the era's calibration block; NP0
+  additionally verified cross-version — bit-identical
+  obs/reward/info against the actual pre-amendment merge commit).
+  NP2 recalibrated the era's reference band (100 episodes):
+  crossings/episode 11.40 ± 1.58, completed points/episode 1.13,
+  bridge metric 4.46 crossings per completed point, zero nudges
+  over 113 relaunches, oracle inter-point recovery 2.10 m mean —
+  and the L2 pilot's numeric bars plus its three-branch decision
+  rule were frozen at NP2 time in the design doc §4a. NP3 held-out
+  certification then **PASSED** every pre-registered floor
+  (reserved seeds 4300–4399, now consumed: mean crossings 11.51 vs
+  the 9.0 floor, 106 completed points vs 50, 0% nudges, zero
+  unsafe). The recipe does NOT enable n-point play; adoption waits
+  on the L2 pilot against the frozen bars. **L2 verdict
+  (2026-08-15): Stop/pivot.** Two from-scratch pilots at the
+  implementation SHA — `20260810_211754` (the pre-registered shape,
+  seed 0, early-stopped 1.125M) and `20260815_015143` (seed 1,
+  n_envs 8, full 2M) — both collapsed to zero policy contact from
+  the first checkpoint (K FAIL every row; R2/P″/D2″ FAIL; M intact
+  by the letter). n-point stays default-off; verdict, validation
+  experiments (statue economics −4.4 vs oracle +11.6 in-mode; the
+  from-scratch exploration cliff under carryover), and the
+  recommended warm-started retest:
+  `docs/paddle_tennis_npoint_pilot_20260815_review.md`. **The
+  warm-started retest (L2W, run `20260815_180815`) then measured
+  both halves** (review doc §6a): the transferred k=1 policy
+  collects the design's inter-point credit at zero updates (+1.92
+  reward, crossings 6.37 — the campaign's first positive learned
+  eval), and SAC training under the same economics regresses it to
+  a ~30%-engagement equilibrium with k=2 still exactly 0% — the
+  stroke re-converges, positioning never improves. The design's
+  mechanism is real; the next probed change is paying position
+  (reach shaping), not more budget.
+- **PaddleTennis escrowed reach shaping (implemented, default
+  off).** The position→touch remedy the L2W warm-start verdict
+  points at (`docs/design_paddle_tennis_reach_shaping.md`): new env
+  kwargs `reach_shaping` (default 0.0 — the frozen task's reward
+  stream is bit-identical until enabled) and `reach_shaping_radius`
+  (default 3.0 m). When on: the incoming ball's live first bounce on
+  side A pays `reach_shaping × max(0, 1 − d/radius)` into a pending
+  escrow (d = recorded bounce position to the side-A paddle head),
+  the side-A legal hit that takes the opportunity keeps it, and
+  every ending path — n-point boundaries included — claws back the
+  pending remainder, so episode totals are exactly the
+  opportunity-taken proximity pay: camping is not farmable. New
+  `rew_reach`/`rew_reach_clawback` components in the decomposition,
+  info, and CSV schema. RS0 (default bit-identity, lockstep), RS1
+  (six-witness identity battery on fresh block 5500–5599, now
+  burned; `tools/paddle_tennis_reach_probe.py`), and RS2 (ending-path
+  invariants, `TestReachShaping`) ship with the change; the LR1
+  learning pilot — the single reward-side change against the L2W
+  baseline, bars frozen in the design doc §4 — then ran
+  (`20260816_135919`, 1M warm-started steps) and **the ADOPT branch
+  fired** (design doc §4a): k=2 exchange survival above zero at five
+  checkpoints (a confirmed second-exchange return at 700k — the
+  campaign's first), touch 41%, ready error to 1.08 m, k=1 receiving
+  68–83% across the last three rows, and the first positive learned
+  final evaluation (+0.14; the from-scratch era's floor was −4.4).
+  The recipe change (adopting n-point + both shapings + the hardened
+  guard set) and the 6M registered-run pre-registration on reserved
+  4100–4199 are the committed follow-ups and ship separately; as of
+  this entry the recipe still does NOT enable reach shaping.
 - **PaddleTennis escrowed contact shaping (implemented, default
   off).** The touch→in remedy
   (docs/design_paddle_tennis_contact_shaping.md): new env kwarg

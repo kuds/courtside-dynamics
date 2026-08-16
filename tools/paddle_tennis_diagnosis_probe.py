@@ -96,10 +96,10 @@ def main(argv: list[str] | None = None) -> int:
         policy = scripted_ground_opponent
         label = "ground oracle (reference)"
 
-    traces = run_player(
+    traces, travels = run_player(
         policy, episodes=args.episodes, seed_start=args.seed_start
     )
-    print(report(traces, label))
+    print(report(traces, label, interpoint_travels=travels))
     return 0
 
 
