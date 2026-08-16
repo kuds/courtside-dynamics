@@ -155,7 +155,16 @@ supersedes it (see the ground-rules bullet).
   pre-registered in
   `docs/paddle_tennis_registered_run_prereg_20260816.md` with its
   run config frozen verbatim in that document (Drive-side at launch,
-  sha-pinned by run provenance, per the pilots' convention).
+  sha-pinned by run provenance, per the pilots' convention). The
+  adoption code review then landed the reach escrow's **ordering
+  amendment** (design doc §2a): a payment whose bounce and taking
+  hit share one control step is kept immediately instead of escrowed
+  — the original ordering could claw back a tight interception's pay
+  — plus probe-tool hardening (NP2 band no longer crashes on zero
+  completed points; the statue/camper witnesses consolidate into
+  `envs/_paddle_court.py` so tools and tests measure one frozen
+  policy; dead NP1 bookkeeping dropped). Both pilots ran the
+  pre-amendment ordering; the registered run runs the amendment.
 - **PaddleTennis escrowed contact shaping (implemented, default
   off).** The touch→in remedy
   (docs/design_paddle_tennis_contact_shaping.md): new env kwarg

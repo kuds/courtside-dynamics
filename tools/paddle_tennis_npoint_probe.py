@@ -77,6 +77,7 @@ from courtside_dynamics.envs._paddle_court import (
     PADDLE_LOCAL_Z,
     scripted_ground_opponent,
     scripted_hard_slam_witness,
+    scripted_statue_witness,
 )
 from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
 from courtside_dynamics.envs.tennis_rules import CourtSide
@@ -113,8 +114,9 @@ _SPAWN_SPEED_BOUND = 10.5
 _CARRYOVER_JUMP_BOUND = 0.5
 
 
-def _statue(_observation: np.ndarray) -> np.ndarray:
-    return np.zeros(3)
+#: The statue witness is frozen in envs/_paddle_court.py, shared with
+#: the reach probe and the test suites.
+_statue = scripted_statue_witness
 
 
 def _serve_cell_parker(_observation: np.ndarray) -> np.ndarray:
@@ -162,9 +164,7 @@ class EpisodeRow:
     nudges: int
     servers: list[str]  # server of each launched point, in order
     point_rewards: list[float]  # per completed point
-    partial_reward: float | None  # cap-cut partial point, if any
     boundary_jumps: list[float]  # per un-nudged boundary, both paddles
-    nudged_boundaries: int
     nudges_off_boundary: int
     boundary_clawbacks: int
     spawn_clearance_min: float
@@ -188,7 +188,7 @@ def run_battery_episode(
     prev_points = prev_nudges = 0
     point_rewards: list[float] = []
     boundary_jumps: list[float] = []
-    nudged_boundaries = nudges_off_boundary = 0
+    nudges_off_boundary = 0
     boundary_clawbacks = spawn_cell_violations = 0
     spawn_clearance_min = np.inf
     spawn_speed_max = 0.0
@@ -220,9 +220,7 @@ def run_battery_episode(
                 # A relaunch happened inside this step.
                 if float(info["rew_shaping_clawback"]) < 0.0:
                     boundary_clawbacks += 1
-                if nudge_delta:
-                    nudged_boundaries += 1
-                else:
+                if not nudge_delta:
                     boundary_jumps.append(
                         max(
                             float(
@@ -269,9 +267,7 @@ def run_battery_episode(
                 nudges=nudges_now,
                 servers=servers,
                 point_rewards=point_rewards,
-                partial_reward=None if point_ended else point_reward,
                 boundary_jumps=boundary_jumps,
-                nudged_boundaries=nudged_boundaries,
                 nudges_off_boundary=nudges_off_boundary,
                 boundary_clawbacks=boundary_clawbacks,
                 spawn_clearance_min=float(spawn_clearance_min),
@@ -639,10 +635,14 @@ def run_np2(
         f"  crossings per completed point (bridge metric) {per_point:.2f}",
         f"  nudges: {sum(nudges)} over {relaunches} relaunches"
         f" ({sum(nudges) / max(relaunches, 1):.1%})",
-        "  inter-point recovery travel mean "
-        f"{np.mean(all_travels):.2f} m  p90 "
-        f"{np.percentile(all_travels, 90):.2f} m"
-        f"  (n={len(all_travels)})",
+        (
+            "  inter-point recovery travel mean "
+            f"{np.mean(all_travels):.2f} m  p90 "
+            f"{np.percentile(all_travels, 90):.2f} m"
+            f"  (n={len(all_travels)})"
+            if all_travels
+            else "  inter-point recovery travel: no boundaries (n=0)"
+        ),
         f"  unsafe episodes: {unsafe}",
     ]
     return (

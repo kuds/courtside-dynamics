@@ -611,6 +611,25 @@ def scripted_hard_slam_witness(observation: np.ndarray) -> np.ndarray:
     )
 
 
+def scripted_statue_witness(_observation: np.ndarray) -> np.ndarray:
+    """The do-nothing witness: zero action every step (targets the
+    home column). The statue-economics reference of the n-point and
+    reach-shaping probe batteries; frozen here so tools and tests
+    measure the same policy."""
+    return np.zeros(3)
+
+
+def scripted_reach_camper_witness(_observation: np.ndarray) -> np.ndarray:
+    """The reach-shaping anti-farming witness: parked at the serve
+    landing depth (side-local x ≈ −4.55, action −0.61 on the frozen
+    piecewise x map) and ~1 m off the ball line (y action 0.33), so
+    qualifying bounces pay proximity while the ball never reaches the
+    paddle face. Calibrated at RS1 bring-up (payments in 94% of
+    episodes, zero hits on the 5500 block); a serve-config change
+    invalidates this constant — recalibrate, in one place, here."""
+    return np.array([-0.61, 0.33, 0.0])
+
+
 def net_patting_local_action(
     ball_position: np.ndarray,
     ball_velocity: np.ndarray,

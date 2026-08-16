@@ -126,6 +126,27 @@ paid*. The pay is dense where the failure is.
   follows task metrics (and the L2W-hardened guards), never eval
   reward.
 
+### 2a. Ordering amendment (2026-08-16, post-LR1, pre-registered-run)
+
+The shipped §1 ordering ("commit before opening") had a blind edge
+the adoption code review caught: a qualifying bounce and the legal
+hit that takes it can share one 50 ms control step (the tight
+interception the shaping exists to teach), and the original ordering
+escrowed that payment — to be clawed back at the next boundary
+unless another hit followed. Coexistence in a batch always orders
+bounce → hit (one ball; an untaken earlier bounce would have ended
+the point as a second bounce), so the amendment keeps a same-step
+payment immediately: only an *untaken* payment enters escrow
+(`_reach_escrow_step`, unit-pinned). This changes the shaped reward
+stream in exactly this edge; both pilots ran the original ordering
+(their recorded results stand as-is) and the registered run runs the
+amendment. The RS1 battery re-ran under the amended tracker rule and
+passed with results **byte-identical to §3a's table** (identity gap
+0.00e+00) — no same-step take occurs on the 5500 block for these
+witnesses, so the edge is pinned by the
+`test_same_step_take_is_kept_not_escrowed` unit witness rather than
+the block. The default-off stream is untouched (RS0 unaffected).
+
 ## 3. Pre-registered probe battery
 
 Calibration seed block **5500–5599 is reserved for RS1** (verified

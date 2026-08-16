@@ -688,18 +688,26 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             rew_shaping = self.contact_shaping
             self._pending_shaping += self.contact_shaping
 
-        # Escrowed reach shaping (side A only): the hit that takes a
-        # pending opportunity keeps its advance (a keep and the next
-        # bounce can share a step — commit before opening, the contact
-        # escrow's ordering); the incoming ball's live first bounce on
-        # side A pays by proximity. Exact zeros when the kwarg is off,
-        # so the default reward stream stays bit-identical.
-        if CourtSide.A in transition.valid_racket_hits:
-            self._pending_reach = 0.0
+        # Escrowed reach shaping (side A only): the incoming ball's
+        # live first bounce pays by proximity; the legal hit that
+        # takes the opportunity keeps the advance. A hit sharing this
+        # very step with the qualifying bounce takes THAT bounce (one
+        # ball: coexistence in a batch always orders bounce → hit
+        # under both rally profiles — an untaken earlier bounce would
+        # have ended the point as a second bounce), so its pay is
+        # kept immediately rather than escrowed: the tight
+        # interception the shaping exists to teach must not forfeit
+        # its advance to the update ordering
+        # (docs/design_paddle_tennis_reach_shaping.md §2). Exact
+        # zeros when the kwarg is off, so the default reward stream
+        # stays bit-identical.
         rew_reach = 0.0
         if self.reach_shaping and CourtSide.A in transition.first_bounces:
             rew_reach = self._reach_payment(transition)
-            self._pending_reach += rew_reach
+        rew_reach = self._reach_escrow_step(
+            took=CourtSide.A in transition.valid_racket_hits,
+            payment=rew_reach,
+        )
 
         raw_observation = self._get_obs()
         nonfinite = not bool(np.isfinite(raw_observation).all())
@@ -825,6 +833,22 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         return self.reach_shaping * max(
             0.0, 1.0 - distance / self.reach_shaping_radius
         )
+
+    def _reach_escrow_step(self, *, took: bool, payment: float) -> float:
+        """One step of the reach escrow's pending-state update.
+
+        ``took`` = a side-A legal hit this step; ``payment`` = this
+        step's qualifying-bounce pay (0.0 when none). A hit keeps any
+        prior pending advance; a payment coexisting with the hit is
+        the bounce that hit just took, so it is kept immediately —
+        only an untaken payment enters escrow. Returns ``payment``
+        (the step's ``rew_reach``) unchanged.
+        """
+        if took:
+            self._pending_reach = 0.0
+        elif payment:
+            self._pending_reach += payment
+        return payment
 
     def _record_point_end(self, reason: TerminationReason) -> None:
         for name, reasons in _TERM_GROUPS:

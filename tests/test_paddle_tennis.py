@@ -840,13 +840,6 @@ class TestContactShaping:
         assert RECIPES["PaddleTennis"].env_kwargs["contact_shaping"] == 0.25
 
 
-#: Off-line camper for the reach-shaping anti-farming witness: parked
-#: near the serve landing depth (side-local x ~= -4.55) but offset ~1 m
-#: laterally, so bounces pay proximity while the ball never reaches the
-#: paddle face.
-_REACH_CAMPER_ACTION = np.array([-0.61, 0.33, 0.0])
-
-
 class TestReachShaping:
     """The escrow contract of design_paddle_tennis_reach_shaping.md:
     pay at side A's live first bounce by proximity, keep on the side-A
@@ -876,11 +869,15 @@ class TestReachShaping:
                 sum(info[key] for key in _SHAPING_COMPONENTS), abs=1e-12
             )
             totals["reward"] += reward
+            # The env's escrow rule: a hit keeps any prior pending
+            # advance, and a same-step payment is the bounce that hit
+            # just took — kept immediately, never escrowed.
             if info["event_valid_racket_hit_a"]:
                 hits += 1
-                kept += pending
+                kept += pending + info["rew_reach"]
                 pending = 0.0
-            pending += info["rew_reach"]
+            else:
+                pending += info["rew_reach"]
             if mirror_env is not None:
                 mirror_obs, mirror_reward, mterm, mtrunc, _ = mirror_env.step(action)
                 np.testing.assert_array_equal(obs, mirror_obs)
@@ -1017,16 +1014,42 @@ class TestReachShaping:
             shaped.close()
             plain.close()
 
+    def test_same_step_take_is_kept_not_escrowed(self):
+        """The §2 ordering amendment: a payment coexisting with the
+        hit that takes it is kept immediately — never pending, so a
+        later boundary cannot claw back a tight interception's pay —
+        while a hit alone keeps exactly the prior pending advance."""
+        env = PaddleTennisEnv(reach_shaping=0.25)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            # Hit and qualifying bounce in the same step: prior
+            # pending is kept, the new payment never enters escrow.
+            env._pending_reach = 0.125
+            assert env._reach_escrow_step(took=True, payment=0.2) == 0.2
+            assert env._pending_reach == 0.0
+            # Bounce alone: the payment escrows.
+            assert env._reach_escrow_step(took=False, payment=0.2) == 0.2
+            assert env._pending_reach == 0.2
+            # Hit alone: pending kept (cleared without clawback).
+            assert env._reach_escrow_step(took=True, payment=0.0) == 0.0
+            assert env._pending_reach == 0.0
+        finally:
+            env.close()
+
     def test_camper_collects_nothing_net(self):
         """The anti-farming witness: parked near the landing, off the
         ball line — proximity is paid every receiving bounce and
         clawed back in full (no hit ever keeps it)."""
+        from courtside_dynamics.envs._paddle_court import (
+            scripted_reach_camper_witness,
+        )
+
         env = PaddleTennisEnv(reach_shaping=0.25)
         try:
             paid_any = False
             for seed in _SMOKE_SEEDS:
                 totals, sums, kept, hits = self._drive(
-                    env, lambda _obs: _REACH_CAMPER_ACTION, seed
+                    env, scripted_reach_camper_witness, seed
                 )
                 assert hits == 0
                 assert kept == 0.0
@@ -1061,9 +1084,10 @@ class TestReachShaping:
                     mirror_total += mirror_reward
                     confirms += int(bool(info["event_valid_return_a"]))
                     if info["event_valid_racket_hit_a"]:
-                        kept_reach += pending_reach
+                        kept_reach += pending_reach + info["rew_reach"]
                         pending_reach = 0.0
-                    pending_reach += info["rew_reach"]
+                    else:
+                        pending_reach += info["rew_reach"]
                     if term or trunc:
                         break
                 assert total - mirror_total == pytest.approx(
