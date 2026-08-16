@@ -70,6 +70,31 @@ from-scratch bootstrapping is booked as still-unpaid (routing the
 next reward design, not more budget). Middle → maintainer's call,
 documented with the post-hoc label.
 
+### 1b. The single-session shape — ADOPTED for launch (2026-08-16,
+frozen before any run step)
+
+The maintainer chose to fold LS1 into the registered attempt rather
+than run two sessions: **the registered attempt launches from
+scratch at 3,000,000 steps, seed 1** (the registered convention; the
+§1a standalone-LS1 shape at seed 0 is superseded unlaunched), with
+LS1's role played in-run:
+
+- the §1a bars (LS-C, LS-K1, LS-G) are scored from the run's own
+  100k-cadence diagnosis probes at their same checkpoints — the
+  identical instrument and numbers, no separate pilot;
+- the armed degenerate guard is the gate's failure half: an abort,
+  or LS-C/LS-K1 landing FAIL by 1M, books the from-scratch attempt
+  **FAIL** and the §2 warm-started shape launches as the registered
+  run (that second launch is the only case with two sessions);
+- if the run survives its LS1 bars, it simply continues — the §3
+  criteria (RK1, RE1, RE3, RS2, M) and the §4 held-out gate apply
+  to it as the registered run, unchanged. Run config: the §1a TOML
+  verbatim (no warm start, no `learning_starts`).
+
+Budget note: 3M ≈ 19 h at the measured 44 FPS — one session. Any
+extension follows §5's extend-once branch, warm-start-chained from
+this run's best (lineage stays from-scratch-in-era).
+
 ## 2. Run shape (frozen — the warm-started shape; §1a's LS1 verdict
 decides whether this shape or a from-scratch addendum launches)
 
