@@ -246,6 +246,8 @@ _PADDLE_TENNIS_CSV_KEYS = (
     "rew_unsafe",
     "rew_shaping",
     "rew_shaping_clawback",
+    "rew_reach",
+    "rew_reach_clawback",
     "points_played",
     "completed_point_crossings",
     "point_serve_nudged",

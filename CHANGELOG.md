@@ -116,6 +116,26 @@ supersedes it (see the ground-rules bullet).
   stroke re-converges, positioning never improves. The design's
   mechanism is real; the next probed change is paying position
   (reach shaping), not more budget.
+- **PaddleTennis escrowed reach shaping (implemented, default
+  off).** The position→touch remedy the L2W warm-start verdict
+  points at (`docs/design_paddle_tennis_reach_shaping.md`): new env
+  kwargs `reach_shaping` (default 0.0 — the frozen task's reward
+  stream is bit-identical until enabled) and `reach_shaping_radius`
+  (default 3.0 m). When on: the incoming ball's live first bounce on
+  side A pays `reach_shaping × max(0, 1 − d/radius)` into a pending
+  escrow (d = recorded bounce position to the side-A paddle head),
+  the side-A legal hit that takes the opportunity keeps it, and
+  every ending path — n-point boundaries included — claws back the
+  pending remainder, so episode totals are exactly the
+  opportunity-taken proximity pay: camping is not farmable. New
+  `rew_reach`/`rew_reach_clawback` components in the decomposition,
+  info, and CSV schema. RS0 (default bit-identity, lockstep), RS1
+  (six-witness identity battery on fresh block 5500–5599, now
+  burned; `tools/paddle_tennis_reach_probe.py`), and RS2 (ending-path
+  invariants, `TestReachShaping`) ship with the change; the LR1
+  learning pilot — the single reward-side change against the L2W
+  baseline, bars frozen in the design doc §4 — is pre-registered but
+  not yet run. The recipe does NOT enable reach shaping.
 - **PaddleTennis escrowed contact shaping (implemented, default
   off).** The touch→in remedy
   (docs/design_paddle_tennis_contact_shaping.md): new env kwarg

@@ -233,6 +233,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         fault_penalty: float = 1.0,
         unsafe_physics_penalty: float = 2.0,
         contact_shaping: float = 0.0,
+        reach_shaping: float = 0.0,
+        reach_shaping_radius: float = 3.0,
         points_per_episode: int | None = 1,
         **kwargs: Any,
     ) -> None:
@@ -247,6 +249,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             fault_penalty=fault_penalty,
             unsafe_physics_penalty=unsafe_physics_penalty,
             contact_shaping=contact_shaping,
+            reach_shaping=reach_shaping,
+            reach_shaping_radius=reach_shaping_radius,
             points_per_episode=points_per_episode,
             **kwargs,
         )
@@ -266,6 +270,21 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         # return, claw back on EVERY episode ending.
         self.contact_shaping = finite_nonnegative("contact_shaping", contact_shaping)
         self._pending_shaping = 0.0
+        # Escrowed reach shaping (side A only; default off keeps the
+        # frozen task definition — docs/design_paddle_tennis_reach_shaping.md):
+        # pay at the incoming ball's live first bounce on side A,
+        # proportional to the paddle's proximity; keep on the side-A
+        # legal hit that takes the opportunity; claw back whatever is
+        # pending at EVERY ending — point boundaries included.
+        self.reach_shaping = finite_nonnegative("reach_shaping", reach_shaping)
+        radius = float(reach_shaping_radius)
+        if not np.isfinite(radius) or radius <= 0.0:
+            raise ValueError(
+                "reach_shaping_radius must be finite and positive, "
+                f"got {reach_shaping_radius!r}"
+            )
+        self.reach_shaping_radius = radius
+        self._pending_reach = 0.0
         # n-point continuous play (docs/design_paddle_tennis_npoint.md):
         # 1 = the frozen one-point episode (default, bit-identical);
         # None = as many points as fit the step cap; ints >= 2 exist
@@ -669,6 +688,19 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             rew_shaping = self.contact_shaping
             self._pending_shaping += self.contact_shaping
 
+        # Escrowed reach shaping (side A only): the hit that takes a
+        # pending opportunity keeps its advance (a keep and the next
+        # bounce can share a step — commit before opening, the contact
+        # escrow's ordering); the incoming ball's live first bounce on
+        # side A pays by proximity. Exact zeros when the kwarg is off,
+        # so the default reward stream stays bit-identical.
+        if CourtSide.A in transition.valid_racket_hits:
+            self._pending_reach = 0.0
+        rew_reach = 0.0
+        if self.reach_shaping and CourtSide.A in transition.first_bounces:
+            rew_reach = self._reach_payment(transition)
+            self._pending_reach += rew_reach
+
         raw_observation = self._get_obs()
         nonfinite = not bool(np.isfinite(raw_observation).all())
         obs = self._record_or_echo_observation(raw_observation, nonfinite)
@@ -696,9 +728,12 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             terminated = False
         truncated = bool(not terminated and self.step_number >= self.episode_len)
         rew_shaping_clawback = 0.0
+        rew_reach_clawback = 0.0
         if absorbed_point or terminated or truncated:
             rew_shaping_clawback = -self._pending_shaping
             self._pending_shaping = 0.0
+            rew_reach_clawback = -self._pending_reach
+            self._pending_reach = 0.0
         serving_side_of_step = self._serving_side
         if point_completed:
             # Every completed point enters the durable counters —
@@ -732,7 +767,13 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
                     forced_nonfinite = True
                     rew_unsafe = -self.unsafe_physics_penalty
         reward = (
-            rew_return + rew_fault + rew_unsafe + rew_shaping + rew_shaping_clawback
+            rew_return
+            + rew_fault
+            + rew_unsafe
+            + rew_shaping
+            + rew_shaping_clawback
+            + rew_reach
+            + rew_reach_clawback
         )
         info = self._build_info(
             transition,
@@ -741,6 +782,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             rew_unsafe=rew_unsafe,
             rew_shaping=rew_shaping,
             rew_shaping_clawback=rew_shaping_clawback,
+            rew_reach=rew_reach,
+            rew_reach_clawback=rew_reach_clawback,
             truncated=truncated,
             forced_nonfinite=forced_nonfinite,
             absorbed_point=absorbed_point,
@@ -753,6 +796,35 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         if self.points_per_episode is None:
             return True
         return self._points_played + 1 < self.points_per_episode
+
+    def _reach_payment(self, transition: RallyTransition) -> float:
+        """Proximity pay at side A's live first bounce.
+
+        ``d`` is the XY distance from the bounce (the qualifying
+        BALL_COURT_A event's recorded contact position — a live first
+        bounce guarantees exactly one such processed event) to the
+        side-A paddle head at step end (at most one control step of
+        paddle motion past the bounce substep, ≤ 0.125 m at the
+        12.5 m/s ceiling — the documented, decidable convention). The
+        pay ramps linearly from the full ``reach_shaping`` at d = 0 to
+        zero at ``reach_shaping_radius``.
+        """
+        bounce_position: tuple[float, float, float] | None = None
+        for event in transition.processed_events:
+            if event.kind is RallyEventKind.BALL_COURT_A:
+                bounce_position = event.position
+                break
+        assert bounce_position is not None  # first_bounces guarantees the event
+        paddle = self._paddle_position(CourtSide.A)
+        distance = float(
+            np.hypot(
+                bounce_position[0] - paddle[0],
+                bounce_position[1] - paddle[1],
+            )
+        )
+        return self.reach_shaping * max(
+            0.0, 1.0 - distance / self.reach_shaping_radius
+        )
 
     def _record_point_end(self, reason: TerminationReason) -> None:
         for name, reasons in _TERM_GROUPS:
@@ -785,7 +857,9 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         # blew up) claws back here too, or the §1 sum identity breaks.
         rew_shaping_clawback = -self._pending_shaping
         self._pending_shaping = 0.0
-        reward = rew_unsafe + rew_shaping_clawback
+        rew_reach_clawback = -self._pending_reach
+        self._pending_reach = 0.0
+        reward = rew_unsafe + rew_shaping_clawback + rew_reach_clawback
         info = self._build_info(
             transition,
             rew_return=0.0,
@@ -793,6 +867,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             rew_unsafe=rew_unsafe,
             rew_shaping=0.0,
             rew_shaping_clawback=rew_shaping_clawback,
+            rew_reach=0.0,
+            rew_reach_clawback=rew_reach_clawback,
             truncated=False,
             forced_nonfinite=True,
         )
@@ -807,6 +883,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         rew_unsafe: float,
         rew_shaping: float,
         rew_shaping_clawback: float,
+        rew_reach: float,
+        rew_reach_clawback: float,
         truncated: bool,
         forced_nonfinite: bool = False,
         absorbed_point: bool = False,
@@ -842,6 +920,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
                 "rew_unsafe": rew_unsafe,
                 "rew_shaping": rew_shaping,
                 "rew_shaping_clawback": rew_shaping_clawback,
+                "rew_reach": rew_reach,
+                "rew_reach_clawback": rew_reach_clawback,
                 "term_timeout": 1.0 if truncated else 0.0,
                 "points_played": float(self._points_played),
                 "completed_point_crossings": float(self._crossings_base),
@@ -1006,6 +1086,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._point_serve_nudged = 0
         self._point_end_counts = {}
         self._pending_shaping = 0.0
+        self._pending_reach = 0.0
         self._last_transition = None
         self._serving_side = self._next_serving_side
         self._next_serving_side = self._serving_side.opponent

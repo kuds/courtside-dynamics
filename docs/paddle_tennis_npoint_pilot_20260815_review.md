@@ -457,7 +457,11 @@ recovery hold, inter-point travel all unimproved across 4M
 cumulative steps and three runs). Any future warm start should add
 an update-ratio control (cap `gradient_steps` early) alongside
 `learning_starts`; re-warm-starting from this run's best gains
-nothing (it *is* the source policy).
+nothing (it *is* the source policy). The reach-shaping design is now
+drafted, implemented (default off), and probe-certified —
+[`design_paddle_tennis_reach_shaping.md`](design_paddle_tennis_reach_shaping.md)
+(RS0–RS2 PASS); its pre-registered LR1 pilot is the run to make
+next.
 
 ## 7. Workpapers
 
