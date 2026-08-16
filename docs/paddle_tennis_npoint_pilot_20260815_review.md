@@ -404,6 +404,61 @@ retention floor from `reports/diagnosis/diagnosis_probe_*.txt`
 same rows; the degenerate guard aborts a no-retention run ≈125k
 steps in (~1 GPU-hour), full budget ≈6–8 h.
 
+## 6a. L2W result (run `20260815_180815`, completed 2026-08-16 00:33)
+
+The §6 recipe ran as specified (SHA 731cf08, seed 0, n_envs 4, 1M
+steps, 6h25m at 43 FPS; stop: patience at the budget's end; summary:
+"policy regressed after best; deploy best_model.zip").
+
+**The transfer worked; the training regressed it; the era's number
+never moved.**
+
+- **Retention at zero updates: PASS, emphatically.** Eval #1 (25k
+  steps, no gradient updates — `learning_starts` guaranteed this):
+  reward **+1.92 ± 1.56**, crossings 6.37/episode (p90 8), real
+  rallies, points lasting ~350 steps. The first positive-reward
+  learned evaluation in the campaign, and direct proof of the
+  design's §1 mechanism: a stroke-owning policy collects the
+  inter-point credit.
+- **Training-induced degradation.** k=1 receiving across the probe
+  rows: 100% (source) → 15% (100k) → 50% (200k) → 32% → 21% → 19%
+  → … → **30% (1M)**; serving side dead (0–3%) the whole run.
+  Reward crashed +1.9 → −3.2 by 100k, then partially recovered to a
+  −1.6 to −1.9 equilibrium — the campaign's best learned state, and
+  still below every bar.
+- **The 1M endpoint isolates the missing skill.** Shot quality
+  re-converged to near-source (86% crossed / 79% in at 3.91 m —
+  oracle depth), but engagement stayed at ~30%: touched-after-bounce
+  ≤ 15%, ready error 3.83 m, recovery-hold wander 6.59 m (worst of
+  the run), inter-point travel 9.08 m. The policy swings well at
+  balls that arrive nearby and never moves for the rest — the
+  *stroke* is solved; *positioning* is the skill nothing in the
+  reward pays for.
+- **Bars: K FAIL** (k=2 = 0% at all 10 checkpoints — unchanged
+  through 4M cumulative n-point steps across three runs); retention
+  floor met by the letter (50% at 200k) and eroded after; R2 FAIL
+  (7.8–9.1 m); D2″ FAIL (≤ 27%). `train/ent_coef` ended 1.0e-4,
+  std 0.0198 — the chronic pattern, again.
+- **The guards worked.** best_model = the pristine 25k transfer
+  (crossings 6.37, confirmed); the degenerate guard correctly never
+  fired on a live-but-degraded policy; total cost 6.4 GPU-hours with
+  the best artifact preserved.
+
+**Reading.** Two mechanisms fit the crash-then-partial-recovery
+shape: early critic churn (the transplanted critic re-fit at ~1
+update/transition on a young buffer — each early transition
+resampled ~100×) knocking the actor off the competent mode, and the
+§4 economics then holding it in the low-engagement basin (below
+reliable k=1, every wobble is one-way — §4b's cliff). The endpoint
+sharpens the next-step ranking within recommendation #4: **reach
+shaping (4a) over fault asymmetry (4b)** — the stroke re-emerged on
+its own; what is never paid is being in position (ready error,
+recovery hold, inter-point travel all unimproved across 4M
+cumulative steps and three runs). Any future warm start should add
+an update-ratio control (cap `gradient_steps` early) alongside
+`learning_starts`; re-warm-starting from this run's best gains
+nothing (it *is* the source policy).
+
 ## 7. Workpapers
 
 Local artifacts backing §4 (session scratchpad, reproducible from

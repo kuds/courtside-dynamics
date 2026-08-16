@@ -106,7 +106,16 @@ supersedes it (see the ground-rules bullet).
   experiments (statue economics −4.4 vs oracle +11.6 in-mode; the
   from-scratch exploration cliff under carryover), and the
   recommended warm-started retest:
-  `docs/paddle_tennis_npoint_pilot_20260815_review.md`.
+  `docs/paddle_tennis_npoint_pilot_20260815_review.md`. **The
+  warm-started retest (L2W, run `20260815_180815`) then measured
+  both halves** (review doc §6a): the transferred k=1 policy
+  collects the design's inter-point credit at zero updates (+1.92
+  reward, crossings 6.37 — the campaign's first positive learned
+  eval), and SAC training under the same economics regresses it to
+  a ~30%-engagement equilibrium with k=2 still exactly 0% — the
+  stroke re-converges, positioning never improves. The design's
+  mechanism is real; the next probed change is paying position
+  (reach shaping), not more budget.
 - **PaddleTennis escrowed contact shaping (implemented, default
   off).** The touch→in remedy
   (docs/design_paddle_tennis_contact_shaping.md): new env kwarg
