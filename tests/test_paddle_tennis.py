@@ -832,13 +832,12 @@ class TestContactShaping:
                 continue
             assert passed, f"{check_name}: {detail}"
 
-    def test_recipe_does_not_enable_shaping_yet(self):
-        """The frozen task ships with shaping OFF until the L1 pilot
-        verdict (design doc §3); the recipe must not flip it early."""
+    def test_recipe_adopts_contact_shaping(self):
+        """The adopted era (reach design doc §4a): the recipe ships
+        the contact escrow at its audited 0.25."""
         from courtside_dynamics.recipes import RECIPES
 
-        env_kwargs = RECIPES["PaddleTennis"].env_kwargs
-        assert "contact_shaping" not in env_kwargs
+        assert RECIPES["PaddleTennis"].env_kwargs["contact_shaping"] == 0.25
 
 
 #: Off-line camper for the reach-shaping anti-farming witness: parked
@@ -1083,13 +1082,21 @@ class TestReachShaping:
             with pytest.raises(ValueError):
                 PaddleTennisEnv(reach_shaping=0.25, reach_shaping_radius=radius)
 
-    def test_recipe_does_not_enable_reach_yet(self):
-        """Reach shaping ships OFF until the LR1 pilot verdict
-        (design doc §4); the recipe must not flip it early."""
+    def test_recipe_adopts_reach_shaping_and_guards(self):
+        """The LR1 ADOPT verdict (design doc §4a): reach escrow on at
+        0.25, and the L2W-hardened guard set rides with it."""
         from courtside_dynamics.recipes import RECIPES
 
-        env_kwargs = RECIPES["PaddleTennis"].env_kwargs
-        assert "reach_shaping" not in env_kwargs
+        recipe = RECIPES["PaddleTennis"]
+        assert recipe.env_kwargs["reach_shaping"] == 0.25
+        extra = recipe.extra_cfg
+        assert extra["success_key"] == "legal_hit_count_a"
+        assert "legal_hit_count_a" in extra["info_eval_keys"]
+        assert extra["degenerate_guard_keys"] == ("legal_hit_count_a_ep_mean",)
+        assert extra["early_stop_degenerate_evals"] == 5
+        assert extra["best_metric_min_delta"] == 0.25
+        assert extra["confirm_best_eval"] is True
+        assert extra["headline_key"] == "crossings"
 
 
 class TestNPointEpisodes:
@@ -1339,10 +1346,18 @@ class TestNPointEpisodes:
             if trace.termination == "second_bounce":
                 assert trace.ender == "policy_never_reached"
 
-    def test_recipe_does_not_enable_npoint_yet(self):
+    def test_recipe_adopts_npoint_continuous_play(self):
+        """The LR1 ADOPT verdict: the recipe plays continuous n-point
+        (the ENV default stays 1 — the frozen one-point task is
+        untouched for direct construction and the NP0 lockstep)."""
         from courtside_dynamics.recipes import RECIPES
 
-        assert "points_per_episode" not in RECIPES["PaddleTennis"].env_kwargs
+        assert RECIPES["PaddleTennis"].env_kwargs["points_per_episode"] is None
+        env = PaddleTennisEnv()
+        try:
+            assert env.points_per_episode == 1
+        finally:
+            env.close()
 
     def test_np3_floor_constants_pin(self):
         """The n-point certification's pre-registered contract: the

@@ -297,12 +297,14 @@ frozen bars, each at its own best checkpoint:
 | M | `legal_hit_count_a` > 0 at ≥ half the evals | nonzero at 39 of 40 evals | intact |
 
 **Decision: K PASS + M intact + three of E1/E2/E3/R2 PASS →
-ADOPT.** Committed follow-ups per the branch: the recipe adopts
-`points_per_episode=None`, `contact_shaping=0.25`, and
-`reach_shaping=0.25` (bringing the L2W-hardened guard set with it),
-and the 6M registered run is pre-registered with its held-out gate
-on reserved block 4100–4199. Both ship as their own change with the
-recipe-pin tests updated; this document freezes the verdict only.
+ADOPT.** Both committed follow-ups have since shipped: the recipe
+adopts `points_per_episode=None`, `contact_shaping=0.25`, and
+`reach_shaping=0.25` with the L2W-hardened guard set (recipe-pin
+tests flipped to adoption pins), and the registered run is
+pre-registered —
+[`paddle_tennis_registered_run_prereg_20260816.md`](paddle_tennis_registered_run_prereg_20260816.md)
+(3M warm-started steps, bars frozen from this run's band, held-out
+gate on reserved 4100–4199).
 
 The run's headline numbers, for the era record: final eval
 **+0.143 ± 2.12** (the campaign's first positive learned final;

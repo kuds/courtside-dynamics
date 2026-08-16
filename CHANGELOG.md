@@ -142,9 +142,20 @@ supersedes it (see the ground-rules bullet).
   68–83% across the last three rows, and the first positive learned
   final evaluation (+0.14; the from-scratch era's floor was −4.4).
   The recipe change (adopting n-point + both shapings + the hardened
-  guard set) and the 6M registered-run pre-registration on reserved
-  4100–4199 are the committed follow-ups and ship separately; as of
-  this entry the recipe still does NOT enable reach shaping.
+  guard set) and the registered-run pre-registration on reserved
+  4100–4199 were the committed follow-ups — **both now shipped**:
+  the `PaddleTennis` recipe defaults to `points_per_episode=None`,
+  `contact_shaping=0.25`, `reach_shaping=0.25`, success/guards on
+  the side-A-only `legal_hit_count_a`, `best_metric_min_delta=0.25`,
+  `confirm_best_eval`, and the 5-eval degenerate stop (the three
+  recipe-pin tests flip to adoption pins; the ENV defaults are
+  untouched, so direct construction and every lockstep identity stay
+  frozen). The registered run — 3M warm-started steps, seed 1, bars
+  frozen from the LR1 band, held-out gate on 4100–4199 — is
+  pre-registered in
+  `docs/paddle_tennis_registered_run_prereg_20260816.md` with its
+  run config frozen verbatim in that document (Drive-side at launch,
+  sha-pinned by run provenance, per the pilots' convention).
 - **PaddleTennis escrowed contact shaping (implemented, default
   off).** The touch→in remedy
   (docs/design_paddle_tennis_contact_shaping.md): new env kwarg
