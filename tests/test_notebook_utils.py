@@ -14,6 +14,7 @@ import hashlib
 import json
 
 import numpy as np
+import pytest
 from gymnasium import Env
 from gymnasium.spaces import Box
 
@@ -23,7 +24,15 @@ from courtside_dynamics.notebook_utils import (
     _wall_ball_constructor_kwargs_match,
     check_run_artifacts,
     evaluate_best_wall_ball,
+    load_campaign_manifest,
+    next_stage_attempt_dir,
+    paddle_campaign_metrics,
     print_stage_summary,
+    require_campaign_fingerprint,
+    resolve_warm_start_branch,
+    score_campaign_bars,
+    score_paddle_stage,
+    write_campaign_manifest,
 )
 from courtside_dynamics.training.artifacts import EXPECTED_ARTIFACTS, RUN_LAYOUT
 
@@ -953,3 +962,272 @@ def test_plot_eval_info_groups_phase_and_term_metrics_together(tmp_path):
         "eval_diagnostics",
     ):
         assert (tmp_path / "reports" / f"{page}.png").is_file(), page
+
+
+# ---------------------------------------------------------------------------
+# PaddleTennis staged-campaign helpers
+# ---------------------------------------------------------------------------
+
+
+def _trace(
+    *,
+    serving: bool,
+    hits: int,
+    touched=(),
+    ready=(),
+    termination: str = "opponent_fault",
+):
+    """A lightweight EpisodeTrace stand-in for the aggregation tests."""
+    from courtside_dynamics.training.paddle_diagnosis import EpisodeTrace
+
+    return EpisodeTrace(
+        serve_side_is_policy=serving,
+        shots=[],
+        policy_hits=hits,
+        crossings=hits,
+        termination=termination,
+        ender="opponent",
+        recovery_travel=[],
+        ready_errors=list(ready),
+        touched_after_bounce=list(touched),
+    )
+
+
+def test_paddle_campaign_metrics_mirrors_the_instrument():
+    traces = [
+        _trace(serving=False, hits=2, touched=[True, True], ready=[1.0, 3.0]),
+        _trace(serving=False, hits=0, touched=[False], ready=[2.0]),
+        _trace(serving=True, hits=1),
+        _trace(serving=True, hits=3, termination="nonfinite_state"),
+    ]
+    metrics = paddle_campaign_metrics(traces, [4.0, 6.0])
+    assert metrics["points"] == 4
+    assert metrics["receiving_points"] == 2
+    assert metrics["serving_points"] == 2
+    assert metrics["k1_receiving_survival"] == 0.5
+    assert metrics["k2_receiving_survival"] == 0.5
+    assert metrics["k3_receiving_survival"] == 0.0
+    assert metrics["k1_serving_survival"] == 1.0
+    assert metrics["k2_serving_survival"] == 0.5
+    assert metrics["k3_serving_survival"] == 0.5
+    # RK1/RK2 read "either parity": the better split wins.
+    assert metrics["k2_either_survival"] == 0.5
+    assert metrics["k3_either_survival"] == 0.5
+    assert metrics["touched_after_bounce_rate"] == pytest.approx(2 / 3)
+    assert metrics["touched_after_bounce_samples"] == 3
+    assert metrics["ready_error_mean"] == pytest.approx(2.0)
+    assert metrics["ready_error_samples"] == 3
+    assert metrics["unsafe_terminations"] == 1
+    assert metrics["interpoint_travel_mean"] == pytest.approx(5.0)
+    assert metrics["interpoint_boundaries"] == 2
+
+
+def test_paddle_campaign_metrics_empty_split_reads_none_not_zero():
+    traces = [_trace(serving=False, hits=1)]
+    metrics = paddle_campaign_metrics(traces, [])
+    assert metrics["k1_serving_survival"] is None
+    assert metrics["k2_either_survival"] == 0.0  # from receiving alone
+    assert metrics["touched_after_bounce_rate"] is None
+    assert metrics["ready_error_mean"] is None
+    assert metrics["interpoint_travel_mean"] is None
+    with pytest.raises(ValueError, match="at least one diagnosis trace"):
+        paddle_campaign_metrics([], [])
+
+
+def test_score_campaign_bars_three_valued_with_no_data():
+    metrics = {"a": 0.12, "b": 0.03, "c": 2.2, "d": None}
+    bars = {
+        "A": {
+            "metric": "a",
+            "pass_at": 0.10,
+            "fail_at": 0.05,
+            "higher_is_better": True,
+            "gating": True,
+        },
+        "B": {
+            "metric": "b",
+            "pass_at": 0.10,
+            "fail_at": 0.02,
+            "higher_is_better": True,
+            "gating": True,
+        },
+        "C": {
+            "metric": "c",
+            "pass_at": 2.0,
+            "fail_at": 2.4,
+            "higher_is_better": False,
+            "gating": False,
+        },
+        "D": {
+            "metric": "d",
+            "pass_at": 0.5,
+            "fail_at": 0.1,
+            "higher_is_better": True,
+            "gating": False,
+        },
+    }
+    scored = score_campaign_bars(metrics, bars)
+    assert scored["bars"]["A"]["verdict"] == "PASS"
+    assert scored["bars"]["B"]["verdict"] == "MIDDLE"
+    assert scored["bars"]["C"]["verdict"] == "MIDDLE"
+    assert scored["bars"]["D"]["verdict"] == "NO_DATA"
+    assert scored["verdict"] == "MIDDLE"  # over gating bars only
+
+    scored = score_campaign_bars({**metrics, "b": 0.01}, bars)
+    assert scored["bars"]["B"]["verdict"] == "FAIL"
+    assert scored["verdict"] == "FAIL"
+
+    scored = score_campaign_bars({**metrics, "b": 0.5}, bars)
+    assert scored["verdict"] == "PASS"
+
+    record_only = {
+        name: {**spec, "gating": False} for name, spec in bars.items()
+    }
+    assert score_campaign_bars(metrics, record_only)["verdict"] == "RECORDED"
+
+
+def test_score_campaign_bars_edge_readings_land_middle():
+    higher = {
+        "H": {
+            "metric": "m",
+            "pass_at": 0.10,
+            "fail_at": 0.05,
+            "higher_is_better": True,
+            "gating": True,
+        }
+    }
+    lower = {
+        "L": {
+            "metric": "m",
+            "pass_at": 2.0,
+            "fail_at": 2.4,
+            "higher_is_better": False,
+            "gating": True,
+        }
+    }
+    # PASS wins its inclusive edge; a reading exactly on the fail line
+    # lands MIDDLE (prereg edge ambiguity routes to the maintainer).
+    assert score_campaign_bars({"m": 0.10}, higher)["verdict"] == "PASS"
+    assert score_campaign_bars({"m": 0.05}, higher)["verdict"] == "MIDDLE"
+    assert score_campaign_bars({"m": 2.0}, lower)["verdict"] == "PASS"
+    assert score_campaign_bars({"m": 2.4}, lower)["verdict"] == "MIDDLE"
+    assert score_campaign_bars({"m": 2.41}, lower)["verdict"] == "FAIL"
+
+
+def test_score_campaign_bars_rejects_bad_specs():
+    spec = {
+        "metric": "m",
+        "pass_at": 0.1,
+        "fail_at": 0.05,
+        "higher_is_better": True,
+        "gating": True,
+    }
+    with pytest.raises(ValueError, match="at least one bar"):
+        score_campaign_bars({"m": 1.0}, {})
+    with pytest.raises(KeyError, match="unknown metric"):
+        score_campaign_bars({"other": 1.0}, {"X": spec})
+    with pytest.raises(ValueError, match="spec keys mismatch"):
+        score_campaign_bars({"m": 1.0}, {"X": {**spec, "extra": 1}})
+    with pytest.raises(ValueError, match="spec keys mismatch"):
+        missing = {k: v for k, v in spec.items() if k != "gating"}
+        score_campaign_bars({"m": 1.0}, {"X": missing})
+    with pytest.raises(ValueError, match="fail_at <= pass_at"):
+        score_campaign_bars({"m": 1.0}, {"X": {**spec, "fail_at": 0.2}})
+    with pytest.raises(ValueError, match="pass_at <= fail_at"):
+        flipped = {**spec, "higher_is_better": False, "fail_at": 0.05}
+        score_campaign_bars({"m": 1.0}, {"X": flipped})
+
+
+def test_resolve_warm_start_branch_matrix():
+    kwargs = {"stage_run_dir": "/runs/gate", "fallback_run_dir": "/runs/ref"}
+    assert resolve_warm_start_branch("PASS", **kwargs) == (
+        "continue",
+        "/runs/gate",
+    )
+    assert resolve_warm_start_branch("FAIL", **kwargs) == (
+        "fallback",
+        "/runs/ref",
+    )
+    assert resolve_warm_start_branch(
+        "FAIL", stage_run_dir="/runs/gate", fallback_run_dir=None
+    ) == ("stop", None)
+    for undecided in ("MIDDLE", "NO_DATA"):
+        assert resolve_warm_start_branch(undecided, **kwargs) == ("stop", None)
+        assert resolve_warm_start_branch(
+            undecided, middle_action="continue", **kwargs
+        ) == ("continue", "/runs/gate")
+        assert resolve_warm_start_branch(
+            undecided, middle_action="fallback", **kwargs
+        ) == ("fallback", "/runs/ref")
+        assert resolve_warm_start_branch(
+            undecided,
+            middle_action="fallback",
+            stage_run_dir="/runs/gate",
+            fallback_run_dir=None,
+        ) == ("stop", None)
+    with pytest.raises(ValueError, match="middle_action"):
+        resolve_warm_start_branch("PASS", middle_action="punt", **kwargs)
+    with pytest.raises(ValueError, match="unknown gate verdict"):
+        resolve_warm_start_branch("RECORDED", **kwargs)
+
+
+def test_campaign_manifest_roundtrip_and_fingerprint(tmp_path):
+    assert load_campaign_manifest(tmp_path) is None
+    fingerprint = {"seed": 0, "gate_bars": {"LS-C": (0.10, 0.05)}}
+    manifest = {"status": "running", "fingerprint": fingerprint, "stages": {}}
+    path = write_campaign_manifest(tmp_path, manifest)
+    assert path == str(tmp_path / "campaign_manifest.json")
+    loaded = load_campaign_manifest(tmp_path)
+    assert loaded is not None
+    assert loaded["status"] == "running"
+
+    # Tuples JSON-normalize to lists; an identical protocol must match.
+    require_campaign_fingerprint(loaded, fingerprint)
+    with pytest.raises(ValueError, match="seed"):
+        require_campaign_fingerprint(loaded, {**fingerprint, "seed": 1})
+    with pytest.raises(ValueError, match="no fingerprint"):
+        require_campaign_fingerprint({"status": "running"}, fingerprint)
+
+
+def test_next_stage_attempt_dir_numbers_attempts(tmp_path):
+    first = next_stage_attempt_dir(tmp_path, "leg1_scratch_gate")
+    assert first == str(tmp_path / "leg1_scratch_gate" / "attempt_01")
+    (tmp_path / "leg1_scratch_gate" / "notes.txt").write_text("x")
+    (tmp_path / "leg1_scratch_gate" / "attempt_xx").mkdir()
+    second = next_stage_attempt_dir(tmp_path, "leg1_scratch_gate")
+    assert second == str(tmp_path / "leg1_scratch_gate" / "attempt_02")
+    with pytest.raises(ValueError, match="bare directory name"):
+        next_stage_attempt_dir(tmp_path, "nested/name")
+
+
+def test_score_paddle_stage_requires_finished_paddle_run(tmp_path):
+    bars = {
+        "LS-C": {
+            "metric": "touched_after_bounce_rate",
+            "pass_at": 0.10,
+            "fail_at": 0.05,
+            "higher_is_better": True,
+            "gating": True,
+        }
+    }
+    with pytest.raises(FileNotFoundError, match="best checkpoint"):
+        score_paddle_stage(tmp_path, bars=bars)
+
+    # Legacy flat-layout artifacts satisfy location; the recorded env
+    # class is validated before any model bytes are read.
+    (tmp_path / "best_model.zip").write_bytes(b"zip")
+    (tmp_path / "best_vec_normalize.pkl").write_bytes(b"pkl")
+    (tmp_path / "config.json").write_text(
+        json.dumps({"evaluation_env": {"class": "WallBallEnv"}})
+    )
+    with pytest.raises(ValueError, match="PaddleTennisEnv"):
+        score_paddle_stage(tmp_path, bars=bars)
+
+    (tmp_path / "config.json").write_text(
+        json.dumps({"evaluation_env": {"class": "PaddleTennisEnv"}})
+    )
+    with pytest.raises(ValueError, match="constructor kwargs"):
+        score_paddle_stage(tmp_path, bars=bars)
+
+    with pytest.raises(ValueError, match="episodes"):
+        score_paddle_stage(tmp_path, bars=bars, episodes=0)

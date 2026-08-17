@@ -1742,3 +1742,458 @@ def display_video(path: str, *, width: int = 480):
     from IPython.display import Video
 
     return Video(path, embed=True, width=width)
+
+
+# ---------------------------------------------------------------------------
+# PaddleTennis staged campaign (notebooks/paddle_tennis_campaign.ipynb)
+# ---------------------------------------------------------------------------
+#
+# The campaign notebook chains PaddleTennis training legs in one
+# execution -- a from-scratch gate leg scored by the behavioral
+# diagnosis instrument, then a main leg warm-started from whichever
+# lineage the gate verdict selects -- and records every decision in a
+# Drive-side manifest so a disconnected session resumes instead of
+# retraining. The helpers here are deliberately engine-free: they read
+# artifacts a finished ``train()`` run already wrote, score them
+# against bars the notebook froze before launch, and never touch a run
+# directory beyond adding a report under ``reports/``.
+
+PADDLE_CAMPAIGN_MANIFEST_NAME = "campaign_manifest.json"
+PADDLE_GATE_REPORT_NAME = "campaign_gate.json"
+
+_BAR_SPEC_KEYS = frozenset(
+    {"metric", "pass_at", "fail_at", "higher_is_better", "gating"}
+)
+
+
+def load_campaign_manifest(campaign_root: str | Path) -> dict[str, Any] | None:
+    """Return the campaign's manifest, or ``None`` for a fresh root.
+
+    The manifest is the campaign's resume point: which legs completed,
+    into which run directories, what each report's verdict was, and
+    which warm-start branch was decided. It is written atomically by
+    :func:`write_campaign_manifest` after every state change, so a
+    Colab disconnect can land anywhere and the next execution still
+    sees a consistent picture.
+    """
+    path = os.path.join(str(campaign_root), PADDLE_CAMPAIGN_MANIFEST_NAME)
+    if not os.path.isfile(path):
+        return None
+    with open(path) as handle:
+        manifest = json.load(handle)
+    if not isinstance(manifest, dict):
+        raise ValueError(f"campaign manifest must be a JSON object: {path}")
+    return manifest
+
+
+def write_campaign_manifest(
+    campaign_root: str | Path, manifest: Mapping[str, Any]
+) -> str:
+    """Atomically persist the campaign manifest; returns its path."""
+    path = os.path.join(str(campaign_root), PADDLE_CAMPAIGN_MANIFEST_NAME)
+    _atomic_write_json(path, dict(manifest))
+    return path
+
+
+def _json_normalized(value: Any) -> Any:
+    """Round-trip ``value`` through JSON so tuples compare as lists."""
+    return json.loads(json.dumps(value, sort_keys=True, allow_nan=False))
+
+
+def require_campaign_fingerprint(
+    manifest: Mapping[str, Any], fingerprint: Mapping[str, Any]
+) -> None:
+    """Refuse to resume a campaign whose frozen settings changed.
+
+    The campaign notebook's settings cell is the campaign's frozen
+    protocol (budgets, bars, seeds, the fallback lineage). Resuming
+    after a disconnect must mean *continuing the same protocol*, so
+    the manifest records a fingerprint of those settings at creation
+    and every later execution has to match it -- the alternative is a
+    campaign whose main leg silently runs under different rules than
+    the gate leg it chains from (the standing "changes after start
+    void the run" doctrine, enforced in code).
+    """
+    recorded = manifest.get("fingerprint")
+    if not isinstance(recorded, Mapping):
+        raise ValueError(
+            "campaign manifest has no fingerprint; this root was not "
+            "created by the campaign notebook -- choose a fresh "
+            "CAMPAIGN_ID instead of resuming it"
+        )
+    recorded_normalized = _json_normalized(dict(recorded))
+    current_normalized = _json_normalized(dict(fingerprint))
+    if recorded_normalized == current_normalized:
+        return
+    missing = object()
+    changed = sorted(
+        key
+        for key in set(recorded_normalized) | set(current_normalized)
+        if recorded_normalized.get(key, missing)
+        != current_normalized.get(key, missing)
+    )
+    raise ValueError(
+        "campaign settings changed since this campaign was created "
+        f"(differing keys: {changed}); a resumed campaign must run the "
+        "protocol it froze. Restore the recorded settings, or start a "
+        "new campaign under a fresh CAMPAIGN_ID."
+    )
+
+
+def next_stage_attempt_dir(campaign_root: str | Path, stage_name: str) -> str:
+    """Create and return ``<root>/<stage>/attempt_NN`` for a fresh leg.
+
+    Every training attempt gets a directory ``train()`` has never
+    touched: a leg that crashed or was interrupted keeps its partial
+    artifacts in place as evidence, and the retry starts clean in the
+    next-numbered attempt instead of mixing two runs' artifacts in one
+    directory.
+    """
+    if (
+        not stage_name
+        or os.sep in stage_name
+        or stage_name != stage_name.strip()
+    ):
+        raise ValueError(
+            f"stage_name must be a bare directory name: {stage_name!r}"
+        )
+    stage_root = os.path.join(str(campaign_root), stage_name)
+    os.makedirs(stage_root, exist_ok=True)
+    numbers = []
+    for entry in os.listdir(stage_root):
+        prefix, _, suffix = entry.partition("_")
+        if prefix == "attempt" and suffix.isdigit():
+            numbers.append(int(suffix))
+    path = os.path.join(
+        stage_root, f"attempt_{max(numbers, default=0) + 1:02d}"
+    )
+    os.makedirs(path)
+    return path
+
+
+def paddle_campaign_metrics(
+    traces: Sequence[Any], interpoint_travels: Sequence[float]
+) -> dict[str, Any]:
+    """Aggregate diagnosis traces into the campaign's scalar metrics.
+
+    ``traces`` are
+    :class:`courtside_dynamics.training.paddle_diagnosis.EpisodeTrace`
+    rows from ``run_player`` (accepted duck-typed so tests can build
+    lightweight stand-ins). The aggregation mirrors the instrument's
+    ``report()`` exactly -- a bar must read the same number a human
+    reads in the run's own ``diagnosis_probe_*.txt``:
+
+    - ``touched_after_bounce_rate`` pools the per-bounce touch flags;
+    - ``k{1,2,3}_{receiving,serving}_survival`` is the fraction of the
+      split's points with at least k policy hits (``None`` when the
+      split is empty);
+    - ``k{2,3}_either_survival`` takes the better parity (the
+      registered RK1/RK2 criteria are "either parity");
+    - ``ready_error_mean`` pools the bounce-time positional errors;
+    - ``interpoint_travel_mean`` is the R2 watch metric;
+    - ``unsafe_terminations`` counts forced non-finite endings.
+    """
+    if not traces:
+        raise ValueError("at least one diagnosis trace is required")
+
+    receiving = [t for t in traces if not t.serve_side_is_policy]
+    serving = [t for t in traces if t.serve_side_is_policy]
+
+    def _survival(split: Sequence[Any], k: int) -> float | None:
+        if not split:
+            return None
+        return float(sum(t.policy_hits >= k for t in split) / len(split))
+
+    touched = [bool(flag) for t in traces for flag in t.touched_after_bounce]
+    ready = [float(x) for t in traces for x in t.ready_errors]
+    travels = [float(x) for x in interpoint_travels]
+
+    metrics: dict[str, Any] = {
+        "points": len(traces),
+        "receiving_points": len(receiving),
+        "serving_points": len(serving),
+        "touched_after_bounce_rate": (
+            float(np.mean(touched)) if touched else None
+        ),
+        "touched_after_bounce_samples": len(touched),
+        "ready_error_mean": float(np.mean(ready)) if ready else None,
+        "ready_error_p90": (
+            float(np.percentile(ready, 90)) if ready else None
+        ),
+        "ready_error_samples": len(ready),
+        "crossings_mean": float(np.mean([t.crossings for t in traces])),
+        "unsafe_terminations": int(
+            sum(t.termination == "nonfinite_state" for t in traces)
+        ),
+        "interpoint_travel_mean": (
+            float(np.mean(travels)) if travels else None
+        ),
+        "interpoint_boundaries": len(travels),
+    }
+    for split_label, split in (("receiving", receiving), ("serving", serving)):
+        for k in (1, 2, 3):
+            metrics[f"k{k}_{split_label}_survival"] = _survival(split, k)
+    for k in (2, 3):
+        parities = [
+            value
+            for value in (
+                metrics[f"k{k}_receiving_survival"],
+                metrics[f"k{k}_serving_survival"],
+            )
+            if value is not None
+        ]
+        metrics[f"k{k}_either_survival"] = max(parities) if parities else None
+    return metrics
+
+
+def score_campaign_bars(
+    metrics: Mapping[str, Any], bars: Mapping[str, Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Score aggregated metrics against a frozen bar table.
+
+    Each bar spec is ``{"metric", "pass_at", "fail_at",
+    "higher_is_better", "gating"}``. A bar reads PASS at its inclusive
+    ``pass_at`` edge, FAIL strictly beyond ``fail_at``, and MIDDLE in
+    between -- a reading exactly on the fail line lands MIDDLE, so any
+    edge ambiguity in a pre-registration's bands routes to the
+    maintainer rather than into an automated branch. A ``None`` metric
+    scores NO_DATA (the instrument saw no qualifying events), which is
+    never a PASS.
+
+    The overall ``verdict`` is computed over gating bars only: FAIL if
+    any gating bar FAILs, PASS if every gating bar PASSes, otherwise
+    MIDDLE. A table with no gating bars (a record-only report) scores
+    ``"RECORDED"``.
+    """
+    if not bars:
+        raise ValueError("at least one bar is required")
+    scored: dict[str, Any] = {}
+    for name, spec in bars.items():
+        unknown = set(spec) - _BAR_SPEC_KEYS
+        absent = _BAR_SPEC_KEYS - set(spec)
+        if unknown or absent:
+            raise ValueError(
+                f"bar {name!r} spec keys mismatch: missing "
+                f"{sorted(absent)}, unknown {sorted(unknown)}"
+            )
+        if spec["metric"] not in metrics:
+            raise KeyError(
+                f"bar {name!r} reads unknown metric {spec['metric']!r}; "
+                f"known: {sorted(metrics)}"
+            )
+        pass_at = float(spec["pass_at"])
+        fail_at = float(spec["fail_at"])
+        if spec["higher_is_better"]:
+            if not fail_at <= pass_at:
+                raise ValueError(
+                    f"bar {name!r}: higher-is-better needs "
+                    "fail_at <= pass_at"
+                )
+        elif not pass_at <= fail_at:
+            raise ValueError(
+                f"bar {name!r}: lower-is-better needs pass_at <= fail_at"
+            )
+        value = metrics[spec["metric"]]
+        if value is None:
+            verdict = "NO_DATA"
+        elif spec["higher_is_better"]:
+            if value >= pass_at:
+                verdict = "PASS"
+            elif value < fail_at:
+                verdict = "FAIL"
+            else:
+                verdict = "MIDDLE"
+        elif value <= pass_at:
+            verdict = "PASS"
+        elif value > fail_at:
+            verdict = "FAIL"
+        else:
+            verdict = "MIDDLE"
+        scored[name] = {
+            "metric": spec["metric"],
+            "value": value,
+            "pass_at": pass_at,
+            "fail_at": fail_at,
+            "higher_is_better": bool(spec["higher_is_better"]),
+            "gating": bool(spec["gating"]),
+            "verdict": verdict,
+        }
+    gating = [bar for bar in scored.values() if bar["gating"]]
+    if not gating:
+        overall = "RECORDED"
+    elif any(bar["verdict"] == "FAIL" for bar in gating):
+        overall = "FAIL"
+    elif all(bar["verdict"] == "PASS" for bar in gating):
+        overall = "PASS"
+    else:
+        overall = "MIDDLE"
+    return {"bars": scored, "verdict": overall}
+
+
+def score_paddle_stage(
+    run_dir: str | Path,
+    *,
+    bars: Mapping[str, Mapping[str, Any]],
+    episodes: int = 30,
+    seed_start: int = 5200,
+    report_name: str = PADDLE_GATE_REPORT_NAME,
+) -> dict[str, Any]:
+    """Score a finished PaddleTennis leg's best checkpoint against bars.
+
+    Loads the leg's protected ``best_model.zip`` with its paired
+    ``best_vec_normalize.pkl``, rebuilds the evaluation environment
+    from the run's own recorded constructor kwargs (the instrument
+    must measure the task the leg actually trained on -- the
+    ``DiagnosisProbeCallback`` contract), replays the behavioral
+    diagnosis instrument on the calibration block, aggregates the
+    traces via :func:`paddle_campaign_metrics`, and scores ``bars``
+    via :func:`score_campaign_bars`. The defaults mirror the recipe's
+    in-run ``checkpoint_diagnosis`` (30 episodes, seeds 5200+), so
+    this report and the run's own ``diagnosis_probe_*.txt`` rows read
+    the same instrument on the same seeds.
+
+    This is a **single-checkpoint reading**: a pre-registered
+    "at some checkpoint" bar is under-approximated here (the best
+    checkpoint is one of them), so a PASS is sound while a FAIL may
+    under-credit a run whose peak on that metric came elsewhere.
+
+    The payload is written atomically to ``reports/<report_name>``
+    under ``run_dir`` and returned.
+    """
+    from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
+    from courtside_dynamics.training.paddle_diagnosis import (
+        native_checkpoint_policy,
+        run_player,
+    )
+
+    run_dir = str(run_dir)
+    if (
+        isinstance(episodes, bool)
+        or not isinstance(episodes, int)
+        or episodes <= 0
+    ):
+        raise ValueError("episodes must be a positive integer")
+
+    located = {
+        name: locate_artifact(run_dir, name)
+        for name in ("config", "best_model", "best_vec_normalize")
+    }
+    missing = [
+        os.path.join(run_dir, RUN_LAYOUT[name])
+        for name, path in located.items()
+        if path is None
+    ]
+    if missing:
+        raise FileNotFoundError(
+            "stage scoring requires a finished run with a protected best "
+            f"checkpoint; missing: {missing}"
+        )
+    config_path = located["config"]
+    model_path = located["best_model"]
+    normalizer_path = located["best_vec_normalize"]
+    assert config_path and model_path and normalizer_path
+
+    with open(config_path) as handle:
+        config = json.load(handle)
+    env_config = config.get("evaluation_env") or config.get("env") or {}
+    if env_config.get("class") != "PaddleTennisEnv":
+        raise ValueError(
+            "stage scoring requires a PaddleTennisEnv run; config.json "
+            f"records {env_config.get('class')!r}"
+        )
+    constructor_kwargs = env_config.get("constructor_kwargs")
+    if not isinstance(constructor_kwargs, Mapping):
+        raise ValueError(
+            "config.json records no evaluation constructor kwargs; the "
+            "instrument cannot rebuild the leg's environment"
+        )
+    env_kwargs = dict(constructor_kwargs)
+
+    policy = native_checkpoint_policy(model_path, normalizer_path)
+    traces, travels = run_player(
+        policy,
+        episodes=episodes,
+        seed_start=seed_start,
+        env_fn=lambda: PaddleTennisEnv(**env_kwargs),
+    )
+    metrics = paddle_campaign_metrics(traces, travels)
+    scored = score_campaign_bars(metrics, bars)
+
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "generated_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+        "run_dir": run_dir,
+        "policy": {
+            "artifact": os.path.basename(model_path),
+            "sha256": _sha256(model_path),
+        },
+        "normalization": {
+            "artifact": os.path.basename(normalizer_path),
+            "sha256": _sha256(normalizer_path),
+        },
+        "environment": {
+            "class": "PaddleTennisEnv",
+            "constructor_kwargs": _canonicalize_constructor_value(env_kwargs),
+        },
+        "evaluation": {
+            "instrument": "paddle_diagnosis.run_player",
+            "checkpoint": "best",
+            "reading": "single_checkpoint",
+            "episodes": int(episodes),
+            "seed_start": int(seed_start),
+        },
+        "metrics": metrics,
+        "bars": scored["bars"],
+        "verdict": scored["verdict"],
+    }
+    report_path = os.path.join(run_dir, "reports", report_name)
+    _atomic_write_json(report_path, payload)
+    bar_text = ", ".join(
+        f"{name}={bar['verdict']}" for name, bar in scored["bars"].items()
+    )
+    print(
+        f"[campaign] {report_name}: verdict {scored['verdict']} ({bar_text})"
+    )
+    print(f"[campaign] wrote {report_path}")
+    return payload
+
+
+def resolve_warm_start_branch(
+    verdict: str,
+    *,
+    stage_run_dir: str | Path,
+    fallback_run_dir: str | Path | None,
+    middle_action: str = "stop",
+) -> tuple[str, str | None]:
+    """Map a gate verdict to the main leg's warm-start source.
+
+    Returns ``(branch, source_run_dir)``:
+
+    - ``PASS`` -> ``("continue", stage_run_dir)``: the from-scratch
+      lineage keeps going from its own best checkpoint.
+    - ``FAIL`` -> ``("fallback", fallback_run_dir)`` when a fallback
+      lineage is configured, else ``("stop", None)``: the from-scratch
+      attempt is booked FAIL, and with nowhere frozen to branch to the
+      campaign stops rather than improvising.
+    - ``MIDDLE`` / ``NO_DATA`` follow ``middle_action``: ``"stop"``
+      (the default -- a declared middle is a maintainer's call by
+      doctrine), ``"continue"``, or ``"fallback"`` (which also stops
+      when no fallback lineage is configured).
+    """
+    if middle_action not in ("stop", "continue", "fallback"):
+        raise ValueError(
+            f"middle_action must be stop|continue|fallback: {middle_action!r}"
+        )
+    if verdict == "PASS":
+        return "continue", str(stage_run_dir)
+    if verdict == "FAIL":
+        if fallback_run_dir is None:
+            return "stop", None
+        return "fallback", str(fallback_run_dir)
+    if verdict in ("MIDDLE", "NO_DATA"):
+        if middle_action == "continue":
+            return "continue", str(stage_run_dir)
+        if middle_action == "fallback" and fallback_run_dir is not None:
+            return "fallback", str(fallback_run_dir)
+        return "stop", None
+    raise ValueError(f"unknown gate verdict: {verdict!r}")

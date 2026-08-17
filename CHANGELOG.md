@@ -172,6 +172,37 @@ supersedes it (see the ground-rules bullet).
   L2 from-scratch pilots), and LS1's verdict decides whether the
   registered run launches warm-started (§2 as frozen) or from
   scratch under its own budget addendum.
+- **PaddleTennis staged campaign notebook (tooling).**
+  `notebooks/paddle_tennis_campaign.ipynb` runs the whole
+  from-scratch campaign in one execution — a gate leg (the LS1
+  shape) trained from scratch and scored in-process against the
+  frozen §1a bars by the same diagnosis instrument the run's own
+  checkpoint probes use, then a main leg warm-started from whichever
+  lineage the verdict selects (PASS: the gate leg's own best, +2M —
+  the 1M spent counts toward the 3M total; FAIL: the frozen
+  `20260809_211147` reference at its full 3M) — with every leg,
+  verdict, and branch decision recorded in a Drive-side
+  `campaign_manifest.json`. Re-running all cells resumes: completed
+  legs are skipped, crashed attempts stay in place as evidence
+  (numbered `attempt_NN` dirs), the recorded branch decision is
+  reused rather than re-decided, and a settings fingerprint refuses
+  to resume a campaign whose frozen budgets/bars changed (the
+  "changes after start void the run" doctrine, enforced in code).
+  New unit-tested `notebook_utils` helpers carry the machinery:
+  `paddle_campaign_metrics` (trace aggregation mirroring the
+  instrument's `report()`), `score_campaign_bars` (three-valued
+  PASS/MIDDLE/FAIL where NO_DATA never passes and a reading exactly
+  on the fail line routes to MIDDLE — prereg edge ambiguity goes to
+  the maintainer, not an automated branch), `score_paddle_stage`
+  (best-checkpoint reading of a finished leg against a bar table,
+  the env rebuilt from the run's own recorded constructor kwargs,
+  report written under `reports/`), `resolve_warm_start_branch`, and
+  the manifest/attempt-dir functions. Warm-started legs merge
+  `learning_starts=25_000` into the recipe's calibrated SAC bundle
+  instead of replacing it. The generic single-run driver stays
+  `sb3_training.ipynb`, and a registered attempt still freezes its
+  plan in a pre-registration doc first — the notebook executes a
+  frozen protocol, it does not invent one.
 - **PaddleTennis escrowed contact shaping (implemented, default
   off).** The touch→in remedy
   (docs/design_paddle_tennis_contact_shaping.md): new env kwarg
