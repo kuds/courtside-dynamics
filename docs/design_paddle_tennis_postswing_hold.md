@@ -151,6 +151,34 @@ gradient, each farm-proof under its own keep rule.
 Adoption of any recipe default waits, as always, on a pilot verdict
 — nothing in this document changes the frozen task or the recipe.
 
+### 3a. Battery results (recorded 2026-08-17; **PH0–PH2 PASS**)
+
+PH0/PH2 via `TestHoldShaping` (11 tests: lockstep default
+bit-identity, formula-exact payments against an externally
+re-accumulated travel, every clawback path, boundary disarm,
+the same-step keep pin, validation) — all green. PH1
+(`tools/paddle_tennis_hold_probe.py`, 100 episodes, seeds
+6200–6299 now burned):
+
+| witness | paid | clawed | kept | eps paid | eps kept |
+|---|---|---|---|---|---|
+| statue | 0.000 | 0.000 | 0.000 | 0/100 | 0/100 |
+| camper | 0.000 | 0.000 | 0.000 | 0/100 | 0/100 |
+| hit_then_freeze | 2.577 | −2.577 | **0.000** | 41/100 | 0/100 |
+| ground_oracle | 21.256 | −4.001 | **17.256** | 89/100 | 83/100 |
+| hard_slam | 0.023 | 0.000 | 0.023 | 1/100 | 1/100 |
+| volley_patting | 0.000 | 0.000 | 0.000 | 0/100 | 0/100 |
+| oracle_stacked | 21.256 | −4.001 | 17.256 | 89/100 | 83/100 |
+
+Worst per-episode identity gap 1.11e-16 (float ulp); every payment
+coincided with an opponent return strike; the stacked arm composed
+the three escrows exactly. The economics read precisely as designed:
+the farming witness collects and keeps nothing; the only witness
+that completes second exchanges keeps 81% of what it is paid; the
+slam witness's 101 hits earned a single kept payment (its shots are
+almost never returnable — hold pay follows genuine rally
+continuation, nothing else). The §4 pilot is cleared to launch.
+
 ## 4. LH1 — the pilot (pre-registered; frozen before launch)
 
 **Shape.** Warm start from the registered run's protected best

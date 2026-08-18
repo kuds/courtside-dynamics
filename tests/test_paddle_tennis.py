@@ -632,6 +632,8 @@ _SHAPING_COMPONENTS = (
     "rew_shaping_clawback",
     "rew_reach",
     "rew_reach_clawback",
+    "rew_hold",
+    "rew_hold_clawback",
 )
 
 
@@ -1105,6 +1107,283 @@ class TestReachShaping:
         for radius in (0.0, -1.0, float("nan")):
             with pytest.raises(ValueError):
                 PaddleTennisEnv(reach_shaping=0.25, reach_shaping_radius=radius)
+
+
+class TestHoldShaping:
+    """The escrow contract of design_paddle_tennis_postswing_hold.md:
+    a side-A legal hit arms a travel-metered window, the opponent's
+    return strike pays by how little the paddle wandered, the next
+    side-A legal hit (the k=2 hit) keeps the advance, and every ending
+    path claws back — with the default-off stream bit-identical."""
+
+    @staticmethod
+    def _drive(env, policy, seed, mirror_env=None):
+        """Step ``env`` (optionally with a lockstep mirror); return
+        totals, per-component sums, and the tracker-computed kept hold
+        escrow (keep-before-arm ordering, the implementation's)."""
+        obs, _ = env.reset(seed=seed)
+        if mirror_env is not None:
+            mirror_obs, _ = mirror_env.reset(seed=seed)
+            np.testing.assert_array_equal(obs, mirror_obs)
+        totals = {"reward": 0.0, "mirror_reward": 0.0}
+        sums = dict.fromkeys(_SHAPING_COMPONENTS, 0.0)
+        kept = pending = 0.0
+        hits = 0
+        while True:
+            action = policy(obs)
+            obs, reward, term, trunc, info = env.step(action)
+            for key in _SHAPING_COMPONENTS:
+                sums[key] += info[key]
+            assert reward == pytest.approx(
+                sum(info[key] for key in _SHAPING_COMPONENTS), abs=1e-12
+            )
+            totals["reward"] += reward
+            if info["event_valid_racket_hit_a"]:
+                hits += 1
+                kept += pending + info["rew_hold"]
+                pending = 0.0
+            else:
+                pending += info["rew_hold"]
+            if mirror_env is not None:
+                mirror_obs, mirror_reward, mterm, mtrunc, _ = mirror_env.step(action)
+                np.testing.assert_array_equal(obs, mirror_obs)
+                assert (term, trunc) == (mterm, mtrunc)
+                totals["mirror_reward"] += mirror_reward
+            if term or trunc:
+                return totals, sums, kept, hits
+
+    def test_escrow_identity_and_default_bit_identity(self):
+        """Shaped-vs-unshaped arms of the same seed are bit-identical
+        trajectories, and the escrow's whole undiscounted effect is
+        exactly the kept (next-hit-taken) hold pay — under continuous
+        n-point play, so boundary clawback and window disarm are
+        exercised at every relaunch."""
+        shaped = PaddleTennisEnv(points_per_episode=None, hold_shaping=0.25)
+        unshaped = PaddleTennisEnv(points_per_episode=None)
+        try:
+            kept_any = False
+            for seed in _SMOKE_SEEDS:
+                totals, sums, kept, _hits = self._drive(
+                    shaped, scripted_ground_opponent, seed, unshaped
+                )
+                assert sums["rew_hold"] + sums["rew_hold_clawback"] == pytest.approx(
+                    kept, abs=1e-12
+                )
+                assert totals["reward"] - totals["mirror_reward"] == pytest.approx(
+                    kept, abs=1e-12
+                )
+                kept_any = kept_any or kept > 0.0
+            assert kept_any, "the oracle never kept a hold payment"
+        finally:
+            shaped.close()
+            unshaped.close()
+
+    def test_default_off_components_are_exact_zero(self):
+        env = PaddleTennisEnv()
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            for _ in range(50):
+                *_, term, trunc, info = env.step(_zero_action())
+                assert info["rew_hold"] == 0.0
+                assert info["rew_hold_clawback"] == 0.0
+                if term or trunc:
+                    break
+        finally:
+            env.close()
+
+    def test_payment_matches_the_travel_formula(self):
+        """Each nonzero pay equals shaping x max(0, 1 - travel/budget)
+        with the travel re-accumulated externally from the step-end
+        paddle-head positions — exactly, including follow-through."""
+        env = PaddleTennisEnv(
+            points_per_episode=None, hold_shaping=0.25, hold_shaping_travel=4.0
+        )
+        try:
+            obs, _ = env.reset(seed=_SMOKE_SEEDS[1])
+            armed = False
+            prev_xy = (0.0, 0.0)
+            travel = 0.0
+            payments = 0
+            last_points = 0.0
+            while True:
+                obs, _reward, term, trunc, info = env.step(
+                    scripted_ground_opponent(obs)
+                )
+                paddle = env._paddle_position(CourtSide.A)
+                xy = (float(paddle[0]), float(paddle[1]))
+                if armed:
+                    travel += float(
+                        np.hypot(xy[0] - prev_xy[0], xy[1] - prev_xy[1])
+                    )
+                    prev_xy = xy
+                    if info["event_valid_racket_hit_b"]:
+                        expected = 0.25 * max(0.0, 1.0 - travel / 4.0)
+                        assert info["rew_hold"] == pytest.approx(
+                            expected, abs=1e-12
+                        )
+                        payments += int(info["rew_hold"] > 0.0)
+                        armed = False
+                else:
+                    assert info["rew_hold"] == 0.0
+                # A side-A legal hit (re-)arms from this step's end;
+                # a point boundary then disarms whatever is armed
+                # (mirroring the env's arm-then-clawback step order).
+                if info["event_valid_racket_hit_a"]:
+                    armed = True
+                    prev_xy = xy
+                    travel = 0.0
+                if info["points_played"] > last_points:
+                    last_points = info["points_played"]
+                    armed = False
+                if term or trunc:
+                    break
+            assert payments > 0, "the oracle never earned a hold payment"
+        finally:
+            env.close()
+
+    def test_boundary_disarms_the_window(self):
+        """Every point ending discards an armed window before the
+        relaunch (so the teleport can never leak into travel, and the
+        next point's serve-return pays nothing). The window is
+        re-armed white-box each step so the armed-at-boundary path is
+        exercised deterministically — statue points end in seconds,
+        while oracle rallies can fill the cap without one boundary."""
+        env = PaddleTennisEnv(points_per_episode=None, hold_shaping=0.25)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            last_points = 0.0
+            while True:
+                if env._hold_anchor_xy is None:
+                    paddle = env._paddle_position(CourtSide.A)
+                    env._hold_anchor_xy = (float(paddle[0]), float(paddle[1]))
+                _obs, _reward, term, trunc, info = env.step(_zero_action())
+                if info["points_played"] > last_points:
+                    last_points = info["points_played"]
+                    assert env._hold_anchor_xy is None
+                    assert env._hold_travel == 0.0
+                if term or trunc:
+                    break
+            assert last_points > 0, "no point boundary was crossed"
+        finally:
+            env.close()
+
+    def test_statue_never_pays(self):
+        """No side-A hit ever arms a window, so the opponent's
+        serve returns pay nothing: hold components are exact zeros for
+        a statue across full continuous-play episodes."""
+        env = PaddleTennisEnv(points_per_episode=None, hold_shaping=0.25)
+        try:
+            for seed in _SMOKE_SEEDS:
+                _totals, sums, kept, hits = self._drive(
+                    env, lambda _obs: _zero_action(), seed
+                )
+                assert hits == 0
+                assert kept == 0.0
+                assert sums["rew_hold"] == 0.0
+                assert sums["rew_hold_clawback"] == 0.0
+        finally:
+            env.close()
+
+    def test_hit_then_freeze_nets_zero(self):
+        """The farming attempt this design must defeat: hit once, then
+        freeze perfectly still. The frozen paddle earns near-full hold
+        pay at the opponent's return strike — and keeps none of it,
+        because no second hit ever follows."""
+        env = PaddleTennisEnv(hold_shaping=0.25)
+        try:
+            paid_any = False
+            for seed in _SMOKE_SEEDS:
+                obs, _ = env.reset(seed=seed)
+                frozen = False
+                sums = {"rew_hold": 0.0, "rew_hold_clawback": 0.0}
+                while True:
+                    action = (
+                        _zero_action()
+                        if frozen
+                        else scripted_ground_opponent(obs)
+                    )
+                    obs, _reward, term, trunc, info = env.step(action)
+                    sums["rew_hold"] += info["rew_hold"]
+                    sums["rew_hold_clawback"] += info["rew_hold_clawback"]
+                    if info["event_valid_racket_hit_a"]:
+                        frozen = True
+                    if term or trunc:
+                        break
+                paid_any = paid_any or sums["rew_hold"] > 0.0
+                assert sums["rew_hold"] + sums["rew_hold_clawback"] == (
+                    pytest.approx(0.0, abs=1e-12)
+                )
+            assert paid_any, "the freezer never received a hold payment"
+        finally:
+            env.close()
+
+    def test_truncation_claws_back_pending_hold(self):
+        env = PaddleTennisEnv(hold_shaping=0.25, episode_len=3)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            env._pending_hold = 0.125
+            term = trunc = False
+            info: dict = {}
+            reward = 0.0
+            while not (term or trunc):
+                _obs, reward, term, trunc, info = env.step(_zero_action())
+            assert trunc and not term
+            assert info["rew_hold_clawback"] == -0.125
+            assert reward == pytest.approx(-0.125)
+            assert env._pending_hold == 0.0
+        finally:
+            env.close()
+
+    def test_nan_action_guard_claws_back_pending_hold(self):
+        env = PaddleTennisEnv(hold_shaping=0.25)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            env._pending_hold = 0.125
+            env._hold_anchor_xy = (0.0, 0.0)
+            _obs, reward, term, trunc, info = env.step(
+                np.array([np.nan, 0.0, 0.0])
+            )
+            assert term and not trunc
+            assert info["rew_hold_clawback"] == -0.125
+            assert reward == pytest.approx(-env.unsafe_physics_penalty - 0.125)
+            assert env._pending_hold == 0.0
+            assert env._hold_anchor_xy is None
+        finally:
+            env.close()
+
+    def test_same_step_keep_pin_and_rearm(self):
+        """The §2 ordering pins, exercised at the helper level (the
+        physical step separation makes the edge unreachable in play):
+        a payment sharing the keeping hit's step is kept immediately,
+        the prior pending is kept too, and the same hit re-arms a
+        fresh window from the current paddle position."""
+        from types import SimpleNamespace
+
+        env = PaddleTennisEnv(hold_shaping=0.25, hold_shaping_travel=4.0)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            paddle = env._paddle_position(CourtSide.A)
+            xy = (float(paddle[0]), float(paddle[1]))
+            env._pending_hold = 0.125
+            env._hold_anchor_xy = xy
+            env._hold_travel = 0.0
+            fake = SimpleNamespace(valid_racket_hits=(CourtSide.A, CourtSide.B))
+            payment = env._hold_escrow_step(fake)
+            assert payment == pytest.approx(0.25)  # zero travel: full pay
+            assert env._pending_hold == 0.0  # prior pending + payment kept
+            assert env._hold_anchor_xy == xy  # the hit re-armed the window
+            assert env._hold_travel == 0.0
+        finally:
+            env.close()
+
+    def test_kwargs_validated(self):
+        with pytest.raises(ValueError):
+            PaddleTennisEnv(hold_shaping=-0.1)
+        with pytest.raises(ValueError):
+            PaddleTennisEnv(hold_shaping=float("nan"))
+        for budget in (0.0, -1.0, float("nan")):
+            with pytest.raises(ValueError):
+                PaddleTennisEnv(hold_shaping=0.25, hold_shaping_travel=budget)
 
     def test_recipe_adopts_reach_shaping_and_guards(self):
         """The LR1 ADOPT verdict (design doc §4a): reach escrow on at

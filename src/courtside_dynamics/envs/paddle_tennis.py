@@ -235,6 +235,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         contact_shaping: float = 0.0,
         reach_shaping: float = 0.0,
         reach_shaping_radius: float = 3.0,
+        hold_shaping: float = 0.0,
+        hold_shaping_travel: float = 4.0,
         points_per_episode: int | None = 1,
         **kwargs: Any,
     ) -> None:
@@ -251,6 +253,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             contact_shaping=contact_shaping,
             reach_shaping=reach_shaping,
             reach_shaping_radius=reach_shaping_radius,
+            hold_shaping=hold_shaping,
+            hold_shaping_travel=hold_shaping_travel,
             points_per_episode=points_per_episode,
             **kwargs,
         )
@@ -285,6 +289,28 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             )
         self.reach_shaping_radius = radius
         self._pending_reach = 0.0
+        # Escrowed post-swing hold (side A only; default off keeps the
+        # frozen task definition —
+        # docs/design_paddle_tennis_postswing_hold.md): the policy's
+        # legal hit arms a travel-metered window; the opponent's
+        # return strike pays by how little the paddle wandered while
+        # the shot was away; the NEXT side-A legal hit — by
+        # construction the k=2 hit — keeps the advance; every ending
+        # path claws back whatever is pending.
+        self.hold_shaping = finite_nonnegative("hold_shaping", hold_shaping)
+        travel_budget = float(hold_shaping_travel)
+        if not np.isfinite(travel_budget) or travel_budget <= 0.0:
+            raise ValueError(
+                "hold_shaping_travel must be finite and positive, "
+                f"got {hold_shaping_travel!r}"
+            )
+        self.hold_shaping_travel = travel_budget
+        self._pending_hold = 0.0
+        # ``None`` = no armed window; a tuple = the last recorded
+        # side-A paddle-head XY, from which the next step's path
+        # increment is measured.
+        self._hold_anchor_xy: tuple[float, float] | None = None
+        self._hold_travel = 0.0
         # n-point continuous play (docs/design_paddle_tennis_npoint.md):
         # 1 = the frozen one-point episode (default, bit-identical);
         # None = as many points as fit the step cap; ints >= 2 exist
@@ -709,6 +735,19 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             payment=rew_reach,
         )
 
+        # Escrowed post-swing hold (side A only): the policy's legal
+        # hit arms a travel-metered window; the opponent's return
+        # strike pays hold_shaping × max(0, 1 − travel/budget); the
+        # next side-A legal hit — by construction the k=2 hit — keeps
+        # the advance (keep runs before the same hit arms the next
+        # window, and a payment sharing the keeping hit's step is
+        # kept immediately, mirroring the reach §2a pin). Exact zeros
+        # when the kwarg is off, so the default reward stream stays
+        # bit-identical (docs/design_paddle_tennis_postswing_hold.md §2).
+        rew_hold = 0.0
+        if self.hold_shaping:
+            rew_hold = self._hold_escrow_step(transition)
+
         raw_observation = self._get_obs()
         nonfinite = not bool(np.isfinite(raw_observation).all())
         obs = self._record_or_echo_observation(raw_observation, nonfinite)
@@ -737,11 +776,19 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         truncated = bool(not terminated and self.step_number >= self.episode_len)
         rew_shaping_clawback = 0.0
         rew_reach_clawback = 0.0
+        rew_hold_clawback = 0.0
         if absorbed_point or terminated or truncated:
             rew_shaping_clawback = -self._pending_shaping
             self._pending_shaping = 0.0
             rew_reach_clawback = -self._pending_reach
             self._pending_reach = 0.0
+            rew_hold_clawback = -self._pending_hold
+            self._pending_hold = 0.0
+            # Every ending disarms the window BEFORE any n-point
+            # relaunch below, so the relaunch teleport can never leak
+            # into the next point's travel.
+            self._hold_anchor_xy = None
+            self._hold_travel = 0.0
         serving_side_of_step = self._serving_side
         if point_completed:
             # Every completed point enters the durable counters —
@@ -782,6 +829,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             + rew_shaping_clawback
             + rew_reach
             + rew_reach_clawback
+            + rew_hold
+            + rew_hold_clawback
         )
         info = self._build_info(
             transition,
@@ -792,6 +841,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             rew_shaping_clawback=rew_shaping_clawback,
             rew_reach=rew_reach,
             rew_reach_clawback=rew_reach_clawback,
+            rew_hold=rew_hold,
+            rew_hold_clawback=rew_hold_clawback,
             truncated=truncated,
             forced_nonfinite=forced_nonfinite,
             absorbed_point=absorbed_point,
@@ -850,6 +901,45 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             self._pending_reach += payment
         return payment
 
+    def _hold_escrow_step(self, transition: RallyTransition) -> float:
+        """One step of the post-swing-hold escrow. Returns ``rew_hold``.
+
+        Travel accumulates from the armed window's last recorded
+        side-A paddle-head XY to this step's end position; the
+        opponent's legal racket hit converts the window into a pay
+        (one per window). A side-A legal hit keeps the pending
+        escrow first (a payment sharing its step is kept
+        immediately), then arms the next window from this step's end
+        position — swing follow-through counts against the budget by
+        design (docs/design_paddle_tennis_postswing_hold.md §2/§2a).
+        """
+        paddle = self._paddle_position(CourtSide.A)
+        paddle_xy = (float(paddle[0]), float(paddle[1]))
+        payment = 0.0
+        if self._hold_anchor_xy is not None:
+            self._hold_travel += float(
+                np.hypot(
+                    paddle_xy[0] - self._hold_anchor_xy[0],
+                    paddle_xy[1] - self._hold_anchor_xy[1],
+                )
+            )
+            self._hold_anchor_xy = paddle_xy
+            if CourtSide.B in transition.valid_racket_hits:
+                payment = self.hold_shaping * max(
+                    0.0, 1.0 - self._hold_travel / self.hold_shaping_travel
+                )
+                self._hold_anchor_xy = None
+                self._hold_travel = 0.0
+        took = CourtSide.A in transition.valid_racket_hits
+        if took:
+            self._pending_hold = 0.0
+        elif payment:
+            self._pending_hold += payment
+        if took:
+            self._hold_anchor_xy = paddle_xy
+            self._hold_travel = 0.0
+        return payment
+
     def _record_point_end(self, reason: TerminationReason) -> None:
         for name, reasons in _TERM_GROUPS:
             if reason in reasons:
@@ -883,7 +973,16 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._pending_shaping = 0.0
         rew_reach_clawback = -self._pending_reach
         self._pending_reach = 0.0
-        reward = rew_unsafe + rew_shaping_clawback + rew_reach_clawback
+        rew_hold_clawback = -self._pending_hold
+        self._pending_hold = 0.0
+        self._hold_anchor_xy = None
+        self._hold_travel = 0.0
+        reward = (
+            rew_unsafe
+            + rew_shaping_clawback
+            + rew_reach_clawback
+            + rew_hold_clawback
+        )
         info = self._build_info(
             transition,
             rew_return=0.0,
@@ -893,6 +992,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             rew_shaping_clawback=rew_shaping_clawback,
             rew_reach=0.0,
             rew_reach_clawback=rew_reach_clawback,
+            rew_hold=0.0,
+            rew_hold_clawback=rew_hold_clawback,
             truncated=False,
             forced_nonfinite=True,
         )
@@ -909,6 +1010,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         rew_shaping_clawback: float,
         rew_reach: float,
         rew_reach_clawback: float,
+        rew_hold: float,
+        rew_hold_clawback: float,
         truncated: bool,
         forced_nonfinite: bool = False,
         absorbed_point: bool = False,
@@ -946,6 +1049,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
                 "rew_shaping_clawback": rew_shaping_clawback,
                 "rew_reach": rew_reach,
                 "rew_reach_clawback": rew_reach_clawback,
+                "rew_hold": rew_hold,
+                "rew_hold_clawback": rew_hold_clawback,
                 "term_timeout": 1.0 if truncated else 0.0,
                 "points_played": float(self._points_played),
                 "completed_point_crossings": float(self._crossings_base),
@@ -1111,6 +1216,9 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._point_end_counts = {}
         self._pending_shaping = 0.0
         self._pending_reach = 0.0
+        self._pending_hold = 0.0
+        self._hold_anchor_xy = None
+        self._hold_travel = 0.0
         self._last_transition = None
         self._serving_side = self._next_serving_side
         self._next_serving_side = self._serving_side.opponent

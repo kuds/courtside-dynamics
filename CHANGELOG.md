@@ -203,6 +203,34 @@ supersedes it (see the ground-rules bullet).
   `sb3_training.ipynb`, and a registered attempt still freezes its
   plan in a pre-registration doc first — the notebook executes a
   frozen protocol, it does not invent one.
+- **PaddleTennis escrowed post-swing hold (implemented, default
+  off).** The k=2 remedy the registered run's stop/amend verdict
+  routes to (`docs/design_paddle_tennis_postswing_hold.md`): new env
+  kwargs `hold_shaping` (default 0.0 — the frozen task's reward
+  stream is bit-identical until enabled) and `hold_shaping_travel`
+  (default 4.0 m). When on: a side-A legal hit arms a travel-metered
+  window; the opponent's legal return strike pays `hold_shaping ×
+  max(0, 1 − travel/budget)` into a pending escrow (travel = the
+  side-A paddle head's accumulated XY path since the hit,
+  follow-through included by design); the **next** side-A legal hit —
+  by construction the k=2 hit — keeps the advance; and every ending
+  path (episode endings, truncation, n-point boundaries, the
+  non-finite guards) claws back the pending remainder, with windows
+  disarmed at boundaries before the relaunch teleport. Hit-then-
+  freeze farming nets exactly zero (collect, never keep — witnessed
+  in the battery); serve returns against a non-hitter pay nothing
+  (the escrow is strictly post-swing). New
+  `rew_hold`/`rew_hold_clawback` components in the decomposition,
+  info, and CSV schema. Motivation is the registered run's measured
+  blocker: k=2 pinned at 1% across 3M steps while k=1 receiving
+  reached 95% and post-swing travel sat at 7.5 m — on the k=2 hit the
+  ladder now pays hold + reach + contact + the confirmed +1, every
+  segment of the second exchange carrying its own farm-proof
+  gradient. `TestHoldShaping` (11 tests) and the PH1 witness probe
+  (`tools/paddle_tennis_hold_probe.py`, fresh block 6200–6299) ship
+  with the change; the LH1 pilot — warm-started from the registered
+  run's 2.4M best, bars frozen from its band — is pre-registered in
+  the design doc §4.
 - **PaddleTennis escrowed contact shaping (implemented, default
   off).** The touch→in remedy
   (docs/design_paddle_tennis_contact_shaping.md): new env kwarg
