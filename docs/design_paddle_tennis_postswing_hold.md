@@ -237,6 +237,80 @@ config-build cell adds
 (the same cell both prior warm-started pilots used). Validate the
 run's `config.json` against this section before the first checkpoint.
 
+### 4a. LH1 verdict (recorded 2026-08-19) and the sanctioned re-pair
+
+Run `20260818_210727` (config validated against §4 at launch; git
+`e13a8f8`, TOML sha `4fd84f05…`, warm-start artifacts sha-verified)
+completed its full 1M in 6h 26m, zero unsafe. The checkpoint series:
+
+| ckpt | k=1 recv | k=2 | touch | hold travel (m) |
+|---|---|---|---|---|
+| 100k | 31% | 0% | 17% | 4.97 |
+| 200k | 32% | 0% | 19% | 5.36 |
+| 300k | 58% | 1% | 32% | 5.15 |
+| 400k | 61% | 1% | 33% | 7.04 |
+| 500k | 59% | 0% | 32% | 5.82 |
+| 600k | 70% | 0% | 36% | 6.36 |
+| 700k | 71% | 1% | 37% | 6.07 |
+| 800k | 74% | 0% | 37% | 6.91 |
+| 900k | 78% | 1% | 41% | 5.81 |
+| 1M | 72% | 0% | 36% | 6.04 |
+
+- **KH1 FAIL** — every k=2 reading ≤ 1% (four 1% events; no advance
+  over the registered band).
+- **H1: no PASS, and the honest reading is that the mechanism did
+  not take at 0.25.** No checkpoint reached ≤ 3.5 m; the sub-6.0
+  readings that block a by-the-letter FAIL all belong to the early
+  churn window when the policy was barely engaging (k=1 31–58%) —
+  once engagement recovered, travel returned to 5.8–7.0 m against
+  the source's 7.46 m. The bands do not tile this outcome; per the
+  standing convention the gap routes to the maintainer.
+- **R1: no PASS by the letter** (peak 78% at 900k against the 80%
+  bar), not FAIL (≥ 60% from 400k on). The recovery arc was
+  LR1-shaped, not L2W-shaped — but incomplete: task-metric selection
+  kept **the untouched 25k checkpoint as best_model for the whole
+  run** (crossings 5.57 / reward +1.07 at eval 1; nothing later beat
+  it; final eval −1.16). Training under the transferred temperature
+  (1.7e-4 throughout, `train/std` 0.016) never re-attained the
+  source's eval quality, let alone improved on it.
+
+**Decision (maintainer, 2026-08-19): the §4-sanctioned re-pair fires
+— LH1b at `hold_shaping = 0.5`,** the single-knob re-pair the rule
+pre-declared for exactly this substance. The supporting precedent:
+LR1 trained successfully under this identical optimizer regime when
+its escrow's signal was dense; the hold signal is sparse (pay only
+when the policy's own shot comes back) — dose is the cheapest
+untested variable. The named alternative (warm-starting without the
+transferred temperature — the L2W review's "strict version" flag)
+stays on the shelf as the next single change if LH1b's verdict
+re-applies the rule, which it does **without this branch**: the
+re-pair is once, per the convention.
+
+**LH1b shape (frozen):** identical to §4 in every respect — same
+warm-start source and artifacts, seed 0, 1M steps, cadence, bars,
+and decision rule — except the TOML's `hold_shaping = 0.5`
+(`hold_shaping_travel` stays 4.0). Drive-side copy as
+`paddle_tennis_lh1b_hold.toml`:
+
+```toml
+# LH1b — post-swing-hold re-pair at 0.5
+# (docs/design_paddle_tennis_postswing_hold.md §4a). Code-side
+# pairing unchanged: seed 0, total_timesteps 1_000_000, warm start
+# from training_runs/PaddleTennis/sac/20260816_235141.
+
+[env]
+hold_shaping = 0.5
+hold_shaping_travel = 4.0
+
+[train]
+n_envs = 4
+eval_freq = 25_000
+checkpoint_freq = 100_000
+
+[train.model_kwargs]
+learning_starts = 25_000
+```
+
 ## 5. Seed ledger
 
 **6200–6299 burned** by the PH1 battery (this document's only new
