@@ -311,10 +311,71 @@ checkpoint_freq = 100_000
 learning_starts = 25_000
 ```
 
+### 4b. LH1b voided: the payment cliff (recorded 2026-08-20), and
+LH1c
+
+LH1b (run `20260820_013545`, `hold_shaping = 0.5`, config otherwise
+conformant) was stopped early on a proof of degeneracy: its 100k
+diagnosis probe is **byte-identical** to LH1's, every behavioral
+eval metric through 175k matches LH1 to the last digit, and the eval
+rewards differ only in floating-point residue. Two runs with
+different reward scales can only train bit-identically if the scaled
+component contributed **exactly zero** to every training step — and
+it did. The §2 formula `max(0, 1 − travel/4.0)` clamps to zero
+whenever the window's travel exceeds 4.0 m, and the learned policy's
+post-swing travel (follow-through included) lives at ~6–10 m:
+**the ramp is a cliff entirely outside the region the policy
+occupies, so the escrow pays nothing and carries no gradient at any
+scale.** The occasional sub-budget window under the *deterministic*
+eval policy produced the fp-dust reward differences; the *stochastic*
+training policy never paid once. LH1b is therefore **void as a dose
+test** (it doubled zero), and by the same proof LH1's own verdict is
+sharpened: the mechanism was never delivered, not rejected — its
+sanctioned re-pair consumed by an outcome the §2a design analysis
+failed to anticipate. The design error is recorded plainly: §2a
+chose the 4.0 m budget so the measured wander "pays zero," which is
+precisely what makes it unlearnable — a shaping term must pay
+*something* where the policy already is.
+
+**Amendment (frozen before LH1c): the travel budget moves onto the
+occupied band.** `hold_shaping_travel = 12.0` with
+`hold_shaping = 0.5`: the current behavior (~6–10 m) pays
+0.08–0.25 of the 0.5 scale with a monotone gradient toward stillness,
+and a disciplined hold (~2–3 m) pays 0.35–0.45. The linear form is
+kept (no code change — both values are constructor kwargs). The PH1
+battery re-runs at the amended values on fresh block **6300–6399**
+before launch; identities are structural and must hold unchanged.
+
+**LH1c shape (frozen):** identical to §4/§4a in every other respect
+— same warm-start source and artifacts, seed 0, cadence, bars
+(KH1/H1/R1 unchanged, scored on the 1M window), decision rule with
+no remaining re-pair branch. Drive-side TOML as
+`paddle_tennis_lh1c_hold.toml`:
+
+```toml
+# LH1c — post-swing-hold with the ramp on the occupied band
+# (docs/design_paddle_tennis_postswing_hold.md §4b). Code-side
+# pairing unchanged: seed 0, total_timesteps 1_000_000, warm start
+# from training_runs/PaddleTennis/sac/20260816_235141.
+
+[env]
+hold_shaping = 0.5
+hold_shaping_travel = 12.0
+
+[train]
+n_envs = 4
+eval_freq = 25_000
+checkpoint_freq = 100_000
+
+[train.model_kwargs]
+learning_starts = 25_000
+```
+
 ## 5. Seed ledger
 
-**6200–6299 burned** by the PH1 battery (this document's only new
-block). Training seed 0 per the pilot convention; diagnosis stays on
-calibration 5200+. **4100–4199 remains sealed** — the registered
-run's stop/amend booking did not open it, and it stays reserved for
-the first run whose registered-result branch fires.
+**6200–6299 burned** by the PH1 battery at (0.25, 4.0);
+**6300–6399 burned** by the §4b re-battery at (0.5, 12.0). Training
+seed 0 per the pilot convention; diagnosis stays on calibration
+5200+. **4100–4199 remains sealed** — the registered run's
+stop/amend booking did not open it, and it stays reserved for the
+first run whose registered-result branch fires.

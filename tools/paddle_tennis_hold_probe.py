@@ -187,11 +187,16 @@ def _refuse_reserved(seed_start: int, episodes: int) -> None:
 
 
 def main() -> None:
+    global HOLD, TRAVEL_BUDGET
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--episodes", type=int, default=PROBE_EPISODES)
     parser.add_argument("--seed-start", type=int, default=PROBE_SEED_START)
+    parser.add_argument("--hold-shaping", type=float, default=HOLD)
+    parser.add_argument("--travel-budget", type=float, default=TRAVEL_BUDGET)
     args = parser.parse_args()
     _refuse_reserved(args.seed_start, args.episodes)
+    HOLD = args.hold_shaping
+    TRAVEL_BUDGET = args.travel_budget
 
     # (name, policy, stacked, freeze_after_first_hit)
     witnesses: list[
