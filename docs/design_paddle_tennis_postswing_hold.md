@@ -346,6 +346,15 @@ kept (no code change — both values are constructor kwargs). The PH1
 battery re-runs at the amended values on fresh block **6300–6399**
 before launch; identities are structural and must hold unchanged.
 
+**Re-battery at (0.5, 12.0): PASS** (recorded 2026-08-20; 100
+episodes, seeds 6300–6399 burned; identities exact to 2.22e-16).
+The amended geometry pays where the cliff did not: `hit_then_freeze`
+now collects in 50/100 episodes (18.478 paid) and still keeps
+**0.000** — farming stays dead under the denser pay; the oracle
+collects 131.585 and keeps 113.202 (86%) across 85/100 episodes;
+statue/camper/volley-patting remain exact zeros; the stacked arm
+composes exactly. LH1c is cleared to launch.
+
 **LH1c shape (frozen):** identical to §4/§4a in every other respect
 — same warm-start source and artifacts, seed 0, cadence, bars
 (KH1/H1/R1 unchanged, scored on the 1M window), decision rule with
