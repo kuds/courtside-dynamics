@@ -60,6 +60,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+from collections.abc import Callable
 
 import numpy as np
 
@@ -209,6 +210,7 @@ def run_probe(
     hold_shaping: float = 0.0,
     hold_shaping_travel: float = 4.0,
 ) -> list[WindowRecord]:
+    policy: Callable[[np.ndarray], np.ndarray]
     if model_path is None:
         from courtside_dynamics.envs._paddle_court import (
             scripted_ground_opponent,
@@ -216,6 +218,8 @@ def run_probe(
 
         policy = scripted_ground_opponent
     else:
+        if vec_normalize_path is None:
+            raise ValueError("vec_normalize_path is required alongside model_path")
         policy = native_checkpoint_policy(model_path, vec_normalize_path)
     env = PaddleTennisEnv(
         episode_len=1500,
