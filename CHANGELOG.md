@@ -230,7 +230,17 @@ supersedes it (see the ground-rules bullet).
   (`tools/paddle_tennis_hold_probe.py`, fresh block 6200–6299) ship
   with the change; the LH1 pilot — warm-started from the registered
   run's 2.4M best, bars frozen from its band — is pre-registered in
-  the design doc §4.
+  the design doc §4. The pilot series closed 2026-08-22 without
+  adoption (design doc §4a–§4c): at a 4.0 m travel budget the ramp
+  sat entirely outside the policy's 6–10 m post-swing band and paid
+  exactly zero (LH1b trained bit-identically to LH1 — the payment
+  cliff, booked as a design error), and at the amended (0.5, 12.0)
+  the gradient was live but the policy kept the wander — hold travel
+  settled at 7.5–8.7 m and k=2 stayed at its 1% floor across 3M —
+  while, as an unregistered-extension observation, setting the
+  warm-started line's eval record (+2.483 at 2.425M with the first
+  deep-training `best_model`; MuJoCo 3.11→3.12 confound noted). The
+  kwargs stay default-off; the k=2 probe moves diagnosis-side.
 - **PaddleTennis escrowed contact shaping (implemented, default
   off).** The touch→in remedy
   (docs/design_paddle_tennis_contact_shaping.md): new env kwarg

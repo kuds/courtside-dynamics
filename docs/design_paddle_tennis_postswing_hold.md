@@ -380,11 +380,88 @@ checkpoint_freq = 100_000
 learning_starts = 25_000
 ```
 
+### 4c. LH1c verdict (recorded 2026-08-22): the line closes
+
+Run `20260821_013700` (config validated against §4b at launch; git
+`b3667c5`, TOML `paddle_tennis_lh1c_hold.toml` sha `84412dc2…`,
+warm-start artifacts sha-verified) completed with one launch
+deviation, **declared before any data landed**: the maintainer set
+`TOTAL_TIMESTEPS = 3_000_000` for an overnight budget against the
+frozen 1M. Handling as declared at launch: the registered verdict
+below scores the 1,000,000-step window only; 1M–3M is an
+unregistered extension, reported as exploratory observation. One
+further named confound: MuJoCo moved 3.11.0 → 3.12.0 between LH1b
+and LH1c, so comparisons against the earlier runs carry a
+physics-version asterisk. The run finished 3M steps in 19h 51m at
+41 FPS, zero unsafe terminations.
+
+**The dose was delivered this time.** Unlike LH1b, the 100k
+diagnosis probe diverged from the LH1 replay — the §4b amendment put
+the ramp on the occupied band and the escrow carried real gradient.
+LH1c is therefore a valid test of the mechanism, which neither LH1
+nor LH1b ever was.
+
+**Registered 1M window, against the frozen §4 bars:**
+
+- **KH1 FAIL** — every k=2 reading in the window ≤ 1% (four 1%
+  events, the rest 0%); no advance over the registered band.
+- **H1: no PASS — the mechanism was paid and declined.** Window
+  minimum 5.20 m, but as in §4a the sub-6.0 readings belong to the
+  early churn; once engagement recovered, hold travel returned to
+  8.1–8.3 m — *above* the source checkpoint's 7.46 m. The bands
+  again do not tile the outcome; the maintainer's reading is
+  rejection at a delivered dose, not non-delivery.
+- **R1 middle** — ≥ 60% once engagement recovered, peak 68% in the
+  window, never ≥ 80%.
+- Guards quiet throughout.
+- Selection echo of §4a: inside the registered window the
+  transferred checkpoint was never beaten (eval-series window best
+  +1.067 at eval 1 — the 25k transfer itself; eval-info window max
+  +1.19).
+
+**Extension observations (1M–3M, unregistered, exploratory):**
+
+- k=1 receiving climbed steadily to **90%** at the 3M probe — the
+  warm-started line's best first-return channel.
+- k=2 never left the noise floor: two isolated 2% readings (1.3M,
+  2.9M) among ~19 extension probes otherwise at 0–1% — the pattern
+  probe-sized sampling noise produces, not an onset.
+- Hold travel settled at 7.5–8.7 m (3M probe: 8.71 m mean, p90
+  11.37 m). Paid, not bought.
+- **Training dynamics, the honest counterpoint:** best eval
+  **+2.483 ± 0.829 at step 2,425,000** — the campaign record (prior
+  best +1.85 across all runs) — and `best_model` selected from step
+  **2,325,000** (crossings 5.63): the first warm-started run whose
+  best came from deep training rather than the untouched transfer.
+  The eval-info channel's entire top-5 sits in the 2.0–2.6M band
+  (reward +1.766 and crossings 6.17 at 2.3M; final policy 5.97
+  crossings, 30% success, closing eval +0.976 ± 1.626). Whether the
+  live hold gradient improved the optimization or MuJoCo 3.12 moved
+  the task is not separable post-hoc and no attempt is made here.
+
+**Decision (maintainer, 2026-08-22): the hold-escrow line closes
+without adoption.** The §4 rule re-applies with no re-pair branch
+remaining. The three-pilot record: LH1 (0.25, 4.0) and LH1b (0.5,
+4.0) never delivered the gradient (§4b's cliff; LH1b void), and
+LH1c (0.5, 12.0) delivered it and the policy kept the wander — the
+post-swing travel is worth more to the current policy than the
+escrow pays, at a scale (0.5) already rivaling the terminal ±1 that
+we decline to raise further. The kwargs stay in the env, default
+off, certified farm-proof, available to a later era. The k=2
+blocker stands, and its assessed locus moves from "unpaid window"
+(§1) to **the policy's own post-swing action targets**: the next
+probe is diagnosis-side — replay the best checkpoints through the
+instrument and read where the paddle is being *commanded* after the
+swing — before any further reward-side change. The §4a shelf item
+(warm start without the transferred temperature) remains the named
+training-dynamics candidate for the next registered attempt.
+
 ## 5. Seed ledger
 
 **6200–6299 burned** by the PH1 battery at (0.25, 4.0);
 **6300–6399 burned** by the §4b re-battery at (0.5, 12.0). Training
 seed 0 per the pilot convention; diagnosis stays on calibration
-5200+. **4100–4199 remains sealed** — the registered run's
-stop/amend booking did not open it, and it stays reserved for the
-first run whose registered-result branch fires.
+5200+. LH1c burned no new blocks. **4100–4199 remains sealed** —
+the registered run's stop/amend booking did not open it, and it
+stays reserved for the first run whose registered-result branch
+fires.

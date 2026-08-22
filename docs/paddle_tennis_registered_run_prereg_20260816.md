@@ -194,3 +194,50 @@ No new blocks. Diagnosis stays on calibration 5200+. **4100–4199
 remains sealed until §4 opens it** (that opening consumes it).
 All prior burns stand — 4300–4399 (NP3 certification, consumed
 2026-08-10) and the review-workpaper blocks 5500–6199 included.
+
+## 8. Verdict (recorded 2026-08-22; run 20260816_235141)
+
+The registered run executed the §1b single-session from-scratch
+shape as frozen (config validated against §2 at launch) and
+completed its full 3M steps. Adjudication against the frozen §3
+bars, each metric at its own best checkpoint:
+
+- **LS1 — PASS.** From-scratch bootstrapping is proven: the era's
+  founding question (can this task be learned without a warm start?)
+  is answered yes, and the campaign no longer depends on the
+  transfer lineage.
+- **RK1 — FAIL.** k=2 exchange survival ≤ 1% at every checkpoint;
+  no advance over LR1's band. (RK2's non-binding record stays
+  empty — no triple exchange was observed.)
+- **RE3 — PASS.** k=1 receiving survival reached the two-consecutive
+  ≥ 80% bar, peaking at 95%.
+- **RE1 and RS2 — declared middle**, both bands entered, neither
+  PASS bar reached.
+- **M — PASS.** `legal_hit_count_a_ep_mean` > 0 at 77.5% of evals;
+  the behavioral mechanism held for the whole run.
+- **R2 watch (non-verdict):** inter-point / post-swing travel sat
+  at ~7.5 m — the measured unpaid window the §5 stop/amend branch
+  routes to.
+
+**Decision rule outcome: the stop/amend branch fired** (RK1 FAIL —
+no budget extension). The next probed change was, as pre-declared,
+the post-swing-hold escrow; it was designed, certified, and piloted
+in `docs/design_paddle_tennis_postswing_hold.md` (§1–§4c). That
+line closed 2026-08-22 without adoption after three pilots — two
+never delivered the gradient (the payment-cliff design error,
+booked there as §4b), the third delivered it and the policy kept
+the wander — so **the RK1 blocker stands**, its assessed locus now
+the policy's post-swing action targets (diagnosis-side next, not
+reward-side).
+
+**Held-out gate: not opened.** Only the registered-result branch
+consumes 4100–4199; the stop/amend booking leaves it sealed
+(maintainer decision, 2026-08-18: keep sealed).
+
+**Era artifacts.** The run's protected best is the 2.4M checkpoint
+(`best_model.zip` sha256 `838997fb…`, `best_vec_normalize.pkl`
+sha256 `d0502c14…`); it anchored every pilot in the hold series as
+warm-start source. What the era banked: from-scratch bootstrapping
+(LS1), k=1 receiving at 95% (90% held at 3M in the final pilot's
+extension), the mechanism intact end-to-end. What it did not: k=2 —
+the headline carries forward to the next design phase.
