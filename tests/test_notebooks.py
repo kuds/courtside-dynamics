@@ -11,6 +11,9 @@ SB3_NOTEBOOK = REPOSITORY_ROOT / "notebooks" / "sb3_training.ipynb"
 HUMANOID_NOTEBOOK = (
     REPOSITORY_ROOT / "notebooks" / "humanoid_tennis_training.ipynb"
 )
+CAMPAIGN_NOTEBOOK = (
+    REPOSITORY_ROOT / "notebooks" / "paddle_tennis_campaign.ipynb"
+)
 
 
 def _source(cell: dict[str, Any]) -> str:
@@ -275,3 +278,122 @@ def test_sb3_notebook_lists_every_recipe() -> None:
     assert not missing, (
         f"recipes missing from the sb3 notebook's menus: {missing}"
     )
+
+
+def _load_campaign_notebook() -> dict[str, Any]:
+    return json.loads(CAMPAIGN_NOTEBOOK.read_text())
+
+
+def test_campaign_notebook_is_clean_and_code_cells_compile() -> None:
+    notebook = _load_campaign_notebook()
+    assert notebook["nbformat"] == 4
+    assert notebook["nbformat_minor"] == 5
+    cells = notebook["cells"]
+    cell_ids = [cell["id"] for cell in cells]
+    assert len(cell_ids) == len(set(cell_ids))
+    for cell in cells:
+        if cell["cell_type"] != "code":
+            continue
+        assert cell["execution_count"] is None
+        assert cell["outputs"] == []
+        source = _source(cell)
+        if any(
+            line.lstrip().startswith(("!", "%"))
+            for line in source.splitlines()
+        ):
+            continue
+        compile(source, f"{CAMPAIGN_NOTEBOOK}:{cell['id']}", "exec")
+
+
+def test_campaign_notebook_bootstraps_mujoco_before_environment_imports() -> None:
+    code_cells = [
+        _source(cell)
+        for cell in _load_campaign_notebook()["cells"]
+        if cell["cell_type"] == "code"
+    ]
+    setup_index = next(
+        index
+        for index, source in enumerate(code_cells)
+        if "setup_colab()" in source
+    )
+    recipe_index = next(
+        index
+        for index, source in enumerate(code_cells)
+        if "from courtside_dynamics.recipes import" in source
+    )
+    assert setup_index < recipe_index
+
+
+def test_campaign_notebook_freezes_the_preregistered_plan() -> None:
+    """The settings cell is the campaign's frozen protocol: every number
+    ships pinned to the pre-registration
+    (docs/paddle_tennis_registered_run_prereg_20260816.md §1a/§1b/§2),
+    and the manifest fingerprint refuses a silent mid-campaign edit."""
+    source = "\n".join(
+        _source(cell) for cell in _load_campaign_notebook()["cells"]
+    )
+    # The LS1 gate-leg shape and both branch budgets.
+    assert "GATE_TIMESTEPS = 1_000_000" in source
+    assert "MAIN_TIMESTEPS_ON_PASS = 2_000_000" in source
+    assert "MAIN_TIMESTEPS_ON_FALLBACK = 3_000_000" in source
+    assert "N_ENVS = 4" in source
+    assert "EVAL_FREQ = 25_000" in source
+    assert "CHECKPOINT_FREQ = 100_000" in source
+    assert "WARM_START_LEARNING_STARTS = 25_000" in source
+    # The gate reads the recipe's own diagnosis instrument settings.
+    assert "GATE_EPISODES = 30" in source
+    assert "GATE_SEED_START = 5200" in source
+    # LS1 bars: LS-C and LS-K1 gate; LS-G is informational.
+    assert '"LS-C"' in source
+    assert '"LS-K1"' in source
+    assert '"LS-G"' in source
+    assert '"metric": "touched_after_bounce_rate"' in source
+    assert '"metric": "k1_receiving_survival"' in source
+    assert '"metric": "ready_error_mean"' in source
+    # The frozen fallback lineage both pilots warm-started from.
+    assert "20260809_211147" in source
+    # Registered §3 bands appear as record-only readings.
+    for band in ('"RK1"', '"RE1"', '"RE3"', '"RS2"'):
+        assert band in source
+    assert '"metric": "k2_either_survival"' in source
+    # Decision knobs are validated, and QUICK_TEST cannot silently
+    # auto-branch on non-evidence gate numbers.
+    assert "QUICK_TEST and FORCE_BRANCH is None" in source
+    assert 'GATE_MIDDLE_ACTION = "stop"' in source
+    assert "FORCE_BRANCH = None" in source
+
+
+def test_campaign_notebook_resumes_and_branches_via_helpers() -> None:
+    source = "\n".join(
+        _source(cell) for cell in _load_campaign_notebook()["cells"]
+    )
+    # Manifest-driven resume on a stable (non-timestamped) root.
+    assert '"PaddleTennisCampaign", "sac", use_drive=USE_DRIVE, timestamp=False' in (
+        source
+    )
+    assert "load_campaign_manifest" in source
+    assert "write_campaign_manifest" in source
+    assert "require_campaign_fingerprint(manifest, FINGERPRINT)" in source
+    assert "next_stage_attempt_dir(CAMPAIGN_ROOT, stage_name)" in source
+    # The gate and final report use the shared scorer.
+    assert "score_paddle_stage(" in source
+    assert "bars=GATE_BARS" in source
+    assert "bars=FINAL_REPORT_BARS" in source
+    assert 'report_name="campaign_final_report.json"' in source
+    # Branching goes through the tested helper, and the main leg
+    # warm-starts from the decided lineage.
+    assert "resolve_warm_start_branch(" in source
+    assert "WarmStartConfig(source_run_dir=str(source))" in source
+    assert 'seed=SEED + 10_000' in source
+    # The warm-started legs merge learning_starts INTO the recipe's
+    # calibrated SAC bundle -- a bare {"learning_starts": ...} override
+    # would silently drop use_sde / auto-entropy / train_freq.
+    assert '**RECIPES[RECIPE].extra_cfg["model_kwargs"],' in source
+    assert '"learning_starts": WARM_START_LEARNING_STARTS,' in source
+    # Interrupted legs cannot gate; the retry lands in a fresh attempt.
+    assert "cannot be gated or branched" in source
+    assert "del model" in source
+    # No post-build config mutation (the humanoid notebook's contract).
+    assert "cfg.checkpoint_freq =" not in source
+    assert "cfg.video_freq =" not in source
+    assert "cfg.env_fn =" not in source
