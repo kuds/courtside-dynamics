@@ -1028,6 +1028,61 @@ def test_run_summary_reports_task_metric_selected_best_model(tmp_path):
     assert "2.000 +/- 0.000 (at 75,000 steps)" in text
 
 
+def test_run_summary_labels_each_evaluation_instrument(tmp_path):
+    """Every evaluation line must name the instrument it reports: run
+    20260821_013700 left three different "final eval" numbers (closing
+    eval, evaluations.npz row, eval_info.csv row) that a reader could
+    not tell apart."""
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    np.savez(
+        tmp_path / "evaluations.npz",
+        timesteps=np.array([25_000, 50_000]),
+        results=np.array([[0.5, 0.5], [2.0, 2.0]]),
+        ep_lengths=np.array([[30, 30], [30, 30]]),
+    )
+    (tmp_path / "eval_info.csv").write_text(
+        "timestep,metric,value\n"
+        "25000,bounce_count_ep_mean,2.86\n"
+        "50000,bounce_count_ep_mean,2.14\n"
+    )
+    monitor_dir = tmp_path / "metrics" / "monitor"
+    monitor_dir.mkdir(parents=True)
+    (monitor_dir / "0.monitor.csv").write_text(
+        '#{"t_start": 0.0}\nr,l,t\n1.0,10,1.0\n2.0,10,2.0\n'
+    )
+
+    def env_fn():
+        raise RuntimeError("no env needed; probe degrades gracefully")
+
+    cfg = TrainConfig(
+        env_fn=env_fn,
+        log_dir=str(tmp_path),
+        headline_key="bounce_count",
+    )
+    write_run_summary(
+        cfg,
+        str(tmp_path),
+        final_mean_reward=0.976,
+        final_std_reward=1.626,
+        duration_seconds=10.0,
+    )
+    text = (tmp_path / "stage_summary.txt").read_text()
+    # Closing eval: train()'s epilogue evaluate_policy pass, distinct
+    # from both periodic series.
+    assert (
+        "Final eval:     0.976 +/- 1.626  [closing eval, fresh episodes]"
+        in text
+    )
+    # EvalCallback's reward series (evaluations.npz).
+    assert "2.000 +/- 0.000 (at 50,000 steps)  [periodic eval series]" in text
+    # InfoDictEvalCallback's series (eval_info.csv), on both lines.
+    assert "Headline final: 2.14  [eval_info series]" in text
+    assert "2.86 (at 25,000 steps)  [eval_info series]" in text
+    # Training-episode rewards from the train env's Monitor logs.
+    assert "1.500 +/- 0.707 (last 2 episodes)  [train monitor logs]" in text
+
+
 def _merged_eval_cfg(tmp_path, **overrides):
     """A tiny headline-selection run with the final-config eval stream on."""
     cfg_kwargs = dict(
