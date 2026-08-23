@@ -415,14 +415,16 @@ def _split_eval_metric(name: str) -> tuple[str, str]:
 
     ``rally_count_mean`` -> ``("rally_count", "mean")``,
     ``rally_count_ep_mean`` -> ``("rally_count", "ep_mean")``,
+    ``rew_hold_ep_sum_mean`` -> ``("rew_hold", "ep_sum_mean")``,
     ``phase_frac_<label>`` -> ``("phase_frac", "<label>")``,
     standalone names like ``episode_length`` -> ``("episode_length", "")``.
     """
     if name.startswith("phase_frac_"):
         return "phase_frac", name[len("phase_frac_") :]
-    # ``_ep_mean`` must be checked before ``_mean`` (its own suffix) so the
-    # per-episode variant overlays on the same panel as ``_mean``/``_max``.
-    for suffix in ("_ep_mean", "_mean", "_final", "_max"):
+    # ``_ep_sum_mean`` and ``_ep_mean`` must be checked before ``_mean``
+    # (their own suffix) so the per-episode variants overlay on the same
+    # panel as ``_mean``/``_max``.
+    for suffix in ("_ep_sum_mean", "_ep_mean", "_mean", "_final", "_max"):
         if name.endswith(suffix):
             return name[: -len(suffix)], suffix[1:]
     return name, ""
@@ -2253,6 +2255,17 @@ def _plan_values_match(recorded: Any, wanted: Any) -> bool:
         return bool(recorded == wanted)
 
 
+class RunConfigPlanMismatch(ValueError):
+    """A run's ``config.json`` diverges from its frozen plan.
+
+    Raised by :func:`validate_run_config_against_plan` for genuine
+    config drift only. A malformed plan or ``config.json`` raises plain
+    :class:`ValueError` (note ``json.JSONDecodeError`` subclasses it),
+    so a caller booking drift -- the campaign notebook's manifest --
+    does not misattribute instrument errors as drift.
+    """
+
+
 def validate_run_config_against_plan(
     config_json_path: str | Path, expected: Mapping[str, Any]
 ) -> None:
@@ -2265,8 +2278,13 @@ def validate_run_config_against_plan(
     before anything downstream consumes the run -- a drifted run must
     stop the campaign, not be gated and branched from. This is that
     check in code. Every divergence is collected and a single
-    :class:`ValueError` lists them all, so the maintainer reads the full
-    drift in one message instead of one mismatch per re-run.
+    :class:`RunConfigPlanMismatch` lists them all, so the maintainer
+    reads the full drift in one message instead of one mismatch per
+    re-run; a malformed plan or ``config.json`` raises plain
+    :class:`ValueError` instead (an instrument error, not drift).
+    ``train()`` writes ``config.json`` at run start, so the check can
+    also be run manually before the first checkpoint lands (the
+    notebook automates it post-run as the backstop).
 
     ``expected`` maps plan keys to frozen values; only supplied keys are
     checked, and an unknown key is rejected loudly rather than silently
@@ -2286,16 +2304,29 @@ def validate_run_config_against_plan(
       call this after training -- and may pin any of:
 
       - ``"source_run_dir_suffix"``: the recorded
-        ``initialization.source_run_dir`` must end with it (mount
-        points move between machines; the run-dir leaf does not);
-      - ``"transfer_log_ent_coef"``: matches the recorded flag and
-        enforces the corresponding presence/absence of
-        ``"log_ent_coef"`` in ``initialization.transferred`` /
-        ``initialization.reset`` (the temperature-skip contract);
+        ``initialization.source_run_dir`` must equal it or end with
+        ``"/" + suffix`` -- whole path components only, so a pin
+        cannot match an evil sibling directory (mount points move
+        between machines; the run-dir leaf does not);
+      - ``"transfer_log_ent_coef"``: the recorded flag must match
+        verbatim. Temperature membership is enforced only where
+        ``train()`` records it: under ``True``,
+        ``initialization.reset`` must not list ``"log_ent_coef"``, and
+        ``initialization.transferred`` must list it when
+        ``transferred_ent_coef`` is recorded (the evidence a
+        temperature actually moved); under ``False``, neither
+        ``transferred`` membership nor a recorded
+        ``transferred_ent_coef`` is allowed, and ``reset`` membership
+        is not required -- PPO and fixed-``ent_coef`` warm starts have
+        no temperature to move, so they record the flag alone (the
+        documented no-op) and pass on the flag comparison;
       - ``"expected_artifact_sha256"``: mapping of source artifact name
-        to the full sha256 or a prefix, matched against
+        to the full sha256 or a prefix -- lowercase hex, 8 to 64 chars,
+        validated like
+        :class:`~courtside_dynamics.training.WarmStartConfig` (a
+        malformed pin is a bad plan, not a mismatch) -- matched against
         ``initialization.source_artifacts`` (``None`` skips the check,
-        mirroring :class:`~courtside_dynamics.training.WarmStartConfig`).
+        mirroring ``WarmStartConfig``).
     """
     if not expected:
         raise ValueError("an expected plan with at least one key is required")
@@ -2381,7 +2412,7 @@ def validate_run_config_against_plan(
         )
 
     if mismatches:
-        raise ValueError(
+        raise RunConfigPlanMismatch(
             f"config.json diverges from the frozen plan in "
             f"{len(mismatches)} place(s) ({config_json_path}):\n- "
             + "\n- ".join(mismatches)
@@ -2417,6 +2448,33 @@ def _warm_start_plan_mismatches(
             f"unknown expected warm_start keys: {sorted(unknown)}; "
             f"known: {sorted(_PLAN_WARM_START_KEYS)}"
         )
+    # Validate the whole plan before comparing anything, so a bad plan
+    # is rejected as a bad plan even when the recorded config would
+    # also mismatch (e.g. a from-scratch run).
+    if "transfer_log_ent_coef" in wanted and not isinstance(
+        wanted["transfer_log_ent_coef"], bool
+    ):
+        raise ValueError("expected transfer_log_ent_coef must be a bool")
+    pins = wanted.get("expected_artifact_sha256")
+    if pins is not None:
+        if not isinstance(pins, Mapping) or not all(
+            isinstance(value, str) for value in pins.values()
+        ):
+            raise ValueError(
+                "expected expected_artifact_sha256 must be a mapping of "
+                "artifact name to a sha256 string (or None)"
+            )
+        for value in pins.values():
+            # WarmStartConfig's pin rule, mirrored: an empty pin would
+            # match every digest, and uppercase or short pins silently
+            # weaken the check.
+            if not 8 <= len(value) <= 64 or any(
+                c not in "0123456789abcdef" for c in value
+            ):
+                raise ValueError(
+                    "expected_artifact_sha256 values must be lowercase "
+                    "hex, 8 to 64 chars"
+                )
     if not isinstance(initialization, Mapping):
         return [
             "warm start: expected a warm-started run, config.json records "
@@ -2426,9 +2484,14 @@ def _warm_start_plan_mismatches(
 
     mismatches = []
     if "source_run_dir_suffix" in wanted:
-        suffix = str(wanted["source_run_dir_suffix"]).rstrip("/")
+        # Whole path components only: the pin "leg1/attempt_01" must
+        # not match an evil sibling like ".../evilleg1/attempt_01".
+        suffix = str(wanted["source_run_dir_suffix"]).strip("/")
         recorded_source = str(initialization.get("source_run_dir", ""))
-        if not recorded_source.rstrip("/").endswith(suffix):
+        trimmed_source = recorded_source.rstrip("/")
+        if trimmed_source != suffix and not trimmed_source.endswith(
+            "/" + suffix
+        ):
             mismatches.append(
                 "initialization.source_run_dir: expected a path ending "
                 f"with {suffix!r}, config.json records {recorded_source!r}"
@@ -2436,8 +2499,6 @@ def _warm_start_plan_mismatches(
 
     if "transfer_log_ent_coef" in wanted:
         wanted_flag = wanted["transfer_log_ent_coef"]
-        if not isinstance(wanted_flag, bool):
-            raise ValueError("expected transfer_log_ent_coef must be a bool")
         recorded_flag = initialization.get(
             "transfer_log_ent_coef", _PLAN_MISSING
         )
@@ -2451,12 +2512,19 @@ def _warm_start_plan_mismatches(
                 "initialization.transfer_log_ent_coef: expected "
                 f"{wanted_flag}, config.json records {recorded_flag!r}"
             )
+        # Membership is evidence-gated: ``train()`` only files
+        # ``log_ent_coef`` under ``transferred``/``reset`` when both
+        # sides carry a temperature, and records ``transferred_ent_coef``
+        # exactly when one actually moved. PPO and fixed-``ent_coef``
+        # warm starts record the flag alone (the documented no-op), so
+        # only the verbatim flag comparison may trip on them.
         transferred = initialization.get("transferred") or ()
         reset = initialization.get("reset") or ()
         in_transferred = "log_ent_coef" in transferred
         in_reset = "log_ent_coef" in reset
+        temperature_moved = "transferred_ent_coef" in initialization
         if wanted_flag:
-            if not in_transferred:
+            if temperature_moved and not in_transferred:
                 mismatches.append(
                     "initialization.transferred: expected 'log_ent_coef' "
                     "(temperature transferred), config.json records it "
@@ -2475,21 +2543,14 @@ def _warm_start_plan_mismatches(
                     "'log_ent_coef' (temperature skip), config.json "
                     "records it transferred"
                 )
-            if not in_reset:
+            if temperature_moved:
                 mismatches.append(
-                    "initialization.reset: expected 'log_ent_coef' "
-                    "(temperature skip), config.json records it absent"
+                    "initialization.transferred_ent_coef: expected no "
+                    "moved temperature (temperature skip), config.json "
+                    f"records {initialization['transferred_ent_coef']!r}"
                 )
 
-    pins = wanted.get("expected_artifact_sha256")
-    if "expected_artifact_sha256" in wanted and pins is not None:
-        if not isinstance(pins, Mapping) or not all(
-            isinstance(value, str) for value in pins.values()
-        ):
-            raise ValueError(
-                "expected expected_artifact_sha256 must be a mapping of "
-                "artifact name to a sha256 string (or None)"
-            )
+    if pins is not None:
         source_artifacts = initialization.get("source_artifacts")
         if not isinstance(source_artifacts, Mapping):
             mismatches.append(

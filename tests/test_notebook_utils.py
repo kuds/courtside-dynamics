@@ -19,6 +19,7 @@ from gymnasium import Env
 from gymnasium.spaces import Box
 
 from courtside_dynamics.notebook_utils import (
+    RunConfigPlanMismatch,
     _rollout_wall_ball_seed,
     _summarize_wall_ball_episodes,
     _wall_ball_constructor_kwargs_match,
@@ -855,6 +856,57 @@ def _write_synthetic_eval_info(csv_path, stems, timesteps=(25_000, 50_000, 75_00
     csv_path.write_text("\n".join(lines) + "\n")
 
 
+def test_split_eval_metric_knows_every_variant_suffix():
+    """``_ep_sum_mean`` splits ahead of its own ``_mean`` suffix, so
+    ``rew_hold_ep_sum_mean`` overlays on the ``rew_hold`` panel instead
+    of spawning a phantom ``rew_hold_ep_sum`` stem."""
+    from courtside_dynamics.notebook_utils import _split_eval_metric
+
+    assert _split_eval_metric("rew_hold_mean") == ("rew_hold", "mean")
+    assert _split_eval_metric("rew_hold_ep_sum_mean") == (
+        "rew_hold",
+        "ep_sum_mean",
+    )
+    assert _split_eval_metric("rally_count_ep_mean") == (
+        "rally_count",
+        "ep_mean",
+    )
+    assert _split_eval_metric("phase_frac_rally") == ("phase_frac", "rally")
+    assert _split_eval_metric("episode_length") == ("episode_length", "")
+
+
+def test_plot_eval_info_overlays_ep_sum_mean_on_the_stem_panel(tmp_path):
+    """The per-episode reward sum renders as a labeled variant line on
+    its stem's panel, not as a separate panel."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from courtside_dynamics.notebook_utils import plot_eval_info
+
+    csv_path = tmp_path / "metrics" / "eval_info.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_path.write_text(
+        "timestep,metric,value\n"
+        "25000,rew_hold_mean,0.1\n"
+        "25000,rew_hold_ep_sum_mean,12.5\n"
+        "50000,rew_hold_mean,0.2\n"
+        "50000,rew_hold_ep_sum_mean,25.0\n"
+    )
+    figures = plot_eval_info(tmp_path, show=False)
+    assert figures is not None
+    try:
+        rewards_page = figures[2]
+        titled = [axis for axis in rewards_page.axes if axis.get_title()]
+        assert [axis.get_title() for axis in titled] == ["rew_hold"]
+        labels = {line.get_label() for line in titled[0].get_lines()}
+        assert labels == {"mean", "ep_sum_mean"}
+    finally:
+        for figure in figures:
+            plt.close(figure)
+
+
 def test_plot_eval_info_writes_four_bounded_pages(tmp_path):
     """The mega-plot is split into four themed pages, each capped at 24
     panels with numbered continuation pages, and every file stays small
@@ -1302,14 +1354,27 @@ def test_score_paddle_stage_requires_finished_paddle_run(tmp_path):
         score_paddle_stage(tmp_path, bars=bars, episodes=0)
 
 
-def _plan_run_config(*, transfer_log_ent_coef=False):
-    """A recorded config.json in the LT1 shape (warm-started leg)."""
+def _plan_run_config(*, transfer_log_ent_coef=False, algo="sac"):
+    """A recorded config.json in the LT1 shape (warm-started leg).
+
+    ``algo="ppo"`` models the no-temperature warm start ``train()``
+    records: the flag verbatim, ``log_ent_coef`` in neither
+    ``transferred`` nor ``reset``, and no ``transferred_ent_coef``
+    (the flag is a documented no-op there).
+    """
     transferred = ["policy.state_dict", "vec_normalize.obs_rms"]
-    reset = ["policy.optimizer_state", "replay_buffer"]
-    if transfer_log_ent_coef:
-        transferred.append("log_ent_coef")
-    else:
-        reset.append("log_ent_coef")
+    reset = [
+        "policy.optimizer_state",
+        "replay_buffer" if algo == "sac" else "rollout_buffer",
+    ]
+    temperature_evidence = {}
+    if algo == "sac":
+        if transfer_log_ent_coef:
+            transferred.append("log_ent_coef")
+            # train() records the moved temperature's value.
+            temperature_evidence["transferred_ent_coef"] = 0.014
+        else:
+            reset.append("log_ent_coef")
     return {
         "train_config": {
             "seed": 0,
@@ -1332,6 +1397,7 @@ def _plan_run_config(*, transfer_log_ent_coef=False):
         "initialization": {
             "source_run_dir": "/drive/PaddleTennis/sac/20260816_235141",
             "transfer_log_ent_coef": transfer_log_ent_coef,
+            **temperature_evidence,
             "transferred": transferred,
             "reset": reset,
             "source_artifacts": {
@@ -1398,13 +1464,13 @@ def test_validate_run_config_against_plan_accepts_from_scratch(tmp_path):
     )
     # An empty warm-start expectation only demands the run WAS
     # warm-started, so it fails on the from-scratch record.
-    with pytest.raises(ValueError, match="no initialization block"):
+    with pytest.raises(RunConfigPlanMismatch, match="no initialization block"):
         validate_run_config_against_plan(path, {"warm_start": {}})
 
 
 def test_validate_run_config_against_plan_lists_every_mismatch(tmp_path):
     path = _write_plan_config(tmp_path, _plan_run_config())
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(RunConfigPlanMismatch) as excinfo:
         validate_run_config_against_plan(
             path,
             {
@@ -1438,7 +1504,7 @@ def test_validate_run_config_against_plan_lists_every_mismatch(tmp_path):
 
 def test_validate_run_config_against_plan_reports_absent_fields(tmp_path):
     path = _write_plan_config(tmp_path, {"train_config": {"seed": 0}})
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(RunConfigPlanMismatch) as excinfo:
         validate_run_config_against_plan(
             path,
             {
@@ -1461,11 +1527,13 @@ def test_validate_run_config_against_plan_reports_absent_fields(tmp_path):
 def test_validate_run_config_against_plan_temperature_skip_both_ways(
     tmp_path,
 ):
-    # The run transferred the temperature; the plan expected the skip.
+    # The run transferred the temperature (SAC auto -> auto; the moved
+    # temperature leaves ``transferred_ent_coef`` behind); the plan
+    # expected the skip.
     path = _write_plan_config(
         tmp_path, _plan_run_config(transfer_log_ent_coef=True)
     )
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(RunConfigPlanMismatch) as excinfo:
         validate_run_config_against_plan(
             path, {"warm_start": {"transfer_log_ent_coef": False}}
         )
@@ -1476,34 +1544,71 @@ def test_validate_run_config_against_plan_temperature_skip_both_ways(
         "config.json records True"
     ) in message
     assert "config.json records it transferred" in message
-    assert "expected 'log_ent_coef' (temperature skip)" in message
+    assert "initialization.transferred_ent_coef: expected no moved" in message
 
     # And the reverse: the run skipped, the plan expected a transfer.
+    # Reset membership is evidence, not a requirement -- but a recorded
+    # reset must not coexist with an expected transfer.
     path = _write_plan_config(
         tmp_path, _plan_run_config(transfer_log_ent_coef=False)
     )
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(RunConfigPlanMismatch) as excinfo:
         validate_run_config_against_plan(
             path, {"warm_start": {"transfer_log_ent_coef": True}}
         )
     message = str(excinfo.value)
-    assert "3 place(s)" in message
+    assert "2 place(s)" in message
     assert (
         "initialization.transfer_log_ent_coef: expected True, "
         "config.json records False"
     ) in message
     assert "config.json records it reset" in message
-    assert "expected 'log_ent_coef' (temperature transferred)" in message
 
-    # Matching expectations pass on the same records.
+    # Matching expectations pass on the same records, both ways.
     validate_run_config_against_plan(
         path, {"warm_start": {"transfer_log_ent_coef": False}}
     )
+    path = _write_plan_config(
+        tmp_path, _plan_run_config(transfer_log_ent_coef=True)
+    )
+    validate_run_config_against_plan(
+        path, {"warm_start": {"transfer_log_ent_coef": True}}
+    )
+
+
+def test_validate_run_config_against_plan_ppo_flag_is_verbatim_only(tmp_path):
+    """A PPO warm start records ``transfer_log_ent_coef`` verbatim but
+    files ``log_ent_coef`` in neither ``transferred`` nor ``reset`` and
+    never records ``transferred_ent_coef`` (no temperature on either
+    side -- the documented no-op). Agreeing flags must pass in both
+    directions; disagreeing flags must fail only via the verbatim flag
+    comparison."""
+    for recorded_flag in (True, False):
+        path = _write_plan_config(
+            tmp_path,
+            _plan_run_config(
+                transfer_log_ent_coef=recorded_flag, algo="ppo"
+            ),
+        )
+        validate_run_config_against_plan(
+            path, {"warm_start": {"transfer_log_ent_coef": recorded_flag}}
+        )
+        with pytest.raises(RunConfigPlanMismatch) as excinfo:
+            validate_run_config_against_plan(
+                path,
+                {"warm_start": {"transfer_log_ent_coef": not recorded_flag}},
+            )
+        message = str(excinfo.value)
+        assert "1 place(s)" in message
+        assert (
+            f"initialization.transfer_log_ent_coef: expected "
+            f"{not recorded_flag}, config.json records {recorded_flag}"
+        ) in message
 
 
 def test_validate_run_config_against_plan_pins_suffix_and_shas(tmp_path):
     path = _write_plan_config(tmp_path, _plan_run_config())
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(RunConfigPlanMismatch) as excinfo:
         validate_run_config_against_plan(
             path,
             {
@@ -1531,7 +1636,9 @@ def test_validate_run_config_against_plan_pins_suffix_and_shas(tmp_path):
     config = _plan_run_config()
     del config["initialization"]["source_artifacts"]["best_model.zip"]
     path = _write_plan_config(tmp_path, config)
-    with pytest.raises(ValueError, match="config.json\\s+records none"):
+    with pytest.raises(
+        RunConfigPlanMismatch, match="config.json\\s+records none"
+    ):
         validate_run_config_against_plan(
             path,
             {
@@ -1553,28 +1660,113 @@ def test_validate_run_config_against_plan_pins_suffix_and_shas(tmp_path):
     )
 
 
+def test_validate_run_config_against_plan_suffix_matches_whole_components(
+    tmp_path,
+):
+    """The suffix pin binds whole path components: 'sac/<leaf>' must not
+    match an evil sibling like '.../evilsac/<leaf>'."""
+    config = _plan_run_config()
+    config["initialization"]["source_run_dir"] = (
+        "/drive/PaddleTennis/evilsac/20260816_235141"
+    )
+    path = _write_plan_config(tmp_path, config)
+    with pytest.raises(RunConfigPlanMismatch, match="expected a path ending"):
+        validate_run_config_against_plan(
+            path,
+            {"warm_start": {"source_run_dir_suffix": "sac/20260816_235141"}},
+        )
+    # Exact equality matches, and a leading slash on the pin is
+    # normalized away rather than demanding an absolute record.
+    config = _plan_run_config()
+    path = _write_plan_config(tmp_path, config)
+    validate_run_config_against_plan(
+        path,
+        {
+            "warm_start": {
+                "source_run_dir_suffix": (
+                    "/drive/PaddleTennis/sac/20260816_235141"
+                )
+            }
+        },
+    )
+    config["initialization"]["source_run_dir"] = "sac/20260816_235141"
+    path = _write_plan_config(tmp_path, config)
+    validate_run_config_against_plan(
+        path,
+        {"warm_start": {"source_run_dir_suffix": "sac/20260816_235141"}},
+    )
+
+
+def test_validate_run_config_against_plan_validates_sha_pin_values(tmp_path):
+    """Plan-side pins obey the WarmStartConfig rule (lowercase hex, 8 to
+    64 chars): an empty pin would prefix-match every digest, and short
+    or uppercase pins silently weaken the check. A bad pin is a bad
+    plan -- plain ValueError, never a mismatch entry."""
+    path = _write_plan_config(tmp_path, _plan_run_config())
+    for bad_pin in ("", "838997f", "838997FB"):
+        with pytest.raises(
+            ValueError, match="lowercase\\s+hex, 8 to 64 chars"
+        ) as excinfo:
+            validate_run_config_against_plan(
+                path,
+                {
+                    "warm_start": {
+                        "expected_artifact_sha256": {
+                            "best_model.zip": bad_pin
+                        }
+                    }
+                },
+            )
+        assert type(excinfo.value) is ValueError, bad_pin
+    # A valid 8-char lowercase prefix still matches the recorded digest.
+    validate_run_config_against_plan(
+        path,
+        {
+            "warm_start": {
+                "expected_artifact_sha256": {"best_model.zip": "838997fb"}
+            }
+        },
+    )
+
+
 def test_validate_run_config_against_plan_rejects_bad_plans(tmp_path):
     path = _write_plan_config(tmp_path, _plan_run_config())
-    with pytest.raises(ValueError, match="at least one key"):
-        validate_run_config_against_plan(path, {})
-    with pytest.raises(ValueError, match="unknown expected-plan keys"):
-        validate_run_config_against_plan(path, {"sedd": 0})
-    with pytest.raises(ValueError, match="unknown expected warm_start keys"):
-        validate_run_config_against_plan(
-            path, {"warm_start": {"source_dir": "x"}}
-        )
-    with pytest.raises(ValueError, match="must be a bool"):
-        validate_run_config_against_plan(
-            path, {"warm_start": {"transfer_log_ent_coef": "no"}}
-        )
-    with pytest.raises(ValueError, match="env_kwargs must be a mapping"):
-        validate_run_config_against_plan(path, {"env_kwargs": [1]})
-    with pytest.raises(ValueError, match="mapping of\\s+artifact name"):
-        validate_run_config_against_plan(
-            path, {"warm_start": {"expected_artifact_sha256": {"a": 1}}}
-        )
-    with pytest.raises(ValueError, match="mapping or None"):
-        validate_run_config_against_plan(path, {"warm_start": "scratch"})
+
+    def expect_bad_plan(match, config_path, expected):
+        # Bad plans and malformed configs are instrument errors: plain
+        # ValueError, never the RunConfigPlanMismatch subclass the
+        # campaign notebook books as config drift.
+        with pytest.raises(ValueError, match=match) as excinfo:
+            validate_run_config_against_plan(config_path, expected)
+        assert not isinstance(excinfo.value, RunConfigPlanMismatch)
+
+    expect_bad_plan("at least one key", path, {})
+    expect_bad_plan("unknown expected-plan keys", path, {"sedd": 0})
+    expect_bad_plan(
+        "unknown expected warm_start keys",
+        path,
+        {"warm_start": {"source_dir": "x"}},
+    )
+    expect_bad_plan(
+        "must be a bool", path, {"warm_start": {"transfer_log_ent_coef": "no"}}
+    )
+    expect_bad_plan("env_kwargs must be a mapping", path, {"env_kwargs": [1]})
+    expect_bad_plan(
+        "mapping of\\s+artifact name",
+        path,
+        {"warm_start": {"expected_artifact_sha256": {"a": 1}}},
+    )
+    expect_bad_plan("mapping or None", path, {"warm_start": "scratch"})
+    # Plan validation precedes comparison: a bad pin is a bad plan even
+    # when the recorded config would also mismatch (a from-scratch run).
+    scratch = _plan_run_config()
+    del scratch["initialization"]
+    scratch_path = tmp_path / "scratch_config.json"
+    scratch_path.write_text(json.dumps(scratch))
+    expect_bad_plan(
+        "lowercase\\s+hex, 8 to 64 chars",
+        scratch_path,
+        {"warm_start": {"expected_artifact_sha256": {"best_model.zip": ""}}},
+    )
     (tmp_path / "list.json").write_text("[]")
-    with pytest.raises(ValueError, match="JSON object"):
-        validate_run_config_against_plan(tmp_path / "list.json", {"seed": 0})
+    expect_bad_plan("JSON object", tmp_path / "list.json", {"seed": 0})

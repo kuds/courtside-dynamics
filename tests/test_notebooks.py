@@ -349,6 +349,12 @@ def test_campaign_notebook_freezes_the_preregistered_plan() -> None:
     assert "LEG2_TRANSFER_LOG_ENT_COEF = True" in source
     assert "LEG2_EXPECTED_ARTIFACT_SHA256 = None" in source
     assert "ENV_KWARGS = {}" in source
+    # The compatibility and scope decisions are stated where the knobs
+    # live: pre-knob campaigns cannot resume under the grown
+    # fingerprint, and the campaign template deliberately has no
+    # CONFIG_FILE/TOML knob (ENV_KWARGS is its [env] table).
+    assert "cannot resume under the updated notebook" in source
+    assert "deliberately out of scope for the campaign template" in source
     # The gate reads the recipe's own diagnosis instrument settings.
     assert "GATE_EPISODES = 30" in source
     assert "GATE_SEED_START = 5200" in source
@@ -395,7 +401,17 @@ def test_campaign_notebook_resumes_and_branches_via_helpers() -> None:
     assert "resolve_warm_start_branch(" in source
     assert "source_run_dir=str(source)," in source
     assert "transfer_log_ent_coef=LEG2_TRANSFER_LOG_ENT_COEF," in source
-    assert "expected_artifact_sha256=LEG2_EXPECTED_ARTIFACT_SHA256," in source
+    # The leg-2 sha pins bind the fallback lineage only: the continue
+    # branch's source is the gate leg's own best, whose digests are
+    # unknowable at fingerprint time -- a pin applied there would wedge
+    # every passing campaign.
+    assert "expected_artifact_sha256=leg2_expected_sha256," in source
+    assert "LEG2_EXPECTED_ARTIFACT_SHA256\n" in source
+    assert 'if decision["branch"] == "fallback"' in source
+    assert "expected_artifact_sha256=LEG2_EXPECTED_ARTIFACT_SHA256," not in (
+        source
+    )
+    assert "applies to the fallback lineage only" in source
     # Leg 1 stays from scratch unless the settings pin a lineage (the
     # warm-started leg-1 path, e.g. an LT1-shape pilot).
     assert "if LEG1_WARM_START_RUN_DIR is not None:" in source
@@ -445,8 +461,14 @@ def test_campaign_notebook_validates_config_and_plumbs_env_kwargs() -> None:
     )
     # Validation runs after train() and before any scoring; the verdict
     # (ok or the full error text) lands in the manifest either way.
+    # Only RunConfigPlanMismatch is booked as config drift -- a missing
+    # config.json, a JSONDecodeError (a ValueError subclass), or the
+    # validator's own bad-plan errors propagate as instrument failures.
     assert "validate_run_config_against_plan(config_path, expected)" in source
     assert '"config_validation": validation,' in source
+    assert "RunConfigPlanMismatch," in source
+    assert "except RunConfigPlanMismatch as err:" in source
+    assert "except ValueError" not in source
     assert 'validation = {"verdict": "mismatch", "error": str(err)}' in source
     train_index = source.index("model = train(cfg)")
     validate_index = source.index("validate_run_config_against_plan(")
