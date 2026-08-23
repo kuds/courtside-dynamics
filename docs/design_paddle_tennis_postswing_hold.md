@@ -436,7 +436,8 @@ nor LH1b ever was.
   actually spans 6.38–8.71 m.]
 - **Training dynamics, the honest counterpoint:** best eval
   **+2.483 ± 0.829 at step 2,425,000** — the campaign record (prior
-  best +1.85 across all runs) — and `best_model` selected from step
+  best +1.822 across all runs; originally recorded here as +1.85) —
+  and `best_model` selected from step
   **2,325,000** (crossings 5.63): the first warm-started run whose
   best came from deep training rather than the untouched transfer.
   Four of the eval-info channel's top-5 sit in the 2.0–2.6M band

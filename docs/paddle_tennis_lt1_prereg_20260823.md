@@ -26,7 +26,8 @@ The stack now has the flag the record called for
 (log α = log 0.02 ≈ −3.91 — a ~125× stronger entropy bonus than the
 transferred temperature), and SAC's entropy gradient then pushes
 directly against tanh-rail saturation, which is exactly the
-F2-measured pathology (88–93% of post-swing steps saturated).
+F2-measured pathology (88–91% of post-swing steps saturated; the
+review's 2.5M row extends the band to 93%).
 
 LT1 asks: **does a live temperature unsaturate the post-swing action
 head — and if it does, does k=2 follow?**
@@ -53,10 +54,10 @@ an informative outcome, not a wasted run.
   standing same-source control. The LH1c-lineage candidates (crowned
   2.325M; the 2.5M checkpoint) were considered by the review and
   set aside — each is a second lever with no
-  temperature-transferred control, and the fresh-seed data gives
-  2.5M no measured edge (its k=2 reads 1.6% [0.3, 4.5] vs the
-  crowned best's 1.1%). A lineage change, if ever wanted, is its own
-  pre-registered decision.
+  temperature-transferred control, and the measurements give 2.5M no
+  established edge (fresh-seed k=2 1.6% [0.3, 4.5]; the crowned best
+  reads 1.1% on the full calibration block). A lineage change, if
+  ever wanted, is its own pre-registered decision.
 - **Artifact pinning enforced in code**: the launch passes
   `expected_artifact_sha256` with the two digests above, so a moved
   artifact aborts the launch instead of voiding the pairing
@@ -161,7 +162,11 @@ it; a pilot never does).
 `ENV = "PaddleTennis"`, `SEED = 0`, `TOTAL_TIMESTEPS = 1_000_000`,
 `CONFIG_FILE` = the §2 TOML; the config-build cell adds the §2
 `WarmStartConfig` with both sha pins. Before the first checkpoint,
-validate the run's `config.json` against §2, including the new
+validate the run's `config.json` against §2 — it is written at run
+start, and `notebook_utils.validate_run_config_against_plan` performs
+the full check (the campaign notebook automates it post-run as the
+enforced backstop; the before-first-checkpoint reading is a manual
+step at launch) — including the new
 provenance: `initialization.transfer_log_ent_coef == false`,
 `"log_ent_coef"` present in `initialization.reset` and absent from
 `initialization.transferred`, and `initialization.source_artifacts`

@@ -86,7 +86,9 @@ below are an instance of one of these.
 
 Source: the dated `paddle_tennis_*` docs and `design_paddle_tennis_*`
 verdict sections indexed in [`docs/README.md`](README.md); this
-section distills the campaign's era verdicts (2026-08-08 → 08-23).
+section distills the campaign's era verdicts (2026-08-15 → 08-23;
+the earlier exploration/diagnosis-era verdicts remain in their
+source docs' status lines).
 The P0–P2 court-scaling entry predates the campaign and stays in the
 WallBall section below.
 
@@ -104,15 +106,18 @@ clawed back in the audited trace). Also measured: **MuJoCo
 LH1c's record eval belongs to the run, not the physics; and
 task-metric selection does not track k=2 — the crowned best (2.325M)
 is not the k=2-richest checkpoint (2.5M). Lesson 13a bit again in
-draft: the first pooled estimate blended the seeds that nominated the
-checkpoint with the fresh ones; only the fresh arm scores.
+draft (caught by the review's own verification pass, commit
+`ec0606a`): the first draft's pooled estimate blended the seeds that
+nominated the checkpoint with the fresh ones; only the fresh arm
+scores.
 
 ### The post-swing wander is commanded thrash, not drift — *diagnosis (PT1, 2026-08-22)*
 `data.ctrl` replay of the best checkpoints: commanded XY path 3–4×
-the paddle's actual travel (31.0 vs 7.8 m; oracle ratio 1.0), 88–93%
-of post-swing steps saturated (|action| > 0.9), 0.26–0.38 m/step
-command saccades, no attractor (≈4 m from hit point, home, and
-ball). The dynamics-side hypothesis is dead; the action head is
+the paddle's actual travel (31.0 vs 7.8 m; oracle ratio 1.0), 88–91%
+of post-swing steps saturated (|action| > 0.9; the 2026-08-23
+review's 2.5M row extends the band to 93%), 0.26–0.38 m/step
+command saccades, no attractor (≈4 m from hit point and home, 5–6 m
+from the ball). The dynamics-side hypothesis is dead; the action head is
 emitting bang-bang under a dead temperature (ent_coef ~1.7e-4, std
 ~0.014). Era law refined: **paid windows organize only where
 exploration can find the paying behavior** — the hold escrow needed
@@ -172,8 +177,10 @@ credit mechanism by transfer: the k=1-mastered checkpoint scored
 here too: 0.02 → 9.8e-4 inside 12k steps; appendix D.6's
 tanh-saturation mechanism (saturated squashed mean inflates latent
 −log π, annealing α to zero) empirically falsifies the target −1.5
-rationale. There is still no warm-start temperature-skip flag in
-code; it is the named next lever.
+rationale. At the verdict there was no warm-start temperature-skip
+flag in code; it shipped 2026-08-23 as
+`WarmStartConfig.transfer_log_ent_coef`, with LT1
+(`paddle_tennis_lt1_prereg_20260823.md`) as its proposed pilot.
 
 ## WallBall — reward, curriculum & geometry
 

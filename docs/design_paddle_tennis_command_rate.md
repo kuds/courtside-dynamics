@@ -151,15 +151,16 @@ case 0.212 < 0.26. Alternating saturated commands collapse to a
 sustained one-direction command still crosses the court at full
 speed. Stillness by default, motion by intent.
 
-**One-knob re-pair convention** (the hold design's pattern): one
-sanctioned re-pair to **Δ = 0.20 m/step**, fired **only** by a CR1
+**One-knob re-pair convention** (the hold design's pattern; binding
+only once this document is frozen): one re-pair to
+**Δ = 0.20 m/step**, fired **only** by a CR1
 oracle-impairment failure at 0.15 (the measured risk on the tight
 side), with CR1/CR2 re-run at the new value. A CR2 failure (the
 thrash witness's paddle path fails to collapse) has **no** re-pair
 — it falsifies the mechanism and closes the line. No pilot-time
 re-pair: the knob is geometric; the battery settles it first.
 
-## 4. Pre-registered certification battery (design-time; frozen before implementation)
+## 4. Certification battery (proposed; the maintainer freezes it before implementation)
 
 - **CR0 — bit-identity when off.** The default in lockstep against
   the pre-change env: exact observation/reward/info equality (the
