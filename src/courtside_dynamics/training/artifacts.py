@@ -261,6 +261,12 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
                     "reset_observation_indices": list(
                         cfg.warm_start.reset_observation_indices
                     ),
+                    "transfer_log_ent_coef": cfg.warm_start.transfer_log_ent_coef,
+                    "expected_artifact_sha256": (
+                        dict(cfg.warm_start.expected_artifact_sha256)
+                        if cfg.warm_start.expected_artifact_sha256 is not None
+                        else None
+                    ),
                 }
                 if cfg.warm_start is not None
                 else None

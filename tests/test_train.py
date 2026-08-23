@@ -606,6 +606,133 @@ def test_train_warm_starts_sac_policy_and_entropy(tmp_path):
         float(np.exp(-6.5))
     )
     assert "replay_buffer" in initialization["reset"]
+    # The default pairing records that the temperature transfer was on.
+    assert initialization["transfer_log_ent_coef"] is True
+    assert "log_ent_coef" not in initialization["reset"]
+
+
+def test_train_warm_start_skips_sac_entropy_when_flagged(tmp_path):
+    """``transfer_log_ent_coef=False`` -- the temperature-skip warm start:
+    the policy still transfers in full, but the target keeps its own
+    fresh ``auto_0.02`` init instead of inheriting the source's
+    collapsed temperature."""
+    source_dir, env_fn, source_state = _make_sac_warm_start_source(tmp_path)
+    target_dir = tmp_path / "sac_target_skip"
+    capture = _CaptureSacWarmStart()
+    cfg = TrainConfig(
+        env_fn=env_fn,
+        algo="SAC",
+        total_timesteps=8,
+        log_dir=str(target_dir),
+        n_envs=1,
+        seed=13,
+        eval_freq=10_000,
+        checkpoint_freq=0,
+        video_freq=0,
+        record_video=False,
+        info_dict_eval=False,
+        n_eval_episodes=1,
+        normalize_obs=True,
+        normalize_obs_excluded_indices=(0,),
+        warm_start=WarmStartConfig(source_dir, transfer_log_ent_coef=False),
+        model_kwargs={
+            "buffer_size": 64,
+            "learning_starts": 1_000,
+            "ent_coef": "auto_0.02",
+        },
+        extra_callbacks=(capture,),
+    )
+    train(cfg)
+
+    # Policy transfer is unaffected by the flag.
+    assert capture.policy_state is not None
+    for name, expected in source_state.items():
+        torch.testing.assert_close(capture.policy_state[name], expected)
+    # The source's collapsed -6.5 was NOT copied; auto_0.02's init stands.
+    assert capture.log_ent_coef == pytest.approx(float(np.log(0.02)))
+
+    config = json.loads((target_dir / "config.json").read_text())
+    initialization = config["initialization"]
+    assert "log_ent_coef" not in initialization["transferred"]
+    assert "log_ent_coef" in initialization["reset"]
+    assert initialization["transfer_log_ent_coef"] is False
+    assert "transferred_ent_coef" not in initialization
+    assert config["train_config"]["warm_start"]["transfer_log_ent_coef"] is False
+
+
+def test_warm_start_enforces_expected_artifact_sha256(tmp_path):
+    """A pinned source artifact is verified by content before any output:
+    full digests and >=8-char lowercase prefixes both match; a mismatch
+    aborts naming the artifact."""
+    source_dir, env_fn, _ = _make_sac_warm_start_source(tmp_path)
+    model_sha = hashlib.sha256(
+        (source_dir / "best_model.zip").read_bytes()
+    ).hexdigest()
+    normalizer_sha = hashlib.sha256(
+        (source_dir / "best_vec_normalize.pkl").read_bytes()
+    ).hexdigest()
+
+    def make_cfg(log_dir, pins):
+        return TrainConfig(
+            env_fn=env_fn,
+            algo="SAC",
+            total_timesteps=8,
+            log_dir=str(log_dir),
+            n_envs=1,
+            seed=13,
+            eval_freq=10_000,
+            checkpoint_freq=0,
+            video_freq=0,
+            record_video=False,
+            info_dict_eval=False,
+            n_eval_episodes=1,
+            normalize_obs=True,
+            normalize_obs_excluded_indices=(0,),
+            warm_start=WarmStartConfig(
+                source_dir, expected_artifact_sha256=pins
+            ),
+            model_kwargs={"buffer_size": 64, "learning_starts": 1_000},
+        )
+
+    train(
+        make_cfg(
+            tmp_path / "sac_target_pinned",
+            {
+                "best_model.zip": model_sha,
+                "best_vec_normalize.pkl": normalizer_sha[:12],
+            },
+        )
+    )
+    config = json.loads(
+        (tmp_path / "sac_target_pinned" / "config.json").read_text()
+    )
+    recorded = config["train_config"]["warm_start"]["expected_artifact_sha256"]
+    assert recorded == {
+        "best_model.zip": model_sha,
+        "best_vec_normalize.pkl": normalizer_sha[:12],
+    }
+
+    with pytest.raises(ValueError, match="does not match its pinned"):
+        train(
+            make_cfg(
+                tmp_path / "sac_target_bad_pin",
+                {"best_model.zip": "deadbeef" * 8},
+            )
+        )
+
+
+def test_warm_start_config_validates_new_fields(tmp_path):
+    with pytest.raises(TypeError, match="transfer_log_ent_coef"):
+        WarmStartConfig("some_dir", transfer_log_ent_coef=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="unknown artifact"):
+        WarmStartConfig(
+            "some_dir", expected_artifact_sha256={"final_model.zip": "a" * 64}
+        )
+    for bad in ("abc123", "A" * 64, "xyz" * 8, "a" * 65):
+        with pytest.raises(ValueError, match="lowercase hex"):
+            WarmStartConfig(
+                "some_dir", expected_artifact_sha256={"best_model.zip": bad}
+            )
 
 
 def test_warm_start_rejects_algo_mismatch(tmp_path):
