@@ -1872,7 +1872,7 @@ def next_stage_attempt_dir(campaign_root: str | Path, stage_name: str) -> str:
 
 
 def paddle_campaign_metrics(
-    traces: Sequence[Any], interpoint_travels: Sequence[float]
+    traces: Sequence[Any], interpoint_travels: Sequence[float] | None = None
 ) -> dict[str, Any]:
     """Aggregate diagnosis traces into the campaign's scalar metrics.
 
@@ -1890,7 +1890,13 @@ def paddle_campaign_metrics(
     - ``k{2,3}_either_survival`` takes the better parity (the
       registered RK1/RK2 criteria are "either parity");
     - ``ready_error_mean`` pools the bounce-time positional errors;
-    - ``interpoint_travel_mean`` is the R2 watch metric;
+    - ``recovery_hold_travel_{mean,p90}`` pool the per-hit hold-window
+      travels (the post-swing wander, the campaign's k=2 blocker
+      metric);
+    - ``interpoint_travel_mean`` is the R2 watch metric; when the
+      caller has no travels list (``None``) it and
+      ``interpoint_boundaries`` read ``None`` rather than a fabricated
+      zero;
     - ``unsafe_terminations`` counts forced non-finite endings.
     """
     if not traces:
@@ -1906,7 +1912,12 @@ def paddle_campaign_metrics(
 
     touched = [bool(flag) for t in traces for flag in t.touched_after_bounce]
     ready = [float(x) for t in traces for x in t.ready_errors]
-    travels = [float(x) for x in interpoint_travels]
+    recovery = [float(x) for t in traces for x in t.recovery_travel]
+    travels = (
+        None
+        if interpoint_travels is None
+        else [float(x) for x in interpoint_travels]
+    )
 
     metrics: dict[str, Any] = {
         "points": len(traces),
@@ -1921,6 +1932,13 @@ def paddle_campaign_metrics(
             float(np.percentile(ready, 90)) if ready else None
         ),
         "ready_error_samples": len(ready),
+        "recovery_hold_travel_mean": (
+            float(np.mean(recovery)) if recovery else None
+        ),
+        "recovery_hold_travel_p90": (
+            float(np.percentile(recovery, 90)) if recovery else None
+        ),
+        "recovery_hold_samples": len(recovery),
         "crossings_mean": float(np.mean([t.crossings for t in traces])),
         "unsafe_terminations": int(
             sum(t.termination == "nonfinite_state" for t in traces)
@@ -1928,7 +1946,9 @@ def paddle_campaign_metrics(
         "interpoint_travel_mean": (
             float(np.mean(travels)) if travels else None
         ),
-        "interpoint_boundaries": len(travels),
+        "interpoint_boundaries": (
+            len(travels) if travels is not None else None
+        ),
     }
     for split_label, split in (("receiving", receiving), ("serving", serving)):
         for k in (1, 2, 3):

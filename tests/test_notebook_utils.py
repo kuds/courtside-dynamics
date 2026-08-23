@@ -975,6 +975,7 @@ def _trace(
     hits: int,
     touched=(),
     ready=(),
+    recovery=(),
     termination: str = "opponent_fault",
 ):
     """A lightweight EpisodeTrace stand-in for the aggregation tests."""
@@ -987,7 +988,7 @@ def _trace(
         crossings=hits,
         termination=termination,
         ender="opponent",
-        recovery_travel=[],
+        recovery_travel=list(recovery),
         ready_errors=list(ready),
         touched_after_bounce=list(touched),
     )
@@ -1032,6 +1033,73 @@ def test_paddle_campaign_metrics_empty_split_reads_none_not_zero():
     assert metrics["interpoint_travel_mean"] is None
     with pytest.raises(ValueError, match="at least one diagnosis trace"):
         paddle_campaign_metrics([], [])
+
+
+def test_paddle_campaign_metrics_recovery_hold_mirrors_the_report():
+    # Pooled hold-window travels: [1, 2] + [3, 10] = [1, 2, 3, 10].
+    traces = [
+        _trace(serving=False, hits=2, recovery=[1.0, 2.0]),
+        _trace(serving=True, hits=2, recovery=[3.0, 10.0]),
+    ]
+    metrics = paddle_campaign_metrics(traces, [])
+    pooled = [1.0, 2.0, 3.0, 10.0]
+    # Hand-computed: mean 4.0; linear-interpolated p90 sits 0.7 of the
+    # way from 3 to 10 (rank (4-1)*0.9 = 2.7), i.e. 7.9.
+    assert metrics["recovery_hold_travel_mean"] == pytest.approx(4.0)
+    assert metrics["recovery_hold_travel_p90"] == pytest.approx(7.9)
+    # Same formula as paddle_diagnosis.report's "recovery hold" line
+    # (numpy's default linear percentile), bit-for-bit.
+    assert metrics["recovery_hold_travel_mean"] == float(np.mean(pooled))
+    assert metrics["recovery_hold_travel_p90"] == float(
+        np.percentile(pooled, 90)
+    )
+    assert metrics["recovery_hold_samples"] == 4
+
+
+def test_paddle_campaign_metrics_absent_travels_read_none():
+    traces = [_trace(serving=False, hits=1)]
+    # No travels list at all (e.g. a caller that only has traces): the
+    # inter-point metrics read None, never a fabricated zero.
+    metrics = paddle_campaign_metrics(traces)
+    assert metrics["interpoint_travel_mean"] is None
+    assert metrics["interpoint_boundaries"] is None
+    # A measured-but-empty travels list keeps its existing reading.
+    metrics = paddle_campaign_metrics(traces, [])
+    assert metrics["interpoint_travel_mean"] is None
+    assert metrics["interpoint_boundaries"] == 0
+    # No hold windows observed (zero policy hits recorded): None too.
+    assert metrics["recovery_hold_travel_mean"] is None
+    assert metrics["recovery_hold_travel_p90"] is None
+    assert metrics["recovery_hold_samples"] == 0
+
+
+def test_score_campaign_bars_gates_on_recovery_hold_travel():
+    # Lower-is-better gating on the post-swing wander, the same
+    # mechanism LS-G uses for ready_error_mean.
+    bars = {
+        "H1_hold": {
+            "metric": "recovery_hold_travel_mean",
+            "pass_at": 0.5,
+            "fail_at": 2.0,
+            "higher_is_better": False,
+            "gating": True,
+        }
+    }
+    still = [_trace(serving=False, hits=2, recovery=[0.2, 0.4])]
+    scored = score_campaign_bars(paddle_campaign_metrics(still), bars)
+    assert scored["bars"]["H1_hold"]["verdict"] == "PASS"
+    assert scored["verdict"] == "PASS"
+
+    wandering = [_trace(serving=False, hits=2, recovery=[3.0, 5.0])]
+    scored = score_campaign_bars(paddle_campaign_metrics(wandering), bars)
+    assert scored["bars"]["H1_hold"]["verdict"] == "FAIL"
+    assert scored["verdict"] == "FAIL"
+
+    # No hold windows observed: NO_DATA, which is never a PASS.
+    no_windows = [_trace(serving=False, hits=0)]
+    scored = score_campaign_bars(paddle_campaign_metrics(no_windows), bars)
+    assert scored["bars"]["H1_hold"]["verdict"] == "NO_DATA"
+    assert scored["verdict"] == "MIDDLE"
 
 
 def test_score_campaign_bars_three_valued_with_no_data():
