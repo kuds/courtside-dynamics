@@ -32,6 +32,7 @@ from courtside_dynamics.notebook_utils import (
     resolve_warm_start_branch,
     score_campaign_bars,
     score_paddle_stage,
+    validate_run_config_against_plan,
     write_campaign_manifest,
 )
 from courtside_dynamics.training.artifacts import EXPECTED_ARTIFACTS, RUN_LAYOUT
@@ -1299,3 +1300,281 @@ def test_score_paddle_stage_requires_finished_paddle_run(tmp_path):
 
     with pytest.raises(ValueError, match="episodes"):
         score_paddle_stage(tmp_path, bars=bars, episodes=0)
+
+
+def _plan_run_config(*, transfer_log_ent_coef=False):
+    """A recorded config.json in the LT1 shape (warm-started leg)."""
+    transferred = ["policy.state_dict", "vec_normalize.obs_rms"]
+    reset = ["policy.optimizer_state", "replay_buffer"]
+    if transfer_log_ent_coef:
+        transferred.append("log_ent_coef")
+    else:
+        reset.append("log_ent_coef")
+    return {
+        "train_config": {
+            "seed": 0,
+            "total_timesteps": 1_000_000,
+            "n_envs": 4,
+            "eval_freq": 25_000,
+            "checkpoint_freq": 100_000,
+            "warm_start": {
+                "source_run_dir": "/drive/PaddleTennis/sac/20260816_235141",
+            },
+        },
+        "env": {
+            "class": "PaddleTennisEnv",
+            "constructor_kwargs": {
+                "render_mode": "rgb_array",
+                "contact_reward_scale": 0.25,
+                "paddle_x_target_range": [-8.2, 0.3],
+            },
+        },
+        "initialization": {
+            "source_run_dir": "/drive/PaddleTennis/sac/20260816_235141",
+            "transfer_log_ent_coef": transfer_log_ent_coef,
+            "transferred": transferred,
+            "reset": reset,
+            "source_artifacts": {
+                "best_model.zip": {
+                    "path": "model/best_model.zip",
+                    "sha256": "838997fb" + "0" * 56,
+                },
+                "best_vec_normalize.pkl": {
+                    "path": "model/best_vec_normalize.pkl",
+                    "sha256": "d0502c14" + "1" * 56,
+                },
+                "config.json": {
+                    "path": "config.json",
+                    "sha256": "ab" * 32,
+                },
+            },
+        },
+    }
+
+
+def _write_plan_config(tmp_path, config):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config))
+    return path
+
+
+def test_validate_run_config_against_plan_accepts_the_lt1_shape(tmp_path):
+    path = _write_plan_config(tmp_path, _plan_run_config())
+    validate_run_config_against_plan(
+        path,
+        {
+            "seed": 0,
+            "total_timesteps": 1_000_000,
+            "n_envs": 4,
+            "eval_freq": 25_000,
+            "checkpoint_freq": 100_000,
+            "env_class": "PaddleTennisEnv",
+            # Subset match, and a planned tuple equals its recorded
+            # JSON-list form.
+            "env_kwargs": {
+                "contact_reward_scale": 0.25,
+                "paddle_x_target_range": (-8.2, 0.3),
+            },
+            "warm_start": {
+                "source_run_dir_suffix": "sac/20260816_235141",
+                "transfer_log_ent_coef": False,
+                # Prefix and full-digest pins both match; None skips.
+                "expected_artifact_sha256": {
+                    "best_model.zip": "838997fb",
+                    "best_vec_normalize.pkl": "d0502c14" + "1" * 56,
+                },
+            },
+        },
+    )
+
+
+def test_validate_run_config_against_plan_accepts_from_scratch(tmp_path):
+    config = _plan_run_config()
+    del config["initialization"]
+    config["train_config"]["warm_start"] = None
+    path = _write_plan_config(tmp_path, config)
+    validate_run_config_against_plan(
+        path, {"seed": 0, "n_envs": 4, "warm_start": None}
+    )
+    # An empty warm-start expectation only demands the run WAS
+    # warm-started, so it fails on the from-scratch record.
+    with pytest.raises(ValueError, match="no initialization block"):
+        validate_run_config_against_plan(path, {"warm_start": {}})
+
+
+def test_validate_run_config_against_plan_lists_every_mismatch(tmp_path):
+    path = _write_plan_config(tmp_path, _plan_run_config())
+    with pytest.raises(ValueError) as excinfo:
+        validate_run_config_against_plan(
+            path,
+            {
+                "seed": 1,
+                "total_timesteps": 3_000_000,
+                "n_envs": 4,  # matches: not reported
+                "env_class": "WallBallEnv",
+                "env_kwargs": {
+                    "contact_reward_scale": 0.5,
+                    "hold_reward_scale": 0.25,
+                },
+                "warm_start": None,
+            },
+        )
+    message = str(excinfo.value)
+    # EVERY divergence in one message, not just the first.
+    assert "7 place(s)" in message
+    assert "train_config.seed: expected 1" in message
+    assert "config.json records 0" in message
+    assert "train_config.total_timesteps: expected 3000000" in message
+    assert "env.class: expected 'WallBallEnv'" in message
+    assert "env kwarg 'contact_reward_scale': expected 0.5" in message
+    assert (
+        "env kwarg 'hold_reward_scale': expected 0.25, config.json records "
+        "no such kwarg"
+    ) in message
+    assert "expected a from-scratch run" in message
+    assert "train_config.warm_start: expected None" in message
+    assert "n_envs" not in message
+
+
+def test_validate_run_config_against_plan_reports_absent_fields(tmp_path):
+    path = _write_plan_config(tmp_path, {"train_config": {"seed": 0}})
+    with pytest.raises(ValueError) as excinfo:
+        validate_run_config_against_plan(
+            path,
+            {
+                "seed": 0,
+                "checkpoint_freq": 100_000,
+                "env_class": "PaddleTennisEnv",
+                "env_kwargs": {"contact_reward_scale": 0.25},
+            },
+        )
+    message = str(excinfo.value)
+    assert "train_config.checkpoint_freq: expected 100000" in message
+    assert "config.json records nothing" in message
+    assert "records no constructor kwargs" in message
+    # env_kwargs pinning nothing has nothing to mismatch against.
+    validate_run_config_against_plan(
+        path, {"seed": 0, "env_kwargs": {}}
+    )
+
+
+def test_validate_run_config_against_plan_temperature_skip_both_ways(
+    tmp_path,
+):
+    # The run transferred the temperature; the plan expected the skip.
+    path = _write_plan_config(
+        tmp_path, _plan_run_config(transfer_log_ent_coef=True)
+    )
+    with pytest.raises(ValueError) as excinfo:
+        validate_run_config_against_plan(
+            path, {"warm_start": {"transfer_log_ent_coef": False}}
+        )
+    message = str(excinfo.value)
+    assert "3 place(s)" in message
+    assert (
+        "initialization.transfer_log_ent_coef: expected False, "
+        "config.json records True"
+    ) in message
+    assert "config.json records it transferred" in message
+    assert "expected 'log_ent_coef' (temperature skip)" in message
+
+    # And the reverse: the run skipped, the plan expected a transfer.
+    path = _write_plan_config(
+        tmp_path, _plan_run_config(transfer_log_ent_coef=False)
+    )
+    with pytest.raises(ValueError) as excinfo:
+        validate_run_config_against_plan(
+            path, {"warm_start": {"transfer_log_ent_coef": True}}
+        )
+    message = str(excinfo.value)
+    assert "3 place(s)" in message
+    assert (
+        "initialization.transfer_log_ent_coef: expected True, "
+        "config.json records False"
+    ) in message
+    assert "config.json records it reset" in message
+    assert "expected 'log_ent_coef' (temperature transferred)" in message
+
+    # Matching expectations pass on the same records.
+    validate_run_config_against_plan(
+        path, {"warm_start": {"transfer_log_ent_coef": False}}
+    )
+
+
+def test_validate_run_config_against_plan_pins_suffix_and_shas(tmp_path):
+    path = _write_plan_config(tmp_path, _plan_run_config())
+    with pytest.raises(ValueError) as excinfo:
+        validate_run_config_against_plan(
+            path,
+            {
+                "warm_start": {
+                    "source_run_dir_suffix": "sac/20260809_211147",
+                    "expected_artifact_sha256": {
+                        "best_model.zip": "deadbeef",
+                        "config.json": "ab" * 32,  # matches: not reported
+                    },
+                }
+            },
+        )
+    message = str(excinfo.value)
+    assert "2 place(s)" in message
+    assert (
+        "initialization.source_run_dir: expected a path ending with "
+        "'sac/20260809_211147'"
+    ) in message
+    assert (
+        "initialization.source_artifacts['best_model.zip']: expected "
+        "sha256 starting 'deadbeef'"
+    ) in message
+
+    # A pinned artifact the provenance never recorded is a mismatch.
+    config = _plan_run_config()
+    del config["initialization"]["source_artifacts"]["best_model.zip"]
+    path = _write_plan_config(tmp_path, config)
+    with pytest.raises(ValueError, match="config.json\\s+records none"):
+        validate_run_config_against_plan(
+            path,
+            {
+                "warm_start": {
+                    "expected_artifact_sha256": {"best_model.zip": "838997fb"}
+                }
+            },
+        )
+    # None pins skip the digest check entirely (the WarmStartConfig
+    # default), and a trailing slash on the suffix is tolerated.
+    validate_run_config_against_plan(
+        path,
+        {
+            "warm_start": {
+                "source_run_dir_suffix": "sac/20260816_235141/",
+                "expected_artifact_sha256": None,
+            }
+        },
+    )
+
+
+def test_validate_run_config_against_plan_rejects_bad_plans(tmp_path):
+    path = _write_plan_config(tmp_path, _plan_run_config())
+    with pytest.raises(ValueError, match="at least one key"):
+        validate_run_config_against_plan(path, {})
+    with pytest.raises(ValueError, match="unknown expected-plan keys"):
+        validate_run_config_against_plan(path, {"sedd": 0})
+    with pytest.raises(ValueError, match="unknown expected warm_start keys"):
+        validate_run_config_against_plan(
+            path, {"warm_start": {"source_dir": "x"}}
+        )
+    with pytest.raises(ValueError, match="must be a bool"):
+        validate_run_config_against_plan(
+            path, {"warm_start": {"transfer_log_ent_coef": "no"}}
+        )
+    with pytest.raises(ValueError, match="env_kwargs must be a mapping"):
+        validate_run_config_against_plan(path, {"env_kwargs": [1]})
+    with pytest.raises(ValueError, match="mapping of\\s+artifact name"):
+        validate_run_config_against_plan(
+            path, {"warm_start": {"expected_artifact_sha256": {"a": 1}}}
+        )
+    with pytest.raises(ValueError, match="mapping or None"):
+        validate_run_config_against_plan(path, {"warm_start": "scratch"})
+    (tmp_path / "list.json").write_text("[]")
+    with pytest.raises(ValueError, match="JSON object"):
+        validate_run_config_against_plan(tmp_path / "list.json", {"seed": 0})

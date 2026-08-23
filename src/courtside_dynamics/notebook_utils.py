@@ -2217,3 +2217,301 @@ def resolve_warm_start_branch(
             return "fallback", str(fallback_run_dir)
         return "stop", None
     raise ValueError(f"unknown gate verdict: {verdict!r}")
+
+
+_PLAN_TRAIN_CONFIG_KEYS = (
+    "seed",
+    "total_timesteps",
+    "n_envs",
+    "eval_freq",
+    "checkpoint_freq",
+)
+_PLAN_KEYS = frozenset(
+    {*_PLAN_TRAIN_CONFIG_KEYS, "env_class", "env_kwargs", "warm_start"}
+)
+_PLAN_WARM_START_KEYS = frozenset(
+    {
+        "source_run_dir_suffix",
+        "transfer_log_ent_coef",
+        "expected_artifact_sha256",
+    }
+)
+_PLAN_MISSING = object()
+
+
+def _plan_values_match(recorded: Any, wanted: Any) -> bool:
+    """Compare a recorded ``config.json`` value against a plan value.
+
+    ``config.json`` holds JSON-native values while the plan comes from
+    live notebook settings, so a planned tuple must compare equal to
+    its recorded list form. Values JSON cannot round-trip fall back to
+    plain equality.
+    """
+    try:
+        return bool(_json_normalized(recorded) == _json_normalized(wanted))
+    except (TypeError, ValueError):
+        return bool(recorded == wanted)
+
+
+def validate_run_config_against_plan(
+    config_json_path: str | Path, expected: Mapping[str, Any]
+) -> None:
+    """Validate a run's ``config.json`` against a frozen plan.
+
+    The pre-registration launch checklists
+    (``docs/paddle_tennis_registered_run_prereg_20260816.md`` section 6,
+    ``docs/paddle_tennis_lt1_prereg_20260823.md`` section 6) require the
+    run's own ``config.json`` to be checked against the frozen plan
+    before anything downstream consumes the run -- a drifted run must
+    stop the campaign, not be gated and branched from. This is that
+    check in code. Every divergence is collected and a single
+    :class:`ValueError` lists them all, so the maintainer reads the full
+    drift in one message instead of one mismatch per re-run.
+
+    ``expected`` maps plan keys to frozen values; only supplied keys are
+    checked, and an unknown key is rejected loudly rather than silently
+    validating nothing:
+
+    - ``"seed"``, ``"total_timesteps"``, ``"n_envs"``, ``"eval_freq"``,
+      ``"checkpoint_freq"``: exact matches against the recorded
+      ``train_config`` block;
+    - ``"env_class"``: the training environment's recorded class;
+    - ``"env_kwargs"``: subset match against the training environment's
+      recorded constructor kwargs (the plan pins the kwargs it cares
+      about; recipe defaults it does not name stay unchecked);
+    - ``"warm_start"``: ``None`` demands a from-scratch run (no
+      ``initialization`` block, no ``train_config.warm_start``). A
+      mapping demands a warm-started run -- ``train()`` binds the
+      resolved ``initialization`` provenance into ``config.json``, so
+      call this after training -- and may pin any of:
+
+      - ``"source_run_dir_suffix"``: the recorded
+        ``initialization.source_run_dir`` must end with it (mount
+        points move between machines; the run-dir leaf does not);
+      - ``"transfer_log_ent_coef"``: matches the recorded flag and
+        enforces the corresponding presence/absence of
+        ``"log_ent_coef"`` in ``initialization.transferred`` /
+        ``initialization.reset`` (the temperature-skip contract);
+      - ``"expected_artifact_sha256"``: mapping of source artifact name
+        to the full sha256 or a prefix, matched against
+        ``initialization.source_artifacts`` (``None`` skips the check,
+        mirroring :class:`~courtside_dynamics.training.WarmStartConfig`).
+    """
+    if not expected:
+        raise ValueError("an expected plan with at least one key is required")
+    unknown = set(expected) - _PLAN_KEYS
+    if unknown:
+        raise ValueError(
+            f"unknown expected-plan keys: {sorted(unknown)}; "
+            f"known: {sorted(_PLAN_KEYS)}"
+        )
+    with open(config_json_path) as handle:
+        config = json.load(handle)
+    if not isinstance(config, Mapping):
+        raise ValueError(
+            f"config.json must be a JSON object: {config_json_path}"
+        )
+
+    mismatches: list[str] = []
+    train_config = config.get("train_config")
+    if not isinstance(train_config, Mapping):
+        train_config = {}
+    env_info = config.get("env")
+    if not isinstance(env_info, Mapping):
+        env_info = {}
+
+    for key in _PLAN_TRAIN_CONFIG_KEYS:
+        if key not in expected:
+            continue
+        recorded = train_config.get(key, _PLAN_MISSING)
+        if recorded is _PLAN_MISSING:
+            mismatches.append(
+                f"train_config.{key}: expected {expected[key]!r}, "
+                "config.json records nothing"
+            )
+        elif not _plan_values_match(recorded, expected[key]):
+            mismatches.append(
+                f"train_config.{key}: expected {expected[key]!r}, "
+                f"config.json records {recorded!r}"
+            )
+
+    if "env_class" in expected:
+        recorded_class = env_info.get("class")
+        if recorded_class != expected["env_class"]:
+            mismatches.append(
+                f"env.class: expected {expected['env_class']!r}, "
+                f"config.json records {recorded_class!r}"
+            )
+
+    if "env_kwargs" in expected:
+        wanted_kwargs = expected["env_kwargs"]
+        if not isinstance(wanted_kwargs, Mapping):
+            raise ValueError("expected env_kwargs must be a mapping")
+        recorded_kwargs = env_info.get("constructor_kwargs")
+        if not isinstance(recorded_kwargs, Mapping):
+            if wanted_kwargs:
+                mismatches.append(
+                    "env.constructor_kwargs: expected "
+                    f"{sorted(wanted_kwargs)}, config.json records no "
+                    "constructor kwargs"
+                )
+        else:
+            for name in sorted(wanted_kwargs):
+                wanted_value = wanted_kwargs[name]
+                if name not in recorded_kwargs:
+                    mismatches.append(
+                        f"env kwarg {name!r}: expected {wanted_value!r}, "
+                        "config.json records no such kwarg"
+                    )
+                elif not _plan_values_match(
+                    recorded_kwargs[name], wanted_value
+                ):
+                    mismatches.append(
+                        f"env kwarg {name!r}: expected {wanted_value!r}, "
+                        f"config.json records {recorded_kwargs[name]!r}"
+                    )
+
+    if "warm_start" in expected:
+        mismatches.extend(
+            _warm_start_plan_mismatches(
+                expected["warm_start"],
+                initialization=config.get("initialization"),
+                recorded_warm_start=train_config.get("warm_start"),
+            )
+        )
+
+    if mismatches:
+        raise ValueError(
+            f"config.json diverges from the frozen plan in "
+            f"{len(mismatches)} place(s) ({config_json_path}):\n- "
+            + "\n- ".join(mismatches)
+        )
+
+
+def _warm_start_plan_mismatches(
+    wanted: Mapping[str, Any] | None,
+    *,
+    initialization: Any,
+    recorded_warm_start: Any,
+) -> list[str]:
+    """Collect the warm-start mismatches for
+    :func:`validate_run_config_against_plan`."""
+    if wanted is None:
+        mismatches = []
+        if initialization is not None:
+            mismatches.append(
+                "warm start: expected a from-scratch run, config.json "
+                "records an initialization block"
+            )
+        if recorded_warm_start is not None:
+            mismatches.append(
+                "train_config.warm_start: expected None (from scratch), "
+                f"config.json records {recorded_warm_start!r}"
+            )
+        return mismatches
+    if not isinstance(wanted, Mapping):
+        raise ValueError("expected warm_start must be a mapping or None")
+    unknown = set(wanted) - _PLAN_WARM_START_KEYS
+    if unknown:
+        raise ValueError(
+            f"unknown expected warm_start keys: {sorted(unknown)}; "
+            f"known: {sorted(_PLAN_WARM_START_KEYS)}"
+        )
+    if not isinstance(initialization, Mapping):
+        return [
+            "warm start: expected a warm-started run, config.json records "
+            "no initialization block (from scratch, or validated before "
+            "train() bound the provenance)"
+        ]
+
+    mismatches = []
+    if "source_run_dir_suffix" in wanted:
+        suffix = str(wanted["source_run_dir_suffix"]).rstrip("/")
+        recorded_source = str(initialization.get("source_run_dir", ""))
+        if not recorded_source.rstrip("/").endswith(suffix):
+            mismatches.append(
+                "initialization.source_run_dir: expected a path ending "
+                f"with {suffix!r}, config.json records {recorded_source!r}"
+            )
+
+    if "transfer_log_ent_coef" in wanted:
+        wanted_flag = wanted["transfer_log_ent_coef"]
+        if not isinstance(wanted_flag, bool):
+            raise ValueError("expected transfer_log_ent_coef must be a bool")
+        recorded_flag = initialization.get(
+            "transfer_log_ent_coef", _PLAN_MISSING
+        )
+        if recorded_flag is _PLAN_MISSING:
+            mismatches.append(
+                "initialization.transfer_log_ent_coef: expected "
+                f"{wanted_flag}, config.json records nothing"
+            )
+        elif recorded_flag is not wanted_flag:
+            mismatches.append(
+                "initialization.transfer_log_ent_coef: expected "
+                f"{wanted_flag}, config.json records {recorded_flag!r}"
+            )
+        transferred = initialization.get("transferred") or ()
+        reset = initialization.get("reset") or ()
+        in_transferred = "log_ent_coef" in transferred
+        in_reset = "log_ent_coef" in reset
+        if wanted_flag:
+            if not in_transferred:
+                mismatches.append(
+                    "initialization.transferred: expected 'log_ent_coef' "
+                    "(temperature transferred), config.json records it "
+                    "absent"
+                )
+            if in_reset:
+                mismatches.append(
+                    "initialization.reset: expected no 'log_ent_coef' "
+                    "(temperature transferred), config.json records it "
+                    "reset"
+                )
+        else:
+            if in_transferred:
+                mismatches.append(
+                    "initialization.transferred: expected no "
+                    "'log_ent_coef' (temperature skip), config.json "
+                    "records it transferred"
+                )
+            if not in_reset:
+                mismatches.append(
+                    "initialization.reset: expected 'log_ent_coef' "
+                    "(temperature skip), config.json records it absent"
+                )
+
+    pins = wanted.get("expected_artifact_sha256")
+    if "expected_artifact_sha256" in wanted and pins is not None:
+        if not isinstance(pins, Mapping) or not all(
+            isinstance(value, str) for value in pins.values()
+        ):
+            raise ValueError(
+                "expected expected_artifact_sha256 must be a mapping of "
+                "artifact name to a sha256 string (or None)"
+            )
+        source_artifacts = initialization.get("source_artifacts")
+        if not isinstance(source_artifacts, Mapping):
+            mismatches.append(
+                "initialization.source_artifacts: expected recorded "
+                "source digests, config.json records none"
+            )
+        else:
+            for name in sorted(pins):
+                entry = source_artifacts.get(name)
+                recorded_sha = (
+                    entry.get("sha256") if isinstance(entry, Mapping) else None
+                )
+                if not isinstance(recorded_sha, str):
+                    mismatches.append(
+                        f"initialization.source_artifacts[{name!r}]: "
+                        f"expected sha256 {pins[name]!r}, config.json "
+                        "records none"
+                    )
+                elif not recorded_sha.startswith(pins[name]):
+                    mismatches.append(
+                        f"initialization.source_artifacts[{name!r}]: "
+                        f"expected sha256 starting {pins[name]!r}, "
+                        f"config.json records {recorded_sha!r}"
+                    )
+    return mismatches

@@ -340,6 +340,15 @@ def test_campaign_notebook_freezes_the_preregistered_plan() -> None:
     assert "EVAL_FREQ = 25_000" in source
     assert "CHECKPOINT_FREQ = 100_000" in source
     assert "WARM_START_LEARNING_STARTS = 25_000" in source
+    # The warm-start and env-override knobs ship at the
+    # backward-compatible defaults: leg 1 from scratch, temperatures
+    # transferred, no sha pins, recipe task exactly.
+    assert "LEG1_WARM_START_RUN_DIR = None" in source
+    assert "LEG1_TRANSFER_LOG_ENT_COEF = True" in source
+    assert "LEG1_EXPECTED_ARTIFACT_SHA256 = None" in source
+    assert "LEG2_TRANSFER_LOG_ENT_COEF = True" in source
+    assert "LEG2_EXPECTED_ARTIFACT_SHA256 = None" in source
+    assert "ENV_KWARGS = {}" in source
     # The gate reads the recipe's own diagnosis instrument settings.
     assert "GATE_EPISODES = 30" in source
     assert "GATE_SEED_START = 5200" in source
@@ -381,9 +390,19 @@ def test_campaign_notebook_resumes_and_branches_via_helpers() -> None:
     assert "bars=FINAL_REPORT_BARS" in source
     assert 'report_name="campaign_final_report.json"' in source
     # Branching goes through the tested helper, and the main leg
-    # warm-starts from the decided lineage.
+    # warm-starts from the decided lineage with the frozen transfer
+    # flags and sha pins.
     assert "resolve_warm_start_branch(" in source
-    assert "WarmStartConfig(source_run_dir=str(source))" in source
+    assert "source_run_dir=str(source)," in source
+    assert "transfer_log_ent_coef=LEG2_TRANSFER_LOG_ENT_COEF," in source
+    assert "expected_artifact_sha256=LEG2_EXPECTED_ARTIFACT_SHA256," in source
+    # Leg 1 stays from scratch unless the settings pin a lineage (the
+    # warm-started leg-1 path, e.g. an LT1-shape pilot).
+    assert "if LEG1_WARM_START_RUN_DIR is not None:" in source
+    assert "source_run_dir=str(LEG1_WARM_START_RUN_DIR)," in source
+    assert "transfer_log_ent_coef=LEG1_TRANSFER_LOG_ENT_COEF," in source
+    assert "expected_artifact_sha256=LEG1_EXPECTED_ARTIFACT_SHA256," in source
+    assert "warm_start=leg1_warm_start," in source
     assert 'seed=SEED + 10_000' in source
     # The warm-started legs merge learning_starts INTO the recipe's
     # calibrated SAC bundle -- a bare {"learning_starts": ...} override
@@ -397,3 +416,65 @@ def test_campaign_notebook_resumes_and_branches_via_helpers() -> None:
     assert "cfg.checkpoint_freq =" not in source
     assert "cfg.video_freq =" not in source
     assert "cfg.env_fn =" not in source
+
+
+def test_campaign_notebook_validates_config_and_plumbs_env_kwargs() -> None:
+    """The prereg §6 gap, closed: every leg's config.json is validated
+    against the frozen plan right after train() returns, the verdict is
+    recorded in the manifest before any gate scoring, and a mismatch
+    stops the campaign. ENV_KWARGS rides the run-config [env]-table
+    route so both legs' training and evaluation envs get the same
+    overrides."""
+    source = "\n".join(
+        _source(cell) for cell in _load_campaign_notebook()["cells"]
+    )
+    # The expected mapping derives from the frozen settings; QUICK_TEST
+    # hands budget/cadence to the quick-test presets.
+    assert "def leg_expected_plan(*, seed, total_timesteps, warm_start):" in (
+        source
+    )
+    assert '"env_class": "PaddleTennisEnv",' in source
+    assert '"env_kwargs": dict(ENV_KWARGS),' in source
+    assert '"source_run_dir_suffix": "/".join(parts).lstrip("/"),' in source
+    assert '"transfer_log_ent_coef": warm_start.transfer_log_ent_coef,' in (
+        source
+    )
+    assert (
+        '"expected_artifact_sha256": warm_start.expected_artifact_sha256,'
+        in source
+    )
+    # Validation runs after train() and before any scoring; the verdict
+    # (ok or the full error text) lands in the manifest either way.
+    assert "validate_run_config_against_plan(config_path, expected)" in source
+    assert '"config_validation": validation,' in source
+    assert 'validation = {"verdict": "mismatch", "error": str(err)}' in source
+    train_index = source.index("model = train(cfg)")
+    validate_index = source.index("validate_run_config_against_plan(")
+    record_index = source.index('"config_validation": validation,')
+    gate_score_index = source.index("gate_report = score_paddle_stage(")
+    assert train_index < validate_index < record_index < gate_score_index
+    assert 'if validation["verdict"] != "ok":' in source
+    assert "does not match the" in source
+    # record_stage merges over run_leg's record instead of dropping the
+    # recorded validation verdict.
+    assert 'record = dict(manifest["stages"].get(stage_name) or {})' in source
+    # ENV_KWARGS goes through the supported factory route ([env]-table
+    # semantics: training env + below the recipe's eval overrides), and
+    # an empty dict leaves the recipe factories untouched.
+    assert "if ENV_KWARGS:" in source
+    assert (
+        'overrides["env_fn"] = make_env_fn(RECIPE, env_overrides=ENV_KWARGS)'
+        in source
+    )
+    assert "base_env_overrides=ENV_KWARGS" in source
+    # Every new knob is fingerprinted so a resumed campaign cannot
+    # silently run under different warm-start/task settings.
+    for fingerprint_entry in (
+        '"leg1_warm_start_run_dir": LEG1_WARM_START_RUN_DIR,',
+        '"leg1_transfer_log_ent_coef": LEG1_TRANSFER_LOG_ENT_COEF,',
+        '"leg1_expected_artifact_sha256": LEG1_EXPECTED_ARTIFACT_SHA256,',
+        '"leg2_transfer_log_ent_coef": LEG2_TRANSFER_LOG_ENT_COEF,',
+        '"leg2_expected_artifact_sha256": LEG2_EXPECTED_ARTIFACT_SHA256,',
+        '"env_kwargs": ENV_KWARGS,',
+    ):
+        assert fingerprint_entry in source
