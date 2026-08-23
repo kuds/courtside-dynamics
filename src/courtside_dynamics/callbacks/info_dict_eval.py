@@ -8,13 +8,16 @@ TensorBoard curves don't tell you whether the agent is learning to
 rally or just drifting.
 
 ``InfoDictEvalCallback`` rolls ``n_eval_episodes`` on a separate eval
-``VecEnv``, collects every scalar ``info`` key it sees, and emits three
+``VecEnv``, collects every scalar ``info`` key it sees, and emits four
 classes of aggregate to TensorBoard:
 
 * ``<prefix>/<key>_mean`` — time-averaged scalar (for continuous values
   like ``paddle_touch``).
 * ``<prefix>/<key>_final`` and ``<prefix>/<key>_max`` — terminal and
   peak values (for monotone counters like ``rally_count``).
+* ``<prefix>/<key>_ep_sum_mean`` — per-episode sum averaged across eval
+  episodes, for keys that are per-step increments (the envs' ``rew_*``
+  reward-decomposition components by default; see ``episode_sum_keys``).
 * ``<prefix>/phase_frac_<label>`` — fraction of eval steps spent in each
   phase, for envs that expose a categorical ``phase_key``.
 
@@ -104,6 +107,21 @@ class InfoDictEvalCallback(BaseCallback):
         ``<key>_ep_ge_<threshold>_rate``. For example, WallBall configures
         ``{"bounce_count": (2, 3, 5)}`` so a one-return plateau remains
         visible even when the mean counter improves through rare outliers.
+    episode_sum_keys:
+        Collected step keys treated as per-step increments and summed
+        over each episode; the per-episode totals are averaged across
+        eval episodes as ``<key>_ep_sum_mean``. The envs' ``rew_*``
+        reward-decomposition components are the intended use: they are
+        emitted fresh every step, so no other aggregate recovers the
+        episode total a shaping term actually delivered (``_mean`` is
+        step-weighted and ``_ep_mean`` reads only the terminal step's
+        increment). The default ``None`` applies the repo-wide naming
+        convention -- every collected step key with the ``rew_`` prefix
+        is summed -- so recipes opt components in simply by listing
+        them in ``info_keys``. Pass an explicit allowlist to override,
+        or ``()`` to disable. When ``info_keys`` is also set, an
+        explicit sum key missing from it would never be collected -- a
+        silent no-op -- so that combination is rejected up front.
     csv_path:
         Optional path. When set, every evaluation appends one row per
         metric in long format (``timestep,metric,value``) so the data
@@ -225,6 +243,7 @@ class InfoDictEvalCallback(BaseCallback):
         degenerate_stop_evals: int = 0,
         degenerate_guard_keys: Sequence[str] = (),
         degenerate_min_evals: int = 0,
+        episode_sum_keys: Sequence[str] | None = None,
     ) -> None:
         super().__init__(verbose)
         # The rollout loop reads infos[0]/rewards[0] and counts episodes
@@ -277,6 +296,23 @@ class InfoDictEvalCallback(BaseCallback):
                     "episode survival thresholds must be positive integers"
                 )
             self.episode_survival_thresholds[key] = tuple(sorted(thresholds))
+        # ``None`` keeps the ``rew_`` prefix convention (see the class
+        # docstring); an explicit tuple pins the summed keys exactly.
+        if episode_sum_keys is None:
+            self.episode_sum_keys: tuple[str, ...] | None = None
+        else:
+            self.episode_sum_keys = tuple(dict.fromkeys(episode_sum_keys))
+            if self.info_keys is not None:
+                missing = [
+                    key
+                    for key in self.episode_sum_keys
+                    if key not in self.info_keys
+                ]
+                if missing:
+                    raise ValueError(
+                        f"episode_sum_keys {missing} are absent from "
+                        f"info_keys, so they would never be collected"
+                    )
         self.csv_path = csv_path
         self.evaluations_npz_path = evaluations_npz_path
         # Rows for ``evaluations.npz``: SB3's EvalCallback schema, so
@@ -491,6 +527,13 @@ class InfoDictEvalCallback(BaseCallback):
         # at episode granularity (e.g. mean terminal rally count, success
         # rate) rather than the step-weighted means above.
         episode_finals: list[dict[str, float]] = []
+        # One dict of per-episode totals per finished episode, for the
+        # keys designated per-step increments (see ``episode_sum_keys``):
+        # the envs' rew_* components are emitted fresh every step, so the
+        # episode total must be summed here -- ``_mean`` is step-weighted
+        # and ``_ep_mean`` reads only the terminal step's increment.
+        episode_sums: list[dict[str, float]] = []
+        current_ep_sums: dict[str, float] = defaultdict(float)
         # Per-episode reward totals (the eval env runs with
         # norm_reward=False, so these are the env's true returns). Kept
         # so reward can serve as the final tie-break in
@@ -535,6 +578,8 @@ class InfoDictEvalCallback(BaseCallback):
                 value = float(info[key])
                 sums[key] += value
                 counts[key] += 1
+                if self._is_episode_sum_key(key):
+                    current_ep_sums[key] += value
                 prev_max = maxes.get(key)
                 if prev_max is None or value > prev_max:
                     maxes[key] = value
@@ -576,6 +621,8 @@ class InfoDictEvalCallback(BaseCallback):
                 }
                 finals.update({key: ep_terminal[key] for key in step_keys})
                 episode_finals.append(ep_terminal)
+                episode_sums.append(dict(current_ep_sums))
+                current_ep_sums.clear()
                 episode_rewards.append(current_ep_reward)
                 episode_lengths.append(current_ep_length)
                 current_ep_reward = 0.0
@@ -667,6 +714,25 @@ class InfoDictEvalCallback(BaseCallback):
                             value >= threshold for value in values
                         ) / len(values)
 
+        # Mean per-episode total for the designated per-step increments:
+        # e.g. ``rew_hold_ep_sum_mean`` is the hold escrow's delivered
+        # dose per eval episode (review finding §1.6: the reward
+        # decomposition was absent from the metrics artifacts). Averaged
+        # over the episodes that carried the key, mirroring the
+        # ``_ep_mean`` convention above.
+        if episode_sums:
+            summed_keys: set[str] = set()
+            for totals in episode_sums:
+                summed_keys.update(totals)
+            for key in summed_keys:
+                totals_present = [
+                    totals[key] for totals in episode_sums if key in totals
+                ]
+                if totals_present:
+                    metrics[f"{key}_ep_sum_mean"] = sum(
+                        totals_present
+                    ) / len(totals_present)
+
         if self.phase_key is not None and phase_counts and total_steps > 0:
             for phase_int, count in phase_counts.items():
                 label = self.phase_labels.get(phase_int, str(phase_int))
@@ -706,6 +772,18 @@ class InfoDictEvalCallback(BaseCallback):
             print(f"[{self.log_prefix}] " + " ".join(fields))
 
         return metrics
+
+    def _is_episode_sum_key(self, key: str) -> bool:
+        """Whether a collected step key is summed per episode.
+
+        ``episode_sum_keys=None`` (the default) applies the repo-wide
+        naming convention -- ``rew_*`` info keys are per-step reward
+        increments -- so recipes opt components in simply by listing
+        them in ``info_keys``; an explicit tuple pins the set instead.
+        """
+        if self.episode_sum_keys is None:
+            return key.startswith("rew_")
+        return key in self.episode_sum_keys
 
     def set_context_metric(self, name: str, value: float) -> None:
         """Attach a caller-owned scalar to every subsequent evaluation.
