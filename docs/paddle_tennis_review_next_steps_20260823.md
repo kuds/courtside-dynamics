@@ -2,7 +2,7 @@
 
 Review snapshot, pinned to `main`@`902fb33`, 2026-08-23. Diagnosis-side
 only: no bars, no verdicts are changed by this document — corrections
-are routed to the owning docs (§5.1) and every next step that trains
+are routed to the owning docs (§4 step 1) and every next step that trains
 anything requires its own pre-registration first, per the standing
 doctrine.
 
@@ -28,9 +28,9 @@ from the raw artifacts. The verdicts all stand. The details:
 
 - LH1c best eval **+2.483 ± 0.829 at 2,425,000** (evaluations.npz row);
   1M-window best +1.067 at eval 1; eval-info window max +1.187;
-  headline `crossings_ep_mean` best 6.17 at 2.3M, final 5.97; the
-  entire eval-reward top-5 in the 2.0–2.6M band; `best_model` at step
-  2,325,000 (crossings 5.633, meta sha `532ef6e9…`/`0d2db134…`).
+  headline `crossings_ep_mean` best 6.17 at 2.3M, final 5.97;
+  `best_model` at step 2,325,000 (crossings 5.633, meta sha
+  `532ef6e9…`/`0d2db134…`).
 - LH1c §4c registered-window scoring: k=2 ≤ 1% at every 100k probe
   with exactly four 1% events (KH1 FAIL confirmed); hold-travel window
   minimum 5.20 m with 8.09/8.32 m at 900k/1M once engagement recovered
@@ -70,20 +70,30 @@ from the raw artifacts. The verdicts all stand. The details:
    instruments; the stage summary should name which it reports.
 5. §4c "hold travel settled at 7.5–8.7 m": the extension series
    actually spans 6.38–8.71 m. Direction unchanged.
-6. The hold escrow's reward components (`rew_hold`/clawback) appear in
-   no logged artifact — eval_info's 54 metrics and the monitor CSVs
-   carry no reward decomposition — so "the dose was delivered" is
-   verifiable only indirectly (measured travel 5.2–8.7 m against the
-   12.0 m budget implies strictly positive pay by the §2 formula, and
-   §4b's byte-divergence evidence). §5.5 routes the logging fix.
+6. The hold escrow's reward components (`rew_hold`/clawback) are
+   absent from the *metrics* artifacts — eval_info's 54 metrics and
+   the monitor CSVs carry no reward decomposition — so the eval/train
+   record verifies "the dose was delivered" only indirectly (measured
+   travel 5.2–8.7 m against the 12.0 m budget implies strictly
+   positive pay by the §2 formula, plus §4b's byte-divergence
+   evidence). The decomposition *is* logged once per 250k in the
+   milestone-video per-step CSVs (`VideoRecordCallback` writes
+   `csv_header` incl. `rew_hold`/`rew_hold_clawback`); §2 below audits
+   the dose directly from the 2.5M trace. §4 step 5 routes the
+   eval-side logging fix.
+7. §4c also states "the eval-info channel's entire top-5 sits in the
+   2.0–2.6M band." False on both instruments: four of five, never
+   five — eval_info's rank 5 is 1,725,000 (+1.606) and the npz's
+   rank 2 is 2,925,000 (+1.979).
 
 ## 2. New measurements (this review)
 
 **PT1 instrument validated end-to-end.** The probe's code was
 adversarially reviewed (ctrl→world mapping exact from the model XML's
 world-aligned slide joints; window lifecycle, follow-through split,
-determinism and normalizer handling all correct), and both published
-rows were replicated locally:
+determinism and normalizer handling all correct), and two of PT1's
+three subject rows were replicated locally (the registered 2.4M row
+was not replayed — its checkpoint was not fetched):
 
 - The **oracle row reproduces to every printed digit** (186 windows;
   2.36/2.31 m commanded/actual, 0.49 m servo gap, 1.8% saturation;
@@ -113,19 +123,40 @@ continuous, deterministic):
 |---|---|---|---|
 | in-run probe row (GPU) | 5200–5229 | 5% (≈4/85) | — |
 | local replication (CPU) | 5200–5229 | 6.2% (5/81) | [2.0%, 13.8%] |
-| fresh seeds | 5230–5299 | 1.6% (3/191) | [0.3%, 4.5%] |
-| **pooled, this review** | 5200–5299 | **2.9% (8/272)** | **[1.3%, 5.7%]** |
-| best model 2.325M, same instrument | 5200–5299 | 1.1% (3/274) | [0.2%, 3.2%] |
+| **fresh seeds (the scoring sample)** | 5230–5299 | **1.6% (3/191)** | **[0.3%, 4.5%]** |
+| best model 2.325M, fresh + calib. | 5200–5299 | 1.1% (3/274) | [0.2%, 3.2%] |
 
-Reading: the 2.5M checkpoint's k=2 is genuinely off the floor — 2.9%
-pooled against the registered 1M window's ~0.5% (four 1% probe events
-in ~840 receiving points) — but the single 5% reading was partly a
-favorable 30-episode draw: the pooled estimate sits **below the KH1
-PASS bar (3%)** and well below RK1's 5%, and the elevation over the
-crowned best model is not individually significant (Fisher one-sided
-p = 0.109 at n ≈ 270 per arm). One fresh-seed second stroke landed in
-(2.87 m depth) — a fully completed second exchange; the other second
-strokes were wild (out-depth 8.5–30.7 m).
+Two readings, kept separate per lesson 13a (an argmax over a logged
+series is a hypothesis; score it on seeds the selection never
+touched):
+
+- **The 5% reading was real, and seed-conditioned.** The CPU
+  replication reproduces it on the same seeds (6.2%; GPU/CPU
+  inference differs in fp detail, so statistical, not bit-level,
+  agreement is the expected form) — the in-run row was not a probe
+  artifact. But 2.5M was singled out *because* that row read high, so
+  those seeds cannot score it, and a pooled estimate would inherit
+  the selection bias (the `confirm_best` lesson).
+- **On fresh seeds the elevation shrinks to 1.6% [0.3, 4.5]** —
+  below the KH1 PASS bar (3%), well below RK1's 5%, and statistically
+  indistinguishable from the crowned best model's 1.1% [0.2, 3.2].
+  The fresh sample does not establish 2.5M over 2.325M; what it does
+  establish is nonzero late-run k=2 (3 events in 191 points, versus
+  four 1% probe events in ~944 receiving points across the entire
+  registered 1M window, ≈ 0.4%). One fresh-seed second stroke landed
+  in (2.87 m depth) — a fully completed second exchange; the other
+  second strokes were wild (per-arm hit-#2 out-depth means
+  13.7–30.7 m).
+
+**The dose is directly audited.** The 2.5M milestone-video per-step
+trace (media/videos CSV, the one artifact that logs the reward
+decomposition) shows the escrow live on the deterministic policy:
+`rew_hold` paid 4 windows for +0.211 total (mean 0.053 of the 0.5
+scale ≈ 10.7 m travel inside paying windows) and **every payment was
+clawed back — net kept 0.000** (no follow-up hit arrived). Reach and
+contact, for contrast, netted +0.93 and +1.00 in the same trace.
+"Delivered and declined" (§4c) now rests on a directly logged number,
+not only on the §4b byte-divergence argument.
 
 **The elevation is not held-court.** PT1 on the 2.5M checkpoint reads
 *more* thrash than the best model (strike-ended cmd path 25.35 m,
@@ -135,8 +166,9 @@ is confirmed at this checkpoint too; its k=2 events arrive despite the
 wander, not through stillness.
 
 **The serving channel is fully dead in this lineage**: k=1 serving 0%
-across 546 local points (0/274 best-model, 0/272 at 2.5M) and ≤ 4% at
-every in-run probe. All k=2 signal is receiving-side.
+across 546 local points (0/274 best-model, 0/272 at 2.5M), ≤ 4% at
+every LH1c in-run probe and ≤ 5% at every registered-run probe. All
+k=2 signal is receiving-side.
 
 **Selection-instrument note.** Task-metric selection
 (crossings/success/reward) crowned 2.325M; the k=2-richest checkpoint
@@ -151,13 +183,15 @@ the k=2-richest checkpoint an era artifact alongside the crowned best.
   FAIL on LH1c's 1M window, and the hold-line closure decision — the
   mechanism was delivered and declined; no re-pair branch remained.
 - The **§4c extension record needs an erratum** (§1.1): the honest
-  extension story is "k=2 rose off the floor late (to ~2–3% around
-  2.5M, peak probe reading 5%) by a non-hold route, below every PASS
-  bar," not "never left the noise floor."
+  extension story is "k=2 rose off the floor late by a non-hold
+  route — probe readings up to 5% at 2.5M (at the KH1/RK1 PASS-bar
+  values, outside the registered window), 1.6% [0.3, 4.5] on fresh
+  seeds — real but small," not "never left the noise floor."
 - The **binding constraint is unchanged and now fully validated**: the
   post-swing action head emits saturated bang-bang (88–93% of steps)
   under a dead temperature (transferred 1.59e-4, final 1.72e-4, std
-  0.014), and `policy_never_reached` ends 60% of points. PT1's routing
+  0.014), and `policy_never_reached` ends 58–64% of local points
+  (61% pooled). PT1's routing
   holds: exploration-side first, interface-side second, no further
   escrow scale, no dynamics- or opponent-side work on the wander.
 - The **temperature-skip flag does not exist in code**. PT1 §6 calls
@@ -166,12 +200,13 @@ the k=2-richest checkpoint an era artifact alongside the crowned best.
   has exactly `source_run_dir` and `reset_observation_indices`, and
   the loader copies `log_ent_coef` unconditionally when both sides are
   auto (`train.py:1521–1534`). The npoint review says it plainly
-  ("there is no skip flag today", §5.1 of that doc). It must be built
-  before the routed pilot can launch.
+  ("there is no skip flag today" — the §6 entropy caveat of that doc).
+  It must be built before the routed pilot can launch.
 - **Chronic α-collapse is the declared risk for that pilot**: every
-  campaign run ends at ent_coef 1e-4–5e-5 regardless of init or
-  target (npoint appendix C.1: 0.02 → 9.8e-4 within 12k steps from
-  scratch), and appendix D.6's tanh-saturation mechanism — a saturated
+  campaign run ends with α collapsed regardless of init or target —
+  1.72e-4 / 1.92e-4 final in the two 3M runs, 1e-4–5e-5 across the
+  earlier corpus (npoint appendix C.1: 0.02 → 9.8e-4 within 12k steps
+  from scratch), and appendix D.6's tanh-saturation mechanism — a saturated
   squashed-Gaussian mean inflates latent −log π, annealing α to zero —
   applies with full force to a warm start that begins 92% saturated.
   Restoring α=0.02 buys a window, not a regime; the pilot's mechanism
@@ -186,10 +221,14 @@ Each step names its owner-doc and its gate. Order is execution order;
 1. **Book the corrections** (no training, do first):
    - Erratum to `design_paddle_tennis_postswing_hold.md` §4c: the
      corrected extension k=2 series (2% at 1.3M/2.1M/2.9M, 5% at
-     2.5M, seven 1% readings), the §2 larger-n measurement (2.9%
-     pooled [1.3, 5.7] at 2.5M; below bars; not via stillness), and
-     the physics-version retirement (3.11 ≡ 3.12 measured). Plus the
-     §1.2–§1.5 bookkeeping fixes in place.
+     2.5M, seven 1% readings), the §2 fresh-seed measurement (1.6%
+     [0.3, 4.5] at 2.5M; below bars; not via stillness; dose paid
+     and fully clawed back in the audited trace), the top-5 claim
+     (§1.7), and the physics-version retirement (3.11 ≡ 3.12
+     measured). Plus the §1.2–§1.5 bookkeeping fixes in place, and
+     the `docs/README.md` index row for the hold design, which
+     repeats the superseded "k=2 at its 1% floor across 3M" and
+     "MuJoCo 3.12 confound noted" language.
    - Distill the 2026-08-15 → 08-22 era verdicts (L2 stop/pivot, LR1
      ADOPT, RK1 FAIL, hold closure, PT1) into `DECISIONS.md` — the
      journal currently ends at 2026-08-02 and the campaign's actual
@@ -200,8 +239,11 @@ Each step names its owner-doc and its gate. Order is execution order;
      (`train.py:131–170`, bool-validated); when False, skip the copy
      in the transfer block (`train.py:1521–1534`) so `auto_0.02`'s
      fresh init stands, keeping the auto-vs-fixed mismatch guard;
-     record the skip in `initialization` provenance
-     (`artifacts.py:258–265`); test sibling of
+     record the skip in the `initialization` provenance (assembled at
+     `train.py:1541` ff., written via
+     `update_run_config_with_initialization`, `artifacts.py:456–469`)
+     and add the new field to the config snapshot's `warm_start`
+     entry (`artifacts.py:258–267`); test sibling of
      `test_train.py:560` asserting `log_ent_coef == log(0.02)` and
      `"log_ent_coef" not in transferred`. Not TOML-settable
      (`run_config.py:58–66` keeps `warm_start` code-side; the pilot's
@@ -211,25 +253,32 @@ Each step names its owner-doc and its gate. Order is execution order;
    seed 0, n_envs 4, eval 25k, checkpoint/diagnosis 100k, recipe
    defaults (hold off), warm start with `transfer_log_ent_coef=False`.
    Three decisions the prereg must freeze:
-   - **Source.** Candidates: the registered 2.4M protected best
-     (`838997fb…`, the shelf item's original pairing), LH1c's crowned
-     2.325M (`532ef6e9…`, campaign-record eval lineage), or LH1c's
-     2.5M (`45a1a80b…`, the k=2-richest measured artifact, 2.9%
-     pooled). This review's data supports 2.5M — most k=2 to retain,
-     same lineage — with the §2 caveat (its edge over 2.325M is not
-     individually significant) recorded in the prereg.
+   - **Source.** The default is the registered 2.4M protected best
+     (`838997fb…`) — the §4a shelf item's own pairing, and the only
+     source with a same-source control already on the books (LH1's
+     transferred-temperature run from the identical artifacts), so
+     the skip flag stays a one-lever change per the standing
+     convention. The LH1c-lineage candidates (crowned 2.325M
+     `532ef6e9…`, record-eval band; 2.5M `45a1a80b…`) are alternatives
+     the prereg may choose instead, but each is a second lever
+     (source + flag) with no temperature-transferred control, and §2's
+     fresh-seed data gives 2.5M no measured edge over 2.325M — if a
+     lineage change is wanted, pre-register it as its own decision.
    - **Bars.** KH1-style headline (k=2 ≥ 3% at some checkpoint) and
-     R1-style retention, anchored on the source's measured band — for
-     a 2.5M source that band is k=1 87–89%, k=2 ~2.9%, so the
-     headline bar should demand an *advance* (e.g. ≥ 5% or ≥ 3% at
-     two probes), not re-cross a line the source already touches.
-     Bars are the maintainer's to freeze; this review supplies the
+     R1-style retention, anchored on the chosen source's measured
+     band. If an LH1c-lineage source is chosen instead of the
+     default, note its own probes already brush the bar values (5% at
+     2.5M on calibration seeds; 1.6% fresh) — the headline bar should
+     then demand an *advance* (e.g. ≥ 3% at two consecutive probes,
+     or ≥ 5%), not re-cross a line the source already touches. Bars
+     are the maintainer's to freeze; this review supplies the
      anchors.
    - **Mechanism observables, pre-declared:** (a) ent_coef trajectory
      — steps until α < 1e-3 again (the §3 collapse risk; expect ~10k
      from the from-scratch precedent, measure it); (b) post-swing
      saturation and saccade from the PT1 instrument at each 100k
-     diagnosis (source band: 91–93% / 0.26–0.29 m/step) — the pilot's
+     diagnosis (measured bands: registered 2.4M source 87.6% /
+     0.381 m/step per PT1; LH1c lineage 91–93% / 0.26–0.29) — the pilot's
      claim is that live temperature lets the action head unsaturate,
      so measure exactly that. If α re-collapses with no saturation
      movement, the verdict routes to step 4's interface-side treatment
@@ -267,14 +316,19 @@ Each step names its owner-doc and its gate. Order is execution order;
    current blocker); seed block **4100–4199 stays sealed** until a
    registered-result branch fires.
 7. *(Optional, maintainer-side where the Drive artifacts are
-   mounted)* Extend PT-K2 to the 2.3M–2.9M neighbors at n=100 each —
-   only if LT1's source selection wants the k=2-richest checkpoint
-   resolved more finely than §2's 2.5M-vs-2.325M comparison.
+   mounted)* Extend PT-K2 to the 2.3M–2.9M neighbors — only if a
+   prereg wants an LH1c-lineage source and needs the k=2-richest
+   checkpoint resolved beyond §2. Score on seeds no probe-driven
+   selection has touched (5230–5299, or a declared fresh use of the
+   calibration convention) — pooling with the 5200–5229 readings that
+   nominated a checkpoint repeats the bias §2 avoids.
 
 ## 5. Seed ledger
 
 Unchanged. All local replays used calibration seeds **5200–5299**
-(the diagnosis convention; 5230–5299 had never been run through this
-instrument but the block is the calibration block, burned since the
-diagnosis era). No reserved block touched; nothing new burned;
-**4100–4199 remains sealed.**
+(the diagnosis convention; the block has been burned since the
+diagnosis era and the instrument has run its full span before — what
+matters here is that no selection over *these* checkpoints ever
+touched 5230–5299, which is why §2 scores on that sub-range). No
+reserved block touched; nothing new burned; **4100–4199 remains
+sealed.**
