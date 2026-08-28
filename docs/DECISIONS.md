@@ -180,7 +180,8 @@ tanh-saturation mechanism (saturated squashed mean inflates latent
 rationale. At the verdict there was no warm-start temperature-skip
 flag in code; it shipped 2026-08-23 as
 `WarmStartConfig.transfer_log_ent_coef`, with LT1
-(`paddle_tennis_lt1_prereg_20260823.md`) as its proposed pilot.
+(`paddle_tennis_lt1_prereg_20260823.md`) as its pre-registered
+pilot (frozen 2026-08-28).
 
 ## WallBall — reward, curriculum & geometry
 

@@ -1,17 +1,16 @@
 # Pre-registration: LT1 — the temperature-skip warm start
 
-Status: **Proposed 2026-08-23 — NOT frozen.** This document was
-drafted as step 3 of
+Status: **frozen 2026-08-28, before any run step** (maintainer
+decision, recorded via the review session; drafted 2026-08-23 as
+step 3 of
 [`paddle_tennis_review_next_steps_20260823.md`](paddle_tennis_review_next_steps_20260823.md)
 §4, implementing the §4a shelf item of
 [`design_paddle_tennis_postswing_hold.md`](design_paddle_tennis_postswing_hold.md)
 and routing item 1 of
 [`paddle_tennis_postswing_targets_20260822.md`](paddle_tennis_postswing_targets_20260822.md)
-§6. It becomes binding only when the maintainer freezes it (this
-Status line updated to **frozen**, before any run step); until then
-every bar in §3 is a proposal with its anchors shown. The standing
-doctrine applies from the freeze: changes after launch void the run
-as campaign evidence.
+§6). Every §3 bar is binding as written, with its anchors shown.
+The standing doctrine applies: changes after launch void the run as
+campaign evidence.
 
 ## 1. What this run asks
 
@@ -41,7 +40,7 @@ toward zero) applies with full force to a warm start that *begins*
 mechanism observables are chosen so that even a fast re-collapse is
 an informative outcome, not a wasted run.
 
-## 2. Shape (frozen at maintainer freeze)
+## 2. Shape (frozen)
 
 - **Source: the registered run's protected best** —
   `training_runs/PaddleTennis/sac/20260816_235141`, best checkpoint
@@ -93,8 +92,7 @@ an informative outcome, not a wasted run.
   expected_artifact_sha256={...}))`, the same notebook cell every
   prior pilot used plus the two new fields.)
 
-## 3. Criteria (proposed values; anchors shown — the maintainer
-freezes or amends these numbers)
+## 3. Criteria (frozen 2026-08-28; anchors shown)
 
 | criterion | metric | FAIL | declared middle | PASS |
 |---|---|---|---|---|
@@ -128,7 +126,7 @@ calibration seeds 5200+, the diagnosis convention) — the
 checkpoint cadence retains everything needed. Scoring this way was
 validated by the review's digit-exact replications.
 
-## 4. Decision rule (proposed)
+## 4. Decision rule (frozen)
 
 - **KT1 PASS ∧ T1 PASS** → the exploration mechanism is confirmed
   and paying: pre-register the era's RK1 retry at registered scale
