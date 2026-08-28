@@ -178,10 +178,13 @@ by every launch's provenance). Launch history, in order:
   completable in practical wall-clock; superseded by a GPU relaunch
   of the identical cell.
 
-**The registered LT1 is the first GPU-resident run whose
-`config.json` validates clean against §2** (the launch cell asserts
-the frozen fields and CUDA availability before training); its run ID
-is appended here when its verdict is booked.
+**The registered LT1 is `20260828_121324`** (launched 12:13 UTC,
+NVIDIA L4, git `107b2b8`): the first GPU-resident run whose
+`config.json` validates clean against §2 — budget 1,000,000; seed 0;
+`transfer_log_ent_coef` false with `log_ent_coef` in the provenance
+reset list and absent from the transferred list; both source-artifact
+digests equal to the §2 pins; hold off; TOML sha `8ad31b39…`
+recorded. The §3 bars score this run and only this run.
 
 ## 5. Seed ledger
 
