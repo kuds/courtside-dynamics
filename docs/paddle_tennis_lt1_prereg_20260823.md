@@ -147,6 +147,42 @@ No re-pair branch: the flag is boolean. A different entropy target
 or a fixed α would be a new design with its own document, not a
 re-pair.
 
+## 4a. Launch record (2026-08-28, booked as launches happened)
+
+The §2 TOML was placed Drive-side as
+`configs/paddle_tennis_lt1_tempskip.toml` (sha `8ad31b39…`, recorded
+by every launch's provenance). Launch history, in order:
+
+- `20260828_112830` — aborted before training (notebook import
+  error); empty remnant, no evidence value.
+- `20260828_113136` (11:31 UTC, L4 GPU) — every frozen field except
+  **`total_timesteps` = 3,000,000** (the recipe default won over the
+  frozen 1M when the budget override was lost in a re-run; the plan
+  validator flags exactly that one field). **Declared an unregistered
+  companion run**, not the registered pilot: its 0–1M window is a
+  same-seed quasi-replicate of LT1 (seed 0 in both — divergence comes
+  only from GPU floating-point nondeterminism, so it is *not* a seed
+  replicate and must not be booked as one), and its 1M–3M tail is an
+  exploratory budget-extension observation. Its
+  `early_stop_patience` 60 (an inherited notebook setting; the
+  recipe default is 20) is a second recipe-default deviation, booked
+  here.
+- `20260828_114038` / `20260828_114815` (11:40 / 11:48 UTC) — the
+  frozen 1M shape, field-conformant on direct inspection
+  (budget 1,000,000; skip flag false with `log_ent_coef` in the
+  provenance reset list; both sha pins exact; hold off; patience 20
+  = the recipe default, which under a 1M budget cannot fire before
+  completion since warm-up is 2×20 evals = the full budget) — but
+  launched on a **CPU-only runtime** (torch `2.11.0+cpu`,
+  `gpu.available: false`): not a shape violation, but not
+  completable in practical wall-clock; superseded by a GPU relaunch
+  of the identical cell.
+
+**The registered LT1 is the first GPU-resident run whose
+`config.json` validates clean against §2** (the launch cell asserts
+the frozen fields and CUDA availability before training); its run ID
+is appended here when its verdict is booked.
+
 ## 5. Seed ledger
 
 No new blocks. Training seed 0 per the pilot convention; diagnosis
