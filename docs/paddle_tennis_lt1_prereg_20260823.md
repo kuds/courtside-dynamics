@@ -186,6 +186,77 @@ reset list and absent from the transferred list; both source-artifact
 digests equal to the §2 pins; hold off; TOML sha `8ad31b39…`
 recorded. The §3 bars score this run and only this run.
 
+## 4b. Scored results and proposed verdict (2026-08-28, post-run)
+
+**Status: PROPOSAL.** The run completed and the §3 bars are scored
+below exactly as frozen; the maintainer books the final adjudication.
+Nothing in §1–§4 was edited.
+
+The registered LT1 (`20260828_121324`) completed all 1,000,000 steps
+(6h 08m 38s on the L4, 18:22 UTC; `stage_summary.txt` status
+`completed`; the patience stop condition was first evaluable at the
+final eval, so the full frozen budget ran). No guard abort. All ten
+100k diagnosis rows and all ten checkpoint pairs synced; T1/T2
+scored per the §3 instrument note by replaying every checkpoint pair
+through `tools/paddle_tennis_postswing_target_probe.py` (defaults:
+30 episodes, calibration seeds 5200+, at the launch commit).
+
+**Scored bars (all three land in their frozen FAIL bands):**
+
+- **KT1 — FAIL.** k=2 exchange survival, either parity, across the
+  ten rows: receiving 0/0/0/**1**/0/0/0/0/0/**1**%, serving all 0%.
+  ≤ 1% at every checkpoint; no 2% middle row. The source's own band
+  (0–1%) unmoved.
+- **T1 — FAIL** (the declared-risk branch). Post-swing saturation on
+  strike-ended windows, per checkpoint (100k→1M):
+  92.4 / 87.1 / 91.7 / 92.3 / 89.8 / 89.4 / 88.8 / **86.0** / 95.9 /
+  89.9% — never < 85% (minimum 86.0% at 800k; source anchor 87.6%).
+  Never approaches the ≤ 70% PASS line. Command saccade on the same
+  windows: 0.25–0.66 m/step (source 0.381) — no smoothing.
+- **R1 — FAIL.** k=1 receiving:
+  28/33/**57**/40/54/44/41/37/44/46% — < 60% at every checkpoint
+  (peak 57% at 300k). The LH1 same-source control read 31/32/58/61%
+  at 100k–400k: LT1 tracks it through 300k, then sits below its
+  400k reading; neither run reaches the ≥ 80% PASS band, so the flag
+  neither bought nor destroyed retention.
+
+**T2 — mechanism observables (recorded, non-verdict):**
+
+- **α trajectory**: entropy updates begin at `learning_starts` 25k;
+  first logged α (30k) is 4.34e-3, and α crosses **below 1e-3 at
+  36,000 steps** — a live window of ~11k update steps, squarely in
+  the precedent's predicted 10–20k band — then decays on a shallow
+  tail (≈6e-4 at 100k, 2.9e-4 at 270k) to **1.474e-4 at 1M**,
+  statistically the source's inherited collapsed value (1.589e-4).
+  The fresh temperature bought a window, not a regime, exactly as §1
+  declared.
+- **Saccade / hold-travel watch**: recovery-hold travel mean ran
+  4.7–6.9 m across the rows (no stillness trend); `train/std` closed
+  at 0.017.
+- **Selection**: the best model was crowned at the **first eval
+  (25k)** — crossings 5.57, essentially the warm-started source
+  policy — and was never beaten in 40 evals (final headline 4.37).
+- **A non-verdict behavioral observation worth keeping**: from
+  ~600k the shot ledger shifts toward softer, more accurate returns
+  — policy in-rate 42/38/49/27/38% over 600k–1M vs 8–20% before,
+  `policy_shot_out` collapsing from ~25 to 7–18 per row, out-depth
+  shortening ~10.8→6.0 m — with **no** unsaturation (T1 rows above)
+  and **no** k=2 movement. Whatever improved the stroke did not run
+  through the action head's saturation, consistent with the k=2
+  blocker being elsewhere than shot quality.
+
+**Proposed §4 branch: T1 FAIL** — α re-collapsed with no saturation
+movement, the declared risk realized on schedule. Per the frozen
+rule: **the optimizer-side lever is spent; route to the
+interface-side treatment
+([`design_paddle_tennis_command_rate.md`](design_paddle_tennis_command_rate.md))
+with no further temperature retry.** (KT1 and R1 FAIL do not alter
+the branch: the rule keys on T1, and no re-pair branch exists.) On
+the maintainer booking this verdict, the command-rate design's gate
+("only LT1's T1-FAIL branch launches this") is satisfied, and its
+own freezes — battery seed block, Δ candidate, LC1 shape — become
+the next pre-registration decision.
+
 ## 5. Seed ledger
 
 No new blocks. Training seed 0 per the pilot convention; diagnosis
