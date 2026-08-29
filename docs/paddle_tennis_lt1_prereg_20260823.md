@@ -245,6 +245,34 @@ through `tools/paddle_tennis_postswing_target_probe.py` (defaults:
   through the action head's saturation, consistent with the k=2
   blocker being elsewhere than shot quality.
 
+**Companion outcome (2026-08-29; observation only, per §4a — not
+verdict evidence, no bar is scored on it):** the unregistered 3M
+companion `20260828_113136` completed its full budget (20h 41m 48s,
+L4, git `5b21273`; final α 1.762e-4, collapsed). Two facts worth
+the record:
+
+- **Its 0–1M window is not merely a quasi-replicate — it reproduced
+  the registered LT1 exactly.** All ten 100k diagnosis rows are
+  byte-identical to the registered run's (programmatic comparison),
+  so GPU nondeterminism produced no measurable divergence and the
+  companion's first 1M adds *zero* independent evidence — one more
+  reason §4a's "must not be booked as a seed replicate" stands.
+- **The 1M–3M budget-extension tail shows the campaign's core
+  dissociation at its sharpest.** k=1 receiving climbs steadily from
+  46% at 1M to **90% at 3M** (83–86% throughout 2.0–2.9M — deep in
+  what R1 would call PASS territory), crossings mean rises
+  0.66 → ~0.9–1.0, and in-rate reaches 55–64% — while **k=2 (either
+  parity) never exceeds 1% in all twenty tail rows**, the best model
+  remains the 25k warm-start checkpoint (crossings 5.57, eval_info
+  peak 5.67 at 2.75M never crowned under the selection rules), and
+  recovery-hold travel stays at 5.5–8.3 m. Two million extra
+  collapsed-temperature steps buy large, monotone first-exchange
+  gains and exactly nothing at the second exchange — consistent with
+  the T1-FAIL reading that the k=2 blocker is not shot quality or
+  budget, and strengthening the case for the interface-side route.
+  (Calibration-seed diagnosis rows, same-seed lineage — lesson 13a
+  applies; no bar is scored on any of this.)
+
 **Proposed §4 branch: T1 FAIL** — α re-collapsed with no saturation
 movement, the declared risk realized on schedule. Per the frozen
 rule: **the optimizer-side lever is spent; route to the
