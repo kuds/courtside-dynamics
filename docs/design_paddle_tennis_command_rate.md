@@ -1,18 +1,30 @@
 # Design: PaddleTennis command-rate limit — capping the target saccade
 
-Status: **Proposed — design only, nothing implemented; a NEW
-COMPARABILITY ERA if adopted (action semantics change); launches
-nothing until its battery (§4) and a pre-registered pilot (§5) are
-frozen by the maintainer. Drafted 2026-08-23 from the PT1 routing**
+Status: **FROZEN 2026-08-29 (maintainer decision, recorded via the
+review session), before any implementation.** The §5 gate is
+satisfied: LT1 completed and was scored 2026-08-28, and its
+**T1-FAIL branch was booked 2026-08-29**
+([`paddle_tennis_lt1_prereg_20260823.md`](paddle_tennis_lt1_prereg_20260823.md)
+§4b — α back below 1e-3 at 36k steps, strike-ended saturation never
+< 85% across all ten checkpoints, minimum 86.0% against the 87.6%
+anchor). Binding as drafted: the §2 mechanism decisions D1–D4, with
+**D5 at (i)** per the drafted recommendation; the §3 candidate
+**Δ = 0.15** and its one-knob re-pair convention (now in force per
+§3's own terms); and the §4 battery, whose freeze-time slot is
+filled — **CR2 seed block 6400–6499 assigned** (next free above
+6300–6399, verified against the ledger at freeze). Nothing is
+implemented yet; implementation proceeds in battery order (CR0
+first). Still a **NEW COMPARABILITY ERA if adopted** (action
+semantics change), and the §5 pilot's final freeze — shape
+confirmation and bars — stays deferred to the post-battery freeze,
+per §5. Drafted 2026-08-23 from the PT1
+routing
 ([`paddle_tennis_postswing_targets_20260822.md`](paddle_tennis_postswing_targets_20260822.md)
 §6 item 2 — whose warning this Status repeats: not a TOML toggle —
 commissioned by
 [`paddle_tennis_review_next_steps_20260823.md`](paddle_tennis_review_next_steps_20260823.md) §4
-step 4). The LT1 temperature-skip pilot
-([`paddle_tennis_lt1_prereg_20260823.md`](paddle_tennis_lt1_prereg_20260823.md))
-runs **first**; §5 names the only branch that launches this.
-Standing doctrine from any freeze: changes after a pre-registered
-run starts void it as campaign evidence.
+step 4). Standing doctrine from this freeze: changes after a
+pre-registered run starts void it as campaign evidence.
 
 ## 1. Why this change, and why interface-side
 
@@ -51,7 +63,7 @@ changes what actions *do*, mechanically, on step one, nothing to
 learn: stillness becomes the head's default output instead of an
 80-step feat; deliberate motion passes through (§2, §3).
 
-## 2. Mechanism (proposed — decision points named, not silently chosen)
+## 2. Mechanism (frozen 2026-08-29 — D1–D4 as drafted, D5 at (i); decision points named, not silently chosen)
 
 One new constructor kwarg on `PaddleTennisEnv`:
 
@@ -160,7 +172,7 @@ thrash witness's paddle path fails to collapse) has **no** re-pair
 — it falsifies the mechanism and closes the line. No pilot-time
 re-pair: the knob is geometric; the battery settles it first.
 
-## 4. Certification battery (proposed; the maintainer freezes it before implementation)
+## 4. Certification battery (frozen 2026-08-29)
 
 - **CR0 — bit-identity when off.** The default in lockstep against
   the pre-change env: exact observation/reward/info equality (the
@@ -195,21 +207,25 @@ re-pair: the knob is geometric; the battery settles it first.
   sequences produce **sign-exact** mirrored effective targets, and
   mirrored trajectories stay mirrored to the P4 bar (1e-6 through
   40 control frames of contact) — bit-for-bit fairness preserved.
-- **Seed block: a fresh block is REQUIRED for CR2 and is NOT
-  allocated here.** The maintainer assigns the next free block per
-  the seed-ledger state indexed in [`docs/README.md`](README.md)
-  at freeze time (highest block burned to date: 6300–6399 by the
-  §4b re-battery; **4100–4199 stays sealed**; 4300–4399 was
-  consumed by the NP3 certification, not reserved). This document
-  names and burns no block; CR1 alone reuses calibration 5200–5229,
-  as stated.
+- **Seed block: 6400–6499, assigned at the 2026-08-29 freeze for
+  CR2** — the next free block above the highest burned (6300–6399,
+  the hold design's §4b re-battery), verified free by a repo-wide
+  sweep at freeze time (**4100–4199 stays sealed**; 4300–4399 was
+  consumed by the NP3 certification, not reserved). The block is
+  consumed when CR2 first runs; CR1 alone reuses calibration
+  5200–5229, as stated.
 
-## 5. LC1 — pilot shape (proposed, UNFROZEN)
+## 5. LC1 — pilot shape (drafted; final freeze — shape confirmation and bars — follows the §4 battery)
 
-**Gate first: LT1 runs before this.** LC1 launches **only** if LT1
-routes here — its §4 T1-FAIL branch (α re-collapsed, no saturation
-movement: the optimizer-side lever spent), per the review's step 3.
+**Gate: satisfied 2026-08-29.** LC1 launches **only** if LT1 routes
+here — its §4 T1-FAIL branch (α re-collapsed, no saturation
+movement: the optimizer-side lever spent), per the review's step 3;
 LT1's "T1 PASS, KT1 FAIL" branch re-diagnoses, not this design.
+**The T1-FAIL branch was booked** (LT1 §4b, maintainer,
+2026-08-29): the gate is open. Per this section's own terms, the
+pilot's final freeze — shape confirmed and bars set from the
+battery's measured band and the step-0 replay row — happens only
+after the §4 battery runs; nothing below is binding yet.
 
 Proposed shape, frozen only after the §4 battery: **1M steps**, seed
 0, n_envs 4, eval 25k, checkpoint/diagnosis 100k (the standing pilot
@@ -228,8 +244,8 @@ pilot must book a **step-0 replay row** — the warm-started
 checkpoint under the limiter, through the PT1 instrument and the
 k-ladder, before any training — and score learning against it.
 
-**Bars: to be frozen from the battery's measured band** at freeze
-time, not here. The candidates, with anchor sources: KC1 headline
+**Bars: to be frozen from the battery's measured band** at the
+post-battery LC1 freeze, not here. The candidates, with anchor sources: KC1 headline
 (k=2 exchange survival ≥ 3% at some checkpoint — the KH1/KT1 bar);
 C1 mechanism (post-swing *actual* paddle travel / recovery-hold,
 its bar set from CR2's thrash-collapse measurement and the step-0
@@ -260,5 +276,6 @@ receiving ≥ 80% at some checkpoint). No Δ re-pair at pilot time.
   What survives: default OFF keeps every past run reproducible
   bit-for-bit; the instruments keep their units.
 
-Seed ledger: nothing burned by this document; block assignment
-deferred to freeze time (§4); **4100–4199 remains sealed**.
+Seed ledger: **6400–6499 assigned to CR2 at the 2026-08-29 freeze**
+(consumed when CR2 first runs; nothing burned yet); CR1 reuses
+calibration 5200–5229; **4100–4199 remains sealed**.

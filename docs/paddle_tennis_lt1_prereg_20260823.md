@@ -186,11 +186,12 @@ reset list and absent from the transferred list; both source-artifact
 digests equal to the §2 pins; hold off; TOML sha `8ad31b39…`
 recorded. The §3 bars score this run and only this run.
 
-## 4b. Scored results and proposed verdict (2026-08-28, post-run)
+## 4b. Scored results and verdict (scored 2026-08-28; booked 2026-08-29)
 
-**Status: PROPOSAL.** The run completed and the §3 bars are scored
-below exactly as frozen; the maintainer books the final adjudication.
-Nothing in §1–§4 was edited.
+**Status: BOOKED — maintainer decision, 2026-08-29, recorded via
+the review session.** The run completed and the §3 bars are scored
+below exactly as frozen; the T1-FAIL branch at the end of this
+section is the adjudicated verdict. Nothing in §1–§4 was edited.
 
 The registered LT1 (`20260828_121324`) completed all 1,000,000 steps
 (6h 08m 38s on the L4, 18:22 UTC; `stage_summary.txt` status
@@ -273,17 +274,19 @@ the record:
   (Calibration-seed diagnosis rows, same-seed lineage — lesson 13a
   applies; no bar is scored on any of this.)
 
-**Proposed §4 branch: T1 FAIL** — α re-collapsed with no saturation
-movement, the declared risk realized on schedule. Per the frozen
-rule: **the optimizer-side lever is spent; route to the
-interface-side treatment
+**Booked §4 branch: T1 FAIL** (maintainer, 2026-08-29) — α
+re-collapsed with no saturation movement, the declared risk realized
+on schedule. Per the frozen rule: **the optimizer-side lever is
+spent; route to the interface-side treatment
 ([`design_paddle_tennis_command_rate.md`](design_paddle_tennis_command_rate.md))
 with no further temperature retry.** (KT1 and R1 FAIL do not alter
-the branch: the rule keys on T1, and no re-pair branch exists.) On
-the maintainer booking this verdict, the command-rate design's gate
-("only LT1's T1-FAIL branch launches this") is satisfied, and its
-own freezes — battery seed block, Δ candidate, LC1 shape — become
-the next pre-registration decision.
+the branch: the rule keys on T1, and no re-pair branch exists.) The
+command-rate design's gate ("only LT1's T1-FAIL branch launches
+this") is satisfied, and that design was **frozen the same day** —
+CR0–CR3 battery and the Δ = 0.15 candidate binding, CR2 seed block
+6400–6499 assigned; its §5 pilot's final freeze (shape confirmation
+and bars) stays deferred to the post-battery freeze, per its own
+terms.
 
 ## 5. Seed ledger
 

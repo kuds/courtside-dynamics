@@ -86,11 +86,46 @@ below are an instance of one of these.
 
 Source: the dated `paddle_tennis_*` docs and `design_paddle_tennis_*`
 verdict sections indexed in [`docs/README.md`](README.md); this
-section distills the campaign's era verdicts (2026-08-15 → 08-23;
+section distills the campaign's era verdicts (2026-08-15 → 08-29;
 the earlier exploration/diagnosis-era verdicts remain in their
 source docs' status lines).
 The P0–P2 court-scaling entry predates the campaign and stays in the
 WallBall section below.
+
+### The temperature-skip lever is spent: LT1 fails every bar and the campaign routes to the interface side — *adjudicated (2026-08-29, run 20260828_121324); command-rate design frozen*
+The pre-registered temperature-skip pilot
+([`paddle_tennis_lt1_prereg_20260823.md`](paddle_tennis_lt1_prereg_20260823.md)
+§4b): warm-started from the registered 2.4M best with
+`transfer_log_ent_coef=False`, the fresh α = 0.02 bought only a
+**~11k-step live window** (below 1e-3 at 36k, inside the predicted
+10–20k band) before re-collapsing to the source's inherited value
+(1.474e-4 vs 1.589e-4). **KT1 FAIL** (k=2 ≤ 1% at every checkpoint,
+either parity), **T1 FAIL** (strike-ended post-swing saturation
+never < 85% — minimum 86.0% vs the 87.6% source anchor, scored by
+replaying all ten 100k checkpoints through the PT1 instrument),
+**R1 FAIL** (k=1 receiving peaks at 57%). The frozen rule's T1-FAIL
+branch booked: **the optimizer-side lever is spent — no further
+temperature retry** — and
+[`design_paddle_tennis_command_rate.md`](design_paddle_tennis_command_rate.md)
+was frozen the same day (Δ = 0.15 rate limit, CR0–CR3 battery, CR2
+block 6400–6499 assigned; LC1's final freeze — shape confirmation
+and bars — deferred to after the battery). Two observations sharpen
+the routing. The 3M same-seed companion's first 1M **reproduced the
+registered run byte-identically on all ten diagnosis rows** (GPU
+nondeterminism produced no measurable divergence — this rerun was a
+reproduction, not a replicate, exactly as the prereg's §4a
+cautioned: zero independent evidence). And its 1M–3M tail is the
+campaign's core dissociation at its sharpest: k=1 receiving climbed
+monotonically to **90% at 3M while k=2 never exceeded 1%** in
+twenty rows — first-exchange mastery is fully learnable under a
+collapsed temperature and buys nothing at the second exchange,
+consistent with the blocker being neither shot quality nor budget.
+Era law extended: **restoring α buys a window, not a regime** —
+under appendix D.6's tanh-saturation mechanism, a warm start that
+begins ~88% saturated re-collapses a fresh auto-tuned temperature
+(confirmed at α = 0.02; a fixed α would be a new design with its
+own document, per the prereg's §4); treating the temperature
+without unsaturating the head is spent as a lever.
 
 ### The review snapshot corrects the closing record; verdicts stand — *booked (2026-08-23)*
 Independent re-derivation of every closing number
