@@ -33,8 +33,10 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import pickle
+import subprocess
 
 import numpy as np
 
@@ -45,6 +47,30 @@ from courtside_dynamics.envs._paddle_court import (
 from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
 from courtside_dynamics.envs.tennis_rules import CourtSide, RallyStateMachine
 from courtside_dynamics.training.paddle_diagnosis import native_checkpoint_policy
+
+
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _git_sha() -> str:
+    try:
+        root = __file__.rsplit("/tools/", 1)[0]
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True, cwd=root,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True, check=True, cwd=root,
+        ).stdout.strip()
+        return f"{sha}-dirty" if dirty else sha
+    except Exception:
+        return "unknown"
 
 
 def _make_env() -> PaddleTennisEnv:
@@ -68,6 +94,13 @@ def _restore_sampler(entry: dict, env: PaddleTennisEnv):
 def _launch_feed(env: PaddleTennisEnv, entry: dict) -> np.ndarray:
     """Arm (a): harvested physics as a fresh feed from side B."""
     env.set_state(entry["qpos"].copy(), entry["qvel"].copy())
+    if "head_a" in entry:
+        ball = entry["qpos"][env._ball_qposadr : env._ball_qposadr + 3]
+        for key in ("head_a", "head_b"):
+            assert (
+                float(np.linalg.norm(entry[key] - ball))
+                >= env._SERVE_CLEARANCE
+            ), f"drill launch violates clearance vs {key}"
     env._serving_side = CourtSide.B
     env._rules = RallyStateMachine(
         serving_side=CourtSide.B, rules=env._rally_rules, court=PADDLE_COURT
@@ -92,6 +125,8 @@ def _launch_full(env: PaddleTennisEnv, entry: dict) -> np.ndarray:
     env._rules = copy.deepcopy(entry["rules"])
     env._event_sampler = _restore_sampler(entry, env)
     env._serving_side = entry["serving_side"]
+    if "next_serving_side" in entry:
+        env._next_serving_side = entry["next_serving_side"]
     env.step_number = entry["step_number"]
     env._crossings = entry["crossings"]
     env._crossings_base = entry["crossings_base"]
@@ -168,11 +203,13 @@ def run_arm(arm: str, library: dict, policy, max_steps: int, reset_seed: int) ->
                     entry["points_played"] if arm == "full" else 0
                 )
                 if term or trunc or boundary:
-                    row["ender"] = (
-                        str(info["termination_reason_name"])
-                        if (term or trunc)
-                        else "point_boundary"
-                    )
+                    name = str(info["termination_reason_name"])
+                    if boundary and not (term or trunc):
+                        row["ender"] = f"point_boundary/{name}"
+                    elif trunc and not term and name == "none":
+                        row["ender"] = "episode_truncated"
+                    else:
+                        row["ender"] = name
                     break
             if arm == "full":
                 rec = entry["cont_ball_track"]
@@ -223,6 +260,9 @@ def run_arm(arm: str, library: dict, policy, max_steps: int, reset_seed: int) ->
         "bounce_dist_mean": float(np.mean(bd)) if bd else None,
         "bounce_within_1m": float(np.mean([d <= 1.0 for d in bd])) if bd else None,
         "obs_fidelity_max": float(max(r["obs_fidelity"] for r in rows)),
+        "truncation_censored": sum(
+            r["ender"] == "episode_truncated" for r in rows
+        ),
         "enders": enders,
     }
     if arm == "full":
@@ -275,8 +315,23 @@ def main() -> None:
         for k, v in summary.items():
             print(f"  {k}: {v}")
     if args.json:
+        payload = {
+            "library_schema": library["schema"],
+            "library_path": args.library,
+            "library_sha256": _sha256(args.library),
+            "library_git_sha": library.get("git_sha"),
+            "model_sha256": _sha256(args.model) if args.model else None,
+            "vec_normalize_sha256": (
+                _sha256(args.vec_normalize) if args.vec_normalize else None
+            ),
+            "tool_git_sha": _git_sha(),
+            "policy": args.policy,
+            "max_steps": args.max_steps,
+            "reset_seed": args.reset_seed,
+            "results": results,
+        }
         with open(args.json, "w") as f:
-            json.dump({"library_schema": library["schema"], "results": results}, f, indent=2)
+            json.dump(payload, f, indent=2)
         print(f"\nwritten -> {args.json}")
 
 

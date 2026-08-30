@@ -1,10 +1,12 @@
 """k=2 drill harvest — capture real second-ball scenarios from a checkpoint.
 
 The harvest instrument of ``docs/design_paddle_tennis_k2_drill.md`` §2 D1:
-replays a named checkpoint deterministically and records, at the **last
-pre-net-crossing control step** of every k=2-opportunity return (own valid
-hit → opponent valid strike, same point → return heading to side A), a
-full scenario tuple:
+replays a named checkpoint deterministically and records, at the **last control
+step with ball x > 0.05 m before the net crossing** of every
+k=2-opportunity return (own valid hit → opponent valid strike, same
+point → return heading to side A; at most one entry per point — a
+later same-point opportunity from a converted k=2 is not captured,
+by convention), a full scenario tuple:
 
 - the complete physics state (full qpos/qvel — the paddle court is exactly
   ball + six slides, nq=13/nv=12, so this is exact);
@@ -17,9 +19,13 @@ full scenario tuple:
 - provenance: repo git sha, artifact sha256s, seed, step.
 
 Seeds must come from the scratch/workpaper range proposed in the design's
-§7 (default 9030, inside 9000–9199): harvesting from calibration 5200+
-would make the diagnosis instrument's own scenarios training data, and
-every reserved/burned ledger block is refused outright.
+§7: harvesting from calibration 5200+ would make the diagnosis
+instrument's own scenarios training data, and every reserved/burned
+ledger block plus the consumed probe seeds are refused outright. The
+default range (9030, 70 episodes) reproduces the §3a registered
+library; a harvest of a DIFFERENT checkpoint must draw fresh seeds
+from the unconsumed scratch remainder (9168+) — consumed harvest
+ranges may be reused only to reproduce their own library.
 
 The library is a single pickle file (schema ``k2-drill-library-v0``).
 
@@ -41,6 +47,7 @@ import subprocess
 import numpy as np
 
 from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
+from courtside_dynamics.envs.tennis_rules import CourtSide
 from courtside_dynamics.training.paddle_diagnosis import native_checkpoint_policy
 
 SCHEMA = "k2-drill-library-v0"
@@ -49,6 +56,7 @@ SCHEMA = "k2-drill-library-v0"
 # calibration block (train-on-test refusal), and already-consumed
 # scratch ranges. See docs/README.md's ledger and the drill design §7.
 _REFUSED_BLOCKS = (
+    (3000, 3099),
     (3100, 3199),
     (4000, 4099),
     (4100, 4199),
@@ -65,6 +73,7 @@ _REFUSED_BLOCKS = (
     (6300, 6399),
     (9000, 9029),  # 2026-08-30 feasibility probe (consumed scratch)
     (9100, 9146),  # 2026-08-30 review probes (consumed scratch)
+    (9147, 9147),  # 2026-08-30 step-0 replay reset seed (consumed scratch)
 )
 
 
@@ -88,13 +97,22 @@ def _sha256(path: str) -> str:
 
 def _git_sha() -> str:
     try:
-        return subprocess.run(
+        root = __file__.rsplit("/tools/", 1)[0]
+        sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             check=True,
-            cwd=__file__.rsplit("/tools/", 1)[0],
+            cwd=root,
         ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=root,
+        ).stdout.strip()
+        return f"{sha}-dirty" if dirty else sha
     except Exception:
         return "unknown"
 
@@ -112,6 +130,13 @@ def _snapshot_env(env: PaddleTennisEnv, obs: np.ndarray) -> dict:
         "rules": copy.deepcopy(env._rules),
         "sampler": sampler_copy,
         "serving_side": env._serving_side,
+        "next_serving_side": env._next_serving_side,
+        "head_a": np.asarray(
+            env._paddle_position(CourtSide.A), dtype=np.float64
+        ).copy(),
+        "head_b": np.asarray(
+            env._paddle_position(CourtSide.B), dtype=np.float64
+        ).copy(),
         "step_number": int(env.step_number),
         "crossings": int(env._crossings),
         "crossings_base": int(env._crossings_base),
@@ -150,6 +175,8 @@ def harvest(
         points_per_episode=None,
     )
     entries: list[dict] = []
+    clearance_dropped = 0
+    crossings_unarmed = 0  # crossing observed with no armed candidate
     try:
         for seed in range(seed_start, seed_start + episodes):
             obs, _ = env.reset(seed=seed)
@@ -159,6 +186,7 @@ def harvest(
             opp_struck_point: int | None = None
             candidate: dict | None = None
             open_entry: dict | None = None
+            prev_points = 0
             while True:
                 action = policy(obs)
                 obs, _, term, trunc, info = env.step(action)
@@ -166,6 +194,13 @@ def harvest(
                 ended = bool(term or trunc)
                 ball_x = float(env.data.qpos[ball_adr])
                 ball_vx = float(env.data.qvel[ball_dof])
+                if points != prev_points:
+                    # absorbed point boundary: no chain state survives it
+                    # (guards the same-control-step hit+fault edge)
+                    last_hit_a_point = None
+                    opp_struck_point = None
+                    candidate = None
+                prev_points = points
 
                 if open_entry is not None:
                     e = open_entry
@@ -215,7 +250,23 @@ def harvest(
                         candidate = _snapshot_env(env, obs)
                         candidate["seed"] = seed
                         candidate["point"] = points
+                    elif ball_x <= 0.0 and candidate is None:
+                        crossings_unarmed += 1
+                        opp_struck_point = None
                     elif ball_x <= 0.0 and candidate is not None:
+                        ball_pos = candidate["qpos"][
+                            ball_adr : ball_adr + 3
+                        ]
+                        clear = all(
+                            float(np.linalg.norm(candidate[key] - ball_pos))
+                            >= env._SERVE_CLEARANCE
+                            for key in ("head_a", "head_b")
+                        )
+                        if not clear:
+                            clearance_dropped += 1
+                            candidate = None
+                            opp_struck_point = None
+                            continue
                         open_entry = candidate
                         open_entry.update(
                             cont_first_step=None,
@@ -240,6 +291,9 @@ def harvest(
         "vec_normalize_sha256": _sha256(vec_normalize_path),
         "seed_start": seed_start,
         "episodes": episodes,
+        "continuation_steps": continuation_steps,
+        "clearance_dropped": clearance_dropped,
+        "crossings_unarmed": crossings_unarmed,
         "entries": entries,
     }
 

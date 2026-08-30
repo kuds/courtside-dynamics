@@ -1,6 +1,8 @@
 # Design: PaddleTennis k=2 drill — training the second ball in its real context
 
-Status: **Proposed — design only, nothing implemented; launches
+Status: **Proposed — design only; the §3a harvest and step-0
+instruments are shipped, the env drill mechanism is NOT implemented;
+launches
 nothing until its battery (§4) and pilot (§5) are frozen by the
 maintainer, and §2 D2 carries a maintainer fork this document does
 not decide. Drafted 2026-08-30 from the PT2 routing**
@@ -112,9 +114,9 @@ Two new constructor kwargs on `PaddleTennisEnv`, both default-off:
   discipline: the eligibility draw consumes no RNG when the drill
   is off, and its stream position when on is pinned at freeze.
 
-**D1 — scenario source: harvested, never synthetic.** A harvest
-instrument (`tools/paddle_tennis_k2_harvest.py`, shipping with the
-implementation) replays a named checkpoint deterministically and
+**D1 — scenario source: harvested, never synthetic.** The harvest
+instrument (`tools/paddle_tennis_k2_harvest.py`, shipped 2026-08-30,
+§3a) replays a named checkpoint deterministically and
 records, at the **last pre-net-crossing control step** of every
 k=2-opportunity return: full ball state (position + 6-dof qvel,
 directly captured), both paddles' slide qpos + qvel, **the rules
@@ -144,7 +146,9 @@ control).
 **D2 — the fork: what "launching a harvested scenario" restores.**
 - **(a) Feed-context** (the original draft): physics only; fresh
   `RallyStateMachine(serving_side=B)`; the drill ball is the
-  point's feed. Measured step-0: touch 38%, legal hit 34–36%.
+  point's feed. Measured step-0 on the registered library, faithful
+  full physics: **touch 6.9%, legal hit 6.9%** (§3a; the review
+  probe's 34–38% was its simplified-physics variant, §1a).
   Cheap (reuses `_launch_point`'s mid-episode body with the drill
   draw replacing `_draw_serve()`; feasibility measured, §3), but
   carries the §1a transfer discontinuity and the genuine-context
@@ -231,10 +235,13 @@ distribution-drift starvation.
   `drill_policy_probe*.py`, 47 states from the LH1c streams,
   scratch seeds 9100–9146): real-context 0/47 convert, 15.9%
   ≤ 1 m; feed-context 34–36% legal hits, 38% touch, robust across
-  three paddle-state arms. **The step-0 baselines for both D2 arms
-  come from this instrument, re-run on the pilot's own library at
-  battery time** — drilled-point observables are scored against
-  them, never against an assumed floor (the draft's touch-accrual
+  its three paddle-state arms — **all simplified physics, superseded
+  at corrected magnitude by §3a's faithful rows. The step-0
+  baselines for both D2 arms come from
+  `tools/paddle_tennis_k2_step0.py`'s faithful launches, re-run on
+  the pilot's own library at battery time** — drilled-point
+  observables are scored against them, never against an assumed
+  floor or the simplified variant (the draft's touch-accrual
   arithmetic is retired; its ≤ 1 m-as-touch proxy overstated
   real-context touch ~10×).
 
@@ -355,8 +362,9 @@ the mechanism bars below are standing per-run observables.
 - **KD-mechanism:** paddle → return-bounce on standard-task k=2
   opportunities (band from the battery, target direction 3 m →
   0.89 m), and drilled-point touch/conversion scored against the
-  KD2 step-0 baselines (≈38% for arm (a), ≈0% for arm (b) — only
-  movement *from the baseline* counts).
+  KD2 step-0 baselines (measured on the registered library, §3a:
+  ≈6.9% for arm (a), ≈2–3% for arm (b) — only movement *from the
+  baseline* counts).
 - **KD-retention:** k=1 receiving holds its band on the standard
   task, with a **mid-run abort convention** named at freeze (the
   existing eval-side selection/patience machinery on
