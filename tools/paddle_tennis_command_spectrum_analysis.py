@@ -199,7 +199,7 @@ def analyze_subject(streams_dir, name, deltas):
         ]
         first_hit_of_point: dict[int, int] = {}
         for t0 in ha:
-            first_hit_of_point.setdefault(int(pts[t0]), t0)
+            first_hit_of_point.setdefault(int(pts[t0]), int(t0))
         for t0 in ha:
             nxt = hb[hb > t0]
             if not len(nxt) or pts[nxt[0]] != pts[t0]:
