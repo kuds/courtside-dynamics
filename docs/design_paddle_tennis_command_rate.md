@@ -280,13 +280,16 @@ Seed ledger: **6400–6499 assigned to CR2 at the 2026-08-29 freeze**
 (consumed when CR2 first runs; nothing burned yet); CR1 reuses
 calibration 5200–5229; **4100–4199 remains sealed**.
 
-## 7. Pre-implementation falsification (2026-08-30) — PROPOSED disposition
+## 7. Pre-implementation falsification (2026-08-30) — disposition BOOKED
 
-**Status of this section: PROPOSAL — the maintainer books the
-disposition.** No CR battery stage has run, no pre-registered run
-has started, and no line of the limiter has been implemented, so a
-disposition decision now voids nothing; §1–§6 above stand as the
-frozen record.
+**Status of this section: BOOKED — maintainer decision, 2026-08-30,
+recorded via the review session: the design is CLOSED without
+implementation.** No CR battery stage ran, no pre-registered run
+started, and no line of the limiter was implemented, so this
+disposition voids nothing; §1–§6 above stand as the frozen record
+of what was designed and why. The consequences stated at the end of
+this section are in force: **6400–6499 is back in the free pool**,
+and the LT1 §4 interface-side routing is satisfied and exhausted.
 
 Before CR0, the PT2 diagnosis probe
 ([`paddle_tennis_command_spectrum_20260830.md`](paddle_tennis_command_spectrum_20260830.md))
@@ -320,12 +323,14 @@ had assumed:
   default pays the k=2 chain via the certified escrow ladder — is
   contradicted at every Δ.
 
-**Proposed disposition: CLOSED without implementation** — falsified
+**Booked disposition: CLOSED without implementation** — falsified
 by measurement before CR0, at the cost of one CPU replay session.
-On booking: the CR2 seed block **6400–6499 returns to the free pool
-unconsumed** (this document then burns nothing); the LT1 §4 routing
-("route to the interface-side treatment") is recorded as satisfied
-and exhausted by this measurement; the campaign's next lever is a
-new design decision, with PT2 §7 naming the measured target (paddle
-→ return-bounce ~3 m → ~1 m) and the candidate lever classes
-(demonstration/buffer injection; the k=2 drill curriculum).
+In force with this booking: the CR2 seed block **6400–6499 returns
+to the free pool unconsumed** (this document burns nothing); the
+LT1 §4 routing ("route to the interface-side treatment") is
+recorded as satisfied and exhausted by this measurement; the
+campaign's next lever is a new design decision, with PT2 §7 naming
+the measured target (paddle → return-bounce ~3 m → ~1 m) and the
+candidate lever classes (demonstration/buffer injection; the k=2
+drill curriculum — the latter taken up first, per the 2026-08-30
+maintainer direction).

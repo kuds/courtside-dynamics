@@ -11,9 +11,9 @@ rested on an *assumed* command spectrum and an *unmeasured* k=2
 geometry, both measurable from recorded streams for CPU pennies.
 Diagnosis-side only: no bars, no verdict — but §6 states plainly
 which frozen premise the numbers contradict, and §7 routes.
-The proposed disposition of the frozen design is drafted as its own
-clearly-labeled §7 amendment in that document; **the maintainer books
-it, not this snapshot.**
+The disposition of the frozen design lives in that document's §7 —
+**booked by the maintainer 2026-08-30: CLOSED without
+implementation.**
 
 ## 1. Data and provenance
 

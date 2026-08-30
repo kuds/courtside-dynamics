@@ -86,11 +86,43 @@ below are an instance of one of these.
 
 Source: the dated `paddle_tennis_*` docs and `design_paddle_tennis_*`
 verdict sections indexed in [`docs/README.md`](README.md); this
-section distills the campaign's era verdicts (2026-08-15 → 08-29;
+section distills the campaign's era verdicts (2026-08-15 → 08-30;
 the earlier exploration/diagnosis-era verdicts remain in their
 source docs' status lines).
 The P0–P2 court-scaling entry predates the campaign and stays in the
 WallBall section below.
+
+### The command-rate design dies on measurement before a line of code: k=2 is a directed-interception gap, not a thrash gap — *closed without implementation (booked 2026-08-30); PT2*
+The frozen limiter design's premise was falsified by a
+pre-implementation probe
+([`paddle_tennis_command_spectrum_20260830.md`](paddle_tennis_command_spectrum_20260830.md),
+one Colab CPU session, every headline independently re-derived
+twice): the measured thrash is heavy-tailed **jump-then-dwell**
+(p50 per-step command delta ≤ 0.033 m, p99 3.4–5.3 m), not the
+per-step alternation Δ = 0.15 was priced against — no
+travel-reduction mechanism in evidence at the frozen candidate,
+and the Δ small enough to bite (≤ 0.05, sub-plant) ramps the
+oracle's own strike jumps (p99 1.76 m). Decisively: on measured
+k=2 opportunities (~1.3–1.7 per episode — **opportunity is not
+scarce**) the trained paddle sits ~3 m from the return's bounce
+and converts ~1%, the oracle sits 0.89 m and converts 98% — and
+the **frozen-at-hit counterfactual is no better than the thrash**
+(≤ 1 m on 1.5–6%), while the oracle's own frozen counterfactual
+collapses to 39%: its k=2 mechanism is *directed recovery toward
+the return's landing point*, which removing motion cannot produce.
+Lessons booked: (a) **price a mechanism against the measured
+spectrum, not the assumed one** — the design's CR2 witness
+(symmetric per-step bang-bang) was the one spectrum its limiter
+trivially defeats and could never have caught this; (b) **a
+cheap falsification probe in front of implementation is worth
+running whenever the mechanism's premise is measurable from
+recorded data** — this one cost hours and saved an
+implementation, a battery, a 1M pilot, and an era break; (c) the
+campaign's target is now a number: **paddle → return-bounce
+~3 m → ~1 m**. Seed block 6400–6499 returned to the pool
+unconsumed. Routing: the k=2 drill curriculum is taken up first
+(maintainer direction, 2026-08-30), demonstration/buffer
+injection the named alternative.
 
 ### The temperature-skip lever is spent: LT1 fails every bar and the campaign routes to the interface side — *adjudicated (2026-08-29, run 20260828_121324); command-rate design frozen*
 The pre-registered temperature-skip pilot
