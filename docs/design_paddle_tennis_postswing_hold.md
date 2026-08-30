@@ -10,12 +10,16 @@ pre-registered run starts void that run as campaign evidence.
 The registered n-point run (`20260816_235141`, from-scratch 3M, seed
 1) booked **RK1 FAIL under §5's stop/amend branch**
 (`paddle_tennis_registered_run_prereg_20260816.md`): k=2 exchange
-survival sat at exactly 1% on nine checkpoints and 0% on the other
-twenty-one, while every upstream rung was climbing or solved —
+survival sat at exactly 1% on eleven checkpoints and 0% on the other
+nineteen (count corrected 2026-08-23, from the diagnosis rows; the
+original text said nine/twenty-one), while every upstream rung was
+climbing or solved —
 LS1 gate PASS (the from-scratch bootstrap works), RE3 PASS with k=1
 receiving at 81–95% across the last third, first-hit shot quality at
 81% crossed / 71% in by 3M (the scripted oracle plays 92%/84%), M
-PASS at 77.5%, campaign-record evaluations (best +1.85). A channel
+PASS at 77.5%, campaign-record evaluations (best +1.822; this
+figure read "+1.85" until the 2026-08-23 review re-derived it from
+evaluations.npz). A channel
 that stays flat at 1% for two million steps while its prerequisites
 triple is not budget-limited; it is reward-limited.
 
@@ -425,19 +429,24 @@ nor LH1b ever was.
   warm-started line's best first-return channel.
 - k=2 never left the noise floor: two isolated 2% readings (1.3M,
   2.9M) among ~19 extension probes otherwise at 0–1% — the pattern
-  probe-sized sampling noise produces, not an onset.
+  probe-sized sampling noise produces, not an onset. **[This reading
+  was wrong — corrected in §4d.]**
 - Hold travel settled at 7.5–8.7 m (3M probe: 8.71 m mean, p90
-  11.37 m). Paid, not bought.
+  11.37 m). Paid, not bought. [Corrected in §4d: the extension series
+  actually spans 6.38–8.71 m.]
 - **Training dynamics, the honest counterpoint:** best eval
   **+2.483 ± 0.829 at step 2,425,000** — the campaign record (prior
-  best +1.85 across all runs) — and `best_model` selected from step
+  best +1.822 across all runs; originally recorded here as +1.85) —
+  and `best_model` selected from step
   **2,325,000** (crossings 5.63): the first warm-started run whose
   best came from deep training rather than the untouched transfer.
-  The eval-info channel's entire top-5 sits in the 2.0–2.6M band
-  (reward +1.766 and crossings 6.17 at 2.3M; final policy 5.97
-  crossings, 30% success, closing eval +0.976 ± 1.626). Whether the
-  live hold gradient improved the optimization or MuJoCo 3.12 moved
-  the task is not separable post-hoc and no attempt is made here.
+  Four of the eval-info channel's top-5 sit in the 2.0–2.6M band
+  (rank 5 is 1.725M; corrected in §4d — the original text claimed
+  the entire top-5) (reward +1.766 and crossings 6.17 at 2.3M; final
+  policy 5.97 crossings, 30% success, closing eval +0.976 ± 1.626).
+  Whether the live hold gradient improved the optimization or MuJoCo
+  3.12 moved the task is not separable post-hoc and no attempt is
+  made here. [Separated in §4d: the physics did not move.]
 
 **Decision (maintainer, 2026-08-22): the hold-escrow line closes
 without adoption.** The §4 rule re-applies with no re-pair branch
@@ -455,6 +464,51 @@ instrument and read where the paddle is being *commanded* after the
 swing — before any further reward-side change. The §4a shelf item
 (warm start without the transferred temperature) remains the named
 training-dynamics candidate for the next registered attempt.
+
+### 4d. Erratum and post-closure measurements (2026-08-23)
+
+The review snapshot
+[`paddle_tennis_review_next_steps_20260823.md`](paddle_tennis_review_next_steps_20260823.md)
+re-derived every §4c number from the run's raw artifacts and re-ran
+the instruments locally against sha-verified checkpoints. The KH1
+verdict and the closure decision stand unchanged. Three recorded
+observations were wrong and are corrected here:
+
+- **The extension k=2 series.** The diagnosis rows actually read: 2%
+  at 1.3M, **2.1M**, and 2.9M; **5% at 2.5M** (4 second-hits in 85
+  receiving points, one landing in); 1% at 1.2M, 1.6M, 2.0M, 2.2M,
+  2.3M, 2.6M, and 3.0M; 0% elsewhere. The 5% reading — the era's
+  strongest — sits at the KH1 (≥ 3%) and RK1 (≥ 5%) PASS-bar values,
+  outside the registered window. Re-measured by the review (CPU
+  replay, same env kwargs): the same-seed replication reproduces it
+  (6.2%, 5/81 — real, not a probe artifact), but on fresh seeds
+  5230–5299 the checkpoint scores **1.6% (3/191, 95% CI
+  [0.3%, 4.5%])** — off the floor (the registered 1M window ran
+  ≈ 0.4%), below every PASS bar, and with no measured edge over the
+  crowned 2.325M best (1.1%, 3/274, on the full block). The
+  corrected reading: late-run k=2 rose off the floor by a non-hold
+  route — real but small, and seed-conditioned at its peak.
+- **Extension hold travel** spans 6.38–8.71 m, not "settled at
+  7.5–8.7 m".
+- **The top-5 claim**: four of five in the 2.0–2.6M band on either
+  instrument (eval-info rank 5 at 1.725M; npz rank 2 at 2.925M),
+  never five.
+
+Two §4c questions the review answered with new measurements:
+
+- **The MuJoCo confound is retired.** PT1's oracle and LH1c-best rows
+  replicate to every printed digit under MuJoCo 3.12.0 versus the
+  doc's 3.11.0 — the version change is behaviorally nil on this task,
+  so the campaign-record evals belong to the run, not to physics
+  moving.
+- **The dose is directly audited.** The 2.5M milestone-video per-step
+  trace (the one artifact carrying the reward decomposition) shows
+  `rew_hold` paying 4 windows for +0.211 total (mean 0.053 of the
+  0.5 scale ≈ 10.7 m travel inside paying windows) and **all of it
+  clawed back — net kept 0.000**. "Delivered and declined" now rests
+  on a logged number. PT1 on the same checkpoint reads cmd path
+  25.35 m, 92.4% saturation, 0.290 m/step saccade — the late k=2 is
+  not via stillness.
 
 ## 5. Seed ledger
 

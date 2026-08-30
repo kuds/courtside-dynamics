@@ -606,6 +606,133 @@ def test_train_warm_starts_sac_policy_and_entropy(tmp_path):
         float(np.exp(-6.5))
     )
     assert "replay_buffer" in initialization["reset"]
+    # The default pairing records that the temperature transfer was on.
+    assert initialization["transfer_log_ent_coef"] is True
+    assert "log_ent_coef" not in initialization["reset"]
+
+
+def test_train_warm_start_skips_sac_entropy_when_flagged(tmp_path):
+    """``transfer_log_ent_coef=False`` -- the temperature-skip warm start:
+    the policy still transfers in full, but the target keeps its own
+    fresh ``auto_0.02`` init instead of inheriting the source's
+    collapsed temperature."""
+    source_dir, env_fn, source_state = _make_sac_warm_start_source(tmp_path)
+    target_dir = tmp_path / "sac_target_skip"
+    capture = _CaptureSacWarmStart()
+    cfg = TrainConfig(
+        env_fn=env_fn,
+        algo="SAC",
+        total_timesteps=8,
+        log_dir=str(target_dir),
+        n_envs=1,
+        seed=13,
+        eval_freq=10_000,
+        checkpoint_freq=0,
+        video_freq=0,
+        record_video=False,
+        info_dict_eval=False,
+        n_eval_episodes=1,
+        normalize_obs=True,
+        normalize_obs_excluded_indices=(0,),
+        warm_start=WarmStartConfig(source_dir, transfer_log_ent_coef=False),
+        model_kwargs={
+            "buffer_size": 64,
+            "learning_starts": 1_000,
+            "ent_coef": "auto_0.02",
+        },
+        extra_callbacks=(capture,),
+    )
+    train(cfg)
+
+    # Policy transfer is unaffected by the flag.
+    assert capture.policy_state is not None
+    for name, expected in source_state.items():
+        torch.testing.assert_close(capture.policy_state[name], expected)
+    # The source's collapsed -6.5 was NOT copied; auto_0.02's init stands.
+    assert capture.log_ent_coef == pytest.approx(float(np.log(0.02)))
+
+    config = json.loads((target_dir / "config.json").read_text())
+    initialization = config["initialization"]
+    assert "log_ent_coef" not in initialization["transferred"]
+    assert "log_ent_coef" in initialization["reset"]
+    assert initialization["transfer_log_ent_coef"] is False
+    assert "transferred_ent_coef" not in initialization
+    assert config["train_config"]["warm_start"]["transfer_log_ent_coef"] is False
+
+
+def test_warm_start_enforces_expected_artifact_sha256(tmp_path):
+    """A pinned source artifact is verified by content before any output:
+    full digests and >=8-char lowercase prefixes both match; a mismatch
+    aborts naming the artifact."""
+    source_dir, env_fn, _ = _make_sac_warm_start_source(tmp_path)
+    model_sha = hashlib.sha256(
+        (source_dir / "best_model.zip").read_bytes()
+    ).hexdigest()
+    normalizer_sha = hashlib.sha256(
+        (source_dir / "best_vec_normalize.pkl").read_bytes()
+    ).hexdigest()
+
+    def make_cfg(log_dir, pins):
+        return TrainConfig(
+            env_fn=env_fn,
+            algo="SAC",
+            total_timesteps=8,
+            log_dir=str(log_dir),
+            n_envs=1,
+            seed=13,
+            eval_freq=10_000,
+            checkpoint_freq=0,
+            video_freq=0,
+            record_video=False,
+            info_dict_eval=False,
+            n_eval_episodes=1,
+            normalize_obs=True,
+            normalize_obs_excluded_indices=(0,),
+            warm_start=WarmStartConfig(
+                source_dir, expected_artifact_sha256=pins
+            ),
+            model_kwargs={"buffer_size": 64, "learning_starts": 1_000},
+        )
+
+    train(
+        make_cfg(
+            tmp_path / "sac_target_pinned",
+            {
+                "best_model.zip": model_sha,
+                "best_vec_normalize.pkl": normalizer_sha[:12],
+            },
+        )
+    )
+    config = json.loads(
+        (tmp_path / "sac_target_pinned" / "config.json").read_text()
+    )
+    recorded = config["train_config"]["warm_start"]["expected_artifact_sha256"]
+    assert recorded == {
+        "best_model.zip": model_sha,
+        "best_vec_normalize.pkl": normalizer_sha[:12],
+    }
+
+    with pytest.raises(ValueError, match="does not match its pinned"):
+        train(
+            make_cfg(
+                tmp_path / "sac_target_bad_pin",
+                {"best_model.zip": "deadbeef" * 8},
+            )
+        )
+
+
+def test_warm_start_config_validates_new_fields(tmp_path):
+    with pytest.raises(TypeError, match="transfer_log_ent_coef"):
+        WarmStartConfig("some_dir", transfer_log_ent_coef=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="unknown artifact"):
+        WarmStartConfig(
+            "some_dir", expected_artifact_sha256={"final_model.zip": "a" * 64}
+        )
+    for bad in ("abc123", "A" * 64, "xyz" * 8, "a" * 65):
+        with pytest.raises(ValueError, match="lowercase hex"):
+            WarmStartConfig(
+                "some_dir", expected_artifact_sha256={"best_model.zip": bad}
+            )
 
 
 def test_warm_start_rejects_algo_mismatch(tmp_path):
@@ -899,6 +1026,61 @@ def test_run_summary_reports_task_metric_selected_best_model(tmp_path):
     assert ">=3 25.0%" in text
     # The reward-series best line is still reported for context.
     assert "2.000 +/- 0.000 (at 75,000 steps)" in text
+
+
+def test_run_summary_labels_each_evaluation_instrument(tmp_path):
+    """Every evaluation line must name the instrument it reports: run
+    20260821_013700 left three different "final eval" numbers (closing
+    eval, evaluations.npz row, eval_info.csv row) that a reader could
+    not tell apart."""
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    np.savez(
+        tmp_path / "evaluations.npz",
+        timesteps=np.array([25_000, 50_000]),
+        results=np.array([[0.5, 0.5], [2.0, 2.0]]),
+        ep_lengths=np.array([[30, 30], [30, 30]]),
+    )
+    (tmp_path / "eval_info.csv").write_text(
+        "timestep,metric,value\n"
+        "25000,bounce_count_ep_mean,2.86\n"
+        "50000,bounce_count_ep_mean,2.14\n"
+    )
+    monitor_dir = tmp_path / "metrics" / "monitor"
+    monitor_dir.mkdir(parents=True)
+    (monitor_dir / "0.monitor.csv").write_text(
+        '#{"t_start": 0.0}\nr,l,t\n1.0,10,1.0\n2.0,10,2.0\n'
+    )
+
+    def env_fn():
+        raise RuntimeError("no env needed; probe degrades gracefully")
+
+    cfg = TrainConfig(
+        env_fn=env_fn,
+        log_dir=str(tmp_path),
+        headline_key="bounce_count",
+    )
+    write_run_summary(
+        cfg,
+        str(tmp_path),
+        final_mean_reward=0.976,
+        final_std_reward=1.626,
+        duration_seconds=10.0,
+    )
+    text = (tmp_path / "stage_summary.txt").read_text()
+    # Closing eval: train()'s epilogue evaluate_policy pass, distinct
+    # from both periodic series.
+    assert (
+        "Final eval:     0.976 +/- 1.626  [closing eval, fresh episodes]"
+        in text
+    )
+    # EvalCallback's reward series (evaluations.npz).
+    assert "2.000 +/- 0.000 (at 50,000 steps)  [periodic eval series]" in text
+    # InfoDictEvalCallback's series (eval_info.csv), on both lines.
+    assert "Headline final: 2.14  [eval_info series]" in text
+    assert "2.86 (at 25,000 steps)  [eval_info series]" in text
+    # Training-episode rewards from the train env's Monitor logs.
+    assert "1.500 +/- 0.707 (last 2 episodes)  [train monitor logs]" in text
 
 
 def _merged_eval_cfg(tmp_path, **overrides):

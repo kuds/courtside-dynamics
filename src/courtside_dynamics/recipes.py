@@ -307,6 +307,26 @@ _PADDLE_TENNIS_TERMINAL_EVAL_KEYS = (
     "point_end_volley",
 )
 
+# The env's nine-component reward decomposition: per-step increments
+# that sum to each step's reward (envs/paddle_tennis.py). Collected at
+# eval so every component's per-episode delivered dose lands in
+# eval_info.csv as ``<key>_ep_sum_mean`` -- the ``rew_`` prefix is what
+# opts a collected key into the eval callback's episode-sum aggregation
+# (review doc §1.6: the milestone-video CSVs were the only artifact
+# carrying the decomposition, so a shaping escrow's dose was not
+# auditable from the metrics artifacts).
+_PADDLE_TENNIS_REWARD_COMPONENT_KEYS = (
+    "rew_return",
+    "rew_fault",
+    "rew_unsafe",
+    "rew_shaping",
+    "rew_shaping_clawback",
+    "rew_reach",
+    "rew_reach_clawback",
+    "rew_hold",
+    "rew_hold_clawback",
+)
+
 # Same rationale as the humanoid exclusions above: normalize only the
 # continuous physical block; the bounded rally/contact tail stays raw.
 _PADDLE_TENNIS_NORMALIZATION_EXCLUSIONS = tuple(
@@ -1182,6 +1202,9 @@ RECIPES: dict[str, Recipe] = {
                 "legal_hit_count",
                 "legal_hit_count_a",
                 "bounce_count",
+                # Reward decomposition -> per-episode dose audit in
+                # eval_info.csv (see the constant's comment).
+                *_PADDLE_TENNIS_REWARD_COMPONENT_KEYS,
             ),
             # Selection/stop hygiene, measured in on the pilots: the
             # min-delta sits above the ±0.2 opponent-crossings noise

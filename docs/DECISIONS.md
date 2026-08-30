@@ -82,6 +82,142 @@ below are an instance of one of these.
 
 ---
 
+## PaddleTennis — the rally campaign
+
+Source: the dated `paddle_tennis_*` docs and `design_paddle_tennis_*`
+verdict sections indexed in [`docs/README.md`](README.md); this
+section distills the campaign's era verdicts (2026-08-15 → 08-29;
+the earlier exploration/diagnosis-era verdicts remain in their
+source docs' status lines).
+The P0–P2 court-scaling entry predates the campaign and stays in the
+WallBall section below.
+
+### The temperature-skip lever is spent: LT1 fails every bar and the campaign routes to the interface side — *adjudicated (2026-08-29, run 20260828_121324); command-rate design frozen*
+The pre-registered temperature-skip pilot
+([`paddle_tennis_lt1_prereg_20260823.md`](paddle_tennis_lt1_prereg_20260823.md)
+§4b): warm-started from the registered 2.4M best with
+`transfer_log_ent_coef=False`, the fresh α = 0.02 bought only a
+**~11k-step live window** (below 1e-3 at 36k, inside the predicted
+10–20k band) before re-collapsing to the source's inherited value
+(1.474e-4 vs 1.589e-4). **KT1 FAIL** (k=2 ≤ 1% at every checkpoint,
+either parity), **T1 FAIL** (strike-ended post-swing saturation
+never < 85% — minimum 86.0% vs the 87.6% source anchor, scored by
+replaying all ten 100k checkpoints through the PT1 instrument),
+**R1 FAIL** (k=1 receiving peaks at 57%). The frozen rule's T1-FAIL
+branch booked: **the optimizer-side lever is spent — no further
+temperature retry** — and
+[`design_paddle_tennis_command_rate.md`](design_paddle_tennis_command_rate.md)
+was frozen the same day (Δ = 0.15 rate limit, CR0–CR3 battery, CR2
+block 6400–6499 assigned; LC1's final freeze — shape confirmation
+and bars — deferred to after the battery). Two observations sharpen
+the routing. The 3M same-seed companion's first 1M **reproduced the
+registered run byte-identically on all ten diagnosis rows** (GPU
+nondeterminism produced no measurable divergence — this rerun was a
+reproduction, not a replicate, exactly as the prereg's §4a
+cautioned: zero independent evidence). And its 1M–3M tail is the
+campaign's core dissociation at its sharpest: k=1 receiving climbed
+monotonically to **90% at 3M while k=2 never exceeded 1%** in
+twenty rows — first-exchange mastery is fully learnable under a
+collapsed temperature and buys nothing at the second exchange,
+consistent with the blocker being neither shot quality nor budget.
+Era law extended: **restoring α buys a window, not a regime** —
+under appendix D.6's tanh-saturation mechanism, a warm start that
+begins ~88% saturated re-collapses a fresh auto-tuned temperature
+(confirmed at α = 0.02; a fixed α would be a new design with its
+own document, per the prereg's §4); treating the temperature
+without unsaturating the head is spent as a lever.
+
+### The review snapshot corrects the closing record; verdicts stand — *booked (2026-08-23)*
+Independent re-derivation of every closing number
+([`paddle_tennis_review_next_steps_20260823.md`](paddle_tennis_review_next_steps_20260823.md)):
+RK1/KH1 FAIL and the hold-line closure all reproduce, but §4c's
+extension observation had missed that k=2 receiving read **5% at the
+2.5M probe** — the era's strongest reading, at the PASS-bar values,
+booked as noise floor. Fresh-seed re-measurement: 1.6% [0.3, 4.5]
+(real but small, seed-conditioned at its peak, not via stillness —
+thrash unchanged at 92% saturation, hold dose +0.211 paid and all
+clawed back in the audited trace). Also measured: **MuJoCo
+3.11 ≡ 3.12 on this task** (digit-exact deterministic replays), so
+LH1c's record eval belongs to the run, not the physics; and
+task-metric selection does not track k=2 — the crowned best (2.325M)
+is not the k=2-richest checkpoint (2.5M). Lesson 13a bit again in
+draft (caught by the review's own verification pass, commit
+`ec0606a`): the first draft's pooled estimate blended the seeds that
+nominated the checkpoint with the fresh ones; only the fresh arm
+scores.
+
+### The post-swing wander is commanded thrash, not drift — *diagnosis (PT1, 2026-08-22)*
+`data.ctrl` replay of the best checkpoints: commanded XY path 3–4×
+the paddle's actual travel (31.0 vs 7.8 m; oracle ratio 1.0), 88–91%
+of post-swing steps saturated (|action| > 0.9; the 2026-08-23
+review's 2.5M row extends the band to 93%), 0.26–0.38 m/step
+command saccades, no attractor (≈4 m from hit point and home, 5–6 m
+from the ball). The dynamics-side hypothesis is dead; the action head is
+emitting bang-bang under a dead temperature (ent_coef ~1.7e-4, std
+~0.014). Era law refined: **paid windows organize only where
+exploration can find the paying behavior** — the hold escrow needed
+~80 consecutive near-zero commands from a saturated head with no
+noise left to discover stillness. Routes: temperature-skip warm
+start first, an interface-side command-rate/low-pass treatment
+second (a new comparability era), no further escrow scale.
+
+### The hold-escrow line closes without adoption — and a shaping term must pay where the policy already is — *closed (2026-08-22)*
+Three pilots (`design_paddle_tennis_postswing_hold.md` §4–§4c): LH1
+(0.25, 4.0 m) and LH1b (0.5, 4.0 m) delivered **exactly zero
+gradient** — the 4.0 m travel budget was a cliff entirely outside
+the policy's 6–10 m band, proven by LH1b training byte-identical to
+LH1 (doubling a zero); the design error is recorded plainly: choosing
+the budget so the measured wander "pays zero" is precisely what makes
+it unlearnable. LH1c (0.5, 12.0 m — ramp moved onto the occupied
+band) delivered the dose and the policy kept the wander (registered
+1M window: KH1 FAIL, hold travel back to 8.1–8.3 m). Honest
+counterpoint, unregistered extension: campaign-record eval **+2.483
+at 2.425M**, the first warm-started run whose best came from deep
+training, k=1 receiving to 90–98%, and (per the 2026-08-23 erratum)
+a small real late k=2 rise by a non-hold route. Kwargs stay in the
+env, default off, certified farm-proof.
+
+### The registered n-point run: from-scratch bootstrapping proven, k=2 is the standing blocker — *adjudicated (2026-08-22, run 20260816_235141)*
+LS1 PASS (the adopted task trains from scratch — the campaign no
+longer depends on the transfer lineage), RE3 PASS (k=1 receiving to
+95%), M PASS (77.5% of evals), RE1/RS2 middle, **RK1 FAIL** (k=2
+≤ 1% at every checkpoint — 1% on eleven, 0% on nineteen) → the
+stop/amend branch fired into the hold-escrow line. R2 watch read
+7.5–9.1 m all run: the post-swing window was the one unpaid segment
+of the k=2 chain. Held-out block 4100–4199 not opened; stays sealed
+for the first registered-result branch.
+
+### Reach shaping fires the ADOPT branch; the recipe enters the n-point era — *implemented + adopted (2026-08-16)*
+LR1 (escrowed reach at 0.25, radius 3.0, warm-started): first
+positive learned final eval (+0.14), k=2 above zero at five
+checkpoints, touch 41%, ready error 1.08 m. Recipe defaults since
+the adoption commit: `points_per_episode=None` (continuous n-point),
+`contact_shaping=0.25`, `reach_shaping=0.25`, side-A-only
+success/guards (`legal_hit_count_a`, `best_metric_min_delta=0.25`,
+`confirm_best_eval`, 5-eval degenerate stop). Env defaults stay
+frozen (everything default-off at env level).
+
+### The n-point L2 verdict: continuous play un-samples contact from scratch; transfer collects the credit — *stop/pivot (2026-08-15)*
+Both from-scratch n-point pilots collapsed to zero contact (3.1M
+cumulative steps, one shot in bounds, ever). The validation battery
+localized it: the reward pays competence (oracle +11.6 vs statue
+−4.4 in-mode) but contact is **undiscoverable by exploration noise
+at any std** (only full-range held-64 uniform touches, ~1/10k
+steps), noise is locally punished, so entropy collapse was the
+correct local gradient; the volley trap runs 3–10× (ball-chasing
+toucher −52/episode). L2W then proved the design's inter-point
+credit mechanism by transfer: the k=1-mastered checkpoint scored
++1.92 with **zero gradient updates** — and training regressed it
+(k=1 100% → ~30% equilibrium). Chronic α-collapse is on the record
+here too: 0.02 → 9.8e-4 inside 12k steps; appendix D.6's
+tanh-saturation mechanism (saturated squashed mean inflates latent
+−log π, annealing α to zero) empirically falsifies the target −1.5
+rationale. At the verdict there was no warm-start temperature-skip
+flag in code; it shipped 2026-08-23 as
+`WarmStartConfig.transfer_log_ent_coef`, with LT1
+(`paddle_tennis_lt1_prereg_20260823.md`) as its pre-registered
+pilot (frozen 2026-08-28).
+
 ## WallBall — reward, curriculum & geometry
 
 Source: [`wall_ball_baseline_review.md`](wall_ball_baseline_review.md) (runs from

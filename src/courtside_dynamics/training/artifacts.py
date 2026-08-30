@@ -261,6 +261,12 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
                     "reset_observation_indices": list(
                         cfg.warm_start.reset_observation_indices
                     ),
+                    "transfer_log_ent_coef": cfg.warm_start.transfer_log_ent_coef,
+                    "expected_artifact_sha256": (
+                        dict(cfg.warm_start.expected_artifact_sha256)
+                        if cfg.warm_start.expected_artifact_sha256 is not None
+                        else None
+                    ),
                 }
                 if cfg.warm_start is not None
                 else None
@@ -842,8 +848,18 @@ def write_run_summary(
         lines.append(_kv("Timesteps", f"{cfg.total_timesteps:,}"))
     lines.append(_kv("Duration", duration_str))
     lines.append(_kv("Throughput", f"{throughput_fps} FPS"))
+    # Instrument tags: run 20260821_013700 left three different "final
+    # eval" numbers (this closing eval, evaluations.npz's last row,
+    # eval_info.csv's last row) that a reader could not tell apart, so
+    # every evaluation line names the instrument it reports. "Final
+    # eval" is train()'s epilogue evaluate_policy pass -- fresh
+    # episodes on the eval env, not a row of either periodic series.
     lines.append(
-        _kv("Final eval", f"{final_mean_reward:.3f} +/- {final_std_reward:.3f}")
+        _kv(
+            "Final eval",
+            f"{final_mean_reward:.3f} +/- {final_std_reward:.3f}"
+            "  [closing eval, fresh episodes]",
+        )
     )
 
     train_rewards, train_lengths = _read_monitor(log_dir)
@@ -876,7 +892,8 @@ def write_run_summary(
             lines.append(
                 _kv(
                     "Best eval",
-                    f"{best_mean:.3f} +/- {best_std:.3f} (at {best_step:,} steps)",
+                    f"{best_mean:.3f} +/- {best_std:.3f} "
+                    f"(at {best_step:,} steps)  [periodic eval series]",
                 )
             )
             # Make post-best collapse impossible to miss: the first
@@ -933,11 +950,14 @@ def write_run_summary(
             final_val = headline[-1][1]
             head_step, head_val = max(headline, key=lambda p: p[1])
             lines.append(_kv("Headline", metric))
-            lines.append(_kv("Headline final", f"{final_val:.2f}"))
+            lines.append(
+                _kv("Headline final", f"{final_val:.2f}  [eval_info series]")
+            )
             lines.append(
                 _kv(
                     "Headline best",
-                    f"{head_val:.2f} (at {head_step:,} steps)",
+                    f"{head_val:.2f} (at {head_step:,} steps)"
+                    "  [eval_info series]",
                 )
             )
         survival_parts: list[str] = []
@@ -963,7 +983,8 @@ def write_run_summary(
         lines.append(
             _kv(
                 "Recent train",
-                f"{r_mean:.3f} +/- {r_std:.3f} (last {last_n} episodes)",
+                f"{r_mean:.3f} +/- {r_std:.3f} "
+                f"(last {last_n} episodes)  [train monitor logs]",
             )
         )
 

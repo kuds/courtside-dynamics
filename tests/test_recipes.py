@@ -234,6 +234,42 @@ def test_ball_bounce_info_row_matches_header(tmp_path):
         env.close()
 
 
+def test_paddle_tennis_recipe_carries_reward_decomposition_at_eval(tmp_path):
+    """Review 20260823 §1.6: the nine ``rew_*`` components must reach
+    eval_info.csv. They ride ``info_eval_keys``, where the eval
+    callback's ``rew_`` prefix convention sums each one per episode
+    into ``<key>_ep_sum_mean``; a typo'd key silently vanishes from the
+    artifacts, so each key must also exist in the env's ``info`` dict."""
+    import numpy as np
+
+    components = (
+        "rew_return",
+        "rew_fault",
+        "rew_unsafe",
+        "rew_shaping",
+        "rew_shaping_clawback",
+        "rew_reach",
+        "rew_reach_clawback",
+        "rew_hold",
+        "rew_hold_clawback",
+    )
+    cfg = build_train_config("PaddleTennis", log_dir=str(tmp_path))
+    assert cfg.info_eval_keys is not None
+    for key in components:
+        assert key in cfg.info_eval_keys
+
+    env = cfg.env_fn()
+    try:
+        env.reset(seed=0)
+        _, _, _, _, info = env.step(
+            np.zeros(env.action_space.shape, dtype=np.float32)
+        )
+        for key in components:
+            assert key in info
+    finally:
+        env.close()
+
+
 def test_humanoid_tennis_smoke_recipe_has_compact_recording_schema(tmp_path):
     """Phase 3 records rally diagnostics without flattening every rule key."""
     import numpy as np

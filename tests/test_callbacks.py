@@ -781,6 +781,211 @@ def test_info_dict_eval_compact_schema_and_episode_distribution(tmp_path):
     assert not any("debug_contact_peak" in name for name in metric_names)
 
 
+def _make_reward_decomposition_env():
+    """Two-episode env double emitting per-step ``rew_*`` increments.
+
+    Episode 0 delivers ``rew_bonus`` increments (0.25, 0.0, -0.25) — a
+    zero total — and episode 1 (0.25, 0.25) — total 0.5. The step count
+    differs between episodes on purpose: it separates the mean of
+    per-episode sums (0.25) from the step-weighted mean (0.1), the
+    terminal-step ``_ep_mean`` (0.0), and the grand total (0.5), so a
+    wrong aggregation cannot pass by coincidence. ``energy`` mirrors the
+    increments without the ``rew_`` prefix and ``rally_count`` is a
+    cumulative counter, covering the explicit/None designation modes.
+    """
+    import gymnasium as gym
+    from gymnasium import spaces
+
+    episodes = ((0.25, 0.0, -0.25), (0.25, 0.25))
+
+    class _Env(gym.Env):
+        metadata = {"render_modes": []}
+
+        def __init__(self) -> None:
+            self.action_space = spaces.Box(-1.0, 1.0, (1,), dtype=np.float32)
+            self.observation_space = spaces.Box(
+                -1.0, 1.0, (1,), dtype=np.float32
+            )
+            self.episode_index = -1
+            self.step_index = 0
+
+        def reset(self, *, seed=None, options=None):
+            super().reset(seed=seed)
+            self.episode_index = (self.episode_index + 1) % len(episodes)
+            self.step_index = 0
+            return np.zeros(1, dtype=np.float32), {}
+
+        def step(self, action):
+            del action
+            increments = episodes[self.episode_index]
+            value = increments[self.step_index]
+            self.step_index += 1
+            done = self.step_index >= len(increments)
+            info = {
+                "rew_bonus": value,
+                "energy": value,
+                "rally_count": self.step_index,
+            }
+            return np.zeros(1, dtype=np.float32), value, done, False, info
+
+    return _Env()
+
+
+def _run_reward_decomposition_eval(**callback_kwargs):
+    """Roll both scripted episodes of ``_make_reward_decomposition_env``."""
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    eval_env = make_vec_env(_make_reward_decomposition_env, n_envs=1)
+    cb = InfoDictEvalCallback(
+        eval_env=eval_env,
+        n_eval_episodes=2,
+        eval_freq=1,
+        **callback_kwargs,
+    )
+    cb.model = _FakeModel(action_dim=1)
+    cb.n_calls = cb.eval_freq
+    cb.num_timesteps = cb.eval_freq
+    cb._on_step()
+    eval_env.close()
+    return cb.model.logger.records
+
+
+def test_info_dict_eval_episode_sum_records_episode_totals(tmp_path):
+    """``rew_*`` step keys land as ``<key>_ep_sum_mean`` — the mean of
+    per-episode totals — while every pre-existing aggregate keeps its
+    semantics and non-``rew_`` keys stay unsummed by default."""
+    csv_path = tmp_path / "eval_info.csv"
+    tb = _run_reward_decomposition_eval(
+        info_keys=("rew_bonus", "rally_count"),
+        csv_path=str(csv_path),
+    )
+
+    # Episode totals 0.0 and 0.5 -> mean 0.25.
+    assert tb["eval_info/rew_bonus_ep_sum_mean"] == pytest.approx(0.25)
+    # Existing aggregates unchanged: step-weighted mean over 5 steps,
+    # peak increment, and the terminal-step episode mean.
+    assert tb["eval_info/rew_bonus_mean"] == pytest.approx(0.1)
+    assert tb["eval_info/rew_bonus_max"] == pytest.approx(0.25)
+    assert tb["eval_info/rew_bonus_ep_mean"] == pytest.approx(0.0)
+    assert tb["eval_info/rally_count_ep_mean"] == pytest.approx(2.5)
+    # A cumulative counter must not gain a nonsense per-step sum.
+    assert "eval_info/rally_count_ep_sum_mean" not in tb
+
+    with open(csv_path) as f:
+        rows = list(csv.DictReader(f))
+    by_metric = {row["metric"]: float(row["value"]) for row in rows}
+    assert by_metric["rew_bonus_ep_sum_mean"] == pytest.approx(0.25)
+
+
+def test_info_dict_eval_episode_sum_explicit_keys_override_prefix():
+    """An explicit ``episode_sum_keys`` pins the summed set exactly:
+    the listed non-``rew_`` key is summed and the ``rew_`` key is not;
+    ``()`` disables episode sums entirely."""
+    tb = _run_reward_decomposition_eval(
+        info_keys=("rew_bonus", "energy"),
+        episode_sum_keys=("energy",),
+    )
+    assert tb["eval_info/energy_ep_sum_mean"] == pytest.approx(0.25)
+    assert "eval_info/rew_bonus_ep_sum_mean" not in tb
+
+    tb = _run_reward_decomposition_eval(
+        info_keys=("rew_bonus",),
+        episode_sum_keys=(),
+    )
+    assert not any(key.endswith("_ep_sum_mean") for key in tb)
+
+
+def test_info_dict_eval_episode_sum_key_missing_from_allowlist_rejected():
+    """An explicit sum key absent from the ``info_keys`` allowlist would
+    never be collected — a silent no-op — so construction fails loudly."""
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    with pytest.raises(ValueError, match="rew_typo"):
+        InfoDictEvalCallback(
+            eval_env=None,
+            info_keys=("rew_bonus",),
+            episode_sum_keys=("rew_typo",),
+        )
+
+
+def test_info_dict_eval_episode_sum_matches_hand_summed_paddle_tennis():
+    """End-to-end on the real env: each ``rew_*`` component's
+    ``_ep_sum_mean`` equals the hand-summed per-episode totals recorded
+    from the very same rollout by a tapping wrapper."""
+    from collections import defaultdict
+
+    import gymnasium as gym
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.envs import PaddleTennisEnv
+    from courtside_dynamics.recipes import _PADDLE_TENNIS_REWARD_COMPONENT_KEYS
+
+    recorded_episode_sums: list[dict[str, float]] = []
+
+    class _InfoTap(gym.Wrapper):
+        """Record each episode's hand-summed ``rew_*`` totals."""
+
+        def __init__(self, env):
+            super().__init__(env)
+            self._current: defaultdict[str, float] = defaultdict(float)
+
+        def reset(self, **kwargs):
+            self._current = defaultdict(float)
+            return self.env.reset(**kwargs)
+
+        def step(self, action):
+            obs, reward, terminated, truncated, info = self.env.step(action)
+            for key in _PADDLE_TENNIS_REWARD_COMPONENT_KEYS:
+                self._current[key] += float(info[key])
+            if terminated or truncated:
+                recorded_episode_sums.append(dict(self._current))
+                self._current = defaultdict(float)
+            return obs, reward, terminated, truncated, info
+
+    # The recipe's shaping kwargs with a short truncation cap keep the
+    # rollout fast while the statue policy still reaches a point end
+    # (a fault pays rew_fault / rew_return, so at least one component
+    # is nonzero and the equality below is not 0 == 0 across the board).
+    eval_env = make_vec_env(
+        lambda: _InfoTap(
+            PaddleTennisEnv(
+                contact_shaping=0.25, reach_shaping=0.25, episode_len=250
+            )
+        ),
+        n_envs=1,
+        seed=0,
+    )
+    cb = InfoDictEvalCallback(
+        eval_env=eval_env,
+        n_eval_episodes=2,
+        eval_freq=1,
+        info_keys=_PADDLE_TENNIS_REWARD_COMPONENT_KEYS,
+    )
+    cb.model = _FakeModel(action_dim=eval_env.action_space.shape[0])
+    cb.n_calls = cb.eval_freq
+    cb.num_timesteps = cb.eval_freq
+    cb._on_step()
+    eval_env.close()
+
+    assert len(recorded_episode_sums) == 2
+    tb = cb.model.logger.records
+    for key in _PADDLE_TENNIS_REWARD_COMPONENT_KEYS:
+        expected = sum(ep[key] for ep in recorded_episode_sums) / len(
+            recorded_episode_sums
+        )
+        assert tb[f"eval_info/{key}_ep_sum_mean"] == pytest.approx(expected)
+    # The deterministic statue rollout ends at least one point, so the
+    # decomposition carries real signal (guards against a vacuous test).
+    assert any(
+        abs(value) > 0
+        for episode in recorded_episode_sums
+        for value in episode.values()
+    )
+
+
 class _FakeSavableModel(_FakeModel):
     """_FakeModel plus SB3's ``save`` contract (appends ``.zip``)."""
 

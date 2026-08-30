@@ -148,10 +148,27 @@ class WarmStartConfig:
     entries). Their carried mean is replaced with the target environment's
     seeded reset value and their variance with one, so the initial normalized
     value is zero instead of clipping against stale near-zero variance.
+
+    ``transfer_log_ent_coef=False`` skips the SAC temperature hand-over so
+    the target's own ``ent_coef`` init (e.g. ``auto_0.02``) stands -- the
+    "temperature-skip" warm start the PaddleTennis campaign routed to
+    (``paddle_tennis_postswing_targets_20260822.md`` section 6). The
+    auto-vs-fixed mismatch still fails loudly either way; for PPO (no
+    temperature on either side) the flag is a documented no-op.
+
+    ``expected_artifact_sha256`` pins source artifacts by content: a mapping
+    from artifact name (``best_model.zip``, ``best_vec_normalize.pkl``,
+    ``config.json``) to the expected sha256 -- the full 64-char digest or a
+    lowercase-hex prefix of at least 8 chars (the campaign docs record
+    truncated digests). A mismatch aborts before any output is written,
+    turning the pre-registration convention "re-pin the SHA" from a process
+    step into an enforced one.
     """
 
     source_run_dir: str | Path
     reset_observation_indices: tuple[int, ...] = ()
+    transfer_log_ent_coef: bool = True
+    expected_artifact_sha256: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_run_dir, (str, os.PathLike)):
@@ -168,6 +185,33 @@ class WarmStartConfig:
         if len(set(indices)) != len(indices):
             raise ValueError("reset_observation_indices must be unique")
         object.__setattr__(self, "reset_observation_indices", tuple(sorted(indices)))
+        if not isinstance(self.transfer_log_ent_coef, bool):
+            raise TypeError("transfer_log_ent_coef must be a bool")
+        if self.expected_artifact_sha256 is not None:
+            if not isinstance(self.expected_artifact_sha256, Mapping):
+                raise TypeError(
+                    "expected_artifact_sha256 must be a mapping of "
+                    "artifact name to sha256 (or None)"
+                )
+            allowed = ("best_model.zip", "best_vec_normalize.pkl", "config.json")
+            pins: dict[str, str] = {}
+            for name, value in self.expected_artifact_sha256.items():
+                if name not in allowed:
+                    raise ValueError(
+                        f"expected_artifact_sha256 has an unknown artifact "
+                        f"{name!r}; allowed: {', '.join(allowed)}"
+                    )
+                if (
+                    not isinstance(value, str)
+                    or not 8 <= len(value) <= 64
+                    or any(c not in "0123456789abcdef" for c in value)
+                ):
+                    raise ValueError(
+                        "expected_artifact_sha256 values must be lowercase "
+                        "hex, 8 to 64 chars"
+                    )
+                pins[name] = value
+            object.__setattr__(self, "expected_artifact_sha256", pins)
 
 
 @dataclass(frozen=True, slots=True)
@@ -838,17 +882,32 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
     if source_env.get("action_shape") != target_action_shape:
         raise ValueError("source and target action spaces differ")
 
+    source_hashes = {
+        "best_model.zip": _sha256_file(model_path),
+        "best_vec_normalize.pkl": _sha256_file(normalizer_path),
+        "config.json": _sha256_file(config_path),
+    }
+    # Enforce the pre-registration pins before any output is written: a
+    # pinned artifact whose content moved voids the pairing, so fail the
+    # launch rather than record a mismatched provenance.
+    for name, expected in (warm_start.expected_artifact_sha256 or {}).items():
+        actual = source_hashes[name]
+        matches = actual == expected if len(expected) == 64 else actual.startswith(
+            expected
+        )
+        if not matches:
+            raise ValueError(
+                f"warm-start artifact {name} does not match its pinned "
+                f"sha256: expected {expected}, found {actual}"
+            )
+
     return _WarmStartArtifacts(
         source_run_dir=source_dir,
         model_path=model_path,
         normalizer_path=normalizer_path,
         config_path=config_path,
         source_config=source_config,
-        source_hashes={
-            "best_model.zip": _sha256_file(model_path),
-            "best_vec_normalize.pkl": _sha256_file(normalizer_path),
-            "config.json": _sha256_file(config_path),
-        },
+        source_hashes=source_hashes,
         target_env_class=target_class,
         target_curriculum=target_curriculum,
         reset_observation_values=reset_values,
@@ -1525,13 +1584,21 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     "warm-start source and target entropy configurations "
                     "differ (auto-tuned vs fixed ent_coef)"
                 )
+            assert cfg.warm_start is not None
+            log_ent_coef_skipped = False
             if source_log_ent is not None and target_log_ent is not None:
-                target_log_ent.data.copy_(
-                    source_log_ent.data.to(target_log_ent.device)
-                )
-                transferred_log_ent_coef = float(
-                    target_log_ent.detach().exp().item()
-                )
+                if cfg.warm_start.transfer_log_ent_coef:
+                    target_log_ent.data.copy_(
+                        source_log_ent.data.to(target_log_ent.device)
+                    )
+                    transferred_log_ent_coef = float(
+                        target_log_ent.detach().exp().item()
+                    )
+                else:
+                    # The temperature-skip warm start: keep the target's own
+                    # auto init so exploration restarts live instead of
+                    # inheriting the source's collapsed temperature.
+                    log_ent_coef_skipped = True
 
             assert warm_start_artifacts is not None
             assert isinstance(train_env, VecNormalize)
@@ -1591,7 +1658,13 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     "vec_normalize.ret_rms",
                     "vec_normalize.returns",
                     "logger_and_callback_state",
+                    *(["log_ent_coef"] if log_ent_coef_skipped else []),
                 ],
+                "transfer_log_ent_coef": (
+                    cfg.warm_start.transfer_log_ent_coef
+                    if cfg.warm_start is not None
+                    else True
+                ),
                 **(
                     {"transferred_ent_coef": transferred_log_ent_coef}
                     if transferred_log_ent_coef is not None
