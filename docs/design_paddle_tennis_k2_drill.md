@@ -1,8 +1,9 @@
 # Design: PaddleTennis k=2 drill — training the second ball in its real context
 
-Status: **Proposed — design only; the §3a harvest and step-0
-instruments are shipped, the env drill mechanism is NOT implemented;
-launches
+Status: **Proposed — the §3a harvest and step-0 instruments AND the
+§2 env mechanism are shipped (2026-08-30, default-off, KD0-certified
+bit-identical with both D2 arms selectable behind the flag; §2a
+records the implementation pins); launches
 nothing until its battery (§4) and pilot (§5) are frozen by the
 maintainer, and §2 D2 carries a maintainer fork this document does
 not decide. Drafted 2026-08-30 from the PT2 routing**
@@ -213,6 +214,71 @@ current wiring: every decision-feeding reader is eval-side).
 re-harvest is the named follow-on, only if LD1's verdict reads as
 distribution-drift starvation.
 
+## 2a. Implementation pins (shipped 2026-08-30, default-off; binding unless the freeze overrides them)
+
+The mechanism landed in `PaddleTennisEnv` ahead of the freeze so the
+battery can run the moment the maintainer decides D2 — behind
+`drill_library=None`/`drill_fraction=0.0` defaults, the same
+default-off pattern as every escrow. Pins the code adds to §2, each a
+freeze input rather than a freeze:
+
+- **Both D2 arms behind one kwarg**: `drill_context ∈ {"feed",
+  "full"}` (default `"feed"`; only meaningful with the drill on —
+  the fork stays the maintainer's, the flag just makes both arms
+  measurable through the same battery).
+- **RNG stream order, pinned**: on a policy-receiving launch with
+  the drill on, the eligibility uniform draws first, then (when
+  drilled) the entry index — before any serve draw. Policy-serving
+  launches and the drill-off env draw nothing extra (KD0's
+  discipline, lockstep-certified in
+  `tests/test_paddle_tennis.py::TestK2Drill`).
+- **First-point eligibility ON** (D3's open pin, pre-freeze
+  default): a policy-receiving episode reset drills like any other
+  policy-receiving launch.
+- **The full arm restores context, never the episode frame**:
+  physics + rules machine + event sampler + solver warm-start from
+  the harvest tuple; the episode's own clock, step budget, reward
+  escrows, and point/crossing counters are untouched (a drilled
+  point substitutes what the point *is*, not where the episode
+  stands). Consequences, measured on the registered library through
+  the real launch body: the launch observation reproduces the
+  recorded one to ≤ 7.9e-6 on every component except index 35
+  (`episode_remaining_fraction`, which reads the drilled episode's
+  own clock), and the harvested rally's crossing count is rebased so
+  the episode counter never jumps. Escrow non-restoration is exact
+  for this scenario class: all 102 registered entries carry zero
+  pending escrow at the harvested instant (the k=1 advance is
+  already confirmed by the time the opponent's return is in
+  flight).
+- **Load-time validation, fail-loud at construction**: schema
+  `k2-drill-library-v0`; per-arm required fields; every entry
+  harvested from a policy-receiving (side-B-serving) point — D3's
+  slot contract, and true of all 102 registered entries; half-
+  configured kwarg pairs and out-of-range fractions rejected. The
+  library file's sha256 lands on the env as
+  `drill_library_sha256` for in-process provenance checks; the D6
+  plan pin at freeze time is the kwargs (library path included) via
+  `validate_run_config_against_plan`'s `env_kwargs` subset match,
+  plus the artifact's sha verified by hashing the file at the
+  pinned path (the standing `expected_artifact_sha256` pattern).
+- **D5 as shipped**: the launch-time clearance check runs against
+  the harvest-recorded heads *before* any state mutation; a
+  violating entry falls back to a drawn serve and increments the
+  per-episode `drill_fallback_count` (0 across every measured
+  launch of the registered library).
+- **Provenance**: step info gains `drill_point` (the step's own
+  point, the same pre-flip convention as `serve_side_is_policy`),
+  `drill_entry_index` (−1 undrilled), and `drill_fallback_count`;
+  reset info gains `drill_point` + `drill_entry_index`, with the
+  serve keys carrying the harvested launch ball state — every
+  launch reproducible from the info stream. The D6 recipe overrides
+  are shipped (`eval_env_overrides` forces both kwargs off for the
+  PaddleTennis recipe); `validate_run_config_against_plan` pins the
+  kwargs + library sha at freeze time as planned.
+- **Train/held-out split (D1)**: realized as separate artifacts at
+  freeze — the env consumes a train-only library file verbatim; no
+  split field in the schema.
+
 ## 3. Measured anchors (all 2026-08-30, CPU)
 
 - **PT2 geometry** (the target): paddle → return-bounce 3.0 m /
@@ -294,6 +360,48 @@ restored continuation inherits the short remaining budget while the
 feed arm grants a fresh one); excluding them moves the comparison
 only to ~2.2% vs 6.9%.
 
+**Env-launch cross-check (2026-08-30, after the §2a mechanism
+shipped):** the same 102 entries scored through
+`PaddleTennisEnv._launch_drill` itself (the body training will run,
+fresh episode clock and budget) reproduce the tool rows: feed
+6.9%/6.9% exactly; full legal-hit 2.0% exactly with touch 3.9% (one
+extra touch — the fresh budget lets the 11 censored entries play
+out, which is the two rows' whole difference), launch-observation
+fidelity ≤ 7.9e-6 off-clock. The oracle scores **identically under
+both arms** (touch = legal = 77.5%, same enders, same geometry):
+the oracle reads only the physical block plus `bounce_count` and
+`ball_side`, so it is structurally blind to the §1a context gate —
+a clean dissociation pinning the 6.9%-vs-2.0% gap entirely to the
+learned policy's use of the rally-context features. Oracle-miss
+taxonomy on these launches (freeze-relevant for the KD2 oracle
+band): 23/102 never touched, all wide/fast tails (missed balls
+bounce at |y| ≈ 3.4 m vs 1.5 m for converted ones; the oracle still
+gets within ~1.1 m of the bounce); 20 of the 21 with recorded
+geometry are kinematically reachable within the playable window
+(≤ 8 m/s average required vs the 12.5 m/s ceiling), so the 77.5%
+row under-certifies winnability — it measures the frozen oracle's
+cold-start rescue rate, not ball quality.
+
+**Oracle witness-parameter probe (same day, same launches; the
+frozen `scripted_ground_opponent` untouched — variants are
+parameterizations of the public
+`ground_lead_charge_local_action`):** halving the run-up wait
+margin (0.9 → 0.45 m behind the predicted landing) lifts
+conversion 77.5% → **80.4%**; cutting it to 0.2 m raises touches
+but breaks legality (73.5% — the face re-enters the descent path);
+widening the charge gap (0.8 → 1.2 m) changes nothing at either
+margin. Reading: the wait margin is a small real lever, the charge
+gap is not binding, and the residual ~20% miss tail (wide/fast
+balls the oracle trails by ~1.1 m at bounce) needs a different
+charge program — direct post-bounce path interception rather than
+wait-behind-the-landing. Consequence, explicitly NOT an action:
+the frozen oracle is the task opponent and a certified reference
+(bands, P4 fairness, every instrument row) — it does not change.
+If the freeze wants a tighter KD2 winnable-cert or (under the
+demonstration-injection route) a higher-coverage demonstrator on
+drill states, that is a NEW named witness function calibrated at
+battery time, with these rows as its starting point.
+
 **The simplification-confound attribution** (the §1a magnitude
 correction): applying the review probe's simplification stack
 (ball spin zeroed, paddle velocities zeroed, opponent parked) to
@@ -310,7 +418,11 @@ exact trap).
 ## 4. Certification battery (proposed; the maintainer freezes it before implementation)
 
 - **KD0 — bit-identity when off**, including the RNG-stream
-  discipline of §2.
+  discipline of §2. *Shipped as standing regression tests with the
+  mechanism* (`tests/test_paddle_tennis.py::TestK2Drill`: full-info
+  lockstep off-vs-default, stream shared through ineligible launches
+  with divergence exactly at the first drilled one); the frozen
+  battery re-runs them.
 - **KD1 — launch fidelity.** Arm (a): the relaunched ball's first
   side-A bounce within a measured tolerance of the harvest-recorded
   bounce. Arm (b): the launch observation equals the recorded
@@ -351,10 +463,12 @@ lever); 1M steps, seed 0, n_envs 4, eval 25k,
 checkpoint/diagnosis 100k; recipe defaults plus the pinned library
 and **`drill_fraction = 0.5`** (one sanctioned pre-pilot re-anchor
 from KD4's measured economics, the hold design's pattern).
-*Prerequisite shipping with the implementation:* the diagnosis
-instrument's class-split extension (PT2 §7) — ready-position /
-touch / boundary metrics split by ball class and `drill_point`, so
-the mechanism bars below are standing per-run observables.
+*Prerequisite still to ship before the pilot* (deliberately not part
+of the 2026-08-30 mechanism landing — it consumes the freeze's
+choices): the diagnosis instrument's class-split extension (PT2 §7)
+— ready-position / touch / boundary metrics split by ball class and
+`drill_point` (now a standing info key, §2a), so the mechanism bars
+below are standing per-run observables.
 
 **Decision-rule shape, committed now (numbers at freeze):**
 

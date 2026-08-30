@@ -1145,6 +1145,15 @@ RECIPES: dict[str, Recipe] = {
             "contact_shaping": 0.25,
             "reach_shaping": 0.25,
         },
+        # The eval task is bit-frozen (docs/design_paddle_tennis_k2_drill.md
+        # §2 D6): a run config's [env] table may turn the k=2 drill on
+        # for training, but selection, periodic/final eval, and the
+        # checkpoint diagnosis always run the standard task — these
+        # overrides sit above [env] in make_eval_env_fn's layering.
+        eval_env_overrides={
+            "drill_library": None,
+            "drill_fraction": 0.0,
+        },
         default_total_timesteps=2_000_000,
         name_prefix="paddle_tennis",
         extra_cfg={

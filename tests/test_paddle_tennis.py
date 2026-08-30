@@ -12,6 +12,7 @@ tables.
 from __future__ import annotations
 
 import inspect
+import pickle
 
 import numpy as np
 import pytest
@@ -1758,3 +1759,421 @@ class TestDeterminism:
         first = run(_SMOKE_SEEDS[2])
         second = run(_SMOKE_SEEDS[2])
         assert np.array_equal(first, second)
+
+
+@pytest.fixture(scope="module")
+def drill_library_path(tmp_path_factory) -> str:
+    """A small harvested k=2 library built the shipped tool's way: the
+    ground oracle drives side A on burned bring-up seeds and the
+    tool's own ``_snapshot_env`` records qualifying k=2 instants on
+    policy-receiving points. Schema-identical to
+    ``tools/paddle_tennis_k2_harvest.py``'s artifact, so this also
+    pins the library contract the env consumes."""
+    from tools.paddle_tennis_k2_harvest import SCHEMA, _snapshot_env
+
+    env = PaddleTennisEnv(points_per_episode=None)
+    entries: list[dict] = []
+    try:
+        seed = _SMOKE_SEEDS[0]
+        while len(entries) < 6:
+            obs, info = env.reset(seed=seed)
+            if info["serve_side"] == "a":
+                # Land on a policy-receiving first point (the
+                # alternation flips per reset, not per seed).
+                obs, info = env.reset(seed=seed)
+            seed += 1
+            hit_a = struck_b = False
+            prev_points = 0
+            for _ in range(1500):
+                obs, _r, term, trunc, step_info = env.step(
+                    scripted_ground_opponent(obs)
+                )
+                if term or trunc:
+                    break
+                if int(step_info["points_played"]) != prev_points:
+                    prev_points = int(step_info["points_played"])
+                    hit_a = struck_b = False
+                if bool(step_info["event_valid_racket_hit_a"]):
+                    hit_a, struck_b = True, False
+                if bool(step_info["event_valid_racket_hit_b"]) and hit_a:
+                    struck_b = True
+                ball_x = float(env.data.qpos[env._ball_qposadr])
+                ball_vx = float(env.data.qvel[env._ball_dofadr])
+                if (
+                    struck_b
+                    and env._serving_side is CourtSide.B
+                    and ball_x > 0.05
+                    and ball_vx < -1.0
+                ):
+                    entry = _snapshot_env(env, obs)
+                    ball = entry["qpos"][
+                        env._ball_qposadr : env._ball_qposadr + 3
+                    ]
+                    if all(
+                        float(np.linalg.norm(entry[key] - ball))
+                        >= env._SERVE_CLEARANCE
+                        for key in ("head_a", "head_b")
+                    ):
+                        entry["seed"] = seed - 1
+                        entry["point"] = prev_points
+                        entries.append(entry)
+                        hit_a = struck_b = False
+                        if len(entries) >= 6:
+                            break
+    finally:
+        env.close()
+    library = {
+        "schema": SCHEMA,
+        "git_sha": "test",
+        "model_path": "scripted_ground_opponent",
+        "model_sha256": "test",
+        "vec_normalize_sha256": "test",
+        "seed_start": _SMOKE_SEEDS[0],
+        "episodes": seed - _SMOKE_SEEDS[0],
+        "continuation_steps": 0,
+        "clearance_dropped": 0,
+        "crossings_unarmed": 0,
+        "entries": entries,
+    }
+    path = tmp_path_factory.mktemp("drill") / "k2_test_library.pkl"
+    with open(path, "wb") as f:
+        pickle.dump(library, f)
+    return str(path)
+
+
+class TestK2Drill:
+    """The k=2 drill mechanism (docs/design_paddle_tennis_k2_drill.md
+    §2, shipped default-off ahead of the battery freeze): KD0
+    bit-identity including the RNG-stream discipline, loud validation
+    of half-configured pairs and malformed libraries, both D2 launch
+    arms' fidelity, policy-receiving-only eligibility with serve
+    alternation preserved, info/reset provenance, and the D5
+    clearance fallback."""
+
+    def test_kd0_default_off_bit_identical_lockstep(self):
+        """KD0: an env with the drill kwargs at their explicit
+        defaults locksteps a default-constructed env bit-for-bit —
+        obs, reward, terminations, and the FULL info dict — across
+        episodes starting from both serve slots. The off launch path
+        must add nothing: no RNG draw (an extra draw would shift
+        every subsequent serve), no state change."""
+        a = PaddleTennisEnv(points_per_episode=None)
+        b = PaddleTennisEnv(
+            points_per_episode=None,
+            drill_library=None,
+            drill_fraction=0.0,
+            drill_context="full",
+        )
+        try:
+            for seed in _SMOKE_SEEDS[:2]:
+                oa, ia = a.reset(seed=seed)
+                ob, ib = b.reset(seed=seed)
+                np.testing.assert_array_equal(oa, ob)
+                assert ia == ib
+                while True:
+                    oa, ra, ta, tra, ia = a.step(_zero_action())
+                    ob, rb, tb, trb, ib = b.step(_zero_action())
+                    np.testing.assert_array_equal(oa, ob)
+                    assert (ra, ta, tra) == (rb, tb, trb)
+                    assert set(ia) == set(ib)
+                    for key, value in ia.items():
+                        if isinstance(value, (int, float)):
+                            assert value == ib[key], key
+                    if ta or tra:
+                        break
+        finally:
+            a.close()
+            b.close()
+
+    def test_kd0_stream_shared_until_first_eligible_launch(
+        self, drill_library_path
+    ):
+        """The §2 RNG discipline, drill-on side: a drill-on env
+        locksteps the default env bit-for-bit through the whole
+        policy-SERVING first point (an ineligible launch draws
+        nothing), then diverges exactly at the policy-receiving
+        relaunch, which substitutes a library scenario for the drawn
+        serve."""
+        a = PaddleTennisEnv(points_per_episode=None)
+        b = PaddleTennisEnv(
+            points_per_episode=None,
+            drill_library=drill_library_path,
+            drill_fraction=1.0,
+        )
+        try:
+            seed = _SMOKE_SEEDS[2]
+            oa, ia = a.reset(seed=seed)
+            ob, ib = b.reset(seed=seed)
+            assert ia["serve_side"] == ib["serve_side"] == "a"
+            assert ib["drill_point"] == 0.0
+            np.testing.assert_array_equal(oa, ob)
+            while True:
+                oa, ra, ta, tra, ia = a.step(_zero_action())
+                ob, rb, tb, trb, ib = b.step(_zero_action())
+                assert (ra, ta, tra) == (rb, tb, trb)
+                assert not (ta or tra)  # divergence must precede the cap
+                if int(ia["points_played"]) == 1:
+                    break
+                np.testing.assert_array_equal(oa, ob)
+            # The boundary step describes the (identical, undrilled)
+            # first point in both arms, but its relaunch observation
+            # already differs: b launched a harvested scenario.
+            assert ia["drill_point"] == ib["drill_point"] == 0.0
+            assert not np.array_equal(oa, ob)
+            _oa, _ra, _ta, _tra, ia = a.step(_zero_action())
+            _ob, _rb, _tb, _trb, ib = b.step(_zero_action())
+            assert ia["drill_point"] == 0.0
+            assert ib["drill_point"] == 1.0
+            assert ib["drill_entry_index"] >= 0.0
+            assert ib["drill_fallback_count"] == 0.0
+        finally:
+            a.close()
+            b.close()
+
+    def test_validation_rejects_half_configured_and_malformed(
+        self, drill_library_path, tmp_path
+    ):
+        """Cardinal rule 1: every inconsistent configuration and every
+        malformed library refuses at construction, never mid-run."""
+        with pytest.raises(ValueError, match="enabled together"):
+            PaddleTennisEnv(drill_fraction=0.5)
+        with pytest.raises(ValueError, match="enabled together"):
+            PaddleTennisEnv(drill_library=drill_library_path)
+        with pytest.raises(ValueError, match="drill_fraction"):
+            PaddleTennisEnv(
+                drill_library=drill_library_path, drill_fraction=1.5
+            )
+        with pytest.raises(ValueError, match="drill_context"):
+            PaddleTennisEnv(
+                drill_library=drill_library_path,
+                drill_fraction=0.5,
+                drill_context="mixed",
+            )
+
+        def _write(name: str, library: dict) -> str:
+            path = tmp_path / name
+            with open(path, "wb") as f:
+                pickle.dump(library, f)
+            return str(path)
+
+        with open(drill_library_path, "rb") as f:
+            library = pickle.load(f)
+
+        bad_schema = _write(
+            "bad_schema.pkl", {**library, "schema": "other-schema"}
+        )
+        with pytest.raises(ValueError, match="schema"):
+            PaddleTennisEnv(drill_library=bad_schema, drill_fraction=0.5)
+
+        empty = _write("empty.pkl", {**library, "entries": []})
+        with pytest.raises(ValueError, match="no entries"):
+            PaddleTennisEnv(drill_library=empty, drill_fraction=0.5)
+
+        # A full-arm-only field missing: the feed arm builds, the
+        # full arm refuses (the per-arm required-key sets).
+        stripped_entries = [dict(entry) for entry in library["entries"]]
+        del stripped_entries[0]["sampler"]
+        stripped = _write(
+            "stripped.pkl", {**library, "entries": stripped_entries}
+        )
+        PaddleTennisEnv(
+            drill_library=stripped, drill_fraction=0.5
+        ).close()
+        with pytest.raises(ValueError, match="missing"):
+            PaddleTennisEnv(
+                drill_library=stripped,
+                drill_fraction=0.5,
+                drill_context="full",
+            )
+
+        # D3: an entry harvested from a non-policy-receiving point
+        # does not fit the slot the drill launches into.
+        wrong_side_entries = [dict(entry) for entry in library["entries"]]
+        wrong_side_entries[1]["serving_side"] = CourtSide.A
+        wrong_side = _write(
+            "wrong_side.pkl", {**library, "entries": wrong_side_entries}
+        )
+        with pytest.raises(ValueError, match="non-policy-receiving"):
+            PaddleTennisEnv(drill_library=wrong_side, drill_fraction=0.5)
+
+    def test_feed_arm_launches_harvested_state_as_fresh_feed(
+        self, drill_library_path
+    ):
+        """Arm (a): the harvested joint state lands exactly (ball AND
+        both paddles — design D4), the rally context reads a fresh
+        side-B feed, and the reset-info serve keys carry the
+        harvested launch ball state (the extended provenance
+        contract)."""
+        env = PaddleTennisEnv(
+            points_per_episode=None,
+            drill_library=drill_library_path,
+            drill_fraction=1.0,
+        )
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            obs, info = env.reset(seed=_SMOKE_SEEDS[0])
+            assert info["serve_side"] == "b"
+            assert info["drill_point"] == 1.0
+            index = int(info["drill_entry_index"])
+            assert index >= 0
+            entry = env._drill_entries[index]
+            np.testing.assert_array_equal(env.data.qpos, entry["qpos"])
+            np.testing.assert_array_equal(env.data.qvel, entry["qvel"])
+            adr, dof = env._ball_qposadr, env._ball_dofadr
+            np.testing.assert_array_equal(
+                np.asarray(info["serve_ball_position"]),
+                entry["qpos"][adr : adr + 3],
+            )
+            np.testing.assert_array_equal(
+                np.asarray(info["serve_ball_velocity"]),
+                entry["qvel"][dof : dof + 3],
+            )
+            names = list(PADDLE_TENNIS_OBSERVATION_NAMES)
+            assert obs[names.index("rally_phase_initial_feed")] == 1.0
+            assert obs[names.index("own_is_serving")] == 0.0
+            assert obs[names.index("ball_side_is_own")] == 0.0
+            assert obs[names.index("feed_crossed_net")] == 0.0
+            assert obs[names.index("rally_count")] == 0.0
+        finally:
+            env.close()
+
+    def test_full_arm_reproduces_the_recorded_observation(
+        self, drill_library_path
+    ):
+        """Arm (b): the launch observation equals the harvest-recorded
+        one on every component except ``episode_remaining_fraction``
+        (index 35), which reads the drilled episode's OWN clock — the
+        documented departure. The restored machine's harvested
+        crossing count must not leak into the episode counter."""
+        env = PaddleTennisEnv(
+            points_per_episode=None,
+            drill_library=drill_library_path,
+            drill_fraction=1.0,
+            drill_context="full",
+        )
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            obs, info = env.reset(seed=_SMOKE_SEEDS[0])
+            assert info["drill_point"] == 1.0
+            entry = env._drill_entries[int(info["drill_entry_index"])]
+            deviation = np.abs(obs - entry["obs"])
+            deviation[35] = 0.0
+            # §3a measured ≤ 7.9e-6 at scale on the registered library.
+            assert float(deviation.max()) <= 1e-4
+            assert obs[35] == 1.0  # a fresh episode clock at reset
+            names = list(PADDLE_TENNIS_OBSERVATION_NAMES)
+            assert obs[names.index("rally_phase_return_in_flight")] == 1.0
+            assert obs[names.index("feed_crossed_net")] == 1.0
+            assert obs[names.index("rally_count")] >= 1.0
+            assert env._crossings == 0
+        finally:
+            env.close()
+
+    def test_eligibility_policy_receiving_only_alternation_preserved(
+        self, drill_library_path
+    ):
+        """D3 at fraction 1.0: every policy-receiving point launches
+        drilled, every policy-serving point stays a drawn serve, and
+        the serve-alternation ledger is untouched — read entirely
+        from the info stream (the boundary step describes its own
+        just-ended point, the pre-flip convention)."""
+        env = PaddleTennisEnv(
+            points_per_episode=None,
+            drill_library=drill_library_path,
+            drill_fraction=1.0,
+        )
+        try:
+            obs, info = env.reset(seed=_SMOKE_SEEDS[1])
+            assert info["serve_side"] == "a"
+            assert info["drill_point"] == 0.0
+            point_flags: list[tuple[float, float]] = []
+            prev_points = 0
+            while True:
+                obs, _r, term, trunc, step_info = env.step(_zero_action())
+                if int(step_info["points_played"]) != prev_points:
+                    prev_points = int(step_info["points_played"])
+                    point_flags.append(
+                        (
+                            step_info["serve_side_is_policy"],
+                            step_info["drill_point"],
+                        )
+                    )
+                if term or trunc:
+                    break
+            assert step_info["drill_fallback_count"] == 0.0
+            assert len(point_flags) >= 4
+            for position, (serve_policy, drilled) in enumerate(point_flags):
+                assert serve_policy == (1.0 if position % 2 == 0 else 0.0)
+                assert drilled == 1.0 - serve_policy
+        finally:
+            env.close()
+
+    def test_launch_falls_back_to_a_drawn_serve_on_clearance_violation(
+        self, drill_library_path, tmp_path
+    ):
+        """D5: the launch-time clearance check is unreachable for a
+        well-formed library; a violating entry falls back to a drawn
+        serve, loudly counted, instead of launching the ball into a
+        paddle head."""
+        probe = PaddleTennisEnv()
+        adr = probe._ball_qposadr
+        probe.close()
+        with open(drill_library_path, "rb") as f:
+            library = pickle.load(f)
+        violating_entries = [dict(entry) for entry in library["entries"]]
+        for entry in violating_entries:
+            entry["head_a"] = entry["qpos"][adr : adr + 3].copy()
+        path = tmp_path / "violating.pkl"
+        with open(path, "wb") as f:
+            pickle.dump({**library, "entries": violating_entries}, f)
+
+        env = PaddleTennisEnv(
+            points_per_episode=None,
+            drill_library=str(path),
+            drill_fraction=1.0,
+        )
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            obs, info = env.reset(seed=_SMOKE_SEEDS[0])
+            assert info["serve_side"] == "b"
+            assert info["drill_point"] == 0.0
+            assert info["drill_entry_index"] == -1.0
+            # A genuine side-B serve draw, not a harvested state.
+            assert np.asarray(info["serve_ball_position"])[0] > 0.0
+            _obs, _r, _t, _tr, step_info = env.step(_zero_action())
+            assert step_info["drill_fallback_count"] == 1.0
+        finally:
+            env.close()
+
+    def test_recipe_pins_the_eval_task_drill_free(
+        self, drill_library_path, tmp_path
+    ):
+        """D6: a run config's [env] drill kwargs reach the training
+        env and never the eval env — selection, periodic/final eval,
+        and the checkpoint diagnosis stay on the frozen task."""
+        from courtside_dynamics.recipes import build_train_config
+
+        config = tmp_path / "drill_pilot.toml"
+        config.write_text(
+            f'[env]\ndrill_library = "{drill_library_path}"\n'
+            "drill_fraction = 0.5\n"
+        )
+        cfg = build_train_config(
+            "PaddleTennis",
+            total_timesteps=1_000,
+            log_dir=str(tmp_path / "run"),
+            config_file=str(config),
+        )
+        train_env = cfg.env_fn()
+        try:
+            assert train_env.drill_fraction == 0.5
+            assert train_env.drill_library_sha256 is not None
+        finally:
+            train_env.close()
+        eval_env = (cfg.eval_env_fn or cfg.env_fn)()
+        try:
+            assert eval_env.drill_fraction == 0.0
+            assert eval_env.drill_library is None
+            assert eval_env._drill_entries is None
+        finally:
+            eval_env.close()

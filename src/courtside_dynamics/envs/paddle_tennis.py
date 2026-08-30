@@ -59,6 +59,9 @@ must not inherit near-zero variance from a transferred normalizer).
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import pickle
 from collections.abc import Callable
 from typing import Any
 
@@ -222,6 +225,17 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
     #: reproduces the first-run volley-loop era).
     _VOLLEY_RULES = ("fault", "legal")
 
+    #: The two D2 launch arms of docs/design_paddle_tennis_k2_drill.md
+    #: (the maintainer's fork; both stay selectable until the freeze):
+    #: "feed" relaunches the harvested physics as a fresh side-B feed,
+    #: "full" restores the harvested rally context (rules machine +
+    #: event sampler) along with the physics.
+    _DRILL_CONTEXTS = ("feed", "full")
+
+    #: The harvest artifact schema this env consumes
+    #: (tools/paddle_tennis_k2_harvest.py).
+    _DRILL_LIBRARY_SCHEMA = "k2-drill-library-v0"
+
     def __init__(
         self,
         episode_len: int = 1500,
@@ -238,6 +252,9 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         hold_shaping: float = 0.0,
         hold_shaping_travel: float = 4.0,
         points_per_episode: int | None = 1,
+        drill_library: str | None = None,
+        drill_fraction: float = 0.0,
+        drill_context: str = "feed",
         **kwargs: Any,
     ) -> None:
         utils.EzPickle.__init__(
@@ -256,6 +273,9 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             hold_shaping=hold_shaping,
             hold_shaping_travel=hold_shaping_travel,
             points_per_episode=points_per_episode,
+            drill_library=drill_library,
+            drill_fraction=drill_fraction,
+            drill_context=drill_context,
             **kwargs,
         )
         if volley_rule not in self._VOLLEY_RULES:
@@ -332,6 +352,40 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._crossings_base = 0
         self._point_serve_nudged = 0
         self._point_end_counts: dict[str, int] = {}
+        # k=2 drill (docs/design_paddle_tennis_k2_drill.md §2; default
+        # off keeps the frozen task definition): a policy-receiving
+        # point launches, with probability ``drill_fraction``, directly
+        # into a harvested real second-ball scenario instead of a
+        # drawn serve. Off means OFF: no library is loaded, no RNG is
+        # consumed by the launch path, and the step/reset streams are
+        # bit-identical to the pre-drill env (KD0). A half-configured
+        # pair is a config error, rejected loudly.
+        if drill_context not in self._DRILL_CONTEXTS:
+            raise ValueError(
+                f"drill_context must be one of {self._DRILL_CONTEXTS}, "
+                f"got {drill_context!r}"
+            )
+        fraction = float(drill_fraction)
+        if not np.isfinite(fraction) or not 0.0 <= fraction <= 1.0:
+            raise ValueError(
+                f"drill_fraction must be in [0.0, 1.0], got {drill_fraction!r}"
+            )
+        if (drill_library is None) != (fraction == 0.0):
+            raise ValueError(
+                "drill_library and drill_fraction must be enabled together: "
+                f"got drill_library={drill_library!r} with "
+                f"drill_fraction={drill_fraction!r}"
+            )
+        self.drill_fraction = fraction
+        self.drill_context = drill_context
+        self.drill_library = drill_library
+        self.drill_library_sha256: str | None = None
+        self._drill_entries: list[dict[str, Any]] | None = (
+            None if drill_library is None else self._load_drill_library(drill_library)
+        )
+        self._drill_fallback_count = 0
+        self._drill_point_active = False
+        self._drill_entry_index = -1
         self.serve_config = serve_config or PaddleCourtServe()
         # The default opponent plays by the active rules: the
         # bounce-waiting oracle under ground rules, the frozen
@@ -790,6 +844,11 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             self._hold_anchor_xy = None
             self._hold_travel = 0.0
         serving_side_of_step = self._serving_side
+        # Like the serve side, the step's drill provenance describes
+        # the step's own (just-ended or ongoing) point — captured
+        # before any relaunch below can start the next one.
+        drill_point_of_step = self._drill_point_active
+        drill_entry_of_step = self._drill_entry_index
         if point_completed:
             # Every completed point enters the durable counters —
             # including the episode-ending fault point under a finite
@@ -847,6 +906,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             forced_nonfinite=forced_nonfinite,
             absorbed_point=absorbed_point,
             serving_side=serving_side_of_step,
+            drill_point=drill_point_of_step,
+            drill_entry_index=drill_entry_of_step,
         )
         return obs, float(reward), terminated, truncated, info
 
@@ -1016,6 +1077,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         forced_nonfinite: bool = False,
         absorbed_point: bool = False,
         serving_side: CourtSide | None = None,
+        drill_point: bool | None = None,
+        drill_entry_index: int | None = None,
     ) -> dict[str, Any]:
         if transition is not None:
             info = transition.to_info()
@@ -1038,10 +1101,21 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         # step's own (just-ended) point — so step() passes the
         # pre-flip side.
         side = serving_side if serving_side is not None else self._serving_side
+        if drill_point is None:
+            drill_point = self._drill_point_active
+        if drill_entry_index is None:
+            drill_entry_index = self._drill_entry_index
         info.update(
             {
                 "crossings": self._crossings,
                 "serve_side_is_policy": (1.0 if side is CourtSide.A else 0.0),
+                # Drill provenance (design D3/D5): the step's own
+                # point's drilled-ness and library entry (-1 when
+                # undrilled), plus the episode's fallback counter —
+                # constant 0.0/-1.0/0.0 when the drill is off.
+                "drill_point": 1.0 if drill_point else 0.0,
+                "drill_entry_index": float(drill_entry_index),
+                "drill_fallback_count": float(self._drill_fallback_count),
                 "rew_return": rew_return,
                 "rew_fault": rew_fault,
                 "rew_unsafe": rew_unsafe,
@@ -1162,6 +1236,47 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
                 self.data.qpos[int(joint.qposadr[0])] += float(world_delta @ axis)
                 self.data.qvel[int(joint.dofadr[0])] = 0.0
 
+    def _load_drill_library(self, path: str) -> list[dict[str, Any]]:
+        """Load + validate a harvest library; record its sha256.
+
+        Fail-loud at construction (cardinal rule 1): a wrong schema, an
+        empty library, a missing per-entry field, or an entry harvested
+        from a non-policy-receiving point (D3: the drill substitutes
+        what side B's feed is, never whose feed it is) refuses to
+        build the env rather than surfacing mid-run.
+        """
+        with open(path, "rb") as f:
+            payload = f.read()
+        self.drill_library_sha256 = hashlib.sha256(payload).hexdigest()
+        library = pickle.loads(payload)
+        schema = library.get("schema") if isinstance(library, dict) else None
+        if schema != self._DRILL_LIBRARY_SCHEMA:
+            raise ValueError(
+                f"drill_library {path!r} has schema {schema!r}; "
+                f"expected {self._DRILL_LIBRARY_SCHEMA!r}"
+            )
+        entries = list(library["entries"])
+        if not entries:
+            raise ValueError(f"drill_library {path!r} contains no entries")
+        required = ("qpos", "qvel", "obs", "head_a", "head_b", "serving_side")
+        if self.drill_context == "full":
+            required += ("rules", "sampler", "qacc_warmstart")
+        for position, entry in enumerate(entries):
+            missing = [key for key in required if key not in entry]
+            if missing:
+                raise ValueError(
+                    f"drill_library {path!r} entry {position} is missing "
+                    f"field(s) {missing}"
+                )
+            if entry["serving_side"] is not CourtSide.B:
+                raise ValueError(
+                    f"drill_library {path!r} entry {position} was harvested "
+                    "from a non-policy-receiving point "
+                    f"({entry['serving_side']!r}); the drill launches only "
+                    "into side-B-serving scenarios (design D3)"
+                )
+        return entries
+
     def _launch_point(self, *, mid_episode: bool) -> None:
         """Start a point: draw + clearance, place the ball, fresh rules.
 
@@ -1172,7 +1287,33 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         paddles stay exactly where play left them (the design's
         carryover), with the ordering the design pins: clear, teleport,
         THEN re-prime the event sampler from the new state.
+
+        With the k=2 drill on, a policy-receiving launch (reset and
+        mid-episode alike — the pre-freeze default for D3's
+        first-point pin) first draws eligibility, then a library entry
+        (that RNG-stream order is the §2 discipline; ineligible
+        launches and the drill-off env consume nothing extra), and a
+        clearance-passing entry replaces the serve draw entirely.
         """
+        if self._drill_entries is not None and self._serving_side is CourtSide.B:
+            if float(self.np_random.random()) < self.drill_fraction:
+                index = int(self.np_random.integers(len(self._drill_entries)))
+                entry = self._drill_entries[index]
+                ball = entry["qpos"][self._ball_qposadr : self._ball_qposadr + 3]
+                clear = all(
+                    float(np.linalg.norm(entry[key] - ball))
+                    >= self._SERVE_CLEARANCE
+                    for key in ("head_a", "head_b")
+                )
+                if clear:
+                    self._launch_drill(entry, index)
+                    return
+                # Unreachable for a well-formed library (D5 filters at
+                # harvest time); a violating entry falls back to a
+                # drawn serve, loudly counted.
+                self._drill_fallback_count += 1
+        self._drill_point_active = False
+        self._drill_entry_index = -1
         position, velocity = self._draw_serve()
         if mid_episode:
             for _ in range(self._SERVE_REDRAWS):
@@ -1207,6 +1348,55 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._latest_event_batch = None
         self._last_serve_state = (position.copy(), velocity.copy())
 
+    def _launch_drill(self, entry: dict[str, Any], index: int) -> None:
+        """Launch the point directly into a harvested k=2 scenario.
+
+        Ball and both paddles take the harvested joint state (design
+        D4 — a self-consistent real state, clearance-checked by the
+        caller against the harvest-recorded heads). Arm ``"feed"``
+        re-primes fresh rules from a side-B feed; arm ``"full"``
+        restores the harvested rally context — rules machine, event
+        sampler, solver warm-start — so the launch observation
+        reproduces the recorded one. The episode's own clock,
+        counters, and escrow state are never touched: the drill
+        substitutes what this point is, not where the episode stands
+        (so ``episode_remaining_fraction`` reads the drilled
+        episode's own clock, the one launch-observation component
+        that departs from the harvest recording under arm "full").
+        """
+        self.set_state(entry["qpos"].copy(), entry["qvel"].copy())
+        if self.drill_context == "full":
+            # Without the harvested solver warm-start, restored
+            # flights drift off the recorded trajectory (warm-start
+            # differences amplify through bounces; measured in the
+            # design's §3a restore validation).
+            self.data.qacc_warmstart[:] = entry["qacc_warmstart"]
+            self._rules = copy.deepcopy(entry["rules"])
+            sampler = copy.deepcopy(entry["sampler"])
+            sampler.model = self.model
+            self._event_sampler = sampler
+            # The restored machine carries the harvested rally's
+            # crossing count; rebase so the episode counter continues
+            # from its own value instead of jumping.
+            snapshot = self._rules.snapshot()
+            self._crossings_base = self._crossings - max(
+                0,
+                int(snapshot.net_crossing_count) - int(snapshot.feed_crossed_net),
+            )
+        else:
+            self._rules = RallyStateMachine(
+                serving_side=CourtSide.B,
+                rules=self._rally_rules,
+                court=PADDLE_COURT,
+            )
+            self._event_sampler.reset(self.data, ball_side=CourtSide.B)
+        self._latest_event_batch = None
+        ball = entry["qpos"][self._ball_qposadr : self._ball_qposadr + 3]
+        velocity = entry["qvel"][self._ball_dofadr : self._ball_dofadr + 3]
+        self._last_serve_state = (ball.copy(), velocity.copy())
+        self._drill_point_active = True
+        self._drill_entry_index = index
+
     def reset_model(self):
         self.step_number = 0
         self._crossings = 0
@@ -1219,6 +1409,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._pending_hold = 0.0
         self._hold_anchor_xy = None
         self._hold_travel = 0.0
+        self._drill_fallback_count = 0
         self._last_transition = None
         self._serving_side = self._next_serving_side
         self._next_serving_side = self._serving_side.opponent
@@ -1241,9 +1432,14 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             # Full initial ball state, so recordings and audits can
             # reproduce the exact serve (the humanoid contract, and the
             # wall-ball review lesson: serve draws must be recoverable
-            # from the info stream).
+            # from the info stream). For a drilled first point these
+            # keys carry the harvested launch ball state, and the
+            # drill keys below name the exact library entry (design
+            # D3: every launch reproducible from the info stream).
             "serve_ball_position": tuple(float(v) for v in position),
             "serve_ball_velocity": tuple(float(v) for v in velocity),
+            "drill_point": 1.0 if self._drill_point_active else 0.0,
+            "drill_entry_index": float(self._drill_entry_index),
         }
 
     #: Human-readable labels matching the observation vector.
