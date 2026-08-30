@@ -40,47 +40,54 @@ physics under two presentations:
 
 - **Real recorded continuation** (rally flags as play produced
   them): **0/47 conversions**, ≤ 1 m at bounce 15.9%.
-- **Replayed as a fresh-feed launch** (identical ball flight and
-  paddle placement; the rules machine restarted, so the observation's
-  phase one-hot reads `INITIAL_FEED`, `feed_crossed_net` 0,
-  `rally_count` 0): **16–17/47 legal hits (34–36%)**, touch 38%,
-  ≤ 1 m 31–35% — robust across paddle-at-harvest, paddle-at-park,
-  and harvested-qvel arms.
+- **Replayed as a fresh-feed launch** (rules machine restarted, so
+  the observation's phase one-hot reads `INITIAL_FEED`): **16–17/47
+  legal hits (34–36%)**, touch 38%.
 
-The interception *skill exists in the network* and is **gated on
-the rally-context observation components** (indices 24–47 are raw,
-normalization-excluded inputs; the discriminating dims are the
-phase one-hot, `feed_crossed_net`, `pending_return_crossed_net`,
-`rally_count`). The 3M companion's k=1-to-90%-while-k=2-stays-0
-dissociation is this gate seen longitudinally: competence does not
-cross the flag boundary passively.
+**Magnitude correction (same day, §3a):** the review's probe
+launched *simplified physics* — spinless finite-difference ball
+velocities, paddle velocities zeroed, opponent paddle parked (the
+streams carry positions only). Re-measured with the harvest tool's
+**faithful full-physics launches** (real ball spin, real paddle
+qpos+qvel, both sides), the feed-context rate is **~7% for both
+subjects** (registered 7/102; LH1c 2/30), and applying the review's
+simplification stack to the same states raises it to 9–20%
+(reaching the review's 36% band on its own n=47 stream states,
+within overlapping CIs). So roughly **half to two-thirds of the
+headline 34% was easier physics, not context** — spinless,
+still-paddle balls evoke the receive program much more readily. The
+**context gate survives at corrected magnitude**: faithful
+feed-context ~7% vs full-context 0–2% (registered: 7/102 vs 2/102,
+§3a) — real, ~3×, but nothing like 0-vs-34. The gate is carried by
+the rally-context observation components (indices 24–47, raw and
+normalization-excluded: the phase one-hot, `feed_crossed_net`,
+`pending_return_crossed_net`, `rally_count`); the 3M companion's
+k=1-to-90%-while-k=2-stays-0 dissociation remains the gate seen
+longitudinally.
 
 This measurement cuts both ways for a drill, and the two edges are
 the design's central fork (§2 D2):
 
-- A **feed-context drill** (the original draft: harvested physics
-  relaunched as a fresh feed) trains the context the policy
-  already half-masters (step-0 touch ~38%) — the escrow ladder
-  engages immediately — but its transfer must cross the measured
-  0-vs-34% behavioral discontinuity, which is exactly the
-  WallBall cardinal-rule-6 failure shape ("fragment skill did not
-  transfer to serve receipt at all"), now visible in observation
-  space. It also *reduces* genuine-context k=2 exposure at step 0
-  (a drilled point reaches a real-flag k=2 moment only via its own
-  drill-feed conversion, vs the ~90%-converting serve receive it
-  replaced).
+- A **feed-context drill** (harvested physics relaunched as a
+  fresh feed) starts from the measured **6.9% step-0 legal-hit
+  rate** (registered library, §3a) — inside the low half of the
+  from-scratch 3–17% band that organized k=1, though that
+  precedent ran under live exploration noise and this policy's
+  temperature is collapsed (LR1's collapsed-temperature ADOPT
+  started from 18–41% — two different regimes, cited separately).
+  Its transfer must still cross the context gate (now ~7% vs
+  0–2%, not 0-vs-34), and it *reduces* genuine-context k=2
+  exposure at step 0 (a drilled point reaches a real-flag k=2
+  moment only via its own drill-feed conversion, vs the
+  ~90%-converting serve receive it replaced).
 - A **full-context drill** (restore the harvested instant exactly:
-  physics *and* rules-machine *and* event-sampler state, so the
-  observation at launch equals the recorded observation) trains the
-  genuinely failing context — but the step-0 touch rate there is
-  ~0%, resurrecting PT1's F4 exploration wall: gradients need
-  successes the deterministic-and-wrong policy rarely produces,
-  and this design must say honestly that **no campaign precedent
-  shows the escrow ladder engaging from ~0% touch under a
-  collapsed temperature** (the from-scratch 3–17%-band
-  organization ran under live exploration noise; LR1's
-  collapsed-temperature ADOPT started from an 18–41% touch band —
-  two different regimes, cited separately now, not stitched).
+  physics *and* rules-machine *and* event-sampler state — measured
+  bit-exact, §3a) trains the genuinely failing context — but from
+  a **2.0% step-0 rate** (2/102), below the from-scratch band,
+  squarely in PT1's F4 regime: gradients need successes the
+  deterministic-and-wrong policy rarely produces, and **no
+  campaign precedent shows the escrow ladder engaging from ~2%
+  touch under a collapsed temperature**.
 
 **Honest consequence, stated before any freeze:** the matched-pair
 discovery *strengthens the demonstration/buffer-injection lever's
@@ -231,6 +238,59 @@ distribution-drift starvation.
   arithmetic is retired; its ≤ 1 m-as-touch proxy overstated
   real-context touch ~10×).
 
+## 3a. The harvest tool, the registered library, and both-arm step-0 rows (2026-08-30, banked)
+
+Implemented per the maintainer's direction ahead of the freeze:
+[`tools/paddle_tennis_k2_harvest.py`](../tools/paddle_tennis_k2_harvest.py)
+(the D1 instrument — full-physics scenario capture with rules/sampler
+deep-copies, refuse-reserved guard including the calibration block,
+provenance-stamped pickle library, schema `k2-drill-library-v0`) and
+[`tools/paddle_tennis_k2_step0.py`](../tools/paddle_tennis_k2_step0.py)
+(both D2 launch arms + fidelity checks + step-0 scoring).
+
+**The registered library**: harvested from the registered 2.4M
+protected best (pins `838997fb…`/`d0502c14…` verified before
+capture) on scratch seeds **9030–9099** (70 episodes) — **102
+entries, 1.46/episode** (matching PT2's opportunity flux), library
+sha `f6a92fb7…`. Reproducible deterministically from the tool + the
+recorded pins and seed range.
+
+**Restore validation (KD1-grade, measured at scale):** the
+full-context restore is **exact** — launch-observation max
+deviation ≤ 7.9e-6 across all 102 entries, and the restored
+continuation reproduces the harvest-recorded ball track
+**bit-exactly** (per-entry max divergence p50 = 0.0; overall max
+4.6e-5 on one entry; outcome agreement 102/102). Requirements
+discovered and shipped in the tool: restoring MuJoCo's
+`qacc_warmstart` (without it, solver-warmstart differences amplify
+through bounces to meters) and step-number-aligned comparison.
+
+**Step-0 rows (registered checkpoint, faithful full physics):**
+
+| arm | touch | legal hit | ≤ 1 m at bounce | n |
+|---|---|---|---|---|
+| (a) feed-context | 6.9% | **6.9%** | 5.9% | 102 |
+| (b) full-context | 2.9% | **2.0%** | 4.3% | 102 |
+| oracle on the same launches (feed) | 77.5% | **77.5%** | 84.3% (0.98 m mean) | 102 |
+
+The oracle row certifies the drill balls winnable; the 2/102
+full-context conversions equal the recorded live-play outcomes
+(outcome-match 100%), i.e. arm (b)'s step-0 row *is* the real-task
+baseline by construction.
+
+**The simplification-confound attribution** (the §1a magnitude
+correction): applying the review probe's simplification stack
+(ball spin zeroed, paddle velocities zeroed, opponent parked) to
+the same faithful states raises feed-context legal hits from 6.9%
+to 9% (registered, n=102) and from 6.7% to 20% (an LH1c
+cross-check library, n=30, seeds 9148–9167; the review's own 36%
+on its n=47 stream states re-verified, CIs overlapping the 20%).
+Spin alone roughly doubles the LH1c rate (6.7% → 13%). Consequence
+for D1, binding on any freeze: **the drill must launch faithful
+physics — real spin, real paddle velocities — or it trains easier
+balls than the task serves** (the serve-alignment falsification's
+exact trap).
+
 ## 4. Certification battery (proposed; the maintainer freezes it before implementation)
 
 - **KD0 — bit-identity when off**, including the RNG-stream
@@ -342,10 +402,11 @@ the mechanism bars below are standing per-run observables.
 ## 7. Seed ledger
 
 This document proposes **9000–9199 as a booked scratch/workpaper
-block** (feasibility probe 9000–9029 and review probes 9100–9146,
-all 2026-08-30, are hereby recorded as consumed within it — the
-reach-era precedent of retro-booking workpaper blocks); the harvest
-draws from its unconsumed range, keeping **calibration 5200+ clean
-for the diagnosis instrument** (no train-on-test). The KD battery
-block is assigned at freeze (§4). Nothing else burned;
-**4100–4199 remains sealed**.
+block**, with the following consumption recorded (all 2026-08-30):
+feasibility probe **9000–9029**; review probes **9100–9146**; the
+registered harvest **9030–9099** (the §3a library's source
+episodes); step-0 replay resets **9147** (launch draws discarded);
+the LH1c cross-check harvest **9148–9167**. Unconsumed remainder:
+**9168–9199**. Calibration 5200+ stays clean for the diagnosis
+instrument (no train-on-test). The KD battery block is assigned at
+freeze (§4). Nothing else burned; **4100–4199 remains sealed**.
