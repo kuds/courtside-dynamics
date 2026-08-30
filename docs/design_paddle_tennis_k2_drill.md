@@ -587,7 +587,10 @@ block**, with the following consumption recorded (all 2026-08-30):
 feasibility probe **9000–9029**; review probes **9100–9146**; the
 registered harvest **9030–9099** (the §3a library's source
 episodes); step-0 replay resets **9147** (launch draws discarded);
-the LH1c cross-check harvest **9148–9167**. Unconsumed remainder:
-**9168–9199**. Calibration 5200+ stays clean for the diagnosis
+the LH1c cross-check harvest **9148–9167**; the arm-(c) roll-in
+probe **9168–9187**
+([`paddle_tennis_prefreeze_diagnostics_20260830.md`](paddle_tennis_prefreeze_diagnostics_20260830.md)).
+Unconsumed remainder: **9188–9199** (12 seeds — the diagnostics note
+proposes booking 9200–9299 as an extension). Calibration 5200+ stays clean for the diagnosis
 instrument (no train-on-test). The KD battery block is assigned at
 freeze (§4). Nothing else burned; **4100–4199 remains sealed**.
