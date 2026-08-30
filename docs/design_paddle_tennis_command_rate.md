@@ -279,3 +279,53 @@ receiving ≥ 80% at some checkpoint). No Δ re-pair at pilot time.
 Seed ledger: **6400–6499 assigned to CR2 at the 2026-08-29 freeze**
 (consumed when CR2 first runs; nothing burned yet); CR1 reuses
 calibration 5200–5229; **4100–4199 remains sealed**.
+
+## 7. Pre-implementation falsification (2026-08-30) — PROPOSED disposition
+
+**Status of this section: PROPOSAL — the maintainer books the
+disposition.** No CR battery stage has run, no pre-registered run
+has started, and no line of the limiter has been implemented, so a
+disposition decision now voids nothing; §1–§6 above stand as the
+frozen record.
+
+Before CR0, the PT2 diagnosis probe
+([`paddle_tennis_command_spectrum_20260830.md`](paddle_tennis_command_spectrum_20260830.md))
+measured, from recorded per-step command streams of the three
+standing checkpoints and the oracle, the two quantities this design
+had assumed:
+
+- **F1/F2** — the thrash is heavy-tailed *jump-then-dwell* (p50
+  per-step command delta ≤ 0.033 m; p99 3.4–5.3 m), not the
+  per-step alternation §3 priced Δ = 0.15 against; the D1 rule
+  applied open-loop at the frozen candidate shows **no
+  paddle-travel-reduction mechanism in evidence** (effective
+  commands still slew at ≥ the 0.125 m/step plant rate on ~47% of
+  window steps; ~100% simulated ON/OFF travel, undecidable
+  closed-loop but unsupported open-loop), while the effective
+  target *walks* 3.1–3.3 m net per window. Material bite appears
+  only at sub-plant Δ (≤ 0.05) — exactly where **F4** shows the
+  oracle's own strike jumps (p99 1.78 m) begin ramping (87%/68% of
+  its unlimited travel at 0.05/0.03): the CR1 impairment this
+  design's §6 names as line-ending.
+- **F3 (decisive)** — on measured k=2 opportunities the paddle sits
+  2.6–3.3 m from the return's bounce (≤ 1 m on 7.5–13.5%) and
+  converts ~1%, while the oracle sits 0.89 m (99.8%) and converts
+  98%; the **frozen-at-hit counterfactual — the zero-motion
+  end-member of this design's mechanism — is no better (≤ 1 m on
+  1.5–6.0%; 3.0–13.5% at the follow-through-exempt +30 anchor)**,
+  and the oracle's own frozen counterfactual collapses to 38.7%:
+  its k=2 mechanism is *directed recovery toward the return's
+  landing point* (strict-k=2 anchor, n=150), which a rate limit cannot produce for commands
+  that (per PT1) track no attractor. The §1 premise (mechanized by §2) — stillness by
+  default pays the k=2 chain via the certified escrow ladder — is
+  contradicted at every Δ.
+
+**Proposed disposition: CLOSED without implementation** — falsified
+by measurement before CR0, at the cost of one CPU replay session.
+On booking: the CR2 seed block **6400–6499 returns to the free pool
+unconsumed** (this document then burns nothing); the LT1 §4 routing
+("route to the interface-side treatment") is recorded as satisfied
+and exhausted by this measurement; the campaign's next lever is a
+new design decision, with PT2 §7 naming the measured target (paddle
+→ return-bounce ~3 m → ~1 m) and the candidate lever classes
+(demonstration/buffer injection; the k=2 drill curriculum).
