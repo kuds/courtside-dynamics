@@ -2229,7 +2229,14 @@ _PLAN_TRAIN_CONFIG_KEYS = (
     "checkpoint_freq",
 )
 _PLAN_KEYS = frozenset(
-    {*_PLAN_TRAIN_CONFIG_KEYS, "env_class", "env_kwargs", "warm_start"}
+    {
+        *_PLAN_TRAIN_CONFIG_KEYS,
+        "env_class",
+        "env_kwargs",
+        "eval_env_kwargs",
+        "drill_library_sha256",
+        "warm_start",
+    }
 )
 _PLAN_WARM_START_KEYS = frozenset(
     {
@@ -2297,6 +2304,19 @@ def validate_run_config_against_plan(
     - ``"env_kwargs"``: subset match against the training environment's
       recorded constructor kwargs (the plan pins the kwargs it cares
       about; recipe defaults it does not name stay unchecked);
+    - ``"eval_env_kwargs"``: the same subset match against the recorded
+      ``evaluation_env`` block's constructor kwargs — the eval-side pin
+      the k=2 drill design's D6 needs (a run config's ``[eval_env]``
+      table layers above the recipe's eval overrides, so the frozen
+      plan asserts the drill kwargs are off on the evaluation env
+      specifically);
+    - ``"drill_library_sha256"``: full sha256 or prefix — lowercase
+      hex, 8 to 64 chars, a malformed pin is a bad plan, not a
+      mismatch — matched against the training environment's recorded
+      construction-time drill-library digest (``env.drill_library_sha256``,
+      banked into ``config.json`` by the env probe), i.e. what the run
+      actually loaded, not what the file at the path contains at audit
+      time;
     - ``"warm_start"``: ``None`` demands a from-scratch run (no
       ``initialization`` block, no ``train_config.warm_start``). A
       mapping demands a warm-started run -- ``train()`` binds the
@@ -2375,32 +2395,50 @@ def validate_run_config_against_plan(
             )
 
     if "env_kwargs" in expected:
-        wanted_kwargs = expected["env_kwargs"]
-        if not isinstance(wanted_kwargs, Mapping):
-            raise ValueError("expected env_kwargs must be a mapping")
-        recorded_kwargs = env_info.get("constructor_kwargs")
-        if not isinstance(recorded_kwargs, Mapping):
-            if wanted_kwargs:
-                mismatches.append(
-                    "env.constructor_kwargs: expected "
-                    f"{sorted(wanted_kwargs)}, config.json records no "
-                    "constructor kwargs"
-                )
-        else:
-            for name in sorted(wanted_kwargs):
-                wanted_value = wanted_kwargs[name]
-                if name not in recorded_kwargs:
-                    mismatches.append(
-                        f"env kwarg {name!r}: expected {wanted_value!r}, "
-                        "config.json records no such kwarg"
-                    )
-                elif not _plan_values_match(
-                    recorded_kwargs[name], wanted_value
-                ):
-                    mismatches.append(
-                        f"env kwarg {name!r}: expected {wanted_value!r}, "
-                        f"config.json records {recorded_kwargs[name]!r}"
-                    )
+        mismatches.extend(
+            _env_kwargs_plan_mismatches(
+                expected["env_kwargs"],
+                env_info,
+                block="env",
+                key="env_kwargs",
+            )
+        )
+
+    if "eval_env_kwargs" in expected:
+        eval_env_info = config.get("evaluation_env")
+        if not isinstance(eval_env_info, Mapping):
+            eval_env_info = {}
+        mismatches.extend(
+            _env_kwargs_plan_mismatches(
+                expected["eval_env_kwargs"],
+                eval_env_info,
+                block="evaluation_env",
+                key="eval_env_kwargs",
+            )
+        )
+
+    if "drill_library_sha256" in expected:
+        wanted_sha = expected["drill_library_sha256"]
+        if (
+            not isinstance(wanted_sha, str)
+            or not 8 <= len(wanted_sha) <= 64
+            or any(c not in "0123456789abcdef" for c in wanted_sha)
+        ):
+            raise ValueError(
+                "expected drill_library_sha256 must be lowercase hex, "
+                "8 to 64 chars"
+            )
+        recorded_sha = env_info.get("drill_library_sha256")
+        if not isinstance(recorded_sha, str):
+            mismatches.append(
+                f"env.drill_library_sha256: expected {wanted_sha!r}, "
+                "config.json records no consumed drill-library digest"
+            )
+        elif not recorded_sha.startswith(wanted_sha):
+            mismatches.append(
+                f"env.drill_library_sha256: expected {wanted_sha!r}, "
+                f"config.json records {recorded_sha!r}"
+            )
 
     if "warm_start" in expected:
         mismatches.extend(
@@ -2417,6 +2455,43 @@ def validate_run_config_against_plan(
             f"{len(mismatches)} place(s) ({config_json_path}):\n- "
             + "\n- ".join(mismatches)
         )
+
+
+def _env_kwargs_plan_mismatches(
+    wanted_kwargs: Any,
+    recorded_env_info: Mapping[str, Any],
+    *,
+    block: str,
+    key: str,
+) -> list[str]:
+    """Subset-match a plan's kwargs pin against one recorded env block
+    (``env`` or ``evaluation_env``) for
+    :func:`validate_run_config_against_plan`."""
+    if not isinstance(wanted_kwargs, Mapping):
+        raise ValueError(f"expected {key} must be a mapping")
+    mismatches: list[str] = []
+    recorded_kwargs = recorded_env_info.get("constructor_kwargs")
+    if not isinstance(recorded_kwargs, Mapping):
+        if wanted_kwargs:
+            mismatches.append(
+                f"{block}.constructor_kwargs: expected "
+                f"{sorted(wanted_kwargs)}, config.json records no "
+                "constructor kwargs"
+            )
+        return mismatches
+    for name in sorted(wanted_kwargs):
+        wanted_value = wanted_kwargs[name]
+        if name not in recorded_kwargs:
+            mismatches.append(
+                f"{block} kwarg {name!r}: expected {wanted_value!r}, "
+                "config.json records no such kwarg"
+            )
+        elif not _plan_values_match(recorded_kwargs[name], wanted_value):
+            mismatches.append(
+                f"{block} kwarg {name!r}: expected {wanted_value!r}, "
+                f"config.json records {recorded_kwargs[name]!r}"
+            )
+    return mismatches
 
 
 def _warm_start_plan_mismatches(

@@ -1148,8 +1148,12 @@ RECIPES: dict[str, Recipe] = {
         # The eval task is bit-frozen (docs/design_paddle_tennis_k2_drill.md
         # §2 D6): a run config's [env] table may turn the k=2 drill on
         # for training, but selection, periodic/final eval, and the
-        # checkpoint diagnosis always run the standard task — these
-        # overrides sit above [env] in make_eval_env_fn's layering.
+        # checkpoint diagnosis run the standard task under any
+        # [env]-table override — these sit above [env] in
+        # make_eval_env_fn's layering. An explicit [eval_env] table
+        # still wins last by the documented layering, so the freeze
+        # checklist forbids drill keys there and the frozen plan pins
+        # the recorded evaluation env via eval_env_kwargs.
         eval_env_overrides={
             "drill_library": None,
             "drill_fraction": 0.0,

@@ -350,6 +350,13 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.points_per_episode = points_per_episode
         self._points_played = 0
         self._crossings_base = 0
+        # The step-time crossings formula's continuity offset. It
+        # equals _crossings_base everywhere except during a
+        # full-context drilled point, where it absorbs the restored
+        # rules machine's harvested crossing count so the episode
+        # counter never jumps — while _crossings_base keeps its
+        # published completed_point_crossings meaning untouched.
+        self._crossings_offset = 0
         self._point_serve_nudged = 0
         self._point_end_counts: dict[str, int] = {}
         # k=2 drill (docs/design_paddle_tennis_k2_drill.md §2; default
@@ -742,7 +749,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         )
         self._last_transition = transition
         after = transition.after
-        self._crossings = self._crossings_base + max(
+        self._crossings = self._crossings_offset + max(
             0,
             int(after.net_crossing_count) - int(after.feed_crossed_net),
         )
@@ -857,6 +864,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             # truncation-cut partial).
             self._record_point_end(after.termination_reason)
             self._crossings_base = self._crossings
+            self._crossings_offset = self._crossings
             self._points_played += 1
         if absorbed_point:
             # The boundary absorbs: if the cap has not been reached,
@@ -1275,6 +1283,21 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
                     f"({entry['serving_side']!r}); the drill launches only "
                     "into side-B-serving scenarios (design D3)"
                 )
+            # Entries harvested under a different rally-rule profile
+            # than this env plays would mix two task rules inside one
+            # episode (the full arm restores the harvested machine
+            # verbatim; the feed arm replays physics harvested under
+            # the other profile) — refuse at construction.
+            rules = entry.get("rules")
+            if rules is not None and bool(
+                rules.rules.require_bounce_before_return
+            ) != (self.volley_rule == "fault"):
+                raise ValueError(
+                    f"drill_library {path!r} entry {position} was harvested "
+                    "under a different volley_rule profile than this env "
+                    f"plays ({self.volley_rule!r}); refuse to mix rally "
+                    "rules"
+                )
         return entries
 
     def _launch_point(self, *, mid_episode: bool) -> None:
@@ -1376,10 +1399,13 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             sampler.model = self.model
             self._event_sampler = sampler
             # The restored machine carries the harvested rally's
-            # crossing count; rebase so the episode counter continues
-            # from its own value instead of jumping.
+            # crossing count; rebase the CONTINUITY OFFSET only, so
+            # the episode counter continues from its own value
+            # instead of jumping — _crossings_base is published as
+            # completed_point_crossings and must keep its
+            # completed-point meaning.
             snapshot = self._rules.snapshot()
-            self._crossings_base = self._crossings - max(
+            self._crossings_offset = self._crossings - max(
                 0,
                 int(snapshot.net_crossing_count) - int(snapshot.feed_crossed_net),
             )
@@ -1401,6 +1427,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self.step_number = 0
         self._crossings = 0
         self._crossings_base = 0
+        self._crossings_offset = 0
         self._points_played = 0
         self._point_serve_nudged = 0
         self._point_end_counts = {}
