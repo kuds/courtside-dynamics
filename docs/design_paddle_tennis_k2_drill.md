@@ -259,8 +259,12 @@ provenance-stamped pickle library, schema `k2-drill-library-v0`) and
 protected best (pins `838997fb…`/`d0502c14…` verified before
 capture) on scratch seeds **9030–9099** (70 episodes) — **102
 entries, 1.46/episode** (matching PT2's opportunity flux), library
-sha `f6a92fb7…`. Reproducible deterministically from the tool + the
-recorded pins and seed range.
+sha `43975265…` (regenerated at the hardened-instrument commit
+`c8bc07d` with clean-tree git stamping after verification caught the
+first capture's dirty-tree provenance; entry content verified
+field-identical across regenerations). Harvest exclusion counters:
+clearance-dropped 0, unarmed crossings 0. Reproducible
+deterministically from the tool + the recorded pins and seed range.
 
 **Restore validation (KD1-grade, measured at scale):** the
 full-context restore is **exact** — launch-observation max
@@ -283,7 +287,12 @@ through bounces to meters) and step-number-aligned comparison.
 The oracle row certifies the drill balls winnable; the 2/102
 full-context conversions equal the recorded live-play outcomes
 (outcome-match 100%), i.e. arm (b)'s step-0 row *is* the real-task
-baseline by construction.
+baseline by construction. Like-for-like caveat, surfaced by the
+instrument: 11 of the full arm's 102 entries are
+truncation-censored (harvested near the episode cap, so their
+restored continuation inherits the short remaining budget while the
+feed arm grants a fresh one); excluding them moves the comparison
+only to ~2.2% vs 6.9%.
 
 **The simplification-confound attribution** (the §1a magnitude
 correction): applying the review probe's simplification stack
