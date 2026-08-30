@@ -37,6 +37,8 @@ import hashlib
 import json
 import pickle
 import subprocess
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
@@ -163,7 +165,7 @@ def run_arm(arm: str, library: dict, policy, max_steps: int, reset_seed: int) ->
             else:
                 obs = _launch_full(env, entry)
             obs_fidelity = float(np.max(np.abs(obs - entry["obs"])))
-            row = dict(
+            row: dict[str, Any] = dict(
                 touch=False,
                 legal_hit=False,
                 bounce_dist=None,
@@ -299,6 +301,7 @@ def main() -> None:
         library = pickle.load(f)
     if library.get("schema") != "k2-drill-library-v0":
         raise SystemExit(f"unknown library schema: {library.get('schema')!r}")
+    policy: Callable[[np.ndarray], np.ndarray]
     if args.policy == "oracle":
         policy = scripted_ground_opponent
     else:

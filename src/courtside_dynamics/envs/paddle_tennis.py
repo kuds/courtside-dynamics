@@ -1266,7 +1266,14 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         entries = list(library["entries"])
         if not entries:
             raise ValueError(f"drill_library {path!r} contains no entries")
-        required = ("qpos", "qvel", "obs", "head_a", "head_b", "serving_side")
+        required: tuple[str, ...] = (
+            "qpos",
+            "qvel",
+            "obs",
+            "head_a",
+            "head_b",
+            "serving_side",
+        )
         if self.drill_context == "full":
             required += ("rules", "sampler", "qacc_warmstart")
         for position, entry in enumerate(entries):

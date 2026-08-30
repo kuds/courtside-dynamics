@@ -118,8 +118,8 @@ def analyze_subject(streams_dir, name, deltas):
 
     step_deltas, strike_rows, strike_rows_30 = [], [], []
     off_actual, off_sim = [], []
-    sim = {d: [] for d in deltas}
-    drift = {d: [] for d in deltas}
+    sim: dict[float, list[float]] = {d: [] for d in deltas}
+    drift: dict[float, list[float]] = {d: [] for d in deltas}
     eff_axis_fast = eff_axis_total = 0  # |d eff|/axis >= plant rate at Delta=0.15
     for seed, ep in eps:
         ctrl, qpos, act = ep["ctrl"], ep["qpos"], ep["actions"]
@@ -154,7 +154,7 @@ def analyze_subject(streams_dir, name, deltas):
     for label, rows in (("strike-ended windows", strike_rows),
                         ("  PT1-subset (seeds 5200-5229)", strike_rows_30)):
         if rows:
-            sats, css, cts, ats = zip(*rows)
+            sats, css, cts, ats = zip(*rows, strict=True)
             print(
                 f"{label} {len(rows)}: sat {np.mean(sats):.1%}  "
                 f"cmd_step {np.mean(css):.3f}  cmd_travel {np.mean(cts):.2f}  "
@@ -184,10 +184,12 @@ def analyze_subject(streams_dir, name, deltas):
         )
 
     # ---- F3: k=2 geometry with counterfactual anchors ----
-    stats = {k: [] for k in ("actual", "hit", "hit30", "home")}
+    stats: dict[str, list[float]] = {
+        k: [] for k in ("actual", "hit", "hit30", "home")
+    }
     strict_hit = []  # frozen-at-hit, strict k=2 (first own hit of the point)
     opps = conv = 0
-    for e_ep, (_, ep) in zip(events["episodes"], eps):
+    for e_ep, (_, ep) in zip(events["episodes"], eps, strict=True):
         qpos, pts = ep["qpos"], ep["points"]
         ha = np.flatnonzero(ep["hit_a"])
         hb = np.flatnonzero(ep["hit_b"])
@@ -195,7 +197,7 @@ def analyze_subject(streams_dir, name, deltas):
         bounces = [
             (t, x, y) for (t, k, x, y) in e_ep["events"] if k == "BALL_COURT_A"
         ]
-        first_hit_of_point = {}
+        first_hit_of_point: dict[int, int] = {}
         for t0 in ha:
             first_hit_of_point.setdefault(int(pts[t0]), t0)
         for t0 in ha:
