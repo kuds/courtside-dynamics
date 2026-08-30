@@ -176,6 +176,14 @@ def _probe_env_fn(env_fn: Any) -> dict[str, Any]:
             # spaces alone cannot identify. The long-horizon evaluator uses
             # this to reject recipe drift apart from its intentional horizon.
             info["constructor_kwargs"] = dict(constructor_kwargs)
+        # The k=2 drill library's consumed hash: the kwargs above pin
+        # only the PATH, and hashing that path at audit time proves the
+        # file's current content, not what the run loaded — so the env's
+        # construction-time digest is banked here (the
+        # expected_artifact_sha256 pattern, extended to the drill).
+        library_sha = getattr(env, "drill_library_sha256", None)
+        if isinstance(library_sha, str):
+            info["drill_library_sha256"] = library_sha
         curriculum_metadata = getattr(env, "curriculum_metadata", None)
         if curriculum_metadata is not None:
             info["curriculum"] = dict(curriculum_metadata)

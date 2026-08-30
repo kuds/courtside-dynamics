@@ -1454,6 +1454,74 @@ def test_validate_run_config_against_plan_accepts_the_lt1_shape(tmp_path):
     )
 
 
+def test_validate_run_config_against_plan_eval_env_and_drill_sha_pins(
+    tmp_path,
+):
+    """The k=2 drill design's D6 eval-side pin and consumed-library
+    digest: ``eval_env_kwargs`` subset-matches the recorded
+    ``evaluation_env`` block (the [eval_env] table layers above the
+    recipe's eval overrides, so the frozen plan must be able to
+    assert the drill is off there), and ``drill_library_sha256``
+    matches what the training env actually loaded — by full digest
+    or prefix — not what the file at the path contains at audit
+    time."""
+    config = _plan_run_config()
+    config["env"]["drill_library_sha256"] = "43975265" + "e" * 56
+    config["evaluation_env"] = {
+        "class": "PaddleTennisEnv",
+        "constructor_kwargs": {
+            "render_mode": "rgb_array",
+            "drill_library": None,
+            "drill_fraction": 0.0,
+        },
+    }
+    path = _write_plan_config(tmp_path, config)
+    validate_run_config_against_plan(
+        path,
+        {
+            "eval_env_kwargs": {"drill_library": None, "drill_fraction": 0.0},
+            "drill_library_sha256": "43975265",
+        },
+    )
+    validate_run_config_against_plan(
+        path, {"drill_library_sha256": "43975265" + "e" * 56}
+    )
+    with pytest.raises(RunConfigPlanMismatch) as excinfo:
+        validate_run_config_against_plan(
+            path,
+            {
+                "eval_env_kwargs": {"drill_fraction": 0.5},
+                "drill_library_sha256": "deadbeef",
+            },
+        )
+    message = str(excinfo.value)
+    assert "evaluation_env kwarg 'drill_fraction': expected 0.5" in message
+    assert "env.drill_library_sha256: expected 'deadbeef'" in message
+
+    # An absent evaluation_env block or consumed digest is a
+    # mismatch, never a silent pass.
+    bare = _plan_run_config()
+    bare_path = tmp_path / "bare.json"
+    bare_path.write_text(json.dumps(bare))
+    with pytest.raises(RunConfigPlanMismatch) as excinfo:
+        validate_run_config_against_plan(
+            bare_path,
+            {
+                "eval_env_kwargs": {"drill_library": None},
+                "drill_library_sha256": "43975265",
+            },
+        )
+    message = str(excinfo.value)
+    assert "evaluation_env.constructor_kwargs" in message
+    assert "records no consumed drill-library digest" in message
+
+    # A malformed pin is a bad plan, not a mismatch.
+    with pytest.raises(ValueError, match="lowercase hex"):
+        validate_run_config_against_plan(
+            path, {"drill_library_sha256": "NOT-HEX"}
+        )
+
+
 def test_validate_run_config_against_plan_accepts_from_scratch(tmp_path):
     config = _plan_run_config()
     del config["initialization"]
