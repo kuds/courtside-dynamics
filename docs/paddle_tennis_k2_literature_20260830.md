@@ -7,8 +7,11 @@ booked.** Produced by a six-theme research sweep (reset-state
 curricula, demonstration injection into off-policy replay,
 collapsed-entropy fine-tuning, context gating, robot table tennis,
 sparse-success mechanics); every cited paper was verified against
-its primary source (arXiv abstract, and the paper body for each
-load-bearing number). The maintainer weighs this alongside the
+its primary source, and the eight load-bearing quantitative
+claims were re-verified against the paper bodies in a second
+adversarial pass (five confirmed verbatim; a Backplay ablation
+claim and two Nair/Florensa framing details were corrected in
+place the same day). The maintainer weighs this alongside the
 campaign's own measurements; where the two disagree, the
 campaign's measurements are on this task and the literature is
 not.
@@ -33,9 +36,9 @@ reset frontier where success is materially higher than ours:
 
 | method | floor / pacing rule | our position |
 |---|---|---|
-| Reverse Curriculum Generation (Florensa et al., CoRL 2017, [1707.05300](https://arxiv.org/abs/1707.05300)) | trains only "good starts" with success in a 10–90% band; below 10% = uninformative | full arm 2.0% below the band; feed arm 6.9% just below |
+| Reverse Curriculum Generation (Florensa et al., CoRL 2017, [1707.05300](https://arxiv.org/abs/1707.05300)) | keeps its "good starts" set to states with success in a 10–90% band; starts measured below 10% are dropped as uninformative | full arm 2.0% below the band; feed arm 6.9% just below |
 | Single-demo Montezuma (Salimans & Chen 2018, [1812.03381](https://arxiv.org/abs/1812.03381)) | reset point advances only at ~20% worker success; backward curriculum "vitally important" | an order of magnitude above our step-0 |
-| Backplay (Resnick et al. 2018, [1807.06919](https://arxiv.org/abs/1807.06919)) | too-fast curriculum advancement fails; too-slow never does; windows of states beat single points | direct hard-state launch = the limit of infinitely fast advancement |
+| Backplay (Resnick et al. 2018, [1807.06919](https://arxiv.org/abs/1807.06919)) | too-fast curriculum advancement fails, too-slow never does; the windowed curriculum beats uniform sampling over the whole demonstration | direct hard-state launch = the limit of infinitely fast advancement |
 | RFCL (Tao et al., ICLR 2024, [2405.03379](https://arxiv.org/abs/2405.03379)) | SAC + per-trajectory reverse frontier advanced on consecutive successes, then a forward curriculum prioritizing intermediate-success starts | the published recipe closest to this exact setting (SAC, state resets, scripted demos) |
 
 Two partial counterexamples, both instructive:
@@ -72,15 +75,17 @@ construction, not an env change.
 ## 3. Drill vs demonstration injection is a false dichotomy
 
 The single closest precedent — Nair et al., ICRA 2018,
-[1709.10089](https://arxiv.org/abs/1709.10089) — uses **both**
-levers in one recipe (demonstration replay buffer sampled every
-batch + resets into demonstration states) and finds them
-complementary. Its Q-filter (clone the demo action only where the
-critic says it beats the policy's) is precisely the guard this
-campaign needs: cloning pressure confines itself to the k=2
-context states while the ~90% k=1 receive is left alone. ~100
-demonstrations sufficed there; a 98% oracle generates that in
-minutes.
+[1709.10089](https://arxiv.org/abs/1709.10089) — composes **both**
+levers in one working recipe: its always-on core is the
+demonstration replay buffer sampled every batch plus a Q-filtered
+BC loss, and it adds resets into demonstration states on its
+longest-horizon tasks, where the demo buffer alone was not
+enough (a resettable simulator assumed — ours qualifies). Its
+Q-filter (clone the demo action only where the critic says it
+beats the policy's) is precisely the guard this campaign needs:
+cloning pressure confines itself to the k=2 context states while
+the ~90% k=1 receive is left alone. ~100 demonstrations sufficed
+there; a 98% oracle generates that in minutes.
 
 The modern low-surgery recipe for the injection half is **RLPD**
 (Ball et al., ICML 2023,
