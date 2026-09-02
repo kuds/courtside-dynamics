@@ -125,8 +125,14 @@ the demo harvest tool shipped default-off the same day (an
 adversarial review of that surface found the booked pilot could
 not launch through the warm-start algo gates and that the first
 demo library carried a fresh-episode clock and a mislabeled cap —
-all fixed and re-harvested before anything was banked); the
-class-split diagnosis extension is the outstanding prerequisite.
+the material findings fixed and the library re-harvested; the
+first library's table (142 kept, "0 censored") had gone into the
+design's §3 the same day and is superseded; a second verification
+pass's residual minors are recorded in the design, including a
+PROPOSAL to amend D-E's "through point termination" wording, since
+most kept demos end at the recording cap while the payment clause
+holds by construction); the class-split diagnosis extension is the
+outstanding prerequisite.
 Lessons booked: (a) **the
 pre-freeze diagnostics' first-draft headlines were wrong in four
 places and the verification caught every one** — the "collapsed

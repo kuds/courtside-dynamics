@@ -319,6 +319,20 @@ class TestInjection:
             if bc_filter == "q":
                 assert 0.0 <= logged["train/demo_q_filter_pass"] <= 1.0
 
+    def test_ordering_series_starts_at_the_first_train_call(self, venv, tmp_path):
+        """Both ordering series are logged after the first train() call's
+        updates (then every 50th call) — the trend series; the step-0
+        baseline is an explicit call before learn()."""
+        path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)
+        model = DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL)
+        baseline = model.demo_q_ordering_launch()
+        assert baseline is not None and 0.0 <= baseline <= 1.0
+        model.learn(total_timesteps=_SMALL["learning_starts"] + 1)  # exactly one train() call
+        assert model._n_updates == 1
+        logged = model.logger.name_to_value
+        assert 0.0 <= logged["train/demo_q_ordering"] <= 1.0
+        assert 0.0 <= logged["train/demo_q_ordering_launch"] <= 1.0
+
     def test_save_and_load_round_trips(self, venv, tmp_path):
         path, n_train = _synthetic_library(tmp_path / "lib.pkl", venv)
         model = DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL)
@@ -369,9 +383,17 @@ class TestInjection:
         assert "demo_library_sha256" not in _model_info(off)
         other, _ = _synthetic_library(tmp_path / "other.pkl", venv, trajectories=7, seed=3)
         moved = DemoSAC.load(str(checkpoint), env=venv, device="cpu", demo_library=other)
-        moved._ensure_demo_loaded()
+        # The override's digest is banked AT LOAD (before any learn()),
+        # so a probe in between pairs the new path with the new digest.
         with open(other, "rb") as f:
-            assert moved.demo_library_sha256 == hashlib.sha256(f.read()).hexdigest()
+            other_digest = hashlib.sha256(f.read()).hexdigest()
+        assert moved.demo_buffer is None
+        assert moved.demo_library_sha256 == other_digest
+        probe = _model_info(moved)
+        assert probe["hyperparameters"]["demo_library"] == other
+        assert probe["demo_library_sha256"] == other_digest
+        moved._ensure_demo_loaded()
+        assert moved.demo_library_sha256 == other_digest
         # Same path, different bytes: the banked provenance no longer
         # describes the file — refused, not silently re-hashed.
         with open(path, "rb") as f:

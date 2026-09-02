@@ -88,11 +88,21 @@ def _git_sha() -> str:
             ["git", "rev-parse", "HEAD"],
             capture_output=True, text=True, check=True, cwd=root,
         ).stdout.strip()
-        dirty = subprocess.run(
+        status = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True, text=True, check=True, cwd=root,
-        ).stdout.strip()
-        return f"{sha}-dirty" if dirty else sha
+        ).stdout
+        if not status.strip():
+            return sha
+        # A dirty tree is identified by the CONTENT of its
+        # modifications, so the start/end comparison in main() also
+        # catches a dirty tree whose edits changed during the run.
+        diff = subprocess.run(
+            ["git", "diff", "HEAD"],
+            capture_output=True, text=True, check=True, cwd=root,
+        ).stdout
+        tag = hashlib.sha256((status + diff).encode()).hexdigest()[:8]
+        return f"{sha}-dirty-{tag}"
     except Exception:
         return "unknown"
 

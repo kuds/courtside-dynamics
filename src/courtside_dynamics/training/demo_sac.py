@@ -156,6 +156,13 @@ class DemoSAC(SAC):
             self.demo_library_sha256 = None
             self._demo_digest_path = None
             return
+        if self._demo_digest_path != self.demo_library:
+            # A load-time override onto a different library: bank THAT
+            # file's digest now, not at the first learn() — the model
+            # probe may run in between and must never pair the new
+            # path with the checkpoint's digest.
+            self.demo_library_sha256 = _file_sha256(self.demo_library)
+            self._demo_digest_path = self.demo_library
         if self.n_steps != 1:
             raise ValueError(
                 "DemoSAC does not support n_steps > 1 with a demo library "
@@ -509,7 +516,12 @@ class DemoSAC(SAC):
                 self.logger.record("train/demo_bc_loss", np.mean(bc_losses))
             if filter_pass:
                 self.logger.record("train/demo_q_filter_pass", np.mean(filter_pass))
-            if self._n_updates // gradient_steps % 50 == 0:
+            # The ordering series: after the first train() call's updates
+            # and every 50th call after that (a TRUE step-0 baseline is an
+            # explicit demo_q_ordering() call before learn(); the SD3
+            # battery takes it that way).
+            calls = self._n_updates // gradient_steps
+            if calls == 1 or calls % 50 == 0:
                 ordering = self.demo_q_ordering()
                 launch_ordering = self.demo_q_ordering_launch()
                 if launch_ordering is not None:

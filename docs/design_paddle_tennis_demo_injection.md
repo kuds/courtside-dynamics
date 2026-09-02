@@ -22,7 +22,10 @@ The k=2 deficit is a **joint observation-side context gate** in the
 learned policy: the same physics converts 6.9% presented as a fresh
 feed and 1.3–2.0% in the real mid-rally context, under both the
 deterministic and the behavior policy (freeze brief G3); the oracle
-is context-blind (identical 77.5% under both presentations); the
+is context-blind (identical 77.5% under both presentations on
+fresh-episode-clock launches; 71.6% with the failure state's own
+clock restored, the difference being late-episode truncation, §3);
+the
 gate is not positional (arm (c): 1/20 from the oracle's own
 position), not the clock, not exploration-noise scale (marginal gSDE
 std ~0.60, never collapsed). What the policy lacks is **successful
@@ -74,9 +77,10 @@ transitions). Constructor kwargs, all default-off:
   Q-filter). **Default "none" per D-C**: the freeze brief's G1
   measured the kept critics near action-blind at these states, so
   the filter would pass ~half the demos arbitrarily at launch.
-- `demo_window: "point" | "to_confirm"` — whole recorded trajectory
-  (through the point's end) or through the conversion's confirmation
-  step.
+- `demo_window: "point" | "to_confirm"` — the whole recorded
+  trajectory (to the point's end, the episode's truncation, or the
+  300-step cap — §3: most kept trajectories end at the cap) or
+  through the conversion's confirmation step.
 - The **D-C arming measurement** ships in two populations:
   `demo_q_ordering()` — the fraction of held-out demo states (every
   transition of every held-out trajectory under the configured
@@ -178,14 +182,16 @@ quoted elsewhere: registered **73/102 = 71.6%**, extension 83/100).
 The registered figure IS a like-for-like reproduction: the step-0
 tool's own oracle row on the full arm, which restores the clock the
 same way, reads touch = legal = **71.6%** with 20 truncation-
-censored entries at its 400-step horizon (re-run 2026-09-02); the
-familiar 77.5% is the fresh-budget row (feed arm, and the first,
-superseded harvest's fresh-clock launch reproduced it at 79/102).
-**Erratum candidate for the drill design (maintainer's call):** its
-§3a "the oracle scores identically under both arms (77.5%)" does
-not hold under the current instrument — the full arm reads 71.6%,
-the difference being the censored late-episode states, not the
-context gate. 26 of the 156 hits (16.7%) went unconfirmed (returns
+censored entries at its 400-step horizon (re-run 2026-09-02). The
+familiar 77.5% is the same oracle on a **fresh-episode-clock launch
+body**: the feed arm (re-run: 77.5%, 0 censored), the env-launch
+cross-check that scored both arms through `_launch_drill` with a
+fresh clock (the drill design's "identical under both arms"
+sentence — still true on that body; the first, superseded harvest
+launched that way and reproduced 79/102), and §1's dissociation.
+Scoping, not an erratum: the two readings differ by the 20
+late-episode states the restored clock censors, not by the context
+gate. 26 of the 156 hits (16.7%) went unconfirmed (returns
 out/net), which the harvest correctly excludes. The restored clock
 is what costs demos relative to a fresh-episode launch (the first
 harvest kept 142), and the loss is entirely the late-episode
@@ -198,6 +204,22 @@ so the cap itself loses no conversion). The pilot env would
 truncate those states identically. Both source libraries are
 policy-harvested failure states (the D-E distribution), one per
 point, clearance-filtered at harvest.
+
+**PROPOSAL (maintainer books) — amend D-E's wording.** D-E reads
+"harvested through point termination so the conversion payment is
+in the buffer". The payment clause holds by construction (asserted
+per kept trajectory); the literal "through point termination" does
+not: 79 of the 130 kept trajectories end at the 300-step cap and 16
+at the episode's truncation, because two scripted players rally on
+after the conversion and a cooperative rally has no natural end
+inside any cap. Proposed wording: "harvested through the
+conversion's confirmation, with the post-confirmation rally
+recorded to the point's end or a 300-step cap, whichever comes
+first". Also recorded: the 35 point-boundary rows' `next_obs` is
+one fixed relaunch serve (every launch resets with the
+discarded-draw seed 9147, so the boundary draw repeats — 2 distinct
+ball positions across the 35 rows): a plain drill-off serve as the
+pilot env produces, but not 35 different ones.
 
 ### 3a. Replay multiplicity — the arithmetic the fraction is set from
 
@@ -246,7 +268,11 @@ escalation with the multiplicity recorded.
   per-minibatch split; `demo_library_sha256` reaches `config.json`
   and the plan validator).
 - **SD3 — the ordering baseline and the arming threshold**: both
-  shipped series read at pilot step 0 — `demo_q_ordering` over every
+  shipped series, read at pilot step 0 by an explicit call on the
+  warm-started model before `learn()` (the battery's own step; the
+  logged series begins after the first `train()` call's updates,
+  then every 50th call — the trend, not the baseline) —
+  `demo_q_ordering` over every
   transition of the 31 held-out trajectories under the
   pilot's window (8,539 rows for `point`, 4,797 for
   `to_confirm`; the window is fixed for the run so the series stays
