@@ -117,8 +117,17 @@ saturation become observables; (D-E) demos are oracle completions
 from the policy's OWN harvested failure states, harvested through
 point termination so the conversion payment is in the buffer;
 (D-F) drill OFF at launch, arm (b) the pre-registered RE-AIM
-escalation, the D2 fork deferred; (D-G) battery block 6400–6499
-and scratch extension 9200–9299. Lessons booked: (a) **the
+escalation, the D2 fork deferred; (D-G) battery block 6400–6499,
+scratch extension 9200–9299, and the pre-pilot instrument list —
+the injection fork with its gradient_steps regression test, the
+model-side provenance hook and plan key, the SD0 certificate, and
+the demo harvest tool shipped default-off the same day (an
+adversarial review of that surface found the booked pilot could
+not launch through the warm-start algo gates and that the first
+demo library carried a fresh-episode clock and a mislabeled cap —
+all fixed and re-harvested before anything was banked); the
+class-split diagnosis extension is the outstanding prerequisite.
+Lessons booked: (a) **the
 pre-freeze diagnostics' first-draft headlines were wrong in four
 places and the verification caught every one** — the "collapsed
 gSDE noise" was a 30× misread of the exploration-matrix scale (the

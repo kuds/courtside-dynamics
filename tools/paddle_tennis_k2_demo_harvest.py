@@ -97,13 +97,26 @@ def _git_sha() -> str:
         return "unknown"
 
 
+def _empty_counts() -> dict[str, int]:
+    return {
+        "launched": 0,
+        "kept": 0,
+        "oracle_miss": 0,
+        "unconfirmed": 0,
+        "kept_point_ended": 0,
+        "kept_cap_ended": 0,
+        "kept_episode_truncated": 0,
+    }
+
+
 def harvest_library(
     library_path: str,
     *,
     max_steps: int,
     holdout_every: int,
-    counts: dict[str, int],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Harvest one source library; returns (trajectories, its own counts)."""
+    counts = _empty_counts()
     env = PaddleTennisEnv(
         **ENV_KWARGS,
         drill_library=library_path,
@@ -216,7 +229,7 @@ def harvest_library(
                 counts["kept_point_ended"] += 1
     finally:
         env.close()
-    return trajectories
+    return trajectories, counts
 
 
 def main() -> None:
@@ -229,32 +242,39 @@ def main() -> None:
     if args.holdout_every < 2:
         raise SystemExit("--holdout-every must be >= 2 (some entries must train)")
 
-    counts = {
-        "launched": 0,
-        "kept": 0,
-        "oracle_miss": 0,
-        "unconfirmed": 0,
-        "kept_point_ended": 0,
-        "kept_cap_ended": 0,
-        "kept_episode_truncated": 0,
-    }
+    # Provenance is the tree the harvest STARTED on; a tree that
+    # changes underneath a running harvest is refused at the end
+    # rather than recorded as if it had been stable.
+    git_sha = _git_sha()
+    counts = _empty_counts()
     trajectories: list[dict[str, Any]] = []
     sources = []
     for path in args.library:
-        got = harvest_library(
+        got, local = harvest_library(
             path,
             max_steps=args.max_steps,
             holdout_every=args.holdout_every,
-            counts=counts,
         )
+        for key, value in local.items():
+            counts[key] += value
         trajectories.extend(got)
         sources.append(
-            {"file": os.path.basename(path), "sha256": _sha256(path), "kept": len(got)}
+            {
+                "file": os.path.basename(path),
+                "sha256": _sha256(path),
+                "kept": len(got),
+                "counts": local,
+            }
         )
-        print(f"{path}: kept {len(got)}")
+        print(f"{path}: {local}")
+    if _git_sha() != git_sha:
+        raise SystemExit(
+            f"working tree changed during the harvest ({git_sha} -> "
+            f"{_git_sha()}); re-run on a stable tree"
+        )
     library = {
         "schema": SCHEMA,
-        "git_sha": _git_sha(),
+        "git_sha": git_sha,
         "oracle": ORACLE,
         "env_kwargs": dict(ENV_KWARGS),
         "reset_seed": RESET_SEED,

@@ -2,7 +2,9 @@
 
 Status: **Proposed — the mechanism is IMPLEMENTED default-off
 (2026-09-02: `DemoSAC`, the demo harvest tool, provenance and plan
-pins, SD0 certified bit-identical against stock SAC); the LD1′ pilot
+pins, SD0 certified bit-identical against stock SAC on a minimal and
+a recipe-shaped lockstep; warm-start gates widened to the SAC family
+and tested); the LD1′ pilot
 (§5) is NOT frozen — its numbers are the maintainer's at freeze, on
 the §3a arithmetic.** Routed injection-first by the maintainer's
 2026-09-02 bookings
@@ -43,18 +45,27 @@ the off-policy registration would silently train 1 update per 256
 transitions). Constructor kwargs, all default-off:
 
 - `demo_library: str | None = None` — a `k2-demo-library-v0`
-  artifact from `tools/paddle_tennis_k2_demo_harvest.py`; loaded at
-  construction (schema, per-trajectory array shapes against the
-  env's spaces, non-empty train split — fail-loud), sha256 banked as
-  `demo_library_sha256` into `config.json`'s `resolved_model` block
-  by the model probe, pinnable via `validate_run_config_against_plan`'s
-  `demo_library_sha256` key. Half-configured pairs are rejected.
+  artifact from `tools/paddle_tennis_k2_demo_harvest.py`. Its sha256
+  is banked **at construction** (the trainer writes `config.json`
+  before `learn()` starts) as `demo_library_sha256` into
+  `config.json`'s `resolved_model` block by the model probe, pinnable
+  via `validate_run_config_against_plan`'s `demo_library_sha256` key;
+  the buffer itself builds at the **first `learn()`** (schema,
+  per-trajectory array shapes against the env's spaces on the raw
+  arrays, non-empty train split — fail-loud; a library whose bytes
+  changed under the banked digest is refused), so inference loaders
+  never need the file. Half-configured pairs are rejected at
+  construction and again after `load()` applies override kwargs.
 - `demo_fraction: float = 0.0` in [0, 1): the **exact** share of
   every minibatch drawn from the demo buffer —
   `n_demo = round(fraction × batch_size)`, arithmetic, never a
-  random draw, so the live buffer's global-RNG stream is consumed
-  identically on and off (the SD0 property) and the composition is
-  auditable (a test spies both buffers' sample sizes).
+  random draw, so the share is exact and auditable (a test spies
+  both buffers' sample sizes); a fraction that rounds to 0 or to the
+  whole batch at the configured batch size is refused. **OFF** makes
+  exactly stock SAC's RNG calls (the SD0 property); **ON** interleaves
+  the demo buffer's own draws with the live buffer's on the global
+  RNG, so an ON run's live sample stream is not a SAC run's
+  (expected; recorded here, not claimed away).
 - `demo_bc_coef: float = 0.0` — a behavior-cloning term on the demo
   rows of the actor loss: MSE between the actor's deterministic
   action and the demonstrated action (needs `demo_fraction > 0`).
@@ -66,21 +77,29 @@ transitions). Constructor kwargs, all default-off:
 - `demo_window: "point" | "to_confirm"` — whole recorded trajectory
   (through the point's end) or through the conversion's confirmation
   step.
-- The **D-C arming measurement** ships: `demo_q_ordering()` — the
-  fraction of held-out demo states where min-Q ranks the demo action
-  above the policy's deterministic action — logged as
-  `train/demo_q_ordering` (every 50th `train()` call). The pilot
-  pre-registers its threshold; flipping `demo_bc_filter` to `"q"`
-  when it clears is a checkpoint-resume config change, recorded.
+- The **D-C arming measurement** ships in two populations:
+  `demo_q_ordering()` — the fraction of held-out demo states (every
+  transition of every held-out trajectory under the configured
+  window) where min-Q ranks the demo action above the policy's
+  deterministic action — logged as `train/demo_q_ordering`; and
+  `demo_q_ordering_launch()` — the same ordering on the held-out
+  trajectories' **launch states only** (one row per held-out failure
+  state, the population the freeze brief's G1 measured at 42%) —
+  logged as `train/demo_q_ordering_launch`; both every 50th `train()`
+  call. The pilot pre-registers its threshold on one named series;
+  flipping `demo_bc_filter` to `"q"` when it clears is a
+  checkpoint-resume config change, recorded.
 
 **What the buffer holds.** Raw observations (SB3 normalizes at
 sample time with the live `VecNormalize` stats, exactly as it does
-for live transitions), the oracle's applied actions in the policy's
-[−1, 1]³ action space, the env's actual reward stream (escrows
+for live transitions), the oracle's applied env actions mapped
+through SB3's `scale_action` exactly as live actions are (identity
+on this [−1, 1]³ space), the env's actual reward stream (escrows
 included — the pilot's own reward definition), and the env's own
-terminal/timeout flags. Train-split trajectories only; held-out
-trajectories are kept aside as ordering-metric material and never
-sampled.
+terminal/timeout flags; a cap-ended trajectory's last row is a
+non-terminal bootstrap row, like any mid-episode live transition.
+Train-split trajectories only; held-out trajectories are kept aside
+as ordering-metric material and never sampled.
 
 **Not supported:** `n_steps > 1` (refused at construction — 1-step
 demo targets would mix into n-step live targets); Dict observation
@@ -89,22 +108,35 @@ spaces.
 ### 2a. Implementation pins
 
 - **SD0**: `tests/test_demo_sac.py` locksteps `DemoSAC` (off) against
-  stock `SAC` on a seeded run and asserts every policy parameter and
-  `log_ent_coef` bit-equal — the training step makes SAC's calls in
-  SAC's order (one replay sample per gradient step, no extra RNG, no
-  extra forward pass) when the surface is off. `train()` is SB3
-  2.9.0's `SAC.train` verbatim except the minibatch source and the
-  BC term; it must be re-synced on any SB3 bump (a pinned copy is
-  the price of a subclass fork).
+  stock `SAC` on two seeded runs — a minimal one (BallBalance,
+  n_envs 1, train_freq 1, 192 updates) and a **recipe-shaped** one
+  (gSDE with the 64-step noise hold, `SelectiveVecNormalize` with an
+  excluded index, n_envs 4 × train_freq (64, step) with
+  gradient_steps −1, batch 256, auto temperature with a target; 768
+  updates) — asserting every policy parameter, `log_ent_coef`, the
+  normalizer's running stats and the global numpy/torch RNG states
+  equal (the explicit global-RNG accounting D-G names). The training
+  step makes SAC's calls in SAC's order when the surface is off.
+  `train()` is SB3 2.9.0's `SAC.train` verbatim except the minibatch
+  source and the BC term; it must be re-synced on any SB3 bump (a
+  pinned copy is the price of a subclass fork).
 - **Checkpoint compatibility**: the demo buffers are excluded from
   pickling; a `DemoSAC` checkpoint loads as plain `SAC` (the path the
-  diagnosis/harvest/step-0 tools use — tested) and as `DemoSAC` (the
-  buffers rebuild from the recorded library path — tested).
-- **Warm start**: the standing transfer path loads the full policy
-  `state_dict` (actor, critics, targets) strictly; `DemoSAC`'s policy
-  class is stock `SACPolicy`, so the registered best warm-starts
-  into it unchanged. Critic head-recycling (D-B) is a **separate,
-  not-yet-shipped** warm-start option (step 4 of the plan).
+  diagnosis/harvest/step-0 tools use — tested) and as `DemoSAC`
+  without the library file present (the buffers rebuild lazily from
+  the recorded path at the next `learn()`; load-time overrides are
+  re-validated; a load that switches the surface off carries no
+  digest — tested).
+- **Warm start**: the trainer's warm-start gates were widened from
+  the literal `SAC` string to the SAC family (`OFF_POLICY_ALGOS`): a
+  `DemoSAC` target warm-starts from a plain-SAC source run (the
+  source loads with its own class; the initialization provenance
+  records the source's own algo), a PPO source is still refused —
+  tested end to end. The transfer is the standing full-policy
+  `state_dict` transfer (actor, critics, targets, `log_ent_coef`).
+  Critic head-recycling (D-B) is a **separate, not-yet-shipped**
+  warm-start option — the next instrument after this one (§5 says
+  what happens if the pilot freezes first).
 - **Strict kwargs validation survives the subclass**:
   `validate_model_kwargs` walks the MRO, so a typo in a demo kwarg
   fails at config validation, not deep in SB3.
@@ -164,8 +196,11 @@ escalation with the multiplicity recorded.
 - **SD0 — bit-identity when off**: shipped (§2a).
 - **SD1 — demo fidelity**: by construction at harvest (conversion
   payment asserted per kept trajectory; counts recorded); the
-  battery re-runs the harvest at the pinned commit and matches the
-  library sha.
+  battery re-runs the harvest at the pinned commit and matches every
+  kept trajectory field-for-field (arrays, enders, splits, counts —
+  a content match; the pickle header carries the harvest's own git
+  sha, so a byte-level file digest is provenance, not the
+  certificate).
 - **SD2 — composition and provenance**: shipped as tests (exact
   per-minibatch split; `demo_library_sha256` reaches `config.json`
   and the plan validator).
@@ -191,9 +226,10 @@ arming rule, **drill OFF** (`drill_fraction = 0.0`; the [env] table
 carries no drill keys and the plan pins `eval_env_kwargs` drill-free),
 **no temperature re-heat** (D-D; `transfer_log_ent_coef = True`,
 `ent_coef` and post-swing saturation pre-registered as observables),
-critic head-recycling per D-B **once its option ships** (step 4; if
-the pilot freezes first, it launches on the transferred critics and
-the recycling becomes the first RE-AIM escalation). 1M steps, seed 0,
+critic head-recycling per D-B **once its option ships** (the next
+instrument; if the pilot freezes first, it launches on the
+transferred critics and the recycling becomes the first RE-AIM
+escalation). 1M steps, seed 0,
 n_envs 4, eval 25k, checkpoint/diagnosis 100k, recipe defaults
 otherwise.
 
@@ -215,10 +251,12 @@ otherwise.
 - **Branches**: **ADOPT** → pre-register the registered-scale retry
   with injection as recipe convention. **RE-AIM** (mechanism moves,
   KD-primary FAIL) → pre-named escalations, one per run: (1) critic
-  head-recycling if not yet in; (2) `demo_bc_filter = "q"` per the
-  SD3 threshold; (3) `demo_fraction` up one §3a row; (4) the drill
-  ON (arm (b), `drill_fraction = 0.5`) as exposure vehicle; (5)
-  whole-block context masking — its own design. **STOP** (no
+  head-recycling if not yet in; (2) full critic re-initialization
+  (D-B's booked escalation beyond recycling; needs its own transfer
+  path — the loader is all-or-nothing); (3) `demo_bc_filter = "q"`
+  per the SD3 threshold; (4) `demo_fraction` up one §3a row; (5)
+  the drill ON (arm (b), `drill_fraction = 0.5`) as exposure
+  vehicle; (6) whole-block context masking — its own design. **STOP** (no
   mechanism movement beyond the SD3/step-0 baselines) → the
   demonstration class is spent at this recipe; SAC-X-style factored
   heads inherit.
