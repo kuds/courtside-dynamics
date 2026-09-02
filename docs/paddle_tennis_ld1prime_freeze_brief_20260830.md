@@ -1,7 +1,10 @@
 # LD1′ freeze brief: the Phase 0 gates and the decisions they resolve (2026-08-30)
 
-Status: **Measured input + PROPOSAL — the maintainer books every
-decision below; nothing here is frozen.** Phase 0 was
+Status: **BOOKED by the maintainer 2026-09-02 — decisions D-A
+through D-G below are the campaign's routing** (the LD1′ pilot
+itself is pre-registered separately in
+[`design_paddle_tennis_demo_injection.md`](design_paddle_tennis_demo_injection.md)
+once its instruments certify; the numbers here are its inputs). Phase 0 was
 maintainer-blessed; its three gates ran on banked artifacts and
 standing seed conventions (env resets: 5200–5209 diagnosis-class
 reads and the 9147 discarded-draw launch convention; torch noise

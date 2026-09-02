@@ -86,11 +86,57 @@ below are an instance of one of these.
 
 Source: the dated `paddle_tennis_*` docs and `design_paddle_tennis_*`
 verdict sections indexed in [`docs/README.md`](README.md); this
-section distills the campaign's era verdicts (2026-08-15 → 08-30;
+section distills the campaign's era verdicts (2026-08-15 → 09-02;
 the earlier exploration/diagnosis-era verdicts remain in their
 source docs' status lines).
 The P0–P2 court-scaling entry predates the campaign and stays in the
 WallBall section below.
+
+### The pure-drill pilot is retired before freeze on its own gates; the campaign routes injection-first — *booked (2026-09-02); LD1′*
+Three maintainer-blessed Phase 0 gates
+([`paddle_tennis_ld1prime_freeze_brief_20260830.md`](paddle_tennis_ld1prime_freeze_brief_20260830.md),
+each verified) settled the k=2 routing on measurement rather than
+prediction: the registered checkpoint's critics are **near
+action-blind at the k=2 failure states** (the oracle-vs-policy Q
+gap sits inside the ~0.02 range that *uniform-random* actions span —
+a Q-filtered BC term cannot engage at launch); **critic penultimate
+dormancy holds on the replay-like training stream** (55/59% dormant,
+41/44% exactly zero, vs <5%/~0% for fresh nets of the same
+architecture — the recycling prescription passes the gate the
+diagnostics note demanded); and the **stochastic behavior policy
+reproduces the deterministic step-0 engagement rows in both drill
+arms** (feed 6.5%, full 1.3%), so gSDE jitter does not rescue the
+drill's engagement premise. Booked: (D-A) LD1-as-drafted RETIRED
+pre-freeze, injection-first LD1′
+([`design_paddle_tennis_demo_injection.md`](design_paddle_tennis_demo_injection.md));
+(D-B) critic head-recycling at fine-tune start, full re-init only as
+escalation, LayerNorm dropped; (D-C) BC term unfiltered at launch,
+Q-filter armed by a pre-registered ordering measurement; (D-D) no
+temperature re-heat — the T1-FAIL era law binds, ent_coef and
+saturation become observables; (D-E) demos are oracle completions
+from the policy's OWN harvested failure states, harvested through
+point termination so the conversion payment is in the buffer;
+(D-F) drill OFF at launch, arm (b) the pre-registered RE-AIM
+escalation, the D2 fork deferred; (D-G) battery block 6400–6499
+and scratch extension 9200–9299. Lessons booked: (a) **the
+pre-freeze diagnostics' first-draft headlines were wrong in four
+places and the verification caught every one** — the "collapsed
+gSDE noise" was a 30× misread of the exploration-matrix scale (the
+true marginal noise is ~0.60 and never collapsed), "sane
+calibration" was a systematic −0.46 pessimism, the per-feature
+context-gate ranking was non-decomposable, and "arm (c) decisively
+negative" was statistically indeterminate — a freeze input is not
+a freeze input until it survives its own adversarial pass; (b) **a
+recommendation red-team is cheap and found blocking flaws** in the
+first composite proposal (an unimplementable actor-only transfer,
+a LayerNorm critic the warm-start guard refuses, a demo harvest with
+the exact distribution mismatch the proposal used to reject arm
+(c), and a temperature component the campaign had already booked
+as spent) — the corrected plan is a single lever with pre-named
+escalations, which is what one-lever discipline demanded all along;
+(c) **measure engagement in the mode the learner actually runs**
+(behavior policy, replay-like stream) before pricing a pilot on
+eval-mode rows.
 
 ### The command-rate design dies on measurement before a line of code: k=2 is a directed-interception gap, not a thrash gap — *closed without implementation (booked 2026-08-30); PT2*
 The frozen limiter design's premise was falsified by a
