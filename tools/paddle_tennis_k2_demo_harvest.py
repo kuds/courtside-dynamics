@@ -122,6 +122,11 @@ def harvest_library(
         for index, entry in enumerate(entries):
             env.reset(seed=RESET_SEED)
             env._serving_side = CourtSide.B
+            # The relaunch after the demo point serves from the
+            # harvested rally's next server (the step-0 tool's full
+            # arm restores the same field), not from reset()'s
+            # alternation parity.
+            env._next_serving_side = entry["next_serving_side"]
             env._launch_drill(entry, index)
             # The launch never touches the episode clock; restore the
             # harvested one so the demo observations carry the failure
@@ -154,6 +159,12 @@ def harvest_library(
                 obs = next_obs
                 boundary = int(info["points_played"]) > 0
                 if term or trunc or boundary:
+                    if boundary:
+                        # This row's next_obs is the relaunch: it must
+                        # be the drill-off pilot env's plain serve.
+                        assert not env._drill_point_active, (
+                            f"entry {index}: boundary relaunch drilled"
+                        )
                     name = str(info["termination_reason_name"])
                     if boundary and not (term or trunc):
                         ender = f"point_boundary/{name}"

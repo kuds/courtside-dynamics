@@ -9,7 +9,9 @@ fraction into every gradient step, plus an optional behavior-cloning
 term on the demo rows (unfiltered by default; a Q-filter — clone only
 where the critics already rank the demo action above the policy's —
 is selectable, and the D-C arming measurement it depends on is logged
-as ``train/demo_q_ordering`` on held-out demo states).
+as ``train/demo_q_ordering`` on every held-out demo transition and
+``train/demo_q_ordering_launch`` on the held-out launch states — the
+population Phase 0's G1 measured).
 
 **Default-off is bit-identical to stock SAC** (SD0): with
 ``demo_library=None`` the training step makes exactly the calls
@@ -26,7 +28,10 @@ is stream-identical.
 The demo buffer is built lazily at the start of ``learn()`` (and on
 first use of the ordering metric), not at construction: a checkpoint
 reloaded for inference through an algo-resolving loader must not
-need the library file present.
+need the library file present. The library's sha256 IS banked at
+construction (the trainer writes ``config.json`` before ``learn()``),
+and a library whose bytes change under a banked digest is refused at
+first use.
 
 Not supported with n-step returns (``n_steps > 1``): refused at
 construction rather than silently mixing 1-step demo targets into
@@ -52,6 +57,14 @@ _BC_FILTERS = ("none", "q")
 _WINDOWS = ("point", "to_confirm")
 
 
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 class DemoSAC(SAC):
     """SAC + demonstration injection (default-off, bit-identical off)."""
 
@@ -67,55 +80,81 @@ class DemoSAC(SAC):
         demo_window: str = "point",
         **sac_kwargs: Any,
     ) -> None:
-        fraction = float(demo_fraction)
-        bc_coef = float(demo_bc_coef)
+        self.demo_library = demo_library
+        self.demo_fraction = float(demo_fraction)
+        self.demo_bc_coef = float(demo_bc_coef)
+        self.demo_bc_filter = demo_bc_filter
+        self.demo_window = demo_window
+        self._validate_demo_config()
+        # Provenance is banked at construction: the trainer writes
+        # config.json BEFORE learn() starts, so the digest of the
+        # library this run will consume must exist before the buffer
+        # (which builds lazily at the first learn()) does.
+        self.demo_library_sha256: str | None = None
+        self._demo_digest_path: str | None = None
+        if demo_library is not None:
+            self.demo_library_sha256 = _file_sha256(demo_library)
+            self._demo_digest_path = demo_library
+        self.demo_buffer: ReplayBuffer | None = None
+        self.demo_holdout: tuple[np.ndarray, np.ndarray] | None = None
+        self.demo_holdout_launch: tuple[np.ndarray, np.ndarray] | None = None
+        self.demo_transitions: int = 0
+        super().__init__(policy, env, **sac_kwargs)
+
+    def _validate_demo_config(self) -> None:
+        """The pairing/bounds rules, applied to the CURRENT attributes —
+        at construction and again after SB3's load() has applied the
+        checkpoint plus any override kwargs onto ``__dict__``."""
+        fraction = self.demo_fraction
+        bc_coef = self.demo_bc_coef
         if not np.isfinite(fraction) or not 0.0 <= fraction < 1.0:
             raise ValueError(
-                f"demo_fraction must be in [0.0, 1.0), got {demo_fraction!r}"
+                f"demo_fraction must be in [0.0, 1.0), got {fraction!r}"
             )
         if not np.isfinite(bc_coef) or bc_coef < 0.0:
             raise ValueError(
-                f"demo_bc_coef must be finite and non-negative, got {demo_bc_coef!r}"
+                f"demo_bc_coef must be finite and non-negative, got {bc_coef!r}"
             )
-        if demo_bc_filter not in _BC_FILTERS:
+        if self.demo_bc_filter not in _BC_FILTERS:
             raise ValueError(
-                f"demo_bc_filter must be one of {_BC_FILTERS}, got {demo_bc_filter!r}"
+                f"demo_bc_filter must be one of {_BC_FILTERS}, "
+                f"got {self.demo_bc_filter!r}"
             )
-        if demo_window not in _WINDOWS:
+        if self.demo_window not in _WINDOWS:
             raise ValueError(
-                f"demo_window must be one of {_WINDOWS}, got {demo_window!r}"
+                f"demo_window must be one of {_WINDOWS}, got {self.demo_window!r}"
             )
         enabled = fraction > 0.0 or bc_coef > 0.0
-        if (demo_library is None) == enabled:
+        if (self.demo_library is None) == enabled:
             raise ValueError(
                 "demo_library and the demo terms must be enabled together: got "
-                f"demo_library={demo_library!r} with demo_fraction="
-                f"{demo_fraction!r}, demo_bc_coef={demo_bc_coef!r}"
+                f"demo_library={self.demo_library!r} with demo_fraction="
+                f"{fraction!r}, demo_bc_coef={bc_coef!r}"
             )
         if bc_coef > 0.0 and fraction == 0.0:
             raise ValueError(
                 "demo_bc_coef > 0 needs demo rows in the minibatch: set "
                 "demo_fraction > 0"
             )
-        self.demo_library = demo_library
-        self.demo_fraction = fraction
-        self.demo_bc_coef = bc_coef
-        self.demo_bc_filter = demo_bc_filter
-        self.demo_window = demo_window
-        self.demo_library_sha256: str | None = None
-        self.demo_buffer: ReplayBuffer | None = None
-        self.demo_holdout: tuple[np.ndarray, np.ndarray] | None = None
-        self.demo_transitions: int = 0
-        super().__init__(policy, env, **sac_kwargs)
 
     # -- setup / persistence ------------------------------------------------
 
     def _setup_model(self) -> None:
         super()._setup_model()
+        # SB3's load() applies the checkpoint and any override kwargs
+        # straight onto __dict__ and then calls this: re-validate so an
+        # override cannot leave a half-configured surface behind.
+        self._validate_demo_config()
         self.demo_buffer = None
         self.demo_holdout = None
+        self.demo_holdout_launch = None
         self.demo_transitions = 0
         if self.demo_library is None:
+            # No library in play: no consumed-library digest either
+            # (a load that switched the surface off must not carry the
+            # checkpoint's digest into its own provenance).
+            self.demo_library_sha256 = None
+            self._demo_digest_path = None
             return
         if self.n_steps != 1:
             raise ValueError(
@@ -153,12 +192,29 @@ class DemoSAC(SAC):
         return super()._excluded_save_params() + [  # noqa: RUF005
             "demo_buffer",
             "demo_holdout",
+            "demo_holdout_launch",
         ]
 
     def _load_demo_library(self, path: str) -> None:
         with open(path, "rb") as f:
             payload = f.read()
-        self.demo_library_sha256 = hashlib.sha256(payload).hexdigest()
+        digest = hashlib.sha256(payload).hexdigest()
+        if (
+            self.demo_library_sha256 is not None
+            and self._demo_digest_path == path
+            and digest != self.demo_library_sha256
+        ):
+            # The file behind a banked digest changed (a resumed run
+            # would otherwise train on a library its provenance does
+            # not describe). A different path (a load-time override)
+            # legitimately re-derives the digest instead.
+            raise ValueError(
+                f"demo_library {path!r} changed under its recorded provenance: "
+                f"sha256 {digest[:12]} on disk vs {self.demo_library_sha256[:12]} "
+                "banked"
+            )
+        self.demo_library_sha256 = digest
+        self._demo_digest_path = path
         library = pickle.loads(payload)
         schema = library.get("schema") if isinstance(library, dict) else None
         if schema != DEMO_LIBRARY_SCHEMA:
@@ -172,6 +228,8 @@ class DemoSAC(SAC):
         train_rows: list[tuple[np.ndarray, ...]] = []
         holdout_obs: list[np.ndarray] = []
         holdout_act: list[np.ndarray] = []
+        launch_obs: list[np.ndarray] = []
+        launch_act: list[np.ndarray] = []
         for position, traj in enumerate(trajectories):
             obs = np.asarray(traj["obs"], dtype=np.float64)
             env_actions = np.asarray(traj["actions"], dtype=np.float64)
@@ -211,6 +269,8 @@ class DemoSAC(SAC):
             if traj.get("split") == "heldout":
                 holdout_obs.append(obs)
                 holdout_act.append(actions)
+                launch_obs.append(obs[0])
+                launch_act.append(actions[0])
                 continue
             train_rows.append((obs, actions, next_obs, rewards, terminated, truncated))
         n_train = int(sum(len(rows[3]) for rows in train_rows))
@@ -244,17 +304,36 @@ class DemoSAC(SAC):
                 np.concatenate(holdout_obs, axis=0),
                 np.concatenate(holdout_act, axis=0),
             )
+            # The launch states alone: the population Phase 0's G1
+            # measured (one row per held-out trajectory).
+            self.demo_holdout_launch = (
+                np.stack(launch_obs, axis=0),
+                np.stack(launch_act, axis=0),
+            )
 
     # -- the D-C arming measurement ----------------------------------------
 
     def demo_q_ordering(self) -> float | None:
-        """Fraction of held-out demo states where min-Q ranks the demo
-        action above the policy's deterministic action (the ordering
-        the Q-filter needs; Phase 0 measured it at coin-flip)."""
+        """Fraction of held-out demo states — every transition of every
+        held-out trajectory under the configured window — where min-Q
+        ranks the demo action above the policy's deterministic action
+        (the ordering the Q-filter needs; Phase 0 measured it at
+        coin-flip on the launch states)."""
         self._ensure_demo_loaded()
         if self.demo_holdout is None:
             return None
-        obs, actions = self.demo_holdout
+        return self._q_ordering(*self.demo_holdout)
+
+    def demo_q_ordering_launch(self) -> float | None:
+        """The same ordering on the held-out trajectories' LAUNCH states
+        only — one row per held-out failure state, the population the
+        freeze brief's G1 measured (42% oracle-higher)."""
+        self._ensure_demo_loaded()
+        if self.demo_holdout_launch is None:
+            return None
+        return self._q_ordering(*self.demo_holdout_launch)
+
+    def _q_ordering(self, obs: np.ndarray, actions: np.ndarray) -> float:
         if self._vec_normalize_env is not None:
             obs = self._vec_normalize_env.normalize_obs(obs)
         with th.no_grad():
@@ -432,6 +511,9 @@ class DemoSAC(SAC):
                 self.logger.record("train/demo_q_filter_pass", np.mean(filter_pass))
             if self._n_updates // gradient_steps % 50 == 0:
                 ordering = self.demo_q_ordering()
+                launch_ordering = self.demo_q_ordering_launch()
+                if launch_ordering is not None:
+                    self.logger.record("train/demo_q_ordering_launch", launch_ordering)
                 if ordering is not None:
                     self.logger.record("train/demo_q_ordering", ordering)
 

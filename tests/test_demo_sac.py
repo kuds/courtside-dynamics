@@ -12,6 +12,9 @@ provenance digest reaching the model probe.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import pickle
 
 import numpy as np
@@ -28,7 +31,12 @@ from courtside_dynamics.training.algos import (
 )
 from courtside_dynamics.training.artifacts import _model_info
 from courtside_dynamics.training.demo_sac import DEMO_LIBRARY_SCHEMA, DemoSAC
-from courtside_dynamics.training.train import _build_algo
+from courtside_dynamics.training.train import (
+    SelectiveVecNormalize,
+    TrainConfig,
+    _build_algo,
+    train,
+)
 
 _SMALL = dict(
     learning_starts=64,
@@ -181,21 +189,87 @@ class TestSD0BitIdentity:
             assert torch.equal(sac_state[key], demo_state[key]), key
         assert sac_ent == demo_ent
 
+    def test_off_locksteps_on_the_recipe_shape(self):
+        """SD0 on the pilot's recipe shape — gSDE with the 64-step noise
+        hold, SelectiveVecNormalize with an excluded index, n_envs 4 x
+        train_freq (64, 'step') with gradient_steps=-1, batch 256, auto
+        temperature with a target: parameters, log_ent_coef, the
+        normalizer's running stats AND the global numpy/torch RNG
+        states are identical after the run (the explicit global-RNG
+        accounting the D-G certificate names)."""
+        results = []
+        for cls in (SAC, DemoSAC):
+            raw = make_vec_env(lambda: BallBalanceEnv(), n_envs=4, seed=0)
+            env = SelectiveVecNormalize(
+                raw, norm_obs=True, norm_reward=False, normalize_obs_excluded_indices=(0,)
+            )
+            try:
+                model = cls(
+                    "MlpPolicy",
+                    env,
+                    use_sde=True,
+                    sde_sample_freq=64,
+                    ent_coef="auto_0.02",
+                    target_entropy=-1.5,
+                    train_freq=(64, "step"),
+                    gradient_steps=-1,
+                    batch_size=256,
+                    buffer_size=4096,
+                    learning_starts=256,
+                    seed=0,
+                    verbose=0,
+                    device="cpu",
+                )
+                model.learn(total_timesteps=1024)
+                assert model._n_updates == 768  # 3 trained rollouts x 256 updates
+                results.append(
+                    (
+                        _state(model),
+                        float(model.log_ent_coef.detach().item()),
+                        np.array(env.obs_rms.mean, copy=True),
+                        np.array(env.obs_rms.var, copy=True),
+                        np.random.get_state()[1].copy(),
+                        torch.get_rng_state().clone(),
+                    )
+                )
+            finally:
+                env.close()
+        sac, demo = results
+        assert sac[0].keys() == demo[0].keys()
+        for key in sac[0]:
+            assert torch.equal(sac[0][key], demo[0][key]), key
+        assert sac[1] == demo[1]
+        np.testing.assert_array_equal(sac[2], demo[2])
+        np.testing.assert_array_equal(sac[3], demo[3])
+        np.testing.assert_array_equal(sac[4], demo[4])
+        assert torch.equal(sac[5], demo[5])
+
 
 class TestInjection:
     def test_loader_builds_train_buffer_and_holdout(self, venv, tmp_path):
         path, n_train = _synthetic_library(tmp_path / "lib.pkl", venv)
         model = DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL)
         assert model.demo_buffer is None  # lazy: nothing loaded at construction
+        # ...but the provenance digest is banked immediately (the
+        # trainer writes config.json before learn()).
+        with open(path, "rb") as f:
+            assert model.demo_library_sha256 == hashlib.sha256(f.read()).hexdigest()
         model._ensure_demo_loaded()
         assert model.demo_transitions == n_train
         assert model.demo_buffer is not None and model.demo_buffer.full
         assert model.demo_holdout is not None
         holdout_obs, holdout_act = model.demo_holdout
         assert holdout_obs.shape[0] == holdout_act.shape[0] == 2 * 12  # entries 0 and 5
-        assert isinstance(model.demo_library_sha256, str) and len(model.demo_library_sha256) == 64
+        # The launch-state population (G1's): one row per held-out trajectory.
+        assert model.demo_holdout_launch is not None
+        launch_obs, launch_act = model.demo_holdout_launch
+        assert launch_obs.shape[0] == launch_act.shape[0] == 2
+        np.testing.assert_array_equal(launch_obs[0], holdout_obs[0])
+        np.testing.assert_array_equal(launch_obs[1], holdout_obs[12])
         ordering = model.demo_q_ordering()
         assert ordering is not None and 0.0 <= ordering <= 1.0
+        launch_ordering = model.demo_q_ordering_launch()
+        assert launch_ordering is not None and 0.0 <= launch_ordering <= 1.0
 
     def test_to_confirm_window_truncates_trajectories(self, venv, tmp_path):
         path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)
@@ -265,7 +339,6 @@ class TestInjection:
         assert again.demo_library_sha256 == model.demo_library_sha256
         again._ensure_demo_loaded()
         assert again.demo_transitions == n_train
-        import os
         os.rename(path, path + ".moved")
         try:
             absent = DemoSAC.load(str(checkpoint), env=venv, device="cpu")
@@ -275,10 +348,80 @@ class TestInjection:
         finally:
             os.rename(path + ".moved", path)
 
+    def test_load_overrides_are_revalidated_and_digest_follows_the_file(self, venv, tmp_path):
+        """SB3's load() applies override kwargs straight onto __dict__:
+        the pairing rules re-run there, a load that switches the surface
+        off carries no digest, a load onto a different library re-derives
+        the digest from THAT file, and a library that changed on disk
+        under a banked digest is refused at first use."""
+        path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)
+        model = DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL)
+        checkpoint = tmp_path / "model.zip"
+        model.save(str(checkpoint))
+        with pytest.raises(ValueError, match="enabled together"):
+            DemoSAC.load(str(checkpoint), env=venv, device="cpu", demo_library=None)
+        with pytest.raises(ValueError, match="enabled together"):
+            DemoSAC.load(str(checkpoint), env=venv, device="cpu", demo_fraction=0.0)
+        off = DemoSAC.load(
+            str(checkpoint), env=venv, device="cpu", demo_library=None, demo_fraction=0.0
+        )
+        assert off.demo_library_sha256 is None
+        assert "demo_library_sha256" not in _model_info(off)
+        other, _ = _synthetic_library(tmp_path / "other.pkl", venv, trajectories=7, seed=3)
+        moved = DemoSAC.load(str(checkpoint), env=venv, device="cpu", demo_library=other)
+        moved._ensure_demo_loaded()
+        with open(other, "rb") as f:
+            assert moved.demo_library_sha256 == hashlib.sha256(f.read()).hexdigest()
+        # Same path, different bytes: the banked provenance no longer
+        # describes the file — refused, not silently re-hashed.
+        with open(path, "rb") as f:
+            library = pickle.load(f)
+        library["note"] = "edited after the checkpoint banked its digest"
+        with open(path, "wb") as f:
+            pickle.dump(library, f)
+        stale = DemoSAC.load(str(checkpoint), env=venv, device="cpu")
+        with pytest.raises(ValueError, match="changed under its recorded provenance"):
+            stale.learn(total_timesteps=8)
+
+    def test_train_banks_the_digest_before_learning(self, venv, tmp_path):
+        """SD2 end to end: the trainer writes config.json before learn()
+        starts, so the consumed-library digest has to exist at
+        construction — it reaches resolved_model on a real train() run."""
+        path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)
+        log_dir = tmp_path / "run"
+        cfg = TrainConfig(
+            env_fn=lambda: BallBalanceEnv(),
+            algo="DEMOSAC",
+            total_timesteps=8,
+            log_dir=str(log_dir),
+            n_envs=1,
+            seed=0,
+            eval_freq=10_000,
+            checkpoint_freq=0,
+            video_freq=0,
+            record_video=False,
+            info_dict_eval=False,
+            n_eval_episodes=1,
+            normalize_obs=True,
+            model_kwargs={
+                "demo_library": path,
+                "demo_fraction": 0.25,
+                "batch_size": 32,
+                "buffer_size": 64,
+                "learning_starts": 1_000,
+            },
+        )
+        train(cfg)
+        config = json.loads((log_dir / "config.json").read_text())
+        with open(path, "rb") as f:
+            assert config["resolved_model"]["demo_library_sha256"] == hashlib.sha256(f.read()).hexdigest()
+        assert config["resolved_model"]["hyperparameters"]["demo_fraction"] == 0.25
+        assert config["resolved_model"]["hyperparameters"]["demo_library"] == path
+
     def test_model_probe_records_the_consumed_digest(self, venv, tmp_path):
         path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)
         model = DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL)
-        model._ensure_demo_loaded()
+        # Probed as the trainer probes it: before any learn() call.
         info = _model_info(model)
         assert info["algo_class"] == "DemoSAC"
         assert info["demo_library_sha256"] == model.demo_library_sha256
