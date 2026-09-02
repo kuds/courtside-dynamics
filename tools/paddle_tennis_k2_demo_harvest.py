@@ -6,7 +6,8 @@ For every entry of one or more k=2 failure-state libraries
 faces and fails), launch the state through the shipped full-context
 drill arm (real rally flags, real physics), let the scripted ground
 oracle play side A, and record the SB3 replay tuple at every control
-step until the point ends (or a step cap). A trajectory is KEPT only
+step until the point ends (or a step cap; cap-ended trajectories are
+kept, counted, and end on a non-terminal row). A trajectory is KEPT only
 if the oracle converted the k=2 ball AND the conversion was confirmed
 inside the recording — the +return_reward is asserted present at the
 confirmation step (fail-loud, cardinal rule 1), so "the demos carry
@@ -16,6 +17,13 @@ are counted, never silently dropped.
 Every kept trajectory carries a train/held-out split (every
 ``--holdout-every``-th source entry is held out; held-out states are
 the D-C ordering-metric material and never enter the demo buffer).
+
+Two launch details keep the demos on the policy's own distribution:
+the failure state's episode clock is restored after the launch (so
+``episode_remaining_fraction`` reads what the policy saw, not a
+fresh episode's), and the drill is switched OFF after the library
+loads, so the point-boundary relaunch inside a kept row is a plain
+drawn serve exactly as the drill-off pilot env would produce.
 
 Schema ``k2-demo-library-v0``: a pickle with header provenance
 (sources with sha256, git sha, env kwargs, oracle name, counts) and
@@ -34,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import pickle
 import subprocess
 from typing import Any
@@ -101,6 +110,10 @@ def harvest_library(
         drill_fraction=1.0,
         drill_context="full",
     )
+    # The drill kwargs above are only the loader; the pilot trains with
+    # the drill OFF (D-F), so the point-boundary relaunch recorded in a
+    # kept row's next_obs must be a plain drawn serve, not another drill.
+    env.drill_fraction = 0.0
     source_sha = _sha256(library_path)
     trajectories: list[dict[str, Any]] = []
     entries = env._drill_entries
@@ -110,6 +123,11 @@ def harvest_library(
             env.reset(seed=RESET_SEED)
             env._serving_side = CourtSide.B
             env._launch_drill(entry, index)
+            # The launch never touches the episode clock; restore the
+            # harvested one so the demo observations carry the failure
+            # state's own episode_remaining_fraction (and truncate where
+            # that episode would have).
+            env.step_number = int(entry["step_number"])
             obs = env._get_obs()
             env._remember_finite_observation(obs)
             obs_list, act_list, next_list = [], [], []
@@ -145,7 +163,7 @@ def harvest_library(
                         ender = name
                     break
             if ender is None:
-                ender = "budget_exhausted"
+                ender = "cap_ended"
             counts["launched"] += 1
             if hit_step is None:
                 counts["oracle_miss"] += 1
@@ -179,8 +197,12 @@ def harvest_library(
                 }
             )
             counts["kept"] += 1
-            if ender == "episode_truncated":
-                counts["kept_truncation_censored"] += 1
+            if ender == "cap_ended":
+                counts["kept_cap_ended"] += 1
+            elif ender == "episode_truncated":
+                counts["kept_episode_truncated"] += 1
+            else:
+                counts["kept_point_ended"] += 1
     finally:
         env.close()
     return trajectories
@@ -201,7 +223,9 @@ def main() -> None:
         "kept": 0,
         "oracle_miss": 0,
         "unconfirmed": 0,
-        "kept_truncation_censored": 0,
+        "kept_point_ended": 0,
+        "kept_cap_ended": 0,
+        "kept_episode_truncated": 0,
     }
     trajectories: list[dict[str, Any]] = []
     sources = []
@@ -213,7 +237,9 @@ def main() -> None:
             counts=counts,
         )
         trajectories.extend(got)
-        sources.append({"path": path, "sha256": _sha256(path), "kept": len(got)})
+        sources.append(
+            {"file": os.path.basename(path), "sha256": _sha256(path), "kept": len(got)}
+        )
         print(f"{path}: kept {len(got)}")
     library = {
         "schema": SCHEMA,

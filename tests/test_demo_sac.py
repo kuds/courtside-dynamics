@@ -135,13 +135,21 @@ class TestRegistryAndValidation:
             DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.2, demo_window="x", **_SMALL)
         with pytest.raises(ValueError, match="n_steps"):
             DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.2, n_steps=3, **_SMALL)
+        # A fraction that rounds to zero demo rows at this batch size
+        # would be a silent no-op with the library recorded as in play.
+        with pytest.raises(ValueError, match="rounds to 0 demo rows"):
+            DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.01, **_SMALL)
 
-    def test_malformed_library_refused_at_construction(self, venv, tmp_path):
+    def test_malformed_library_refused_at_first_use(self, venv, tmp_path):
+        """The buffer builds lazily (so inference loaders never need the
+        file), but the first learn() still refuses a malformed
+        library loudly."""
         bad = tmp_path / "bad.pkl"
         with open(bad, "wb") as f:
             pickle.dump({"schema": "other", "trajectories": []}, f)
+        model = DemoSAC("MlpPolicy", venv, demo_library=str(bad), demo_fraction=0.2, **_SMALL)
         with pytest.raises(ValueError, match="schema"):
-            DemoSAC("MlpPolicy", venv, demo_library=str(bad), demo_fraction=0.2, **_SMALL)
+            model.learn(total_timesteps=8)
         path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)
         with open(path, "rb") as f:
             library = pickle.load(f)
@@ -150,7 +158,7 @@ class TestRegistryAndValidation:
         with open(shaped, "wb") as f:
             pickle.dump(library, f)
         with pytest.raises(ValueError, match="inconsistent array shapes"):
-            DemoSAC("MlpPolicy", venv, demo_library=str(shaped), demo_fraction=0.2, **_SMALL)
+            DemoSAC("MlpPolicy", venv, demo_library=str(shaped), demo_fraction=0.2, **_SMALL).learn(8)
 
 
 class TestSD0BitIdentity:
@@ -178,6 +186,8 @@ class TestInjection:
     def test_loader_builds_train_buffer_and_holdout(self, venv, tmp_path):
         path, n_train = _synthetic_library(tmp_path / "lib.pkl", venv)
         model = DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL)
+        assert model.demo_buffer is None  # lazy: nothing loaded at construction
+        model._ensure_demo_loaded()
         assert model.demo_transitions == n_train
         assert model.demo_buffer is not None and model.demo_buffer.full
         assert model.demo_holdout is not None
@@ -192,12 +202,14 @@ class TestInjection:
         model = DemoSAC(
             "MlpPolicy", venv, demo_library=path, demo_fraction=0.25, demo_window="to_confirm", **_SMALL
         )
+        model._ensure_demo_loaded()
         # 4 train trajectories x (confirm_step 6 + 1) steps
         assert model.demo_transitions == 4 * 7
 
     def test_minibatch_composition_is_exact(self, venv, tmp_path, monkeypatch):
         path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)
         model = DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL)
+        model._ensure_demo_loaded()
         sizes = {"live": [], "demo": []}
         live_sample = model.replay_buffer.sample
         demo_sample = model.demo_buffer.sample
@@ -244,15 +256,29 @@ class TestInjection:
         plain = SAC.load(str(checkpoint), device="cpu")
         for key, value in model.policy.state_dict().items():
             assert torch.equal(value, plain.policy.state_dict()[key]), key
-        # The subclass reloads its buffers from the recorded library path.
+        # The subclass reloads WITHOUT needing the library file (an
+        # algo-resolving inference loader), and rebuilds the buffers
+        # lazily from the recorded path when training resumes.
         again = DemoSAC.load(str(checkpoint), env=venv, device="cpu")
         assert again.demo_fraction == 0.25
-        assert again.demo_transitions == n_train
+        assert again.demo_buffer is None
         assert again.demo_library_sha256 == model.demo_library_sha256
+        again._ensure_demo_loaded()
+        assert again.demo_transitions == n_train
+        import os
+        os.rename(path, path + ".moved")
+        try:
+            absent = DemoSAC.load(str(checkpoint), env=venv, device="cpu")
+            assert absent.demo_library_sha256 == model.demo_library_sha256
+            with pytest.raises(FileNotFoundError):
+                absent.learn(total_timesteps=8)
+        finally:
+            os.rename(path + ".moved", path)
 
     def test_model_probe_records_the_consumed_digest(self, venv, tmp_path):
         path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)
         model = DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL)
+        model._ensure_demo_loaded()
         info = _model_info(model)
         assert info["algo_class"] == "DemoSAC"
         assert info["demo_library_sha256"] == model.demo_library_sha256

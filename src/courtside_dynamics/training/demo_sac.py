@@ -17,8 +17,16 @@ as ``train/demo_q_ordering`` on held-out demo states).
 gradient step, no extra RNG draw, no extra forward pass. The
 composition is decided once per gradient step by arithmetic
 (``round(demo_fraction * batch_size)``), never by a random draw, so
-the demo share is exact and the live buffer's global-RNG stream is
-consumed identically whether the demo buffer exists or not.
+the demo share is exact. When the surface is ON, the demo buffer's
+own sample draws interleave with the live buffer's on the global
+numpy RNG (so an ON run's live sample stream differs from a SAC
+run's — expected, and recorded in the design); only the OFF case
+is stream-identical.
+
+The demo buffer is built lazily at the start of ``learn()`` (and on
+first use of the ordering metric), not at construction: a checkpoint
+reloaded for inference through an algo-resolving loader must not
+need the library file present.
 
 Not supported with n-step returns (``n_steps > 1``): refused at
 construction rather than silently mixing 1-step demo targets into
@@ -34,6 +42,7 @@ import numpy as np
 import torch as th
 from stable_baselines3 import SAC
 from stable_baselines3.common.buffers import ReplayBuffer
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.type_aliases import ReplayBufferSamples
 from stable_baselines3.common.utils import polyak_update
 from torch.nn import functional as F
@@ -113,7 +122,30 @@ class DemoSAC(SAC):
                 "DemoSAC does not support n_steps > 1 with a demo library "
                 "(1-step demo targets would mix into n-step live targets)"
             )
-        self._load_demo_library(self.demo_library)
+        # The realized composition must actually mix: a fraction that
+        # rounds to zero demo rows (or to the whole batch) at this
+        # batch size would be a silent no-op (or a pure-demo batch)
+        # while config.json records the library as in play.
+        n_demo = int(round(self.demo_fraction * self.batch_size))
+        if self.demo_fraction > 0.0 and not 1 <= n_demo <= self.batch_size - 1:
+            raise ValueError(
+                f"demo_fraction={self.demo_fraction} at batch_size="
+                f"{self.batch_size} rounds to {n_demo} demo rows per "
+                "minibatch; it must round to at least 1 and at most "
+                "batch_size - 1"
+            )
+
+    def _setup_learn(self, *args: Any, **kwargs: Any) -> tuple[int, BaseCallback]:
+        # The demo buffer is built at the first learn(), not at
+        # construction: inference-side loaders (eval notebooks,
+        # SAC.load of a DemoSAC checkpoint) never need the library file.
+        self._ensure_demo_loaded()
+        return super()._setup_learn(*args, **kwargs)
+
+    def _ensure_demo_loaded(self) -> None:
+        """Build the demo buffer from the library on first need."""
+        if self.demo_library is not None and self.demo_buffer is None:
+            self._load_demo_library(self.demo_library)
 
     def _excluded_save_params(self) -> list[str]:
         # The buffers are rebuilt from the library path at load; never
@@ -142,16 +174,19 @@ class DemoSAC(SAC):
         holdout_act: list[np.ndarray] = []
         for position, traj in enumerate(trajectories):
             obs = np.asarray(traj["obs"], dtype=np.float64)
-            actions = np.asarray(traj["actions"], dtype=np.float64)
+            env_actions = np.asarray(traj["actions"], dtype=np.float64)
             next_obs = np.asarray(traj["next_obs"], dtype=np.float64)
             rewards = np.asarray(traj["rewards"], dtype=np.float64)
             terminated = np.asarray(traj["terminated"], dtype=bool)
             truncated = np.asarray(traj["truncated"], dtype=bool)
             steps = len(rewards)
+            # Shapes are checked on the RAW arrays: scale_action would
+            # broadcast a wrongly shaped action array back to the env's
+            # action width and hide the defect.
             if not (
                 obs.shape == (steps, obs_dim)
                 and next_obs.shape == (steps, obs_dim)
-                and actions.shape == (steps, act_dim)
+                and env_actions.shape == (steps, act_dim)
                 and terminated.shape == (steps,)
                 and truncated.shape == (steps,)
                 and steps >= 1
@@ -160,6 +195,13 @@ class DemoSAC(SAC):
                     f"demo_library {path!r} trajectory {position} has "
                     "inconsistent array shapes for this env"
                 )
+            # The live buffer holds policy-space actions (SB3's
+            # scale_action of the env action); demos are recorded as
+            # env actions, so map them the same way (identity on a
+            # [-1, 1] Box, exact on any Box).
+            actions = np.asarray(
+                self.policy.scale_action(env_actions), dtype=np.float64
+            )
             if self.demo_window == "to_confirm":
                 end = int(traj["confirm_step"]) + 1
                 obs, actions, next_obs = obs[:end], actions[:end], next_obs[:end]
@@ -209,6 +251,7 @@ class DemoSAC(SAC):
         """Fraction of held-out demo states where min-Q ranks the demo
         action above the policy's deterministic action (the ordering
         the Q-filter needs; Phase 0 measured it at coin-flip)."""
+        self._ensure_demo_loaded()
         if self.demo_holdout is None:
             return None
         obs, actions = self.demo_holdout
@@ -225,7 +268,9 @@ class DemoSAC(SAC):
     # -- training ------------------------------------------------------------
 
     def _sample_minibatch(self, batch_size: int) -> tuple[ReplayBufferSamples, int]:
-        """Live-then-demo minibatch; identical to SAC's when demos are off."""
+        """Live-then-demo minibatch; identical to SAC's call when demos are
+        off. When on, the demo sample's own global-RNG draws interleave
+        with the live buffer's (the live stream is not SAC's)."""
         n_demo = (
             int(round(self.demo_fraction * batch_size))
             if self.demo_buffer is not None

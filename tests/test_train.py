@@ -617,6 +617,72 @@ def test_train_warm_starts_sac_policy_and_entropy(tmp_path):
     assert "log_ent_coef" not in initialization["reset"]
 
 
+def test_train_warm_starts_demosac_from_plain_sac_source(tmp_path):
+    """The LD1-prime pilot shape: a ``DEMOSAC`` target (injection OFF)
+    warm-started from a plain-SAC lineage run. The policy container is
+    shared across the SAC family, so the gates admit the pair and the
+    transfer is the full SAC transfer (actor, critics, targets,
+    log_ent_coef); provenance records the source algo verbatim."""
+    source_dir, env_fn, source_state = _make_sac_warm_start_source(tmp_path)
+    target_dir = tmp_path / "demosac_target"
+    capture = _CaptureSacWarmStart()
+    cfg = TrainConfig(
+        env_fn=env_fn,
+        algo="DEMOSAC",
+        total_timesteps=8,
+        log_dir=str(target_dir),
+        n_envs=1,
+        seed=13,
+        eval_freq=10_000,
+        checkpoint_freq=0,
+        video_freq=0,
+        record_video=False,
+        info_dict_eval=False,
+        n_eval_episodes=1,
+        normalize_obs=True,
+        normalize_obs_excluded_indices=(0,),
+        warm_start=WarmStartConfig(source_dir),
+        model_kwargs={"buffer_size": 64, "learning_starts": 1_000},
+        extra_callbacks=(capture,),
+    )
+    train(cfg)
+
+    assert capture.policy_state is not None
+    assert capture.policy_state.keys() == source_state.keys()
+    for name, expected in source_state.items():
+        torch.testing.assert_close(capture.policy_state[name], expected)
+    assert capture.optimizer_state_counts == (0, 0)
+    assert capture.start_timestep == 0
+    assert capture.log_ent_coef == pytest.approx(-6.5)
+
+    config = json.loads((target_dir / "config.json").read_text())
+    assert config["train_config"]["algo"] == "DEMOSAC"
+    assert config["resolved_model"]["algo_class"] == "DemoSAC"
+    assert config["resolved_model"]["hyperparameters"]["demo_fraction"] == 0.0
+    assert "demo_library_sha256" not in config["resolved_model"]
+    initialization = config["initialization"]
+    assert initialization["mode"] == "policy_and_observation_stats"
+    assert initialization["source"]["algo"] == "SAC"
+    assert "log_ent_coef" in initialization["transferred"]
+
+
+def test_prepare_warm_start_refuses_cross_family_source(tmp_path):
+    """The family widening admits SAC<->DemoSAC only; a PPO source can
+    never seed a SAC-family target (different policy container)."""
+    source_dir, env_fn, _ = _make_ppo_warm_start_source(tmp_path)
+    cfg = TrainConfig(
+        env_fn=env_fn,
+        algo="DEMOSAC",
+        log_dir=str(tmp_path / "target"),
+        n_envs=1,
+        normalize_obs=True,
+        normalize_obs_excluded_indices=(0,),
+        warm_start=WarmStartConfig(source_dir),
+    )
+    with pytest.raises(ValueError, match="share its SAC family"):
+        _prepare_warm_start(cfg)
+
+
 def test_train_warm_start_skips_sac_entropy_when_flagged(tmp_path):
     """``transfer_log_ent_coef=False`` -- the temperature-skip warm start:
     the policy still transfers in full, but the target keeps its own
@@ -861,17 +927,18 @@ def test_warm_start_setup_failure_closes_every_constructed_env(tmp_path):
     assert constructed <= closed
 
 
-def test_warm_start_supports_ppo_and_sac_only(tmp_path):
-    """The transfer path is written for exactly the two algorithms this
-    project trains; any future third algorithm must extend it explicitly
-    rather than falling through half-supported."""
+def test_warm_start_supports_ppo_and_sac_family_only(tmp_path):
+    """The transfer path is written for PPO and the SAC family this
+    project trains (SAC and its DemoSAC subclass share the policy
+    container); any future algorithm outside them must extend it
+    explicitly rather than falling through half-supported."""
     cfg = TrainConfig(
         env_fn=lambda: BallBalanceEnv(),
         algo="TD3",
         log_dir=str(tmp_path / "target"),
         warm_start=WarmStartConfig(tmp_path),
     )
-    with pytest.raises(ValueError, match="supports PPO and SAC only"):
+    with pytest.raises(ValueError, match="PPO and the SAC family"):
         _prepare_warm_start(cfg)
 
 
