@@ -15,14 +15,20 @@ from typing import Any
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.base_class import BaseAlgorithm
 
+from courtside_dynamics.training.demo_sac import DemoSAC
+
 #: Maps the ``algo`` string used throughout the project to its SB3 class.
-ALGOS: dict[str, type[BaseAlgorithm]] = {"SAC": SAC, "PPO": PPO}
+#: ``DemoSAC`` is SAC plus default-off demonstration injection
+#: (docs/design_paddle_tennis_demo_injection.md) — a distinct name so a
+#: run's algo string alone says whether the injection surface was in
+#: play, and so its off-policy registration below is explicit.
+ALGOS: dict[str, type[BaseAlgorithm]] = {"SAC": SAC, "PPO": PPO, "DEMOSAC": DemoSAC}
 
 #: Algorithms that learn off-policy from a replay buffer. For these the
 #: number of gradient updates per rollout is decoupled from the number of
 #: env steps collected, so a vectorised env silently starves the policy of
 #: updates unless we compensate (see ``train._build_algo``).
-OFF_POLICY_ALGOS = frozenset({"SAC"})
+OFF_POLICY_ALGOS = frozenset({"SAC", "DEMOSAC"})
 
 
 #: Constructor arguments the trainer supplies itself (``train._build_algo``
@@ -46,18 +52,15 @@ def validate_model_kwargs(
     fail-loud-and-early rule the env-kwarg probe already enforces.
     """
     cls = resolve_algo(algo_name)
-    parameters = inspect.signature(cls.__init__).parameters
     reserved = sorted(_RESERVED_MODEL_KWARGS & set(model_kwargs))
     if reserved:
         raise ValueError(
             f"model_kwargs may not set {reserved}: the trainer supplies "
             f"these to {cls.__name__} itself"
         )
-    if not any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    ):
-        accepted = set(parameters) - {"self"} - _RESERVED_MODEL_KWARGS
+    accepted, open_ended = _accepted_parameters(cls)
+    if not open_ended:
+        accepted = accepted - _RESERVED_MODEL_KWARGS
         for key in model_kwargs:
             if key in accepted:
                 continue
@@ -76,6 +79,39 @@ def validate_model_kwargs(
                 f"SAC-only, and a non-numeric value would not fail until "
                 f"the first gradient update"
             )
+
+
+def _accepted_parameters(cls: type) -> tuple[set[str], bool]:
+    """Explicit constructor parameters along the MRO.
+
+    A subclass that adds its own keywords and forwards ``**kwargs`` to
+    its parent (``DemoSAC`` -> ``SAC``) still has a closed parameter
+    set: the union of every explicit signature down to the first
+    ``__init__`` without a ``**kwargs`` catch-all. Returns
+    ``(accepted, open_ended)``; ``open_ended`` is True only when every
+    level forwards ``**kwargs``, in which case nothing can be rejected.
+    """
+    accepted: set[str] = set()
+    for klass in cls.__mro__:
+        init = klass.__dict__.get("__init__")
+        if init is None:
+            continue
+        parameters = inspect.signature(init).parameters
+        accepted |= {
+            name
+            for name, parameter in parameters.items()
+            if parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        }
+        if not any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        ):
+            return accepted - {"self"}, False
+    return accepted - {"self"}, True
 
 
 def resolve_algo(name: str) -> type[BaseAlgorithm]:
