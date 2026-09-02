@@ -145,41 +145,82 @@ spaces.
 
 `tools/paddle_tennis_k2_demo_harvest.py` launches each failure-state
 entry through the shipped **full-context** drill arm (real rally
-flags, real physics), lets `scripted_ground_opponent` play side A,
-records the replay tuple every step until the point ends (cap 300),
-and **keeps a trajectory only if the oracle's k=2 hit was legal AND
-its return confirmed inside the recording**, asserting the
-confirmation step paid ≥ `return_reward` (the success signal is in
-the buffer by construction, fail-loud). Every 5th source entry is
+flags, real physics), **restores the failure state's episode clock**
+(so `episode_remaining_fraction` reads what the policy saw — launch
+clocks 0.12–0.84, median 0.50, instead of a fresh episode's 0.8–1.0
+— and the episode truncates where the policy's would have), switches
+the drill off after loading (the relaunch after the demo point is
+the pilot env's plain serve, asserted), lets `scripted_ground_opponent`
+play side A, records the replay tuple every step until the point
+ends, the episode truncates, or a **300-step cap**, and **keeps a
+trajectory only if the oracle's k=2 hit was legal AND its return
+confirmed inside the recording**, asserting the confirmation step
+paid ≥ `return_reward` (the success signal is in the buffer by
+construction, fail-loud). Cap-ended trajectories are kept and
+counted (they end on a non-terminal row). Every 5th source entry is
 held out.
 
-| source library | entries | kept | oracle miss | hit, unconfirmed | censored |
-|---|---|---|---|---|---|
-| registered (seeds 9030–9099, sha `43975265…`) | 102 | 70 | 23 | 9 | 0 |
-| extension (seeds **9200–9269**, harvested at `d226a99` with untracked new files present — the harvest tool itself unchanged since `c8bc07d`, so the library reproduces from that tool + seeds) | 100 | 72 | 17 | 3 | 0 |
-| **combined demo library** (sha `21fda9dd…`) | 202 | **142** (110 train / 32 held-out) | 40 | 20 | 0 |
+| source library | entries | kept (by ender) | oracle miss | hit, unconfirmed |
+|---|---|---|---|---|
+| registered (seeds 9030–9099, sha `43975265…`) | 102 | 62 (18 point-ended / 36 cap-ended / 8 episode-truncated) | 29 | 11 |
+| extension (seeds **9200–9269**, sha `176e4728…`) | 100 | 68 (17 point-ended / 43 cap-ended / 8 episode-truncated) | 17 | 15 |
+| **combined demo library** (sha `b203741e985a…`, harvested at `5fe9a37` on a clean tree — per-source counts in the header) | 202 | **130** (99 train / 31 held-out; 35 / 79 / 16) | 46 | 26 |
 
-**39,591 transitions** (≈30.7k in the train split); keep rate
-**70.3%** — below the 77.5% oracle *touch* rate because ~10% of
-oracle hits go unconfirmed (returns out/net), which the harvest
-correctly excludes. Both source libraries are policy-harvested
-failure states (the D-E distribution), one per point, clearance-
-filtered at harvest.
+**35,270 transitions under `demo_window="point"`** (26,731 train /
+8,539 held-out); **20,090 under `"to_confirm"`** (15,293 train
+/ 4,797 held-out) — 43% of the point-window
+rows are post-confirmation oracle rally play (confirmation comes
+131–192 steps after launch, median 152; most kept trajectories then
+run to the cap). Keep rate **64.4%**
+of launched states; the oracle *touched* 156/202 (**77.2%** pooled
+— a coincidence of populations, not a reproduction of the 77.5%
+quoted elsewhere: registered **73/102 = 71.6%**, extension 83/100).
+The registered figure IS a like-for-like reproduction: the step-0
+tool's own oracle row on the full arm, which restores the clock the
+same way, reads touch = legal = **71.6%** with 20 truncation-
+censored entries at its 400-step horizon (re-run 2026-09-02); the
+familiar 77.5% is the fresh-budget row (feed arm, and the first,
+superseded harvest's fresh-clock launch reproduced it at 79/102).
+**Erratum candidate for the drill design (maintainer's call):** its
+§3a "the oracle scores identically under both arms (77.5%)" does
+not hold under the current instrument — the full arm reads 71.6%,
+the difference being the censored late-episode states, not the
+context gate. 26 of the 156 hits (16.7%) went unconfirmed (returns
+out/net), which the harvest correctly excludes. The restored clock
+is what costs demos relative to a fresh-episode launch (the first
+harvest kept 142), and the loss is entirely the late-episode
+states: on the registered library every one of the six hits lost
+to the restore is an entry harvested at step 1448–1485 whose
+episode truncates 15–52 steps after launch, before the hit the
+fresh-clock replay lands 46–78 steps in (per-entry replica,
+2026-09-02; no hit arrives after step 300 at a 400-step horizon,
+so the cap itself loses no conversion). The pilot env would
+truncate those states identically. Both source libraries are
+policy-harvested failure states (the D-E distribution), one per
+point, clearance-filtered at harvest.
 
 ### 3a. Replay multiplicity — the arithmetic the fraction is set from
 
 The red-team's warning, now quantified. A 1M-step pilot at the
 recipe's UTD 1 (256 updates per 256 collected transitions, batch
-256) draws 256M samples in total. With ~30.7k train demo transitions
-and a live buffer of 1M:
+256) draws 256M samples in total. With 26,731 train demo transitions
+(the `point` window; `to_confirm` has 15,293, so multiply the demo
+column by 1.75) and a live buffer of 1M:
 
-| `demo_fraction` | demo draws | replays per demo transition | replays per live transition | ratio |
+| `demo_fraction` | demo draws | replays per demo transition | replays per live transition (whole-run mean) | ratio |
 |---|---|---|---|---|
-| 0.50 | 128M | ~4,170 | ~128 | ~33× |
-| 0.25 | 64M | ~2,080 | ~192 | ~11× |
-| 0.10 | 25.6M | ~830 | ~230 | ~3.6× |
-| 0.05 | 12.8M | ~420 | ~243 | ~1.7× |
-| 0.03 | 7.7M | ~250 | ~248 | ~1.0× |
+| 0.50 | 128.0M | ~4,788 | ~128 | ~37.4× |
+| 0.25 | 64.0M | ~2,394 | ~192 | ~12.5× |
+| 0.10 | 25.6M | ~958 | ~230 | ~4.2× |
+| 0.05 | 12.8M | ~479 | ~243 | ~2.0× |
+| 0.03 | 7.7M | ~287 | ~248 | ~1.2× |
+
+The live column is a whole-run mean over a buffer that only fills at
+the run's end: a live transition collected at step *t* is drawn
+about 256(1−f)·ln(1M/*t*) times, so early live transitions (~1,100
+replays for one collected at step 10k, at f = 0.05) are replayed
+*more* often than any demo transition at the small fractions; the
+ratio column is the end-of-run figure, not the early-run one.
 
 RLPD's 50/50 is licensed by stabilizers this pilot does not run
 (LayerNorm critics, larger ensembles, UTD ~20 — the freeze brief's
@@ -204,14 +245,26 @@ escalation with the multiplicity recorded.
 - **SD2 — composition and provenance**: shipped as tests (exact
   per-minibatch split; `demo_library_sha256` reaches `config.json`
   and the plan validator).
-- **SD3 — the ordering baseline and the arming threshold**:
-  `demo_q_ordering` on the held-out 32 at step 0 (the freeze brief's
-  G1 predicts ~coin-flip: 42–45%); the pilot pre-registers the
-  threshold that arms `demo_bc_filter="q"`.
+- **SD3 — the ordering baseline and the arming threshold**: both
+  shipped series read at pilot step 0 — `demo_q_ordering` over every
+  transition of the 31 held-out trajectories under the
+  pilot's window (8,539 rows for `point`, 4,797 for
+  `to_confirm`; the window is fixed for the run so the series stays
+  comparable) and `demo_q_ordering_launch` on their 31
+  launch states. The freeze brief's G1 (42% on 102 launch states,
+  45% along the first ~120 oracle-play steps) was measured on
+  different populations and anchors only the coin-flip expectation;
+  the pilot pre-registers the threshold that arms
+  `demo_bc_filter="q"` from this step-0 reading, on one named
+  series.
 - **SD4 — realized economics at pilot settings**: a short run
   (≥ 20k steps) recording `train/demo_fraction`, `train/demo_bc_loss`,
   the realized replay multiplicity, and — the retention canary —
   `legal_hit_count_a` on the eval stream, before the 1M pilot.
+- **Outstanding instrument (D-G's standing prerequisite): the
+  class-split diagnosis extension** — the diagnosis stream reporting
+  k=2 outcomes split by presentation class, so KD-mechanism has a
+  series to move; not yet shipped.
 - **Seed block: 6400–6499** (booked). Harvest seeds: the scratch
   ledger (§7).
 
