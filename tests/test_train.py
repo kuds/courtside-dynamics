@@ -147,12 +147,18 @@ def test_env_steps_to_calls_scales_with_n_envs():
     assert _env_steps_to_calls(100, 0) == 100
 
 
-def test_algo_registry_has_sac_and_ppo():
+def test_algo_registry_has_sac_ppo_and_demosac():
+    """The registry is the single source of truth, and off-policy
+    membership is the silent trap: an off-policy algo missing from
+    OFF_POLICY_ALGOS keeps SB3's gradient_steps=1 against a vectorised
+    train_freq and trains 1 update per n_envs*train_freq transitions."""
     from courtside_dynamics.training.algos import ALGOS, OFF_POLICY_ALGOS
+    from courtside_dynamics.training.demo_sac import DemoSAC
 
-    assert set(ALGOS) == {"SAC", "PPO"}
-    # SAC is off-policy (gets gradient_steps=-1); PPO is not.
+    assert set(ALGOS) == {"SAC", "PPO", "DEMOSAC"}
+    assert ALGOS["DEMOSAC"] is DemoSAC
     assert "SAC" in OFF_POLICY_ALGOS
+    assert "DEMOSAC" in OFF_POLICY_ALGOS
     assert "PPO" not in OFF_POLICY_ALGOS
 
 
