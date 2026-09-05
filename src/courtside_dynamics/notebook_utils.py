@@ -2235,6 +2235,7 @@ _PLAN_KEYS = frozenset(
         "env_kwargs",
         "eval_env_kwargs",
         "drill_library_sha256",
+        "demo_library_sha256",
         "warm_start",
     }
 )
@@ -2317,6 +2318,10 @@ def validate_run_config_against_plan(
       banked into ``config.json`` by the env probe), i.e. what the run
       actually loaded, not what the file at the path contains at audit
       time;
+    - ``"demo_library_sha256"``: the same digest pin for the LD1′
+      demonstration library, matched against
+      ``resolved_model.demo_library_sha256`` (banked by the model
+      probe from ``DemoSAC.demo_library_sha256``);
     - ``"warm_start"``: ``None`` demands a from-scratch run (no
       ``initialization`` block, no ``train_config.warm_start``). A
       mapping demands a warm-started run -- ``train()`` binds the
@@ -2417,26 +2422,33 @@ def validate_run_config_against_plan(
             )
         )
 
-    if "drill_library_sha256" in expected:
-        wanted_sha = expected["drill_library_sha256"]
+    resolved_model = config.get("resolved_model")
+    if not isinstance(resolved_model, Mapping):
+        resolved_model = {}
+    for key, block, block_label in (
+        ("drill_library_sha256", env_info, "env"),
+        ("demo_library_sha256", resolved_model, "resolved_model"),
+    ):
+        if key not in expected:
+            continue
+        wanted_sha = expected[key]
         if (
             not isinstance(wanted_sha, str)
             or not 8 <= len(wanted_sha) <= 64
             or any(c not in "0123456789abcdef" for c in wanted_sha)
         ):
             raise ValueError(
-                "expected drill_library_sha256 must be lowercase hex, "
-                "8 to 64 chars"
+                f"expected {key} must be lowercase hex, 8 to 64 chars"
             )
-        recorded_sha = env_info.get("drill_library_sha256")
+        recorded_sha = block.get(key)
         if not isinstance(recorded_sha, str):
             mismatches.append(
-                f"env.drill_library_sha256: expected {wanted_sha!r}, "
-                "config.json records no consumed drill-library digest"
+                f"{block_label}.{key}: expected {wanted_sha!r}, "
+                "config.json records no consumed library digest"
             )
         elif not recorded_sha.startswith(wanted_sha):
             mismatches.append(
-                f"env.drill_library_sha256: expected {wanted_sha!r}, "
+                f"{block_label}.{key}: expected {wanted_sha!r}, "
                 f"config.json records {recorded_sha!r}"
             )
 

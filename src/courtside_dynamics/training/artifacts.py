@@ -429,6 +429,9 @@ def _model_info(model: Any) -> dict[str, Any]:
         # On-policy (PPO, A2C)
         "n_steps", "n_epochs", "gae_lambda", "clip_range",
         "clip_range_vf", "vf_coef", "normalize_advantage",
+        # Demonstration injection (DemoSAC)
+        "demo_library", "demo_fraction", "demo_bc_coef",
+        "demo_bc_filter", "demo_window", "demo_transitions",
     )
     hyperparams: dict[str, Any] = {}
     for attr in hyperparam_keys:
@@ -441,6 +444,12 @@ def _model_info(model: Any) -> dict[str, Any]:
             value = repr(value)
         hyperparams[attr] = value
     info["hyperparameters"] = hyperparams
+    # The consumed demo library's digest (the model-side analogue of
+    # the env probe's drill_library_sha256): what the run loaded, not
+    # what the file at the path contains at audit time.
+    demo_sha = getattr(model, "demo_library_sha256", None)
+    if isinstance(demo_sha, str):
+        info["demo_library_sha256"] = demo_sha
     return info
 
 

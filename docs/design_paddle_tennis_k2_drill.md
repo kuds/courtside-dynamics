@@ -9,10 +9,15 @@ independent twin generator, with the default info stream gaining
 three constant provenance keys; §2a records the implementation
 pins, hardened same-day by an adversarial review whose 17 confirmed
 findings — one live counter-corruption bug included — were all
-fixed with mutation-verified tests); launches
-nothing until its battery (§4) and pilot (§5) are frozen by the
-maintainer, and §2 D2 carries a maintainer fork this document does
-not decide. Drafted 2026-08-30 from the PT2 routing**
+fixed with mutation-verified tests). **Re-booked 2026-09-02 on the
+Phase 0 gates
+([`paddle_tennis_ld1prime_freeze_brief_20260830.md`](paddle_tennis_ld1prime_freeze_brief_20260830.md)):
+LD1-as-drafted (§5) is RETIRED before freeze — the campaign routes
+injection-first
+([`design_paddle_tennis_demo_injection.md`](design_paddle_tennis_demo_injection.md));
+the shipped mechanism stays ready as the pre-registered RE-AIM
+escalation with the drill OFF at the LD1′ launch, and the §2 D2
+fork is deferred, not decided.** Drafted 2026-08-30 from the PT2 routing
 ([`paddle_tennis_command_spectrum_20260830.md`](paddle_tennis_command_spectrum_20260830.md)
 §7, taken up first per the maintainer direction booked with the
 command-rate closure), **revised the same day after its own
@@ -500,12 +505,11 @@ exact trap).
   depth/lateral tails, and drilled-point reach-pay incidence —
   gating the pilot on the §1 arithmetic as corrected, so exposure
   starvation or a silent fallback drift cannot pass the battery.
-- **Seed block: assigned by the maintainer at freeze** (fresh block
-  REQUIRED for KD2–KD4 witness/economics runs; **6400–6499 is free
-  again** and is the natural candidate). Harvest and probe seeds:
+- **Seed block: 6400–6499, booked by the maintainer 2026-09-02**
+  (the battery block for KD2–KD4 and the LD1′ SD battery alike). Harvest and probe seeds:
   the §7 scratch block. **4100–4199 stays sealed.**
 
-## 5. LD1 — pilot shape (proposed, UNFROZEN; numbers at the post-battery freeze, rule shape committed now)
+## 5. LD1 — pilot shape (RETIRED as drafted, 2026-09-02, on the Phase 0 gates; the rule SHAPE below is inherited by LD1′, with the drill as its RE-AIM escalation)
 
 Warm start from the **registered 2.4M protected best** (shas pinned
 via `expected_artifact_sha256`; also the library's source — one
@@ -587,7 +591,12 @@ block**, with the following consumption recorded (all 2026-08-30):
 feasibility probe **9000–9029**; review probes **9100–9146**; the
 registered harvest **9030–9099** (the §3a library's source
 episodes); step-0 replay resets **9147** (launch draws discarded);
-the LH1c cross-check harvest **9148–9167**. Unconsumed remainder:
-**9168–9199**. Calibration 5200+ stays clean for the diagnosis
+the LH1c cross-check harvest **9148–9167**; the arm-(c) roll-in
+probe **9168–9187**
+([`paddle_tennis_prefreeze_diagnostics_20260830.md`](paddle_tennis_prefreeze_diagnostics_20260830.md)).
+Unconsumed remainder: **9188–9199** (12 seeds). **Scratch extension
+9200–9299 booked by the maintainer 2026-09-02** (first consumer: the
+demo-harvest diversity block, recorded in the injection design's
+ledger). Calibration 5200+ stays clean for the diagnosis
 instrument (no train-on-test). The KD battery block is assigned at
 freeze (§4). Nothing else burned; **4100–4199 remains sealed**.

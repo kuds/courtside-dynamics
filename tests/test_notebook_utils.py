@@ -1513,13 +1513,25 @@ def test_validate_run_config_against_plan_eval_env_and_drill_sha_pins(
         )
     message = str(excinfo.value)
     assert "evaluation_env.constructor_kwargs" in message
-    assert "records no consumed drill-library digest" in message
+    assert "env.drill_library_sha256" in message
+    assert "records no consumed library digest" in message
 
     # A malformed pin is a bad plan, not a mismatch.
     with pytest.raises(ValueError, match="lowercase hex"):
         validate_run_config_against_plan(
             path, {"drill_library_sha256": "NOT-HEX"}
         )
+
+    # The LD1-prime demo library pins the model-side digest the same way.
+    config["resolved_model"] = {"demo_library_sha256": "ab" * 32}
+    demo_path = tmp_path / "demo.json"
+    demo_path.write_text(json.dumps(config))
+    validate_run_config_against_plan(demo_path, {"demo_library_sha256": "abababab"})
+    with pytest.raises(RunConfigPlanMismatch) as excinfo:
+        validate_run_config_against_plan(demo_path, {"demo_library_sha256": "cdcdcdcd"})
+    assert "resolved_model.demo_library_sha256: expected 'cdcdcdcd'" in str(excinfo.value)
+    with pytest.raises(RunConfigPlanMismatch, match="no consumed library digest"):
+        validate_run_config_against_plan(bare_path, {"demo_library_sha256": "abababab"})
 
 
 def test_validate_run_config_against_plan_accepts_from_scratch(tmp_path):

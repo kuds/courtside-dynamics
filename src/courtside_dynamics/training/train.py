@@ -765,9 +765,10 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
     if warm_start is None:
         return None
     algo = cfg.algo.upper()
-    if algo not in ("PPO", "SAC"):
+    if algo != "PPO" and algo not in _OFF_POLICY_ALGOS:
         raise ValueError(
-            "policy-only warm start currently supports PPO and SAC only"
+            "policy-only warm start currently supports PPO and the SAC "
+            f"family ({', '.join(sorted(_OFF_POLICY_ALGOS))}) only"
         )
     if not cfg.normalize_obs:
         raise ValueError("policy-only warm start requires normalize_obs=True")
@@ -811,10 +812,18 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
     source_env = source_config.get("env")
     if not isinstance(source_train, dict) or not isinstance(source_env, dict):
         raise ValueError("warm-start config lacks train_config/env provenance")
-    if str(source_train.get("algo", "")).upper() != algo:
+    source_algo = str(source_train.get("algo", "")).upper()
+    # Same algo, or both in the SAC family: the policy container
+    # (actor/critics/targets/log_ent_coef) is shared across the family,
+    # so a DemoSAC pilot may start from a plain-SAC lineage and vice
+    # versa. PPO never crosses.
+    same_family = source_algo == algo or (
+        source_algo in _OFF_POLICY_ALGOS and algo in _OFF_POLICY_ALGOS
+    )
+    if not same_family:
         raise ValueError(
             f"warm-start source algo must match the target "
-            f"({algo}), got {source_train.get('algo')!r}"
+            f"({algo}) or share its SAC family, got {source_train.get('algo')!r}"
         )
     if source_train.get("normalize_obs") is not True:
         raise ValueError("warm-start source must have normalize_obs=True")
@@ -1530,7 +1539,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         # re-establishes cfg.seed for the new run's stochastic sequence.
         source_model: BaseAlgorithm | None = None
         if warm_start_artifacts is not None:
-            source_model = _resolve_algo(cfg.algo).load(
+            source_algo_name = str(
+                warm_start_artifacts.source_config["train_config"]["algo"]
+            )
+            source_model = _resolve_algo(source_algo_name).load(
                 str(warm_start_artifacts.model_path),
                 device="cpu",
             )
@@ -1625,7 +1637,11 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     )
                 },
                 "source": {
-                    "algo": cfg.algo.upper(),
+                    # The source's OWN algo (a DemoSAC target may start
+                    # from a plain-SAC lineage; provenance says which).
+                    "algo": str(
+                        warm_start_artifacts.source_config["train_config"]["algo"]
+                    ).upper(),
                     "environment_class": source_env.get("class"),
                     "curriculum": source_curriculum,
                     "model_num_timesteps": int(source_model.num_timesteps),
