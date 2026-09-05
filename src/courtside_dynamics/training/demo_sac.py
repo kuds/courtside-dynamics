@@ -230,8 +230,11 @@ class DemoSAC(SAC):
                 f"{DEMO_LIBRARY_SCHEMA!r}"
             )
         trajectories = list(library["trajectories"])
-        obs_dim = int(np.prod(self.observation_space.shape))
-        act_dim = int(np.prod(self.action_space.shape))
+        obs_shape = self.observation_space.shape
+        act_shape = self.action_space.shape
+        assert obs_shape is not None and act_shape is not None  # Box spaces
+        obs_dim = int(np.prod(obs_shape))
+        act_dim = int(np.prod(act_shape))
         train_rows: list[tuple[np.ndarray, ...]] = []
         holdout_obs: list[np.ndarray] = []
         holdout_act: list[np.ndarray] = []
@@ -342,7 +345,9 @@ class DemoSAC(SAC):
 
     def _q_ordering(self, obs: np.ndarray, actions: np.ndarray) -> float:
         if self._vec_normalize_env is not None:
-            obs = self._vec_normalize_env.normalize_obs(obs)
+            normalized = self._vec_normalize_env.normalize_obs(obs)
+            assert isinstance(normalized, np.ndarray)  # Box observations only
+            obs = normalized
         with th.no_grad():
             obs_t = th.as_tensor(obs, dtype=th.float32, device=self.device)
             act_t = th.as_tensor(actions, dtype=th.float32, device=self.device)
