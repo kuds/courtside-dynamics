@@ -1,7 +1,8 @@
 # LD1′ freeze brief: the Phase 0 gates and the decisions they resolve (2026-08-30)
 
 Status: **BOOKED by the maintainer 2026-09-02 — decisions D-A
-through D-G below are the campaign's routing** (the LD1′ pilot
+through D-G below are the campaign's routing; D-E's harvest wording
+amended and re-booked 2026-09-05 (its bullet)** (the LD1′ pilot
 itself is pre-registered separately in
 [`design_paddle_tennis_demo_injection.md`](design_paddle_tennis_demo_injection.md)
 once its instruments certify; the numbers here are its inputs). Phase 0 was
@@ -79,9 +80,17 @@ modes**, closing the red-team's strongest objection to retiring it.
 - **D-E. Demo harvest spec:** oracle completions launched from the
   policy-harvested full-context library states (the policy's OWN
   failure distribution — not oracle-native play), harvested through
-  point termination so the conversion payment is in the buffer
-  (fail-loud assert per trajectory), budgeted from the measured
-  77.5–80.4% oracle conversion, with a train/held-out split.
+  the conversion's confirmation so the conversion payment is in the
+  buffer (fail-loud assert per trajectory), with the
+  post-confirmation rally recorded to the point's end, the episode's
+  truncation, or a 300-step cap, whichever comes first (**amended
+  and booked 2026-09-05**: as
+  first booked this read "through point termination", which the
+  measured harvest does not meet literally — two scripted players
+  rally on after the conversion; design §3), budgeted from the measured
+  77.5–80.4% oracle conversion (fresh-clock figures at booking; the
+  clock-restored harvest touched 77.2% and kept 64.4% — design §3),
+  with a train/held-out split.
   **Booking needed: the 9200–9299 scratch extension** (remainder is
   12 seeds) for harvest diversity beyond the 102 deterministic
   completions.

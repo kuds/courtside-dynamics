@@ -4,7 +4,8 @@ Status: **Proposed — the mechanism is IMPLEMENTED default-off
 (2026-09-02: `DemoSAC`, the demo harvest tool, provenance and plan
 pins, SD0 certified bit-identical against stock SAC on a minimal and
 a recipe-shaped lockstep; warm-start gates widened to the SAC family
-and tested); the LD1′ pilot
+and tested; D-E's harvest wording amended and booked 2026-09-05,
+§3); the LD1′ pilot
 (§5) is NOT frozen — its numbers are the maintainer's at freeze, on
 the §3a arithmetic.** Routed injection-first by the maintainer's
 2026-09-02 bookings
@@ -205,17 +206,19 @@ truncate those states identically. Both source libraries are
 policy-harvested failure states (the D-E distribution), one per
 point, clearance-filtered at harvest.
 
-**PROPOSAL (maintainer books) — amend D-E's wording.** D-E reads
-"harvested through point termination so the conversion payment is
-in the buffer". The payment clause holds by construction (asserted
-per kept trajectory); the literal "through point termination" does
-not: 79 of the 130 kept trajectories end at the 300-step cap and 16
-at the episode's truncation, because two scripted players rally on
-after the conversion and a cooperative rally has no natural end
-inside any cap. Proposed wording: "harvested through the
-conversion's confirmation, with the post-confirmation rally
-recorded to the point's end or a 300-step cap, whichever comes
-first". Also recorded: the 35 point-boundary rows' `next_obs` is
+**BOOKED 2026-09-05 — D-E's wording amended.** D-E as first booked
+read "harvested through point termination so the conversion
+payment is in the buffer". The payment clause holds by construction
+(asserted per kept trajectory); the literal "through point
+termination" does not: 79 of the 130 kept trajectories end at the
+300-step cap and 16 at the episode's truncation, because two
+scripted players rally on after the conversion and a cooperative
+rally has no natural end inside any cap. The booked wording is now
+"harvested through the conversion's confirmation, with the
+post-confirmation rally recorded to the point's end, the episode's
+truncation, or a 300-step cap, whichever comes first" (ledger
+entries updated in
+[`DECISIONS.md`](DECISIONS.md) and the freeze brief). Also recorded: the 35 point-boundary rows' `next_obs` is
 one fixed relaunch serve (every launch resets with the
 discarded-draw seed 9147, so the boundary draw repeats — 2 distinct
 ball positions across the 35 rows): a plain drill-off serve as the

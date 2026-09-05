@@ -6,8 +6,9 @@ For every entry of one or more k=2 failure-state libraries
 faces and fails), launch the state through the shipped full-context
 drill arm (real rally flags, real physics), let the scripted ground
 oracle play side A, and record the SB3 replay tuple at every control
-step until the point ends (or a step cap; cap-ended trajectories are
-kept, counted, and end on a non-terminal row). A trajectory is KEPT only
+step until the point ends, the episode truncates, or a step cap
+(cap-ended and truncated trajectories are kept and counted; a
+cap-ended one ends on a non-terminal row). A trajectory is KEPT only
 if the oracle converted the k=2 ball AND the conversion was confirmed
 inside the recording — the +return_reward is asserted present at the
 confirmation step (fail-loud, cardinal rule 1), so "the demos carry

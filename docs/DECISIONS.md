@@ -115,7 +115,12 @@ Q-filter armed by a pre-registered ordering measurement; (D-D) no
 temperature re-heat — the T1-FAIL era law binds, ent_coef and
 saturation become observables; (D-E) demos are oracle completions
 from the policy's OWN harvested failure states, harvested through
-point termination so the conversion payment is in the buffer;
+the conversion's confirmation so the conversion payment is in the
+buffer, with the post-confirmation rally recorded to the point's
+end, the episode's truncation, or a 300-step cap, whichever comes
+first (wording **amended and booked 2026-09-05**; as first booked it read "through point
+termination", which the measured harvest does not meet literally —
+design §3);
 (D-F) drill OFF at launch, arm (b) the pre-registered RE-AIM
 escalation, the D2 fork deferred; (D-G) battery block 6400–6499,
 scratch extension 9200–9299, and the pre-pilot instrument list —
@@ -128,11 +133,11 @@ demo library carried a fresh-episode clock and a mislabeled cap —
 the material findings fixed and the library re-harvested; the
 first library's table (142 kept, "0 censored") had gone into the
 design's §3 the same day and is superseded; a second verification
-pass's residual minors are recorded in the design, including a
-PROPOSAL to amend D-E's "through point termination" wording, since
-most kept demos end at the recording cap while the payment clause
-holds by construction); the class-split diagnosis extension is the
-outstanding prerequisite.
+pass's residual minors are recorded in the design, including the
+amendment of D-E's "through point termination" wording booked
+2026-09-05, since most kept demos end at the recording cap while
+the payment clause holds by construction); the class-split
+diagnosis extension is the outstanding prerequisite.
 Lessons booked: (a) **the
 pre-freeze diagnostics' first-draft headlines were wrong in four
 places and the verification caught every one** — the "collapsed
