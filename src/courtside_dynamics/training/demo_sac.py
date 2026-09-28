@@ -31,7 +31,10 @@ reloaded for inference through an algo-resolving loader must not
 need the library file present. The library's sha256 IS banked at
 construction (the trainer writes ``config.json`` before ``learn()``),
 and a library whose bytes change under a banked digest is refused at
-first use.
+first use. A ``demo_library_sha256`` constructor pin (full digest or
+a lowercase-hex prefix of at least 8 chars) refuses a library whose
+digest does not match it at construction, so a moved or re-harvested
+file aborts the launch instead of voiding the run after the fact.
 
 Not supported with n-step returns (``n_steps > 1``): refused at
 construction rather than silently mixing 1-step demo targets into
@@ -74,6 +77,7 @@ class DemoSAC(SAC):
         env: Any,
         *,
         demo_library: str | None = None,
+        demo_library_sha256: str | None = None,
         demo_fraction: float = 0.0,
         demo_bc_coef: float = 0.0,
         demo_bc_filter: str = "none",
@@ -86,14 +90,42 @@ class DemoSAC(SAC):
         self.demo_bc_filter = demo_bc_filter
         self.demo_window = demo_window
         self._validate_demo_config()
+        if demo_library_sha256 is not None:
+            # The repo's pin rule (WarmStartConfig, the plan validator):
+            # an empty pin would match every digest, and uppercase or
+            # short pins silently weaken the check.
+            if (
+                not isinstance(demo_library_sha256, str)
+                or not 8 <= len(demo_library_sha256) <= 64
+                or any(c not in "0123456789abcdef" for c in demo_library_sha256)
+            ):
+                raise ValueError(
+                    "demo_library_sha256 must be lowercase hex, 8 to 64 chars, "
+                    f"got {demo_library_sha256!r}"
+                )
+            if demo_library is None:
+                raise ValueError(
+                    "demo_library_sha256 pins a demo_library, but none was given"
+                )
         # Provenance is banked at construction: the trainer writes
         # config.json BEFORE learn() starts, so the digest of the
         # library this run will consume must exist before the buffer
-        # (which builds lazily at the first learn()) does.
+        # (which builds lazily at the first learn()) does. The
+        # attribute is always the FULL digest; the constructor pin is
+        # checked against it here and never stored.
         self.demo_library_sha256: str | None = None
         self._demo_digest_path: str | None = None
         if demo_library is not None:
-            self.demo_library_sha256 = _file_sha256(demo_library)
+            digest = _file_sha256(demo_library)
+            if demo_library_sha256 is not None and not digest.startswith(
+                demo_library_sha256
+            ):
+                raise ValueError(
+                    f"demo_library {demo_library!r} has sha256 {digest[:12]}, "
+                    f"which does not match the pinned demo_library_sha256 "
+                    f"{demo_library_sha256!r}"
+                )
+            self.demo_library_sha256 = digest
             self._demo_digest_path = demo_library
         self.demo_buffer: ReplayBuffer | None = None
         self.demo_holdout: tuple[np.ndarray, np.ndarray] | None = None
