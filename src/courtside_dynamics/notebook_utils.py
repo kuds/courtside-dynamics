@@ -2270,6 +2270,8 @@ _PLAN_TRAIN_CONFIG_KEYS = (
 _PLAN_KEYS = frozenset(
     {
         *_PLAN_TRAIN_CONFIG_KEYS,
+        "algo",
+        "model_kwargs",
         "env_class",
         "env_kwargs",
         "eval_env_kwargs",
@@ -2340,6 +2342,13 @@ def validate_run_config_against_plan(
     - ``"seed"``, ``"total_timesteps"``, ``"n_envs"``, ``"eval_freq"``,
       ``"checkpoint_freq"``: exact matches against the recorded
       ``train_config`` block;
+    - ``"algo"``: the recorded ``train_config.algo``, compared
+      case-insensitively like the algorithm registry resolves it
+      (``"DemoSAC"`` and ``"DEMOSAC"`` are one algorithm);
+    - ``"model_kwargs"``: subset match against the recorded
+      ``train_config.model_kwargs`` (the plan pins the kwargs it
+      cares about -- e.g. the LD1′ ``demo_*`` surface; recipe
+      defaults it does not name stay unchecked);
     - ``"env_class"``: the training environment's recorded class;
     - ``"env_kwargs"``: subset match against the training environment's
       recorded constructor kwargs (the plan pins the kwargs it cares
@@ -2430,6 +2439,32 @@ def validate_run_config_against_plan(
                 f"config.json records {recorded!r}"
             )
 
+    if "algo" in expected:
+        wanted_algo = expected["algo"]
+        if not isinstance(wanted_algo, str) or not wanted_algo:
+            raise ValueError("expected algo must be a non-empty string")
+        recorded_algo = train_config.get("algo")
+        if (
+            not isinstance(recorded_algo, str)
+            or recorded_algo.upper() != wanted_algo.upper()
+        ):
+            mismatches.append(
+                f"train_config.algo: expected {wanted_algo!r}, "
+                f"config.json records {recorded_algo!r}"
+            )
+
+    if "model_kwargs" in expected:
+        mismatches.extend(
+            _kwargs_subset_mismatches(
+                expected["model_kwargs"],
+                train_config.get("model_kwargs"),
+                key="model_kwargs",
+                recorded_label="train_config.model_kwargs",
+                kwarg_label="train_config.model_kwargs",
+                absent_label="model kwargs",
+            )
+        )
+
     if "env_class" in expected:
         recorded_class = env_info.get("class")
         if recorded_class != expected["env_class"]:
@@ -2518,28 +2553,49 @@ def _env_kwargs_plan_mismatches(
     """Subset-match a plan's kwargs pin against one recorded env block
     (``env`` or ``evaluation_env``) for
     :func:`validate_run_config_against_plan`."""
+    return _kwargs_subset_mismatches(
+        wanted_kwargs,
+        recorded_env_info.get("constructor_kwargs"),
+        key=key,
+        recorded_label=f"{block}.constructor_kwargs",
+        kwarg_label=block,
+        absent_label="constructor kwargs",
+    )
+
+
+def _kwargs_subset_mismatches(
+    wanted_kwargs: Any,
+    recorded_kwargs: Any,
+    *,
+    key: str,
+    recorded_label: str,
+    kwarg_label: str,
+    absent_label: str,
+) -> list[str]:
+    """Subset-match a plan's kwargs pin against one recorded kwargs
+    mapping: every planned kwarg must be recorded with an equal value;
+    recorded kwargs the plan does not name stay unchecked."""
     if not isinstance(wanted_kwargs, Mapping):
         raise ValueError(f"expected {key} must be a mapping")
     mismatches: list[str] = []
-    recorded_kwargs = recorded_env_info.get("constructor_kwargs")
     if not isinstance(recorded_kwargs, Mapping):
         if wanted_kwargs:
             mismatches.append(
-                f"{block}.constructor_kwargs: expected "
+                f"{recorded_label}: expected "
                 f"{sorted(wanted_kwargs)}, config.json records no "
-                "constructor kwargs"
+                f"{absent_label}"
             )
         return mismatches
     for name in sorted(wanted_kwargs):
         wanted_value = wanted_kwargs[name]
         if name not in recorded_kwargs:
             mismatches.append(
-                f"{block} kwarg {name!r}: expected {wanted_value!r}, "
+                f"{kwarg_label} kwarg {name!r}: expected {wanted_value!r}, "
                 "config.json records no such kwarg"
             )
         elif not _plan_values_match(recorded_kwargs[name], wanted_value):
             mismatches.append(
-                f"{block} kwarg {name!r}: expected {wanted_value!r}, "
+                f"{kwarg_label} kwarg {name!r}: expected {wanted_value!r}, "
                 f"config.json records {recorded_kwargs[name]!r}"
             )
     return mismatches

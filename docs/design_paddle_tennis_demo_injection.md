@@ -53,12 +53,18 @@ transitions). Constructor kwargs, all default-off:
   is banked **at construction** (the trainer writes `config.json`
   before `learn()` starts) as `demo_library_sha256` into
   `config.json`'s `resolved_model` block by the model probe, pinnable
-  via `validate_run_config_against_plan`'s `demo_library_sha256` key;
+  via `validate_run_config_against_plan`'s `demo_library_sha256` key
+  and, at construction, via the `demo_library_sha256` kwarg (full
+  digest or ≥ 8-char lowercase-hex prefix; a mismatch aborts the
+  launch — added 2026-09-28 with the launch-blocker fixes, see the
+  CHANGELOG);
   the buffer itself builds at the **first `learn()`** (schema,
   per-trajectory array shapes against the env's spaces on the raw
   arrays, non-empty train split — fail-loud; a library whose bytes
   changed under the banked digest is refused), so inference loaders
-  never need the file. Half-configured pairs are rejected at
+  never need the file. `train()` builds it just before recording
+  `resolved_model`, so `config.json`'s `demo_transitions` is the
+  real train-split count. Half-configured pairs are rejected at
   construction and again after `load()` applies override kwargs.
 - `demo_fraction: float = 0.0` in [0, 1): the **exact** share of
   every minibatch drawn from the demo buffer —

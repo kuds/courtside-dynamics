@@ -21,9 +21,14 @@ import numpy as np
 import pytest
 import torch
 from stable_baselines3 import SAC
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 
 from courtside_dynamics.envs import BallBalanceEnv
+from courtside_dynamics.notebook_utils import (
+    RunConfigPlanMismatch,
+    validate_run_config_against_plan,
+)
 from courtside_dynamics.training.algos import (
     ALGOS,
     OFF_POLICY_ALGOS,
@@ -126,6 +131,44 @@ class TestRegistryAndValidation:
         validate_model_kwargs("DemoSAC", {"demo_fraction": 0.2, "buffer_size": 10})
         with pytest.raises(ValueError, match="not accepted by DemoSAC"):
             validate_model_kwargs("DemoSAC", {"demo_fractoin": 0.2})
+
+    def test_every_demo_kwarg_passes_model_kwargs_validation(self):
+        """The whole LD1′ surface is suppliable through a run's
+        model_kwargs (the campaign notebook's route) — the sha pin
+        included — and none of it is accepted by plain SAC."""
+        demo_kwargs = {
+            "demo_library": "lib.pkl",
+            "demo_library_sha256": "0123abcd",
+            "demo_fraction": 0.1,
+            "demo_bc_coef": 0.0,
+            "demo_bc_filter": "none",
+            "demo_window": "point",
+        }
+        validate_model_kwargs("DemoSAC", demo_kwargs)
+        for key, value in demo_kwargs.items():
+            with pytest.raises(ValueError, match="not accepted by SAC"):
+                validate_model_kwargs("SAC", {key: value})
+
+    def test_library_sha_pin_is_checked_at_construction(self, venv, tmp_path):
+        """A moved or re-harvested library aborts the launch at
+        construction instead of voiding the run after the fact; the
+        banked attribute is always the full digest, whatever the pin's
+        length."""
+        path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)
+        with open(path, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        on = dict(demo_library=path, demo_fraction=0.25, **_SMALL)
+        for pin in (digest, digest[:8]):
+            model = DemoSAC("MlpPolicy", venv, demo_library_sha256=pin, **on)
+            assert model.demo_library_sha256 == digest
+        wrong = ("0" if digest[0] != "0" else "1") + digest[1:12]
+        with pytest.raises(ValueError, match="does not match the pinned"):
+            DemoSAC("MlpPolicy", venv, demo_library_sha256=wrong, **on)
+        for bad in ("", "0123abc", "ABCDEF01", "g" * 8, digest + "0", 123):
+            with pytest.raises(ValueError, match="lowercase hex, 8 to 64"):
+                DemoSAC("MlpPolicy", venv, demo_library_sha256=bad, **on)
+        with pytest.raises(ValueError, match="pins a demo_library"):
+            DemoSAC("MlpPolicy", venv, demo_library_sha256=digest, **_SMALL)
 
     def test_half_configured_pairs_and_bounds_are_rejected(self, venv, tmp_path):
         path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)
@@ -408,9 +451,41 @@ class TestInjection:
     def test_train_banks_the_digest_before_learning(self, venv, tmp_path):
         """SD2 end to end: the trainer writes config.json before learn()
         starts, so the consumed-library digest has to exist at
-        construction — it reaches resolved_model on a real train() run."""
-        path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)
+        construction — it reaches resolved_model on a real train() run.
+        So does the train-transition count, which only exists once the
+        (lazy) demo buffer is built: config.json used to record
+        ``demo_transitions: 0`` on every DemoSAC run. The count must
+        already be on disk when learning starts (a run that dies
+        mid-learn keeps the config.json written at launch), and the
+        demo kwargs — the construction-time sha pin included — pass
+        the frozen-plan validator the campaign notebook runs."""
+        path, n_train = _synthetic_library(tmp_path / "lib.pkl", venv)
+        with open(path, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
         log_dir = tmp_path / "run"
+
+        class _RecordedAtTrainingStart(BaseCallback):
+            def __init__(self):
+                super().__init__()
+                self.demo_transitions = None
+
+            def _on_training_start(self):
+                config = json.loads((log_dir / "config.json").read_text())
+                hyperparameters = config["resolved_model"]["hyperparameters"]
+                self.demo_transitions = hyperparameters["demo_transitions"]
+
+            def _on_step(self):
+                return True
+
+        at_start = _RecordedAtTrainingStart()
+        demo_kwargs = {
+            "demo_library": path,
+            "demo_library_sha256": digest[:16],
+            "demo_fraction": 0.25,
+            "demo_bc_coef": 0.1,
+            "demo_bc_filter": "none",
+            "demo_window": "point",
+        }
         cfg = TrainConfig(
             env_fn=lambda: BallBalanceEnv(),
             algo="DEMOSAC",
@@ -425,20 +500,63 @@ class TestInjection:
             info_dict_eval=False,
             n_eval_episodes=1,
             normalize_obs=True,
+            extra_callbacks=(at_start,),
             model_kwargs={
-                "demo_library": path,
-                "demo_fraction": 0.25,
+                **demo_kwargs,
                 "batch_size": 32,
                 "buffer_size": 64,
                 "learning_starts": 1_000,
             },
         )
-        train(cfg)
+        model = train(cfg)
         config = json.loads((log_dir / "config.json").read_text())
-        with open(path, "rb") as f:
-            assert config["resolved_model"]["demo_library_sha256"] == hashlib.sha256(f.read()).hexdigest()
+        assert config["resolved_model"]["demo_library_sha256"] == digest
         assert config["resolved_model"]["hyperparameters"]["demo_fraction"] == 0.25
         assert config["resolved_model"]["hyperparameters"]["demo_library"] == path
+        # The recorded count is the model's, and it is the real one.
+        assert isinstance(model, DemoSAC)
+        assert model.demo_transitions == n_train > 0
+        recorded = config["resolved_model"]["hyperparameters"]["demo_transitions"]
+        assert recorded == model.demo_transitions
+        assert at_start.demo_transitions == model.demo_transitions
+        # The campaign notebook's leg plan for this run validates clean...
+        plan = {
+            "algo": "DemoSAC",
+            "model_kwargs": demo_kwargs,
+            "demo_library_sha256": demo_kwargs["demo_library_sha256"],
+        }
+        validate_run_config_against_plan(log_dir / "config.json", plan)
+        # ...and a plan pinning a different library does not.
+        with pytest.raises(RunConfigPlanMismatch, match="demo_library_sha256"):
+            validate_run_config_against_plan(
+                log_dir / "config.json",
+                {**plan, "demo_library_sha256": "0123abcd"},
+            )
+
+    def test_train_with_the_surface_off_records_zero_transitions(self, tmp_path):
+        """The eager pre-learn load the trainer does for DemoSAC is a
+        no-op with the surface off: nothing to load, 0 recorded."""
+        log_dir = tmp_path / "run"
+        cfg = TrainConfig(
+            env_fn=lambda: BallBalanceEnv(),
+            algo="DemoSAC",
+            total_timesteps=8,
+            log_dir=str(log_dir),
+            n_envs=1,
+            seed=0,
+            eval_freq=10_000,
+            checkpoint_freq=0,
+            video_freq=0,
+            record_video=False,
+            info_dict_eval=False,
+            n_eval_episodes=1,
+            model_kwargs={"buffer_size": 64, "learning_starts": 1_000},
+        )
+        model = train(cfg)
+        assert model.demo_buffer is None
+        config = json.loads((log_dir / "config.json").read_text())
+        assert config["resolved_model"]["hyperparameters"]["demo_transitions"] == 0
+        assert "demo_library_sha256" not in config["resolved_model"]
 
     def test_model_probe_records_the_consumed_digest(self, venv, tmp_path):
         path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)

@@ -1534,6 +1534,91 @@ def test_validate_run_config_against_plan_eval_env_and_drill_sha_pins(
         validate_run_config_against_plan(bare_path, {"demo_library_sha256": "abababab"})
 
 
+def test_validate_run_config_against_plan_pins_algo_and_model_kwargs(tmp_path):
+    """The campaign notebook's plan-level ALGO and per-leg model kwargs
+    (the LD1′ DemoSAC surface): ``algo`` matches the recorded
+    ``train_config.algo`` case-insensitively (the registry's rule),
+    ``model_kwargs`` is a subset match like ``env_kwargs``, and a plan
+    that pins neither leaves a run recorded without them unchecked."""
+    config = _plan_run_config()
+    config["train_config"]["algo"] = "DemoSAC"
+    config["train_config"]["model_kwargs"] = {
+        "use_sde": True,
+        "train_freq": [64, "step"],
+        "learning_starts": 25_000,
+        "demo_library": "/drive/k2_demo_library.pkl",
+        "demo_library_sha256": "abababab",
+        "demo_fraction": 0.1,
+        "demo_bc_coef": 0.0,
+        "demo_bc_filter": "none",
+        "demo_window": "point",
+    }
+    config["resolved_model"] = {"demo_library_sha256": "ab" * 32}
+    path = _write_plan_config(tmp_path, config)
+    leg_kwargs = {
+        "demo_library": "/drive/k2_demo_library.pkl",
+        "demo_library_sha256": "abababab",
+        "demo_fraction": 0.1,
+        "demo_bc_coef": 0.0,
+        "demo_bc_filter": "none",
+        "demo_window": "point",
+    }
+    for algo in ("DemoSAC", "DEMOSAC", "demosac"):
+        validate_run_config_against_plan(
+            path,
+            {
+                "algo": algo,
+                "model_kwargs": leg_kwargs,
+                "demo_library_sha256": "abababab",
+            },
+        )
+    # A planned tuple equals its recorded JSON-list form here too.
+    validate_run_config_against_plan(
+        path, {"model_kwargs": {"train_freq": (64, "step")}}
+    )
+
+    with pytest.raises(RunConfigPlanMismatch) as excinfo:
+        validate_run_config_against_plan(
+            path,
+            {
+                "algo": "SAC",
+                "model_kwargs": {
+                    **leg_kwargs,
+                    "demo_fraction": 0.25,
+                    "demo_windw": "point",
+                },
+            },
+        )
+    message = str(excinfo.value)
+    assert "3 place(s)" in message
+    assert "train_config.algo: expected 'SAC', config.json records 'DemoSAC'" in message
+    assert (
+        "train_config.model_kwargs kwarg 'demo_fraction': expected 0.25, "
+        "config.json records 0.1"
+    ) in message
+    assert (
+        "train_config.model_kwargs kwarg 'demo_windw': expected 'point', "
+        "config.json records no such kwarg"
+    ) in message
+
+    # A run that recorded no algo / no model kwargs cannot satisfy pins
+    # on them (the pre-DemoSAC fixture records neither).
+    bare_path = tmp_path / "bare.json"
+    bare_path.write_text(json.dumps(_plan_run_config()))
+    with pytest.raises(RunConfigPlanMismatch) as excinfo:
+        validate_run_config_against_plan(
+            bare_path, {"algo": "SAC", "model_kwargs": {"demo_fraction": 0.1}}
+        )
+    message = str(excinfo.value)
+    assert "train_config.algo: expected 'SAC', config.json records None" in message
+    assert (
+        "train_config.model_kwargs: expected ['demo_fraction'], "
+        "config.json records no model kwargs"
+    ) in message
+    # An empty model_kwargs pin demands nothing.
+    validate_run_config_against_plan(bare_path, {"model_kwargs": {}})
+
+
 def test_validate_run_config_against_plan_accepts_from_scratch(tmp_path):
     config = _plan_run_config()
     del config["initialization"]
@@ -1831,6 +1916,9 @@ def test_validate_run_config_against_plan_rejects_bad_plans(tmp_path):
         "must be a bool", path, {"warm_start": {"transfer_log_ent_coef": "no"}}
     )
     expect_bad_plan("env_kwargs must be a mapping", path, {"env_kwargs": [1]})
+    expect_bad_plan("model_kwargs must be a mapping", path, {"model_kwargs": [1]})
+    expect_bad_plan("algo must be a non-empty string", path, {"algo": ""})
+    expect_bad_plan("algo must be a non-empty string", path, {"algo": None})
     expect_bad_plan(
         "mapping of\\s+artifact name",
         path,

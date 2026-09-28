@@ -34,7 +34,11 @@ dependencies = [
 
 [project.optional-dependencies]
 train = [
-    "stable-baselines3>=2.5",
+    # >=2.7: DemoSAC reads the off-policy ``n_steps`` attribute and
+    # ``ReplayBufferSamples.discounts``, both new in SB3 2.7.0.
+    # DemoSAC.train() mirrors SB3 2.9.0's SAC.train (unchanged since
+    # 2.7.0); re-sync that copy on any SB3 bump.
+    "stable-baselines3>=2.7",
     "torch>=2.3",
     "tensorboard",
     "pandas",

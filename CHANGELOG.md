@@ -359,6 +359,49 @@ supersedes it (see the ground-rules bullet).
   (early-stop patience, degenerate signal, or stage budget). Artifact
   addition only; existing readers scan line-prefixes and are
   unaffected.
+- **LD1′ launch blockers fixed (DemoSAC; 2026-09-27 review).** Four
+  defects that blocked the demonstration-injection pilot
+  (`docs/design_paddle_tennis_demo_injection.md` §5). Default
+  (non-DemoSAC) training is bit-identical; no verdict in any
+  pre-registered doc changes.
+  - *`config.json` recorded `demo_transitions: 0` on every DemoSAC
+    run.* The demo buffer builds lazily at the first `learn()`, but
+    `train()` wrote `resolved_model` before that. `train()` now
+    builds a DemoSAC model's demo buffer just before recording the
+    model (a no-op with the surface off), so the recorded count is
+    the real train-split count and is on disk before the first
+    gradient step. Inference loaders still never need the library.
+  - *SB3 floor.* `stable-baselines3>=2.5` → `>=2.7`: DemoSAC needs
+    the off-policy `n_steps` attribute and
+    `ReplayBufferSamples.discounts`, both new in 2.7.0.
+    `DemoSAC.train()` mirrors SB3 2.9.0's `SAC.train`, which is
+    unchanged since 2.7.0. The suite passes against 2.7.0,
+    including the SD0 lockstep.
+  - *The campaign notebook could not launch DemoSAC* (run-config
+    TOMLs reject `algo` by design). `paddle_tennis_campaign.ipynb`
+    gains a plan-level `ALGO` knob (default `None` = the recipe's
+    SAC), passed to `build_train_config(algo=...)`, and per-leg
+    `LEG1_MODEL_KWARGS` / `LEG2_MODEL_KWARGS`, merged over the bundle
+    the leg already carries. The settings cell refuses a typo'd or
+    cross-algorithm key, a `seed`, and a warm-started leg's
+    `learning_starts` before the manifest is written. Each leg's
+    frozen plan now pins `algo`, the leg's model kwargs and the demo
+    library's digest. `validate_run_config_against_plan` gains
+    `algo` (case-insensitive, like the registry) and `model_kwargs`
+    (subset match) keys. The new knobs join the campaign fingerprint
+    only when set, so a default-plan campaign created before them
+    still resumes. `DemoSAC` gains a `demo_library_sha256`
+    constructor pin (full digest or a lowercase-hex prefix of at
+    least 8 chars), checked at construction, so a moved or
+    re-harvested library aborts the launch instead of voiding the
+    run afterwards. The whole `demo_*` surface is now suppliable
+    through `model_kwargs`.
+  - *`train()` leaked its SB3 logger.* The `progress.csv` and
+    TensorBoard handles are now closed in `train()`'s cleanup path
+    on every exit (they previously stayed open across notebook legs
+    and showed up as `ResourceWarning`s under pytest). A caller that
+    trains the returned model further must `set_logger` a fresh
+    logger first.
 - **Pipeline robustness closures (review 2026-08-28, after-LT1
   class).** Robustness only — no eval, reward, or selection semantics
   change for a correctly configured run; every shipped recipe passes

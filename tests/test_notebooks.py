@@ -349,6 +349,11 @@ def test_campaign_notebook_freezes_the_preregistered_plan() -> None:
     assert "LEG2_TRANSFER_LOG_ENT_COEF = True" in source
     assert "LEG2_EXPECTED_ARTIFACT_SHA256 = None" in source
     assert "ENV_KWARGS = {}" in source
+    # The algorithm knobs ship at the recipe's own algorithm with no
+    # extra model kwargs: the historical plan, byte-for-byte.
+    assert "ALGO = None" in source
+    assert "LEG1_MODEL_KWARGS = {}" in source
+    assert "LEG2_MODEL_KWARGS = {}" in source
     # The compatibility and scope decisions are stated where the knobs
     # live: pre-knob campaigns cannot resume under the grown
     # fingerprint, and the campaign template deliberately has no
@@ -466,9 +471,10 @@ def test_campaign_notebook_validates_config_and_plumbs_env_kwargs() -> None:
     )
     # The expected mapping derives from the frozen settings; QUICK_TEST
     # hands budget/cadence to the quick-test presets.
-    assert "def leg_expected_plan(*, seed, total_timesteps, warm_start):" in (
-        source
-    )
+    assert (
+        "def leg_expected_plan(*, seed, total_timesteps, warm_start, "
+        "model_kwargs=None):"
+    ) in source
     assert '"env_class": "PaddleTennisEnv",' in source
     assert '"env_kwargs": dict(ENV_KWARGS),' in source
     assert '"source_run_dir_suffix": "/".join(parts).lstrip("/"),' in source
@@ -520,3 +526,274 @@ def test_campaign_notebook_validates_config_and_plumbs_env_kwargs() -> None:
         '"env_kwargs": ENV_KWARGS,',
     ):
         assert fingerprint_entry in source
+
+
+def test_campaign_notebook_plumbs_algo_and_model_kwargs() -> None:
+    """The LD1′ launch path: run-config TOMLs reject ``algo`` by design,
+    so the plan-level ALGO reaches build_train_config from the notebook,
+    each leg's MODEL_KWARGS merge over the bundle the leg already
+    carries, and both land in the leg's frozen plan (the demo library's
+    sha pin included). The new knobs join the fingerprint only when set
+    so a default-plan campaign created before them still resumes."""
+    source = "\n".join(
+        _source(cell) for cell in _load_campaign_notebook()["cells"]
+    )
+    assert (
+        "RESOLVED_ALGO = RECIPES[RECIPE].default_algo if ALGO is None else ALGO"
+        in source
+    )
+    assert "algo=RESOLVED_ALGO," in source
+    assert '"algo": RESOLVED_ALGO,' in source
+    # Leg kwargs merge over the warm-start bundle (else the recipe's),
+    # never replace it wholesale.
+    assert "if model_kwargs:" in source
+    assert (
+        '**overrides.get(\n                "model_kwargs", '
+        'RECIPES[RECIPE].extra_cfg["model_kwargs"]\n            ),\n'
+        "            **model_kwargs,"
+    ) in source
+    assert 'expected["model_kwargs"] = dict(model_kwargs)' in source
+    assert 'expected["demo_library_sha256"] = model_kwargs[' in source
+    assert "model_kwargs=LEG1_MODEL_KWARGS," in source
+    assert "model_kwargs=LEG2_MODEL_KWARGS," in source
+    assert "model_kwargs=model_kwargs," in source
+    # Settings-time validation, before the manifest freezes the plan.
+    assert 'validate_model_kwargs(ALGO or "SAC", _kwargs)' in source
+    assert "may not set" in source
+    # Conditional fingerprint entries.
+    assert 'if ALGO is not None:\n    FINGERPRINT["algo"] = ALGO' in source
+    assert (
+        'if LEG1_MODEL_KWARGS:\n    FINGERPRINT["leg1_model_kwargs"] = '
+        "LEG1_MODEL_KWARGS"
+    ) in source
+    assert (
+        'if LEG2_MODEL_KWARGS:\n    FINGERPRINT["leg2_model_kwargs"] = '
+        "LEG2_MODEL_KWARGS"
+    ) in source
+
+
+# The fingerprint keys every campaign created before the algorithm knobs
+# recorded; a default plan must still produce exactly these.
+_PRE_ALGO_FINGERPRINT_KEYS = {
+    "campaign_id",
+    "seed",
+    "quick_test",
+    "gate_timesteps",
+    "main_timesteps_on_pass",
+    "main_timesteps_on_fallback",
+    "n_envs",
+    "eval_freq",
+    "checkpoint_freq",
+    "warm_start_learning_starts",
+    "leg1_warm_start_run_dir",
+    "leg1_transfer_log_ent_coef",
+    "leg1_expected_artifact_sha256",
+    "leg2_transfer_log_ent_coef",
+    "leg2_expected_artifact_sha256",
+    "env_kwargs",
+    "gate_episodes",
+    "gate_seed_start",
+    "gate_bars",
+    "fallback_warm_start_run_dir",
+}
+
+_DEMO_LEG_KWARGS = {
+    "demo_library": "/content/drive/MyDrive/k2_demo_library.pkl",
+    "demo_library_sha256": "abababab",
+    "demo_fraction": 0.1,
+    "demo_bc_coef": 0.0,
+    "demo_bc_filter": "none",
+    "demo_window": "point",
+}
+
+
+def _exec_campaign_plan(substitutions: tuple[tuple[str, str], ...] = ()):
+    """Execute the campaign's settings cell (with whole-line setting
+    substitutions), the fingerprint block of the root cell (no Drive
+    mount, no manifest), and the leg-helper cell; return the namespace."""
+    code_cells = [
+        _source(cell)
+        for cell in _load_campaign_notebook()["cells"]
+        if cell["cell_type"] == "code"
+    ]
+    settings = next(s for s in code_cells if 'CAMPAIGN_ID = "' in s)
+    root = next(s for s in code_cells if "FINGERPRINT = {" in s)
+    helpers = next(s for s in code_cells if "def make_leg_config(" in s)
+    for old, new in substitutions:
+        # Whole assignment lines only: the knobs' own comments quote
+        # their defaults too.
+        old_line, new_line = f"\n{old}\n", f"\n{new}\n"
+        assert settings.count(old_line) == 1, old
+        settings = settings.replace(old_line, new_line)
+    fingerprint = root[
+        root.index("FINGERPRINT = {") : root.index("manifest = load_campaign_manifest")
+    ]
+    namespace: dict[str, Any] = {}
+    exec(compile(settings, f"{CAMPAIGN_NOTEBOOK}:settings", "exec"), namespace)
+    exec(compile(fingerprint, f"{CAMPAIGN_NOTEBOOK}:fingerprint", "exec"), namespace)
+    exec(compile(helpers, f"{CAMPAIGN_NOTEBOOK}:helpers", "exec"), namespace)
+    return namespace
+
+
+def test_campaign_default_plan_is_unchanged_by_the_algo_knobs(tmp_path) -> None:
+    """With the knobs at their defaults the notebook builds exactly the
+    historical legs: the recipe's SAC, the recipe bundle (plus
+    learning_starts on a warm-started leg), no model-kwargs pins, and
+    the pre-knob fingerprint key set -- so a campaign already in flight
+    still resumes."""
+    from courtside_dynamics.recipes import RECIPES
+    from courtside_dynamics.training import WarmStartConfig
+
+    ns = _exec_campaign_plan()
+    assert set(ns["FINGERPRINT"]) == _PRE_ALGO_FINGERPRINT_KEYS
+    assert ns["RESOLVED_ALGO"] == "SAC"
+    recipe_bundle = RECIPES["PaddleTennis"].extra_cfg["model_kwargs"]
+
+    scratch = ns["make_leg_config"](
+        log_dir=tmp_path / "leg1",
+        seed=0,
+        total_timesteps=1_000_000,
+        model_kwargs=ns["LEG1_MODEL_KWARGS"],
+    )
+    assert scratch.algo == "SAC"
+    assert scratch.model_kwargs == recipe_bundle
+    warm = ns["make_leg_config"](
+        log_dir=tmp_path / "leg2",
+        seed=10_000,
+        total_timesteps=2_000_000,
+        warm_start=WarmStartConfig(source_run_dir=str(tmp_path)),
+        model_kwargs=ns["LEG2_MODEL_KWARGS"],
+    )
+    assert warm.algo == "SAC"
+    assert warm.model_kwargs == {**recipe_bundle, "learning_starts": 25_000}
+
+    plan = ns["leg_expected_plan"](
+        seed=0,
+        total_timesteps=1_000_000,
+        warm_start=None,
+        model_kwargs=ns["LEG1_MODEL_KWARGS"],
+    )
+    assert plan["algo"] == "SAC"
+    assert "model_kwargs" not in plan
+    assert "demo_library_sha256" not in plan
+
+
+def test_campaign_demosac_plan_builds_and_validates(tmp_path) -> None:
+    """ALGO = "DemoSAC" plus the demo_* leg kwargs: the leg config is
+    built with the DemoSAC algorithm and the kwargs merged over the
+    bundle; the leg plan pins algo, the kwargs and the library digest,
+    and a config.json recorded from that config passes it; the new
+    settings join the fingerprint."""
+    from courtside_dynamics.notebook_utils import (
+        RunConfigPlanMismatch,
+        validate_run_config_against_plan,
+    )
+    from courtside_dynamics.recipes import RECIPES
+    from courtside_dynamics.training import WarmStartConfig
+    from courtside_dynamics.training.artifacts import write_run_config
+
+    ns = _exec_campaign_plan(
+        (
+            ("ALGO = None", 'ALGO = "DemoSAC"'),
+            ("LEG1_MODEL_KWARGS = {}", f"LEG1_MODEL_KWARGS = {_DEMO_LEG_KWARGS!r}"),
+        )
+    )
+    assert ns["RESOLVED_ALGO"] == "DemoSAC"
+    assert ns["FINGERPRINT"]["algo"] == "DemoSAC"
+    assert ns["FINGERPRINT"]["leg1_model_kwargs"] == _DEMO_LEG_KWARGS
+    assert "leg2_model_kwargs" not in ns["FINGERPRINT"]
+    recipe_bundle = RECIPES["PaddleTennis"].extra_cfg["model_kwargs"]
+
+    cfg = ns["make_leg_config"](
+        log_dir=tmp_path / "leg1",
+        seed=0,
+        total_timesteps=1_000_000,
+        model_kwargs=ns["LEG1_MODEL_KWARGS"],
+    )
+    assert cfg.algo == "DemoSAC"
+    assert cfg.name_prefix.endswith("_demosac")
+    assert cfg.model_kwargs == {**recipe_bundle, **_DEMO_LEG_KWARGS}
+    # A warm-started leg keeps learning_starts under the demo kwargs.
+    warm = ns["make_leg_config"](
+        log_dir=tmp_path / "leg1_warm",
+        seed=0,
+        total_timesteps=1_000_000,
+        warm_start=WarmStartConfig(source_run_dir=str(tmp_path)),
+        model_kwargs=ns["LEG1_MODEL_KWARGS"],
+    )
+    assert warm.model_kwargs == {
+        **recipe_bundle,
+        "learning_starts": 25_000,
+        **_DEMO_LEG_KWARGS,
+    }
+
+    plan = ns["leg_expected_plan"](
+        seed=0,
+        total_timesteps=1_000_000,
+        warm_start=None,
+        model_kwargs=ns["LEG1_MODEL_KWARGS"],
+    )
+    assert plan["algo"] == "DemoSAC"
+    assert plan["model_kwargs"] == _DEMO_LEG_KWARGS
+    assert plan["demo_library_sha256"] == "abababab"
+
+    # The run's own train_config/env blocks as train() records them,
+    # plus the digest DemoSAC banks into resolved_model.
+    log_dir = tmp_path / "leg1"
+    log_dir.mkdir()
+    config_path = write_run_config(cfg, str(log_dir))
+    with open(config_path) as handle:
+        recorded = json.load(handle)
+    recorded["resolved_model"] = {"demo_library_sha256": "ab" * 32}
+    with open(config_path, "w") as handle:
+        json.dump(recorded, handle)
+    validate_run_config_against_plan(config_path, plan)
+    # A run that consumed a different library fails its leg's plan.
+    recorded["resolved_model"] = {"demo_library_sha256": "cd" * 32}
+    with open(config_path, "w") as handle:
+        json.dump(recorded, handle)
+    try:
+        validate_run_config_against_plan(config_path, plan)
+    except RunConfigPlanMismatch as err:
+        assert "resolved_model.demo_library_sha256" in str(err)
+    else:
+        raise AssertionError("a mismatched demo library digest passed the plan")
+
+
+def test_campaign_settings_refuse_misconfigured_algo_knobs() -> None:
+    """Each refusal fires in the settings cell -- before Drive is
+    mounted and the manifest freezes a plan that could never launch."""
+    import pytest
+
+    demo = f"LEG1_MODEL_KWARGS = {_DEMO_LEG_KWARGS!r}"
+    cases = (
+        # demo_* keys need ALGO = "DemoSAC".
+        ((("LEG1_MODEL_KWARGS = {}", demo),), "not accepted by SAC"),
+        ((("ALGO = None", 'ALGO = "PPO"'),), "ALGO must be None"),
+        (
+            (("LEG1_MODEL_KWARGS = {}", 'LEG1_MODEL_KWARGS = {"seed": 1}'),),
+            r"may not set \['seed'\]",
+        ),
+        # Leg 2 always warm-starts: WARM_START_LEARNING_STARTS owns it.
+        (
+            (
+                (
+                    "LEG2_MODEL_KWARGS = {}",
+                    'LEG2_MODEL_KWARGS = {"learning_starts": 1}',
+                ),
+            ),
+            r"may not set \['learning_starts'\]",
+        ),
+        (
+            (("LEG2_MODEL_KWARGS = {}", "LEG2_MODEL_KWARGS = None"),),
+            "must be a dict",
+        ),
+    )
+    for substitutions, match in cases:
+        with pytest.raises(ValueError, match=match):
+            _exec_campaign_plan(substitutions)
+    # A from-scratch leg 1 may tune learning_starts (the stack default
+    # is not a frozen plan value there).
+    _exec_campaign_plan(
+        (("LEG1_MODEL_KWARGS = {}", 'LEG1_MODEL_KWARGS = {"learning_starts": 1}'),)
+    )
