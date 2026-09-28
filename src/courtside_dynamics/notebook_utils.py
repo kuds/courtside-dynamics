@@ -334,9 +334,9 @@ _ARTIFACT_HINTS: dict[str, str] = {
     RUN_LAYOUT["best_vec_normalize"]: "needs VecNormalize enabled plus at least one new-best eval",
     RUN_LAYOUT["checkpoints_dir"]: "requires checkpoint_freq > 0 and a run long enough to reach the first checkpoint",
     RUN_LAYOUT["videos_dir"]: "requires record_video=True, video_freq > 0, and moviepy installed",
-    RUN_LAYOUT["final_model"]: "written when learn() finishes or is interrupted; absent means the run crashed",
+    RUN_LAYOUT["final_model"]: "written when learn() finishes, is interrupted, or raises (salvaged before the error re-raises); absent means the process died hard",
     RUN_LAYOUT["vec_normalize"]: "only written when VecNormalize is enabled (normalize_obs / normalize_reward)",
-    RUN_LAYOUT["stage_summary"]: "written by train()'s epilogue; absent means the run crashed before it",
+    RUN_LAYOUT["stage_summary"]: "written by train()'s epilogue or crash salvage (Status: completed/interrupted/crashed); absent means the process died hard",
     RUN_LAYOUT["learning_curve"]: "saved by the plot_learning_curve cell -- did it run with save_path set?",
     RUN_LAYOUT["eval_headline"]: "saved by the plot_eval_info cell -- did it run with save_path set?",
     RUN_LAYOUT["eval_terminations"]: "saved by the plot_eval_info cell -- did it run with save_path set?",
@@ -701,28 +701,67 @@ def _load_best_model(log_dir: str, algo: str):
     return cls.load(candidate)
 
 
+def _run_recorded_obs_normalization(log_dir: str) -> bool:
+    """Whether the run's ``config.json`` records ``normalize_obs=True``.
+
+    ``False`` when the file is absent or unreadable (pre-provenance
+    runs): then nothing on disk says a normalizer was expected.
+    """
+    path = locate_artifact(log_dir, "config")
+    if path is None:
+        return False
+    try:
+        with open(path) as handle:
+            config = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return False
+    train_config = config.get("train_config") if isinstance(config, dict) else None
+    return (
+        isinstance(train_config, dict)
+        and train_config.get("normalize_obs") is True
+    )
+
+
 def _load_obs_normalizer(log_dir: str, env_fn: Callable):
     """Return a callable ``obs -> normalized_obs`` paired with ``best_model.zip``.
 
     Prefers ``best_vec_normalize.pkl`` (snapshot taken at the moment the
     best model was saved) and falls back to ``vec_normalize.pkl`` (saved
     at end of training, may not match best_model's training-time stats)
-    for older runs. Returns identity if neither file exists. Builds a
-    throwaway ``DummyVecEnv`` only because ``VecNormalize.load`` requires
-    a venv; we never step it.
+    for older runs. Returns identity if neither file exists and the
+    run's ``config.json`` does not record ``normalize_obs=True``. A
+    normalizer that was expected -- a snapshot on disk that fails to
+    load (shape skew, truncated pickle, SB3 version skew), or none on
+    disk for a run that recorded observation normalization -- raises
+    instead: an identity fallback would feed raw observations to a
+    policy trained on normalized ones and record a misleading video of
+    it (cardinal rule 1's own example). Builds a throwaway
+    ``DummyVecEnv`` only because ``VecNormalize.load`` requires a venv;
+    we never step it.
     """
     path = locate_artifact(log_dir, "best_vec_normalize") or locate_artifact(
         log_dir, "vec_normalize"
     )
     if path is None:
+        if _run_recorded_obs_normalization(log_dir):
+            raise FileNotFoundError(
+                f"{log_dir}: config.json records normalize_obs=True but "
+                f"neither best_vec_normalize.pkl nor vec_normalize.pkl "
+                f"exists, so best_model.zip cannot be replayed on the "
+                f"observations it was trained on"
+            )
         return lambda obs: obs
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
     dummy = DummyVecEnv([env_fn])
     try:
         vec_norm = VecNormalize.load(path, dummy)
-    except Exception:
-        return lambda obs: obs
+    except Exception as error:
+        raise RuntimeError(
+            f"could not load the observation normalizer {path} "
+            f"({error!r}); refusing to replay best_model.zip on "
+            f"unnormalized observations"
+        ) from error
     finally:
         # ``normalize_obs`` only reads ``obs_rms``; the venv exists solely
         # to satisfy VecNormalize.load's signature and would otherwise leak

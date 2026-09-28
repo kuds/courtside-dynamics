@@ -482,6 +482,16 @@ def test_gymnasium_make_ids():
             env.close()
 
 
+def test_smoke_wheel_floor_matches_the_registry():
+    """``tools/smoke_wheel.py`` fails the wheel build when fewer env ids
+    register than its floor. The floor sat at 4 after the fifth env
+    shipped, so losing any one registration passed silently; pin it to
+    the live count so the next env must raise it too."""
+    from tools.smoke_wheel import MIN_EXPECTED_ENV_COUNT, _registered_env_ids
+
+    assert len(_registered_env_ids()) == MIN_EXPECTED_ENV_COUNT
+
+
 @pytest.mark.parametrize("env_cls", ENV_CLASSES)
 def test_observation_names_match_obs_shape(env_cls):
     """Each env declares labels in lockstep with its observation vector."""

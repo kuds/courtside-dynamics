@@ -38,7 +38,7 @@ import json
 import os
 import shutil
 from collections import defaultdict, deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -147,7 +147,10 @@ class InfoDictEvalCallback(BaseCallback):
         "episode_reward_mean")``) compared lexicographically to decide
         whether an evaluation is a new best. Empty (the default)
         disables selection entirely. A metric absent from an
-        evaluation compares as ``-inf``.
+        evaluation compares as ``-inf`` and is reported on every such
+        evaluation; ``train()`` rejects, before training, any key the
+        eval env could never produce (see
+        :meth:`unresolvable_metrics`).
     best_metric_min_delta:
         Per-key noise threshold for the lexicographic comparison: a key
         only counts as better (or worse) than the stored best when it
@@ -785,6 +788,96 @@ class InfoDictEvalCallback(BaseCallback):
             return key.startswith("rew_")
         return key in self.episode_sum_keys
 
+    def producible_metric_names(
+        self, info_scalar_keys: Iterable[str]
+    ) -> frozenset[str]:
+        """Metric names an evaluation can emit, given the env's info keys.
+
+        Mirrors :meth:`_collect_metrics`'s naming for an eval env whose
+        ``info`` carries the scalar keys ``info_scalar_keys`` (e.g. from
+        one probe reset and step), plus the context metrics already
+        set. Phase fractions for integer phases without a declared
+        label cannot be enumerated; :meth:`unresolvable_metrics`
+        accepts those by pattern.
+        """
+        available = set(info_scalar_keys)
+        if self.info_keys is None:
+            step_keys = available
+        else:
+            step_keys = {key for key in self.info_keys if key in available}
+        names = {"episode_length", "episode_reward_mean"}
+        names.update(self._context_metrics)
+        for key in step_keys:
+            names.update(
+                (f"{key}_mean", f"{key}_max", f"{key}_final", f"{key}_ep_mean")
+            )
+            if self._is_episode_sum_key(key):
+                names.add(f"{key}_ep_sum_mean")
+        terminal_requested = {
+            *self.terminal_info_keys,
+            *self.episode_distribution_keys,
+            *self.episode_survival_thresholds,
+        }
+        if self.success_key is not None:
+            terminal_requested.add(self.success_key)
+            if self.success_key in available:
+                names.add("success_rate")
+        names.update(
+            f"{key}_ep_mean" for key in terminal_requested & available
+        )
+        for key in self.episode_distribution_keys:
+            if key in available:
+                names.update(
+                    f"{key}_ep_{suffix}"
+                    for suffix in ("min", "p50", "p90", "max")
+                )
+        for key, thresholds in self.episode_survival_thresholds.items():
+            if key in available:
+                names.update(
+                    f"{key}_ep_ge_{threshold}_rate" for threshold in thresholds
+                )
+        if self.phase_key is not None and self.phase_key in available:
+            names.update(
+                f"phase_frac_{label}" for label in self.phase_labels.values()
+            )
+        return frozenset(names)
+
+    def unresolvable_metrics(
+        self,
+        names: Iterable[str],
+        info_scalar_keys: Iterable[str],
+        *,
+        context_names: Iterable[str] = (),
+    ) -> list[str]:
+        """The ``names`` no evaluation of this callback could ever emit.
+
+        ``context_names`` are context metrics a caller will set later
+        (a performance gate stamps its stage index at training start).
+        A selection key in the result would score ``-inf`` at every
+        evaluation -- silently handing selection to the remaining keys
+        -- and a guard key in it would keep the degenerate-signal stop
+        disarmed for the whole run.
+        """
+        available = set(info_scalar_keys)
+        producible = self.producible_metric_names(available) | set(
+            context_names
+        )
+        phase_prefix = (
+            "phase_frac_"
+            if self.phase_key is not None and self.phase_key in available
+            else None
+        )
+        return [
+            name
+            for name in dict.fromkeys(names)
+            if name not in producible
+            and not (
+                phase_prefix is not None
+                and name.startswith(phase_prefix)
+                and name[len(phase_prefix):].lstrip("-").isdigit()
+            )
+        ]
+
     def set_context_metric(self, name: str, value: float) -> None:
         """Attach a caller-owned scalar to every subsequent evaluation.
 
@@ -835,6 +928,42 @@ class InfoDictEvalCallback(BaseCallback):
         self._evals_since_best = 0
         self._recent_signal.clear()
 
+    def _warn_missing_selection_metrics(
+        self, metrics: Mapping[str, float]
+    ) -> None:
+        """Say so, every evaluation, when a selection or guard key is absent.
+
+        Scoring is unchanged -- a missing selection key still compares
+        as ``-inf`` and a missing guard key still blocks the guard --
+        but neither may happen silently: a typo'd key otherwise hands
+        selection to the remaining keys (ultimately reward, the
+        failure run 20260712_190054 exists to prevent). ``train()``
+        rejects such keys before training; this covers callers that
+        wire the callback by hand.
+        """
+        missing_selection = [
+            key for key in self.best_metric_keys if key not in metrics
+        ]
+        if missing_selection:
+            print(
+                f"[InfoDictEvalCallback] selection key(s) "
+                f"{missing_selection} absent from the evaluation at "
+                f"{self.num_timesteps} steps: they score as -inf, so "
+                f"best-model selection falls through to the remaining "
+                f"keys"
+            )
+        if self.degenerate_stop_evals > 0:
+            missing_guard = [
+                key for key in self.degenerate_guard_keys if key not in metrics
+            ]
+            if missing_guard:
+                print(
+                    f"[InfoDictEvalCallback] degenerate guard key(s) "
+                    f"{missing_guard} absent from the evaluation at "
+                    f"{self.num_timesteps} steps: the degenerate-signal "
+                    f"stop cannot fire while they are missing"
+                )
+
     def _score_of(self, metrics: Mapping[str, float]) -> tuple[float, ...]:
         return tuple(
             float(metrics.get(key, float("-inf")))
@@ -876,6 +1005,7 @@ class InfoDictEvalCallback(BaseCallback):
         if not self.best_metric_keys:
             return True
         self._eval_count += 1
+        self._warn_missing_selection_metrics(metrics)
         score = self._score_of(metrics)
         improved = self._improves(score, self._best_score)
         confirmation: Mapping[str, float] | None = None
@@ -1093,17 +1223,31 @@ class InfoDictEvalCallback(BaseCallback):
             return json.load(stream)
 
     def _append_csv(self, metrics: Mapping[str, float], timestep: int) -> None:
-        """Append one (timestep, metric, value) row per metric in long format."""
+        """Append one (timestep, metric, value) row per metric in long format.
+
+        Diagnostic-only, like the npz writer: an I/O failure (a Google
+        Drive FUSE hiccup, a full disk) logs and continues rather than
+        propagating out of ``model.learn()`` and losing the run's
+        closing artifacts (lesson 7). TensorBoard and ``last_metrics``
+        still carry this evaluation's values.
+        """
         path = self.csv_path
         if path is None:
             return
-        parent = os.path.dirname(path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        new_file = not os.path.exists(path)
-        with open(path, "a", newline="") as f:
-            writer = csv.writer(f)
-            if new_file:
-                writer.writerow(["timestep", "metric", "value"])
-            for name in sorted(metrics):
-                writer.writerow([timestep, name, float(metrics[name])])
+        try:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            new_file = not os.path.exists(path)
+            with open(path, "a", newline="") as f:
+                writer = csv.writer(f)
+                if new_file:
+                    writer.writerow(["timestep", "metric", "value"])
+                for name in sorted(metrics):
+                    writer.writerow([timestep, name, float(metrics[name])])
+        except OSError as error:
+            print(
+                f"[InfoDictEvalCallback] could not append the evaluation "
+                f"at {timestep} steps to {path}: {error!r}; continuing "
+                f"(TensorBoard still carries this evaluation)"
+            )

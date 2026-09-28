@@ -1938,3 +1938,65 @@ def test_validate_run_config_against_plan_rejects_bad_plans(tmp_path):
     )
     (tmp_path / "list.json").write_text("[]")
     expect_bad_plan("JSON object", tmp_path / "list.json", {"seed": 0})
+
+
+# --- _load_obs_normalizer: no silent identity fallback (review §2.6) ------
+
+
+def _ball_balance_env():
+    from courtside_dynamics.envs import BallBalanceEnv
+
+    return BallBalanceEnv(episode_len=8)
+
+
+def test_obs_normalizer_is_identity_only_when_none_was_expected(tmp_path):
+    from courtside_dynamics.notebook_utils import _load_obs_normalizer
+
+    obs = np.arange(3, dtype=np.float32)
+    # No snapshot and no config.json (a pre-provenance run): identity.
+    assert _load_obs_normalizer(str(tmp_path), _ball_balance_env)(obs) is obs
+    # A run that recorded normalize_obs=False: identity too.
+    (tmp_path / "config.json").write_text(
+        json.dumps({"train_config": {"normalize_obs": False}})
+    )
+    assert _load_obs_normalizer(str(tmp_path), _ball_balance_env)(obs) is obs
+
+
+def test_obs_normalizer_refuses_a_snapshot_that_fails_to_load(tmp_path):
+    """A snapshot that exists but cannot load (truncated pickle, shape or
+    SB3 version skew) used to become the identity with zero output --
+    feeding raw observations to a policy trained on normalized ones."""
+    from courtside_dynamics.notebook_utils import _load_obs_normalizer
+
+    snapshot = tmp_path / "model" / "best_vec_normalize.pkl"
+    snapshot.parent.mkdir()
+    snapshot.write_bytes(b"truncated pickle")
+    with pytest.raises(RuntimeError, match="could not load the observation"):
+        _load_obs_normalizer(str(tmp_path), _ball_balance_env)
+
+
+def test_obs_normalizer_refuses_a_missing_snapshot_the_run_recorded(tmp_path):
+    from courtside_dynamics.notebook_utils import _load_obs_normalizer
+
+    (tmp_path / "config.json").write_text(
+        json.dumps({"train_config": {"normalize_obs": True}})
+    )
+    with pytest.raises(FileNotFoundError, match="normalize_obs=True"):
+        _load_obs_normalizer(str(tmp_path), _ball_balance_env)
+
+
+def test_obs_normalizer_loads_a_valid_snapshot(tmp_path):
+    from stable_baselines3.common.env_util import make_vec_env
+    from stable_baselines3.common.vec_env import VecNormalize
+
+    from courtside_dynamics.notebook_utils import _load_obs_normalizer
+
+    venv = VecNormalize(make_vec_env(_ball_balance_env, n_envs=1))
+    venv.obs_rms.mean[:] = 5.0
+    snapshot = tmp_path / "model" / "best_vec_normalize.pkl"
+    snapshot.parent.mkdir()
+    venv.save(str(snapshot))
+    venv.close()
+    normalize = _load_obs_normalizer(str(tmp_path), _ball_balance_env)
+    obs = np.full(venv.observation_space.shape, 5.0, dtype=np.float32)
+    assert np.allclose(normalize(obs), 0.0, atol=1e-3)

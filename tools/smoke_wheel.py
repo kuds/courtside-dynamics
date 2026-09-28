@@ -42,7 +42,7 @@ import tempfile
 # _registered_env_ids) so a newly registered environment -- and the
 # packaged MJCF assets its constructor loads -- is smoke-tested the day
 # it ships, instead of silently skipped by a stale hand-copied tuple.
-MIN_EXPECTED_ENV_COUNT = 4
+MIN_EXPECTED_ENV_COUNT = 5
 
 
 def _registered_env_ids() -> tuple[str, ...]:

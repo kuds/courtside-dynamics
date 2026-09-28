@@ -17,7 +17,10 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
+from typing import Any
 
+import gymnasium as gym
 import numpy as np
 import pytest
 import torch
@@ -1225,10 +1228,40 @@ def test_run_summary_labels_each_evaluation_instrument(tmp_path):
     assert "1.500 +/- 0.707 (last 2 episodes)  [train monitor logs]" in text
 
 
+class _StepsAlive(gym.Wrapper):
+    """BallBalance plus a ``steps_alive`` info counter.
+
+    BallBalance's own ``info`` is empty, so a headline key on it names
+    a metric no evaluation emits -- which ``train()`` now rejects
+    (review §2.1). The counter gives the headline-selection tests a
+    real task metric to key on.
+    """
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        self._steps_alive = 0
+        return obs, {**info, "steps_alive": 0}
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        self._steps_alive += 1
+        return (
+            obs,
+            reward,
+            terminated,
+            truncated,
+            {**info, "steps_alive": self._steps_alive},
+        )
+
+
+def _steps_alive_env(episode_len: int = 12) -> gym.Env:
+    return _StepsAlive(BallBalanceEnv(episode_len=episode_len))
+
+
 def _merged_eval_cfg(tmp_path, **overrides):
     """A tiny headline-selection run with the final-config eval stream on."""
     cfg_kwargs = dict(
-        env_fn=lambda: BallBalanceEnv(episode_len=12),
+        env_fn=_steps_alive_env,
         algo="SAC",
         total_timesteps=600,
         log_dir=str(tmp_path),
@@ -1291,7 +1324,7 @@ def test_completed_final_info_eval_run_closes_every_constructed_env(
     closed: set[int] = set()
 
     def tracked_env_fn():
-        env = BallBalanceEnv(episode_len=12)
+        env = _steps_alive_env()
         identity = id(env)
         constructed.add(identity)
         original_close = env.close
@@ -1551,3 +1584,318 @@ def test_config_json_gate_block_records_every_gate_key(tmp_path):
     # defaults, so the block reads as the gate actually ran.
     assert gate_block["stage_eval_budget"] is None
     assert gate_block["stage_eval_budget_action"] == "stop"
+
+
+# ---------------------------------------------------------------------------
+# Robustness closures from docs/rl_pipeline_review_20260828.md (after-LT1)
+# ---------------------------------------------------------------------------
+
+
+def _unbuildable_env():
+    raise AssertionError("train() built an env before validating its config")
+
+
+class _RaiseAt(BaseCallback):
+    """Raise ``exc`` out of ``model.learn()`` once ``at`` steps are done."""
+
+    def __init__(self, exc: BaseException | type[BaseException], at: int = 64):
+        super().__init__()
+        self.exc = exc
+        self.at = at
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps >= self.at:
+            raise self.exc
+        return True
+
+
+def _salvage_cfg(tmp_path, **overrides) -> TrainConfig:
+    """A short VecNormalize'd SAC run with no periodic evaluation."""
+    cfg_kwargs = dict(
+        env_fn=lambda: BallBalanceEnv(episode_len=12),
+        algo="SAC",
+        total_timesteps=2_000,
+        log_dir=str(tmp_path),
+        n_envs=1,
+        seed=0,
+        eval_freq=100_000,
+        checkpoint_freq=0,
+        video_freq=0,
+        record_video=False,
+        info_dict_eval=False,
+        normalize_obs=True,
+        n_eval_episodes=1,
+        model_kwargs={"learning_starts": 16, "buffer_size": 500},
+    )
+    cfg_kwargs.update(overrides)
+    return TrainConfig(**cfg_kwargs)
+
+
+def _summary_field(tmp_path, label: str) -> str:
+    text = (tmp_path / "stage_summary.txt").read_text()
+    line = next(line for line in text.splitlines() if line.startswith(label))
+    return line.split(":", 1)[1].strip()
+
+
+def test_keyboard_interrupt_salvages_the_run(tmp_path):
+    """Review §2.13: the salvage protecting ~20-hour Colab runs had no
+    test. An interrupt mid-learn must still leave the final model, its
+    normalizer, and a summary marked ``interrupted``, and return."""
+    from stable_baselines3 import SAC
+
+    from courtside_dynamics.training.artifacts import artifact_path
+
+    cfg = _salvage_cfg(tmp_path, extra_callbacks=(_RaiseAt(KeyboardInterrupt),))
+    try:
+        model = train(cfg)
+    except KeyboardInterrupt:  # pragma: no cover - the regression itself
+        pytest.fail("KeyboardInterrupt escaped train()'s salvage path")
+
+    assert 64 <= model.num_timesteps < cfg.total_timesteps
+    final_model = artifact_path(str(tmp_path), "final_model")
+    assert SAC.load(final_model).num_timesteps == model.num_timesteps
+    venv = make_vec_env(lambda: BallBalanceEnv(episode_len=12), n_envs=1)
+    try:
+        VecNormalize.load(artifact_path(str(tmp_path), "vec_normalize"), venv)
+    finally:
+        venv.close()
+    assert _summary_field(tmp_path, "Status") == "interrupted"
+    # The closing evaluation still runs on an interrupt.
+    assert "closing eval" in _summary_field(tmp_path, "Final eval")
+
+
+def test_non_keyboard_interrupt_crash_salvages_then_reraises(tmp_path, capsys):
+    """Review §2.2/§3: any other exception out of ``learn()`` used to skip
+    the whole epilogue. It must now save the model and normalizer, mark
+    the summary ``crashed`` with the error, and still re-raise."""
+    from stable_baselines3 import SAC
+
+    from courtside_dynamics.training.artifacts import artifact_path
+
+    cfg = _salvage_cfg(
+        tmp_path,
+        extra_callbacks=(_RaiseAt(RuntimeError("synthetic crash")),),
+    )
+    with pytest.raises(RuntimeError, match="synthetic crash"):
+        train(cfg)
+
+    assert "Training crashed" in capsys.readouterr().out
+    loaded = SAC.load(artifact_path(str(tmp_path), "final_model"))
+    assert 64 <= loaded.num_timesteps < cfg.total_timesteps
+    venv = make_vec_env(lambda: BallBalanceEnv(episode_len=12), n_envs=1)
+    try:
+        VecNormalize.load(artifact_path(str(tmp_path), "vec_normalize"), venv)
+    finally:
+        venv.close()
+    assert _summary_field(tmp_path, "Status") == "crashed"
+    assert "synthetic crash" in _summary_field(tmp_path, "Stop reason")
+    # No closing evaluation: the env may be what broke.
+    assert _summary_field(tmp_path, "Final eval") == "not run (run crashed)"
+
+
+def test_crash_salvage_failure_never_masks_the_original_error(
+    tmp_path, monkeypatch, capsys
+):
+    """A salvage step that itself fails (the Drive mount that caused the
+    crash, say) is printed and skipped; the caller still sees the
+    original exception, and the earlier salvage steps still land."""
+    import importlib
+
+    from courtside_dynamics.training.artifacts import artifact_path
+
+    train_module = importlib.import_module("courtside_dynamics.training.train")
+
+    def _broken_summary(*args, **kwargs):
+        raise OSError("drive went away")
+
+    monkeypatch.setattr(train_module, "write_run_summary", _broken_summary)
+    cfg = _salvage_cfg(
+        tmp_path,
+        extra_callbacks=(_RaiseAt(RuntimeError("synthetic crash")),),
+    )
+    with pytest.raises(RuntimeError, match="synthetic crash"):
+        train(cfg)
+    assert "could not salvage stage_summary" in capsys.readouterr().out
+    assert (tmp_path / "model" / "final_model.zip").is_file()
+    assert os.path.isfile(artifact_path(str(tmp_path), "vec_normalize"))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            {"headline_key": "steps_alvie"},
+            r"headline_key 'steps_alvie': it is not a scalar info key .* "
+            r"\(did you mean 'steps_alive'\?\)",
+        ),
+        (
+            {"best_metric_keys": ("steps_alive_ep_maen",)},
+            r"best_metric_keys 'steps_alive_ep_maen': no evaluation emits .*"
+            r"\(did you mean 'steps_alive_ep_mean'\?\)",
+        ),
+        (
+            {"success_key": "steps_alvie"},
+            r"success_key 'steps_alvie': it is not a scalar info key",
+        ),
+        (
+            {
+                "early_stop_degenerate_evals": 2,
+                "degenerate_guard_keys": ("paddle_hit_count_ep_mean",),
+            },
+            r"degenerate_guard_keys 'paddle_hit_count_ep_mean'",
+        ),
+        (
+            {"info_eval_keys": ("unrelated",)},
+            r"headline_key 'steps_alive': the eval env emits it, but "
+            r"info_eval_keys filters it out",
+        ),
+    ],
+)
+def test_train_rejects_metric_keys_no_evaluation_produces(
+    tmp_path, overrides, message
+):
+    """Review §2.1: a miskeyed selection metric scored -inf at every
+    evaluation, so a typo trained normally while selection silently fell
+    through to reward. train() must refuse it before any training step."""
+    cfg = _merged_eval_cfg(tmp_path, final_info_eval=False, **overrides)
+    with pytest.raises(ValueError, match=message):
+        train(cfg)
+    assert not (tmp_path / "model" / "final_model.zip").exists()
+    assert not (tmp_path / "metrics" / "eval_info.csv").exists()
+
+
+def test_train_accepts_the_gate_stage_index_as_a_selection_key(tmp_path):
+    """Context metrics a performance gate stamps at training start are
+    producible even though no env info key carries them."""
+    cfg = _merged_eval_cfg(
+        tmp_path,
+        final_info_eval=False,
+        total_timesteps=200,
+        best_metric_keys=("steps_alive_ep_mean", "curriculum_stage_index"),
+        performance_gate={
+            "metric_key": "steps_alive_ep_mean",
+            "threshold": 1e9,
+            "sustain_evals": 1,
+            "stages": ({"episode_len": 12},),
+        },
+    )
+    train(cfg)
+    meta = json.loads((tmp_path / "model" / "best_model_meta.json").read_text())
+    assert "curriculum_stage_index" in meta["selection_values"]
+
+
+def test_train_validates_model_kwargs_before_any_setup(tmp_path):
+    """Review §3: only the recipe path validated model_kwargs, so a direct
+    TrainConfig with a cross-algorithm key crashed inside SB3 after the
+    env fleet was built and artifacts written."""
+    log_dir = tmp_path / "run"
+    cfg = TrainConfig(
+        env_fn=_unbuildable_env,
+        algo="PPO",
+        log_dir=str(log_dir),
+        model_kwargs={"buffer_size": 1_000},
+    )
+    with pytest.raises(ValueError, match="buffer_size"):
+        train(cfg)
+    assert not log_dir.exists()
+
+
+def test_require_device_cuda_fails_fast_without_cuda(tmp_path, monkeypatch):
+    """Review §2.3: SB3's device='auto' silently resolved to CPU on two LT1
+    launches. With require_device='cuda' the run must stop before any env
+    is built or the run directory created."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    log_dir = tmp_path / "run"
+    cfg = TrainConfig(
+        env_fn=_unbuildable_env, log_dir=str(log_dir), require_device="cuda"
+    )
+    with pytest.raises(RuntimeError, match=r"torch\.cuda\.is_available\(\)"):
+        train(cfg)
+    assert not log_dir.exists()
+
+
+def test_require_device_rejects_bad_values_and_contradictions(
+    tmp_path, monkeypatch
+):
+    from courtside_dynamics.training.train import _check_required_device
+
+    with pytest.raises(ValueError, match="require_device must be None or"):
+        _check_required_device(
+            TrainConfig(env_fn=_unbuildable_env, require_device="gpu")
+        )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    with pytest.raises(ValueError, match="contradicts require_device"):
+        _check_required_device(
+            TrainConfig(
+                env_fn=_unbuildable_env,
+                require_device="cuda",
+                model_kwargs={"device": "cpu"},
+            )
+        )
+    for device in ("auto", "cuda", "cuda:0"):
+        _check_required_device(
+            TrainConfig(
+                env_fn=_unbuildable_env,
+                require_device="cuda",
+                model_kwargs={"device": device},
+            )
+        )
+    # Opt-in: the default never touches torch.cuda.
+    monkeypatch.setattr(torch.cuda, "is_available", _unbuildable_env)
+    _check_required_device(TrainConfig(env_fn=_unbuildable_env))
+
+
+def test_check_model_device_asserts_the_built_model_placement():
+    from types import SimpleNamespace
+
+    from courtside_dynamics.training.train import _check_model_device
+
+    on_cpu: Any = SimpleNamespace(device=torch.device("cpu"))
+    on_cuda: Any = SimpleNamespace(device=torch.device("cuda", 0))
+    with pytest.raises(RuntimeError, match="built on cpu"):
+        _check_model_device(on_cpu, "cuda")
+    _check_model_device(on_cuda, "cuda")
+    _check_model_device(on_cpu, None)
+
+
+def test_config_updaters_warn_loudly_on_an_unreadable_config(tmp_path, capsys):
+    """Review §2.5: the provenance writers returned None with no output
+    on an unreadable config.json, silently dropping the block."""
+    from types import SimpleNamespace
+
+    config = tmp_path / "config.json"
+    config.write_text('{"train_config": ')  # truncated mid-write
+    assert update_run_config_with_model(SimpleNamespace(), str(tmp_path)) is None
+    out = capsys.readouterr().out
+    assert "[artifacts]" in out
+    assert str(config) in out
+    assert "JSONDecodeError" in out
+    assert "'resolved_model'" in out
+
+
+def test_config_updaters_refuse_to_drop_pinned_provenance(tmp_path):
+    """Pinned digests are what a frozen plan validates; losing them must
+    stop the run at start, not surface post hoc as a plan mismatch."""
+    from types import SimpleNamespace
+
+    from courtside_dynamics.training.artifacts import (
+        update_run_config_with_initialization,
+    )
+
+    (tmp_path / "config.json").write_text('{"train_config": ')
+    demo_model = SimpleNamespace(demo_library_sha256="ab" * 32)
+    with pytest.raises(RuntimeError, match="demo_library_sha256"):
+        update_run_config_with_model(demo_model, str(tmp_path))
+    with pytest.raises(RuntimeError, match="initialization.source_artifacts"):
+        update_run_config_with_initialization({"mode": "x"}, str(tmp_path))
+
+
+def test_unreadable_best_model_meta_is_reported(tmp_path, capsys):
+    from courtside_dynamics.training.artifacts import _read_best_model_meta
+
+    meta = tmp_path / "model" / "best_model_meta.json"
+    meta.parent.mkdir()
+    meta.write_text("{")
+    assert _read_best_model_meta(str(tmp_path)) is None
+    out = capsys.readouterr().out
+    assert "[artifacts]" in out and str(meta) in out

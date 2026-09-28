@@ -1658,3 +1658,172 @@ def test_evaluations_npz_records_the_primary_batch_not_the_confirmation(
         assert cb.last_confirmation_metrics is not None
     finally:
         eval_env.close()
+
+
+def test_info_dict_eval_csv_append_failure_logs_and_continues(tmp_path, capsys):
+    """Review §2.2: an I/O error appending eval_info.csv (a Drive FUSE
+    hiccup) propagated out of ``model.learn()`` and killed the run. It
+    is a diagnostic artifact, so it must log and continue like the npz
+    writer -- with TensorBoard and ``last_metrics`` still populated."""
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    unwritable = tmp_path / "eval_info.csv"
+    unwritable.mkdir()  # opening a directory for append raises OSError
+    eval_env = make_vec_env(_make_reward_decomposition_env, n_envs=1)
+    cb = InfoDictEvalCallback(
+        eval_env=eval_env,
+        n_eval_episodes=2,
+        eval_freq=1,
+        csv_path=str(unwritable),
+    )
+    cb.model = _FakeModel(action_dim=1)
+    cb.n_calls = cb.eval_freq
+    cb.num_timesteps = cb.eval_freq
+    try:
+        assert cb._on_step() is True
+    finally:
+        eval_env.close()
+
+    assert cb.last_metrics is not None
+    assert "eval_info/rew_bonus_ep_sum_mean" in cb.model.logger.records
+    out = capsys.readouterr().out
+    assert "could not append" in out
+    assert str(unwritable) in out
+
+
+def _make_schema_env():
+    """Two-step episodes emitting every aggregate family's raw material."""
+    import gymnasium as gym
+    from gymnasium import spaces
+
+    class _Env(gym.Env):
+        metadata = {"render_modes": []}
+
+        def __init__(self) -> None:
+            self.action_space = spaces.Box(-1.0, 1.0, (1,), dtype=np.float32)
+            self.observation_space = spaces.Box(
+                -1.0, 1.0, (1,), dtype=np.float32
+            )
+            self.step_index = 0
+
+        def reset(self, *, seed=None, options=None):
+            super().reset(seed=seed)
+            self.step_index = 0
+            return np.zeros(1, dtype=np.float32), {}
+
+        def step(self, action):
+            del action
+            self.step_index += 1
+            done = self.step_index >= 2
+            info = {
+                "hits": self.step_index,
+                "phase": self.step_index % 2,
+                "rew_bonus": 0.5,
+                "term_fault": done,
+                "rally": 3,
+                "debug": 1.0,
+                "vector": np.zeros(3),
+            }
+            return np.zeros(1, dtype=np.float32), 1.0, done, False, info
+
+    return _Env()
+
+
+@pytest.mark.parametrize(
+    "callback_kwargs",
+    [
+        pytest.param(
+            {
+                "info_keys": ("hits", "rew_bonus"),
+                "terminal_info_keys": ("term_fault",),
+                "episode_distribution_keys": ("rally",),
+                "episode_survival_thresholds": {"rally": (2, 5)},
+                "success_key": "hits",
+                "phase_key": "phase",
+                "phase_labels": {0: "serve", 1: "rally"},
+            },
+            id="compact-schema",
+        ),
+        pytest.param({}, id="all-scalars"),
+    ],
+)
+def test_producible_metric_names_mirror_collected_metrics(callback_kwargs):
+    """The resolver train() validates selection keys against must name
+    exactly what an evaluation emits -- if the two drift, a valid key
+    gets rejected or a typo slips through (review §2.1)."""
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks._info import _scalar_info_keys
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    probe = _make_schema_env()
+    _, reset_info = probe.reset()
+    step_info = probe.step(probe.action_space.sample())[-1]
+    info_keys = {*_scalar_info_keys(reset_info), *_scalar_info_keys(step_info)}
+
+    eval_env = make_vec_env(_make_schema_env, n_envs=1)
+    cb = InfoDictEvalCallback(
+        eval_env=eval_env, n_eval_episodes=3, eval_freq=1, **callback_kwargs
+    )
+    cb.model = _FakeModel(action_dim=1)
+    try:
+        collected = cb._collect_metrics()
+    finally:
+        eval_env.close()
+
+    assert set(collected) == cb.producible_metric_names(info_keys)
+    assert cb.unresolvable_metrics(collected, info_keys) == []
+
+
+def test_unresolvable_metrics_flags_typos_only():
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    cb = InfoDictEvalCallback(
+        eval_env=object(), phase_key="phase", info_keys=("crossings",)
+    )
+    info_keys = {"crossings", "phase", "debug"}
+    names = [
+        "corssings_ep_mean",  # typo
+        "crossings_ep_mean",
+        "debug_mean",  # emitted by the env, filtered by info_keys
+        "phase_frac_7",  # an undeclared integer phase label
+        "phase_frac_serve",  # a label that was never declared
+        "curriculum_stage_index",  # a context metric set later
+        "success_rate",  # no success_key configured
+    ]
+    assert cb.unresolvable_metrics(
+        names, info_keys, context_names=("curriculum_stage_index",)
+    ) == ["corssings_ep_mean", "debug_mean", "phase_frac_serve", "success_rate"]
+
+
+def test_missing_selection_key_is_reported_every_evaluation(capsys):
+    """Review §2.1: a missing selection key scores -inf and a missing
+    guard key blocks the degenerate stop. Scoring is unchanged, but it
+    must never be silent -- and a well-keyed evaluation prints nothing."""
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    cb = InfoDictEvalCallback(
+        eval_env=object(),
+        best_metric_keys=("crossings_ep_mean", "episode_reward_mean"),
+        degenerate_stop_evals=3,
+        degenerate_guard_keys=("hits_ep_mean",),
+    )
+    cb.model = _FakeSavableModel(action_dim=1)
+
+    cb._update_best_and_maybe_stop(
+        {"crossings_ep_mean": 1.0, "episode_reward_mean": 1.0, "hits_ep_mean": 0.0}
+    )
+    assert capsys.readouterr().out == ""
+
+    for step in (2, 3):
+        cb.num_timesteps = step
+        cb._update_best_and_maybe_stop({"episode_reward_mean": 5.0})
+        out = capsys.readouterr().out
+        assert "selection key(s) ['crossings_ep_mean'] absent" in out
+        assert f"at {step} steps" in out
+        assert "degenerate guard key(s) ['hits_ep_mean'] absent" in out
+    # The documented -inf semantics are untouched: a reward jump cannot
+    # dethrone a best banked on the (now missing) primary key.
+    assert cb._best_score == (1.0, 1.0)

@@ -383,6 +383,26 @@ def test_campaign_notebook_freezes_the_preregistered_plan() -> None:
     assert "FORCE_BRANCH = None" in source
 
 
+def test_campaign_notebook_requires_a_cuda_device() -> None:
+    """Review §2.3: two LT1 launches trained on a CPU-only runtime that
+    passed setup_colab's nvidia-smi check. Every leg opts into train()'s
+    device assertion, and the knob stays out of the fingerprint -- an
+    operational guard, not protocol -- so existing campaigns resume."""
+    source = "\n".join(
+        _source(cell) for cell in _load_campaign_notebook()["cells"]
+    )
+    assert 'REQUIRE_DEVICE = "cuda"' in source
+    assert (
+        'overrides = {"eval_verbose": 1, "require_device": REQUIRE_DEVICE}'
+        in source
+    )
+    assert "require_device={cfg.require_device}" in source
+    start = source.index("FINGERPRINT = {")
+    fingerprint = source[start : source.index("\n}\n", start)]
+    assert "REQUIRE_DEVICE" not in fingerprint
+    assert "deliberately NOT\n# fingerprinted" in source
+
+
 def test_campaign_notebook_resumes_and_branches_via_helpers() -> None:
     source = "\n".join(
         _source(cell) for cell in _load_campaign_notebook()["cells"]
