@@ -77,6 +77,7 @@ from courtside_dynamics.training.artifacts import (
     write_run_config,
     write_run_summary,
 )
+from courtside_dynamics.training.demo_sac import DemoSAC
 
 
 class _SaveVecNormalizeOnNewBest(BaseCallback):
@@ -986,6 +987,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     ``final_model`` checkpoints, plus ``config.json`` (provenance
     snapshot at start) and ``stage_summary.txt`` (eval / wall-clock
     report at end) under ``cfg.log_dir``.
+
+    The SB3 logger ``train()`` installs (``progress.csv`` + TensorBoard)
+    is closed on return; a caller that trains the returned model further
+    must ``set_logger`` a fresh one first.
     """
     # Validate the algo name up front, before any envs are built or
     # artifacts written -- a typo'd ``algo`` should fail in milliseconds,
@@ -1051,6 +1056,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     eval_seed_offset = cfg.n_envs
 
     opened_envs: list[VecEnv] = []
+    sb3_logger: Logger | None = None
     try:
         train_env = make_vec_env(
             checked_train_env_fn,
@@ -1723,9 +1729,17 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         ]
         if effective_verbose:
             output_formats.append(make_output_format("stdout", tensorboard_dir))
-        model.set_logger(
-            Logger(folder=tensorboard_dir, output_formats=output_formats)
-        )
+        sb3_logger = Logger(folder=tensorboard_dir, output_formats=output_formats)
+        model.set_logger(sb3_logger)
+        if isinstance(model, DemoSAC):
+            # DemoSAC builds its demo buffer lazily at the first learn()
+            # (so inference loaders never need the library file), and
+            # demo_transitions is only known once it has. learn() is
+            # next anyway, so build it now: the resolved_model block
+            # written below must record the transitions this run
+            # actually trains on, not the pre-load 0. A no-op with the
+            # demo surface off.
+            model._ensure_demo_loaded()
         update_run_config_with_model(model, cfg.log_dir)
 
         interrupted = False
@@ -1819,3 +1833,8 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     finally:
         for opened_env in reversed(opened_envs):
             opened_env.close()
+        if sb3_logger is not None:
+            # Releases progress.csv and the TensorBoard event writer; a
+            # campaign notebook runs several legs in one process and
+            # would otherwise hold every earlier leg's handles open.
+            sb3_logger.close()

@@ -15,6 +15,7 @@ and hard to notice from a training curve alone:
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 
 import numpy as np
@@ -277,6 +278,74 @@ def test_csv_logger_survives_learn(tmp_path):
     assert not os.path.exists(
         os.path.join(str(tmp_path), "metrics", "tensorboard", "progress.csv")
     )
+
+
+def test_train_closes_its_sb3_logger(tmp_path, monkeypatch):
+    """train() creates the SB3 Logger (progress.csv + TensorBoard) and
+    must release it on every exit: a campaign notebook runs several legs
+    in one process, and each leaked leg kept its CSV and event-file
+    handles open (ResourceWarnings under pytest). Covers a clean return
+    and an exception raised after the logger exists."""
+    from stable_baselines3.common.logger import (
+        CSVOutputFormat,
+        TensorBoardOutputFormat,
+    )
+
+    from courtside_dynamics.training import TrainConfig, train
+
+    # The package re-exports the train() function under the submodule's
+    # name, so fetch the module itself to patch its globals.
+    train_module = importlib.import_module("courtside_dynamics.training.train")
+    created = []
+
+    class _TrackedLogger(train_module.Logger):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+    monkeypatch.setattr(train_module, "Logger", _TrackedLogger)
+
+    def assert_closed(logger):
+        kinds = {type(fmt) for fmt in logger.output_formats}
+        assert {CSVOutputFormat, TensorBoardOutputFormat} <= kinds
+        for fmt in logger.output_formats:
+            if isinstance(fmt, CSVOutputFormat):
+                assert fmt.file.closed
+            if isinstance(fmt, TensorBoardOutputFormat):
+                # torch's SummaryWriter.close() drops its event-file
+                # writers (SB3 keeps the SummaryWriter object itself).
+                assert fmt.writer.all_writers is None
+
+    def make_cfg(log_dir):
+        return TrainConfig(
+            env_fn=lambda: BallBalanceEnv(),
+            algo="SAC",
+            total_timesteps=64,
+            log_dir=str(log_dir),
+            n_envs=1,
+            eval_freq=10_000,
+            checkpoint_freq=0,
+            video_freq=0,
+            record_video=False,
+            info_dict_eval=False,
+            normalize_obs=False,
+            n_eval_episodes=1,
+            model_kwargs={"learning_starts": 16, "buffer_size": 500},
+        )
+
+    model = train(make_cfg(tmp_path / "clean"))
+    assert len(created) == 1
+    assert model.logger is created[0]
+    assert_closed(created[0])
+
+    def fail_after_logger(*args, **kwargs):
+        raise RuntimeError("boom after the logger exists")
+
+    monkeypatch.setattr(train_module, "update_run_config_with_model", fail_after_logger)
+    with pytest.raises(RuntimeError, match="boom after the logger exists"):
+        train(make_cfg(tmp_path / "raised"))
+    assert len(created) == 2
+    assert_closed(created[1])
 
 
 def test_warm_start_config_validates_and_canonicalizes_indices(tmp_path):
