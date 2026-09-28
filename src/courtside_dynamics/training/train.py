@@ -20,6 +20,7 @@ The helper builds vectorized train / eval envs, wires ``EvalCallback`` and
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import math
@@ -56,6 +57,7 @@ from courtside_dynamics.callbacks.env_attr_schedule import (
 )
 from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
 from courtside_dynamics.callbacks.performance_gate import (
+    STAGE_CONTEXT_METRIC,
     PerformanceGatedEnvStagesCallback,
 )
 from courtside_dynamics.callbacks.video_record import (
@@ -67,6 +69,9 @@ from courtside_dynamics.training.algos import (
 )
 from courtside_dynamics.training.algos import (
     resolve_algo as _resolve_algo,
+)
+from courtside_dynamics.training.algos import (
+    validate_model_kwargs as _validate_model_kwargs,
 )
 from courtside_dynamics.training.artifacts import (
     RUN_LAYOUT,
@@ -584,6 +589,17 @@ class TrainConfig:
         is derived to cover the longest schedule's hold phase, where a
         dead full-difficulty eval is still expected by design.
         Defaults (0 / empty) disable the guard.
+    require_device:
+        Opt-in device assertion. ``"cuda"`` makes ``train()`` fail in
+        milliseconds -- before any env is built or artifact written --
+        when ``torch.cuda.is_available()`` is false, or when
+        ``model_kwargs["device"]`` names a non-CUDA device, and checks
+        the constructed model actually landed on CUDA. ``None``
+        (default) keeps SB3's ``device="auto"``, which silently resolves
+        to CPU: runs ``20260828_114038`` and ``20260828_114815`` were
+        shape-conformant launches on a CPU-only runtime (a ``+cpu``
+        torch build passes the ``nvidia-smi`` check ``setup_colab``
+        makes) that could not finish in wall-clock.
     """
 
     env_fn: Callable
@@ -653,6 +669,7 @@ class TrainConfig:
     # so artifacts can record its provenance and copy it into the run
     # directory. ``Any`` to keep this module free of a run_config import.
     run_config_file: Any = None
+    require_device: str | None = None
 
 
 def _offset_seed(seed: int | None, offset: int) -> int | None:
@@ -740,6 +757,210 @@ def _resolved_norm_reward(cfg: TrainConfig) -> bool:
         if cfg.normalize_reward is not None
         else cfg.algo.upper() == "PPO"
     )
+
+
+#: Devices ``TrainConfig.require_device`` can demand (``None`` disables).
+_REQUIRABLE_DEVICES = ("cuda",)
+
+
+def _check_required_device(cfg: TrainConfig) -> None:
+    """Fail fast when ``cfg.require_device`` cannot be honored.
+
+    Runs before any env is built or artifact written, so a CPU-only
+    runtime costs milliseconds and leaves no half-made run directory.
+    """
+    required = cfg.require_device
+    if required is None:
+        return
+    if required not in _REQUIRABLE_DEVICES:
+        raise ValueError(
+            f"require_device must be None or one of "
+            f"{list(_REQUIRABLE_DEVICES)}, got {required!r}"
+        )
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            f"require_device={required!r} but torch.cuda.is_available() "
+            f"is False (torch {torch.__version__}, CUDA build "
+            f"{torch.version.cuda}): this run would silently train on "
+            f"CPU. On Colab, pick a GPU runtime (Runtime -> Change "
+            f"runtime type); a '+cpu' torch build fails this check even "
+            f"on a GPU runtime. Set require_device=None to train on CPU "
+            f"deliberately."
+        )
+    requested = cfg.model_kwargs.get("device", "auto")
+    if requested != "auto" and torch.device(requested).type != required:
+        raise ValueError(
+            f"model_kwargs['device']={requested!r} contradicts "
+            f"require_device={required!r}"
+        )
+
+
+def _check_model_device(model: BaseAlgorithm, required: str | None) -> None:
+    """Assert the constructed model landed on the required device."""
+    if required is None:
+        return
+    device = getattr(model, "device", None)
+    if device is None or device.type != required:
+        raise RuntimeError(
+            f"require_device={required!r} but the model was built on "
+            f"{device}"
+        )
+
+
+def _probe_eval_info_keys(env_fn: Callable) -> set[str]:
+    """Scalar ``info`` keys a fresh eval env emits on reset and one step.
+
+    A throwaway instance, so the real evaluation envs' reset streams
+    are untouched. Every shipped env emits its full scalar schema by
+    the first step -- later and terminal steps add no keys -- which is
+    what makes one step a faithful probe of what an evaluation can
+    aggregate.
+    """
+    from courtside_dynamics.callbacks._info import _scalar_info_keys
+
+    env = env_fn()
+    try:
+        _, reset_info = env.reset()
+        keys = set(_scalar_info_keys(reset_info))
+        step_info = env.step(env.action_space.sample())[-1]
+        keys.update(_scalar_info_keys(step_info))
+    finally:
+        env.close()
+    return keys
+
+
+def _validate_eval_metric_keys(
+    cfg: TrainConfig,
+    info_eval: InfoDictEvalCallback,
+    info_keys: set[str],
+    *,
+    context_names: Sequence[str] = (),
+) -> None:
+    """Refuse selection/guard/headline/success keys no evaluation emits.
+
+    ``InfoDictEvalCallback`` scores a missing selection key as
+    ``-inf``, so a typo (``headline_key = "corssings"``) trains
+    normally while selection silently degrades to the remaining keys
+    -- ultimately reward, the failure run 20260712_190054 exists to
+    prevent -- and a missing guard key keeps the degenerate stop
+    disarmed. Checked against ``info_keys`` (see
+    :func:`_probe_eval_info_keys`) before any training step.
+    """
+    wanted: list[tuple[str, str, str]] = []
+    if cfg.headline_key:
+        wanted.append(
+            ("headline_key", cfg.headline_key, f"{cfg.headline_key}_ep_mean")
+        )
+    if info_eval.success_key is not None:
+        wanted.append(("success_key", info_eval.success_key, "success_rate"))
+    wanted.extend(
+        ("best_metric_keys", key, key) for key in info_eval.best_metric_keys
+    )
+    if info_eval.degenerate_stop_evals > 0:
+        wanted.extend(
+            ("degenerate_guard_keys", key, key)
+            for key in info_eval.degenerate_guard_keys
+        )
+    unresolved = set(
+        info_eval.unresolvable_metrics(
+            (metric for _, _, metric in wanted),
+            info_keys,
+            context_names=context_names,
+        )
+    )
+    if not unresolved:
+        return
+    producible = sorted(
+        info_eval.producible_metric_names(info_keys) | set(context_names)
+    )
+    problems: list[str] = []
+    for field_name, value, metric in wanted:
+        if metric not in unresolved:
+            continue
+        if field_name in ("headline_key", "success_key"):
+            if value in info_keys:
+                reason = (
+                    f"the eval env emits it, but info_eval_keys filters "
+                    f"it out, so {metric} is never emitted"
+                )
+            else:
+                reason = (
+                    f"it is not a scalar info key the eval env emits, so "
+                    f"{metric} is never emitted"
+                )
+            candidates = sorted(info_keys)
+        else:
+            reason = "no evaluation emits a metric of that name"
+            candidates = producible
+        suggestion = difflib.get_close_matches(value, candidates, n=1)
+        hint = f" (did you mean {suggestion[0]!r}?)" if suggestion else ""
+        problems.append(f"{field_name} {value!r}: {reason}{hint}")
+    raise ValueError(
+        "evaluation metric keys that no evaluation will produce -- "
+        "selection would silently fall through to the remaining keys:\n"
+        + "\n".join(f"  - {problem}" for problem in problems)
+        + f"\nmetrics the info evaluator can emit: {producible}"
+    )
+
+
+def _salvage_crashed_run(
+    cfg: TrainConfig,
+    model: BaseAlgorithm,
+    train_env: VecEnv,
+    *,
+    gate_callback: PerformanceGatedEnvStagesCallback | None,
+    start_time: float,
+    error: BaseException,
+) -> None:
+    """Best-effort epilogue for a run whose ``learn()`` raised.
+
+    Saves what does not depend on the crashed machinery -- the policy,
+    its normalizer, the gate's stage history, and a ``stage_summary``
+    marked ``crashed`` -- skipping the closing evaluation (the env may
+    be the thing that broke). Every step is isolated: a salvage
+    failure is printed and never masks the original exception, which
+    the caller re-raises.
+    """
+    steps: list[tuple[str, Callable[[], object]]] = [
+        (
+            "final_model",
+            lambda: model.save(artifact_path(cfg.log_dir, "final_model")),
+        )
+    ]
+    if isinstance(train_env, VecNormalize):
+        steps.append(
+            (
+                "vec_normalize",
+                lambda: train_env.save(
+                    artifact_path(cfg.log_dir, "vec_normalize")
+                ),
+            )
+        )
+    if gate_callback is not None:
+        steps.append(("performance-gate stage history", gate_callback.finalize))
+    steps.append(
+        (
+            "stage_summary",
+            lambda: write_run_summary(
+                cfg,
+                cfg.log_dir,
+                final_mean_reward=None,
+                final_std_reward=None,
+                duration_seconds=time.monotonic() - start_time,
+                device=str(getattr(model, "device", "")) or None,
+                status="crashed",
+                actual_timesteps=int(model.num_timesteps),
+                stop_reason=f"crashed: {error!r}",
+            ),
+        )
+    )
+    for label, action in steps:
+        try:
+            action()
+        except Exception as salvage_error:
+            print(f"  could not salvage {label}: {salvage_error!r}")
 
 
 def _sha256_file(path: Path) -> str:
@@ -991,6 +1212,13 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     # artifacts written -- a typo'd ``algo`` should fail in milliseconds,
     # not after constructing (and checking) a fleet of MuJoCo envs.
     _resolve_algo(cfg.algo)
+    # Same for model_kwargs: recipes validate theirs in
+    # build_train_config, but a direct TrainConfig would otherwise hit
+    # a cross-algorithm key (or PPO's string ent_coef) only inside the
+    # SB3 constructor, after the env fleet is built and artifacts are
+    # written -- or, for the string ent_coef, a full rollout later.
+    _validate_model_kwargs(cfg.algo, cfg.model_kwargs)
+    _check_required_device(cfg)
     env_attr_schedule_callbacks = tuple(
         LinearEnvAttrScheduleCallback(**dict(schedule))
         for schedule in cfg.env_attr_schedules
@@ -1407,6 +1635,20 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 verbose=eval_verbose,
                 **selection_kwargs,
             )
+            if headline_selection or cfg.success_key is not None:
+                # Fail now, not as a -inf selection score at every
+                # evaluation of a multi-hour run. The gate stamps its
+                # stage index as a context metric at training start.
+                _validate_eval_metric_keys(
+                    cfg,
+                    info_eval_callback,
+                    _probe_eval_info_keys(resolved_eval_env_fn),
+                    context_names=(
+                        (STAGE_CONTEXT_METRIC,)
+                        if cfg.performance_gate is not None
+                        else ()
+                    ),
+                )
             callbacks.append(info_eval_callback)
             if cfg.performance_gate is not None:
                 # Ordered after the info-eval callback so a trigger sees
@@ -1559,6 +1801,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             policy=cfg.policy,
             **model_kwargs,
         )
+        _check_model_device(model, cfg.require_device)
         transferred_log_ent_coef: float | None = None
         if source_model is not None:
             if type(source_model.policy) is not type(model.policy):
@@ -1753,6 +1996,25 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 # is idempotent, so a duplicate close cannot occur.
                 if gate_callback is not None:
                     gate_callback.finalize()
+            except Exception as error:
+                # Any other exception out of learn() -- an I/O error on
+                # the Drive mount, an env or callback bug -- used to skip
+                # the whole epilogue and lose hours of training. Salvage
+                # the policy, normalizer, and a "crashed" summary, then
+                # re-raise: the run must still fail loudly.
+                print(
+                    f"Training crashed ({error!r}) -- saving final_model "
+                    f"and the normalizer before re-raising."
+                )
+                _salvage_crashed_run(
+                    cfg,
+                    model,
+                    train_env,
+                    gate_callback=gate_callback,
+                    start_time=start_time,
+                    error=error,
+                )
+                raise
             model.save(artifact_path(cfg.log_dir, "final_model"))
             if use_vec_normalize:
                 assert isinstance(train_env, VecNormalize)

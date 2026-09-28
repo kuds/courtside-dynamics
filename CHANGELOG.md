@@ -359,6 +359,55 @@ supersedes it (see the ground-rules bullet).
   (early-stop patience, degenerate signal, or stage budget). Artifact
   addition only; existing readers scan line-prefixes and are
   unaffected.
+- **Pipeline robustness closures (review 2026-08-28, after-LT1
+  class).** Robustness only — no eval, reward, or selection semantics
+  change for a correctly configured run; every shipped recipe passes
+  the new start-of-run checks, and a seeded PaddleTennis run
+  (4k steps, 2 evals) reproduces `main` byte-for-byte in
+  `eval_info.csv` and `evaluations.npz`, with identical best-model
+  selection and final/best policy weights.
+  - *Miskeyed selection keys fail at start (§2.1).* `train()` probes
+    the eval env's `info` schema on a throwaway instance (one reset +
+    one step) and refuses a `headline_key`, `success_key`,
+    `best_metric_keys` entry, or armed `degenerate_guard_keys` entry
+    that no evaluation can emit, with a close-match hint. Previously a
+    typo scored `-inf` at every evaluation and selection silently fell
+    through to reward. `InfoDictEvalCallback` also prints a line on
+    every evaluation missing a selection/guard key (hand-wired
+    callers); scoring is unchanged. **Migration:** a config whose
+    headline or success key its env never emits used to train on
+    degraded selection; it now raises before training.
+  - *`eval_info.csv` append is exception-isolated (§2.2)*: an
+    `OSError` logs and continues, like the `evaluations.npz` writer
+    (cardinal rule 7).
+  - *Crash salvage (§2.13, §3).* Any non-`KeyboardInterrupt`
+    exception out of `learn()` now saves `final_model.zip`,
+    `vec_normalize.pkl`, the gate's stage history, and a
+    `stage_summary.txt` with `Status: crashed` (the exception as the
+    stop reason; closing eval skipped) before re-raising. Each salvage
+    step is isolated and never masks the original error. The
+    interrupt and crash paths are now integration-tested.
+  - *`TrainConfig.require_device` (§2.3).* Opt-in `"cuda"` fails in
+    milliseconds — before any env or run directory — when
+    `torch.cuda.is_available()` is false or `model_kwargs["device"]`
+    contradicts it, and asserts the built model's device. Recorded in
+    `config.json`'s `train_config`. The campaign notebook sets
+    `REQUIRE_DEVICE = "cuda"` (not fingerprinted, so existing
+    campaigns still resume).
+  - *Loud provenance (§2.5).* The `config.json` updaters and the
+    summary's `best_model_meta.json` read print an `[artifacts]` line
+    with the path and exception instead of returning silently; a read
+    failure that would drop pinned provenance
+    (`resolved_model.demo_library_sha256`, or the warm-start
+    `initialization` block that the plan's `expected_artifact_sha256`
+    and `transfer_log_ent_coef` checks read) raises at run start.
+  - *No silent normalizer fallback (§2.6).* Best-model replay raises
+    when a normalizer was expected — a snapshot that fails to load, or
+    none on disk for a run whose `config.json` records
+    `normalize_obs=True` — instead of replaying on raw observations.
+  - *Also:* `train()` calls `validate_model_kwargs` itself, so a direct
+    `TrainConfig` fails before any setup; `tools/smoke_wheel.py`'s
+    env-count floor is 5, pinned to the live registry by a test.
 
 ## 0.25.0
 

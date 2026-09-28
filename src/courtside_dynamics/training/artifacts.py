@@ -366,6 +366,7 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
                 else None
             ),
             "final_info_eval": cfg.final_info_eval,
+            "require_device": cfg.require_device,
         },
     }
     out = artifact_path(log_dir, "config")
@@ -453,6 +454,36 @@ def _model_info(model: Any) -> dict[str, Any]:
     return info
 
 
+def _read_config_for_update(
+    path: str, *, block: str, pinned: Sequence[str]
+) -> dict[str, Any] | None:
+    """Read ``config.json`` so ``block`` can be merged in; never silently.
+
+    On an I/O or JSON error, returns ``None`` after one
+    ``[artifacts]``-prefixed line naming the path, the exception, and
+    the block that will be missing -- unless ``pinned`` names
+    content-pinned fields the block carries. Those are what a frozen
+    plan validates (``validate_run_config_against_plan``), so losing
+    them raises: failing at run start is cheaper than discovering an
+    unverifiable run after its compute is spent.
+    """
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as error:
+        if pinned:
+            raise RuntimeError(
+                f"[artifacts] could not read {path} to record the "
+                f"{block!r} block ({error!r}); it carries pinned "
+                f"provenance {list(pinned)} that a frozen plan validates"
+            ) from error
+        print(
+            f"[artifacts] could not read {path}: {error!r}; config.json "
+            f"will lack the {block!r} block"
+        )
+        return None
+
+
 def update_run_config_with_model(model: Any, log_dir: str) -> str | None:
     """Augment ``log_dir/config.json`` with resolved model details.
 
@@ -464,12 +495,19 @@ def update_run_config_with_model(model: Any, log_dir: str) -> str | None:
     path = locate_artifact(log_dir, "config")
     if path is None:
         return None
-    try:
-        with open(path) as f:
-            payload = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    info = _model_info(model)
+    payload = _read_config_for_update(
+        path,
+        block="resolved_model",
+        pinned=(
+            ("resolved_model.demo_library_sha256",)
+            if "demo_library_sha256" in info
+            else ()
+        ),
+    )
+    if payload is None:
         return None
-    payload["resolved_model"] = _model_info(model)
+    payload["resolved_model"] = info
     with open(path, "w") as f:
         json.dump(payload, f, indent=2, default=repr)
         f.write("\n")
@@ -480,14 +518,25 @@ def update_run_config_with_initialization(
     initialization: dict[str, Any],
     log_dir: str,
 ) -> str | None:
-    """Bind resolved warm-start provenance to ``config.json``."""
+    """Bind resolved warm-start provenance to ``config.json``.
+
+    The block is the only record of the source artifacts' digests and
+    of whether the entropy temperature transferred, so a failure to
+    read ``config.json`` raises rather than launching a warm-started
+    run whose frozen plan can no longer be validated.
+    """
     path = locate_artifact(log_dir, "config")
     if path is None:
         return None
-    try:
-        with open(path) as f:
-            payload = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    payload = _read_config_for_update(
+        path,
+        block="initialization",
+        pinned=(
+            "initialization.source_artifacts",
+            "initialization.transfer_log_ent_coef",
+        ),
+    )
+    if payload is None:  # unreachable: a pinned block's failed read raises
         return None
     payload["initialization"] = initialization
     with open(path, "w") as f:
@@ -615,7 +664,11 @@ def _read_best_model_meta(log_dir: str) -> dict[str, Any] | None:
     try:
         with open(path) as f:
             payload = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as error:
+        print(
+            f"[artifacts] could not read {path}: {error!r}; the summary "
+            f"omits the task-metric selection provenance"
+        )
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -791,8 +844,8 @@ def write_run_summary(
     cfg: TrainConfig,
     log_dir: str,
     *,
-    final_mean_reward: float,
-    final_std_reward: float,
+    final_mean_reward: float | None,
+    final_std_reward: float | None,
     duration_seconds: float,
     device: str | None = None,
     status: str = "completed",
@@ -803,7 +856,10 @@ def write_run_summary(
 
     ``status`` distinguishes a run that reached its full budget
     (``"completed"``) from one cut short by KeyboardInterrupt
-    (``"interrupted"``); the eval numbers are real either way.
+    (``"interrupted"``); the eval numbers are real either way. A run
+    whose ``learn()`` raised is summarized as ``"crashed"`` with
+    ``final_mean_reward``/``final_std_reward`` of ``None``: its closing
+    evaluation is skipped, since the env may be what broke.
     ``actual_timesteps`` is the number of env steps actually trained --
     it differs from ``cfg.total_timesteps`` when early stopping or an
     interrupt cut the run short, and it is what the throughput figure
@@ -871,13 +927,16 @@ def write_run_summary(
     # every evaluation line names the instrument it reports. "Final
     # eval" is train()'s epilogue evaluate_policy pass -- fresh
     # episodes on the eval env, not a row of either periodic series.
-    lines.append(
-        _kv(
-            "Final eval",
-            f"{final_mean_reward:.3f} +/- {final_std_reward:.3f}"
-            "  [closing eval, fresh episodes]",
+    if final_mean_reward is None or final_std_reward is None:
+        lines.append(_kv("Final eval", f"not run (run {status})"))
+    else:
+        lines.append(
+            _kv(
+                "Final eval",
+                f"{final_mean_reward:.3f} +/- {final_std_reward:.3f}"
+                "  [closing eval, fresh episodes]",
+            )
         )
-    )
 
     train_rewards, train_lengths = _read_monitor(log_dir)
     if train_lengths:
@@ -917,14 +976,15 @@ def write_run_summary(
             # real WallBall run ended 7 points below its best and the
             # operator had to diff two lines to notice. Flag a drop
             # bigger than 2 eval-stds AND 20% of the best mean.
-            delta = final_mean_reward - best_mean
-            regressed = delta < -max(2 * best_std, 0.2 * abs(best_mean))
-            note = (
-                "  <-- policy regressed after best; deploy best_model.zip"
-                if regressed
-                else ""
-            )
-            lines.append(_kv("Final vs best", f"{delta:+.3f}{note}"))
+            if final_mean_reward is not None:
+                delta = final_mean_reward - best_mean
+                regressed = delta < -max(2 * best_std, 0.2 * abs(best_mean))
+                note = (
+                    "  <-- policy regressed after best; deploy best_model.zip"
+                    if regressed
+                    else ""
+                )
+                lines.append(_kv("Final vs best", f"{delta:+.3f}{note}"))
 
     # Task-metric selection provenance: when best_model.zip was chosen
     # by the headline metric rather than reward, say so -- the reward
