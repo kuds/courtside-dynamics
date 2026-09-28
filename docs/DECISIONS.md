@@ -644,6 +644,17 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### The 2026-08-28 review's after-LT1 robustness findings are closed — *implemented (unreleased, commit `0cdd79f`)*
+Commit `0cdd79f` closes these findings from
+[`rl_pipeline_review_20260828.md`](rl_pipeline_review_20260828.md) (the
+snapshot itself stays unchanged; a 2026-09-27 audit had confirmed none
+had landed): §2.1 (miskeyed selection keys), §2.2 (`eval_info.csv`
+append), §2.3 (`require_device`), §2.5 (provenance writers), §2.6
+(normalizer fallback), §2.13 (salvage tests), plus from §3 the non-KI
+crash salvage, `validate_model_kwargs` in `train()`, and the
+smoke-wheel floor (4 → 5). Still open from the after-LT1 class: §2.4,
+§2.7, the rest of the §3 register, and the §6 cleanup sweep.
+
 ### Certification artifacts must be derived from the live spec, never maintained in parallel — *implemented (0.23.0)*
 
 The 0.22.0 ladder shipped without a calibration sweep because
