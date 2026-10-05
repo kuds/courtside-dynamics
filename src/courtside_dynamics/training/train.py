@@ -547,9 +547,17 @@ class TrainConfig:
         ``eval_seed + 100_000 + i``; the ``final_info_eval`` stream its
         own block at ``eval_seed + 200_000 + i``) and, when given,
         cycles ``eval_reset_options`` (e.g. ``({"serve_side": "a"},
-        {"serve_side": "b"})``). ``eval_seed=None`` (default) derives
-        ``seed + 10_000`` when ``seed`` is set and keeps the legacy
-        unpaired stream when it is not. The reward ``EvalCallback`` and
+        {"serve_side": "b"})``). Pairing is opt-in: an explicit
+        ``eval_seed`` always pairs, and ``eval_seed=None`` (default)
+        derives ``seed + EVAL_SEED_OFFSET`` only for a seeded run that
+        sets ``eval_reset_options`` (the options are applied by the
+        paired resets alone, so setting them asks for pairing). Every
+        other run keeps the legacy unpaired stream, whose unseeded
+        auto-resets alternate an env's serve side; a seeded reset
+        restarts that alternation, so a paired run of an alternating
+        env needs the options to cover both sides. Setting
+        ``eval_reset_options=None`` (TOML ``"none"``) therefore opts a
+        recipe out of derived pairing. The reward ``EvalCallback`` and
         the closing evaluation stay unpaired. The resolved seed is
         recorded in ``config.json`` (``evaluation_seeding``).
     monitor_info_keywords:
@@ -745,10 +753,16 @@ class TrainConfig:
 
 
 #: Offset of the derived paired-evaluation seed block from ``cfg.seed``
-#: (``TrainConfig.eval_seed=None`` with a seeded run): far past the
-#: training workers (``seed + i``) and the helper envs
-#: (``seed + n_envs + k``).
-EVAL_SEED_OFFSET = 10_000
+#: (``TrainConfig.eval_seed=None`` with a seeded run that sets
+#: ``eval_reset_options``): far past the training workers
+#: (``seed + i``) and the helper envs (``seed + n_envs + k``), and past
+#: every ``SEED + k * 10_000`` stage/leg seed the notebooks derive and
+#: every held-out audit block (the WallBall long-horizon audit's
+#: 10,000-10,049 and 20,000-20,199, the ladder certification's 30,000+,
+#: the probe ledger's 3,000-9,299). At 10_000 a seed-0 run's selection
+#: batch replayed the long-horizon audit's "held-out" seeds and a leg's
+#: block coincided with the next leg's training seeds.
+EVAL_SEED_OFFSET = 1_000_000
 
 #: Offset of the ``final_info_eval`` stream's paired seed block from the
 #: resolved ``eval_seed``. The selection stream owns ``eval_seed + i``
@@ -763,12 +777,20 @@ FINAL_INFO_EVAL_SEED_OFFSET = 200_000
 def resolve_eval_seed(cfg: TrainConfig) -> int | None:
     """The paired-evaluation seed ``train()`` uses, or None (unpaired).
 
-    An explicit ``cfg.eval_seed`` wins; otherwise a seeded run derives
-    ``cfg.seed + EVAL_SEED_OFFSET`` and an unseeded one stays unpaired.
+    An explicit ``cfg.eval_seed`` wins. Otherwise pairing is opt-in
+    through ``cfg.eval_reset_options``: a seeded run that sets them
+    derives ``cfg.seed + EVAL_SEED_OFFSET``, and every other run --
+    unseeded, or seeded without options -- keeps the legacy unpaired
+    stream. Deriving for every seeded run silently changed the
+    evaluation protocol of recipes that never asked for it: a seeded
+    reset restarts an alternating env's serve schedule, so every
+    paired episode of the humanoid curricula served from side A (the
+    learned returner was always B), and the WallBall selection batch
+    replayed its long-horizon audit's held-out seeds.
     """
     if cfg.eval_seed is not None:
         return int(cfg.eval_seed)
-    if cfg.seed is None:
+    if cfg.seed is None or cfg.eval_reset_options is None:
         return None
     return int(cfg.seed) + EVAL_SEED_OFFSET
 
@@ -2024,7 +2046,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 # `eval_verbose=1` restores a per-evaluation heartbeat.
                 verbose=eval_verbose,
                 # Paired evaluation: every evaluation replays the same
-                # feeds (None keeps the legacy unpaired stream).
+                # feeds. None (no explicit eval_seed, and no
+                # eval_reset_options to derive one for; see
+                # resolve_eval_seed) keeps the legacy unpaired stream.
                 eval_seed=resolved_eval_seed,
                 eval_reset_options=cfg.eval_reset_options,
                 **selection_kwargs,

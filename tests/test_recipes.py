@@ -341,7 +341,7 @@ def test_paddle_tennis_recipe_selects_on_policy_rally_conversions(tmp_path):
         {"serve_side": "b"},
     ]
     assert cfg.eval_seed is None
-    assert resolve_eval_seed(cfg) == 10_000  # seed + EVAL_SEED_OFFSET
+    assert resolve_eval_seed(cfg) == 1_000_000  # seed + EVAL_SEED_OFFSET
     assert tuple(cfg.monitor_info_keywords) == (
         "episode_legal_hit_count_a",
         "episode_valid_return_count_a",
@@ -365,11 +365,6 @@ def test_paddle_tennis_recipe_selects_on_policy_rally_conversions(tmp_path):
     assert "episode_rally_returns_a" in cfg.info_eval_distribution_keys
     _validate_evaluation_config(cfg)
 
-    # Paired reset options need a seed to apply them: an unseeded run
-    # is refused up front rather than silently unpaired.
-    unseeded = build_train_config("PaddleTennis", log_dir=str(tmp_path))
-    with pytest.raises(ValueError, match="requires paired evaluation"):
-        _validate_evaluation_config(unseeded)
 
     env = cfg.env_fn()
     try:
@@ -387,6 +382,96 @@ def test_paddle_tennis_recipe_selects_on_policy_rally_conversions(tmp_path):
         assert len(row) == len(list(cfg.csv_header))
     finally:
         env.close()
+
+
+def test_only_recipes_with_reset_options_derive_a_paired_eval_seed(tmp_path):
+    """Paired evaluation is opt-in. At seed=0 every recipe without
+    eval_reset_options keeps the legacy unpaired stream: deriving a seed
+    for all of them made every humanoid-curriculum eval episode serve
+    from side A (a seeded reset restarts the serve alternation, so the
+    learned returner was always B) and put the WallBall selection batch
+    on the long-horizon audit's held-out seeds 10,000+. The recipes that
+    do opt in derive a block clear of every SEED + k * 10_000 stage
+    seed and audit block."""
+    from courtside_dynamics.training.train import resolve_eval_seed
+
+    paired = {}
+    for name in RECIPES:
+        cfg = build_train_config(name, log_dir=str(tmp_path / name), seed=0)
+        resolved = resolve_eval_seed(cfg)
+        if cfg.eval_reset_options is None:
+            assert resolved is None, name
+        else:
+            paired[name] = resolved
+    assert paired == {"PaddleTennis": 1_000_000}
+    for name in RECIPES:
+        if name.startswith(("HumanoidTennis", "WallBall")):
+            assert name not in paired
+
+
+def test_paddle_tennis_run_file_none_opts_out_of_pairing(tmp_path):
+    """A seeded run opts out of the recipe's paired evaluation with
+    eval_reset_options = "none": nothing is left to derive a seed for,
+    so it evaluates on the legacy unpaired stream (whose unseeded
+    resets alternate the serve) instead of being refused or paired."""
+    from courtside_dynamics.training.train import (
+        _validate_evaluation_config,
+        resolve_eval_seed,
+    )
+
+    path = tmp_path / "unpaired.toml"
+    path.write_text('[train]\neval_reset_options = "none"\n')
+    cfg = build_train_config(
+        "PaddleTennis", log_dir=str(tmp_path / "run"), seed=0, config_file=path
+    )
+    assert cfg.eval_reset_options is None
+    assert resolve_eval_seed(cfg) is None
+    _validate_evaluation_config(cfg)
+
+
+def test_unseeded_paddle_tennis_build_drops_the_recipe_reset_options(tmp_path):
+    """seed=None (the notebooks' documented nondeterministic run) used to
+    fail at train() start: the recipe's reset options need paired
+    evaluation, which needs a seed. The build now drops the recipe's own
+    options with a warning and evaluates unpaired; options a caller or a
+    run file set explicitly are kept, and train() still refuses those."""
+    from courtside_dynamics.training.train import (
+        _validate_evaluation_config,
+        resolve_eval_seed,
+    )
+
+    with pytest.warns(UserWarning, match="unpaired"):
+        unseeded = build_train_config(
+            "PaddleTennis", log_dir=str(tmp_path / "a"), seed=None
+        )
+    assert unseeded.eval_reset_options is None
+    assert resolve_eval_seed(unseeded) is None
+    _validate_evaluation_config(unseeded)
+    # The recipe itself is untouched.
+    assert RECIPES["PaddleTennis"].extra_cfg["eval_reset_options"] is not None
+
+    # An explicit eval_seed pairs the unseeded run: options kept.
+    with_eval_seed = build_train_config(
+        "PaddleTennis", log_dir=str(tmp_path / "b"), seed=None, eval_seed=7
+    )
+    assert with_eval_seed.eval_reset_options is not None
+    assert resolve_eval_seed(with_eval_seed) == 7
+
+    # Explicit options from the caller or a run file stay, and stay refused.
+    explicit = build_train_config(
+        "PaddleTennis",
+        log_dir=str(tmp_path / "c"),
+        eval_reset_options=({"serve_side": "b"},),
+    )
+    with pytest.raises(ValueError, match="requires paired evaluation"):
+        _validate_evaluation_config(explicit)
+    path = tmp_path / "options.toml"
+    path.write_text('[train]\neval_reset_options = [{serve_side = "a"}]\n')
+    from_file = build_train_config(
+        "PaddleTennis", log_dir=str(tmp_path / "d"), config_file=path
+    )
+    with pytest.raises(ValueError, match="requires paired evaluation"):
+        _validate_evaluation_config(from_file)
 
 
 def test_paddle_tennis_paired_evaluation_replays_identical_metrics(tmp_path):

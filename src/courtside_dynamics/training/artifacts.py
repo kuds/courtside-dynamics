@@ -300,8 +300,10 @@ def _evaluation_seeding(cfg: TrainConfig) -> dict[str, Any]:
     """The paired-evaluation seeds ``train()`` resolves for this config.
 
     ``train_config.eval_seed`` records the configured value; a seeded
-    run with ``eval_seed=None`` derives its block from ``seed``, so the
-    resolved seeds are recorded here, where a replay can read them.
+    run with ``eval_seed=None`` and ``eval_reset_options`` derives its
+    block from ``seed`` (see ``train.resolve_eval_seed``), so the
+    resolved seeds are recorded here, where a replay (or an audit
+    checking that its seeds are held out) can read them.
     """
     from courtside_dynamics.callbacks.info_dict_eval import (
         CONFIRMATION_SEED_OFFSET,
@@ -453,7 +455,8 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             ),
             "degenerate_min_evals": cfg.degenerate_min_evals,
             # As configured; the resolved seed (None here derives from
-            # ``seed``) is the top-level ``evaluation_seeding`` block.
+            # ``seed`` when eval_reset_options are set) is the
+            # top-level ``evaluation_seeding`` block.
             "eval_seed": cfg.eval_seed,
             "eval_reset_options": (
                 [dict(options) for options in cfg.eval_reset_options]

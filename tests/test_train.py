@@ -2061,12 +2061,28 @@ def test_train_wires_selection_and_paired_evaluation(tmp_path, monkeypatch):
     )
     assert selection._min_deltas == (0.5, 0.25)
     assert selection.degenerate_flat_keys == ("steps_alive_ep_mean",)
-    # seed=0 and eval_seed=None: the derived block, seed + 10_000.
-    assert selection.eval_seed == 10_000
+    # seed=0, eval_seed=None and reset options set: the derived block,
+    # seed + EVAL_SEED_OFFSET. Literal values throughout, so a changed
+    # offset constant cannot pass by construction.
+    assert selection.eval_seed == 1_000_000
     assert selection.eval_reset_options == options
     # The final-config stream is paired on its own block.
-    assert final.eval_seed == 10_000 + train_module.FINAL_INFO_EVAL_SEED_OFFSET
+    assert final.eval_seed == 1_200_000
     assert final.eval_reset_options == options
+    # ...which no stream shares: the selection batch, its confirmation
+    # batch and the final stream each own a disjoint seed range.
+    blocks = [
+        range(selection.eval_seed, selection.eval_seed + selection.n_eval_episodes),
+        range(
+            selection.eval_seed + CONFIRMATION_SEED_OFFSET,
+            selection.eval_seed + CONFIRMATION_SEED_OFFSET
+            + selection.n_eval_episodes,
+        ),
+        range(final.eval_seed, final.eval_seed + final.n_eval_episodes),
+    ]
+    for index, block in enumerate(blocks):
+        for other in blocks[index + 1 :]:
+            assert not set(block) & set(other)
 
     config = json.loads((tmp_path / "config.json").read_text())
     recorded = config["train_config"]
@@ -2076,16 +2092,40 @@ def test_train_wires_selection_and_paired_evaluation(tmp_path, monkeypatch):
     assert recorded["eval_reset_options"] == [dict(o) for o in options]
     assert config["evaluation_seeding"] == {
         "paired": True,
-        "eval_seed": 10_000,
+        "eval_seed": 1_000_000,
         "derived_from_seed": True,
-        "selection_batch_seed_start": 10_000,
-        "confirmation_batch_seed_start": 10_000 + CONFIRMATION_SEED_OFFSET,
-        "final_info_eval_seed_start": (
-            10_000 + train_module.FINAL_INFO_EVAL_SEED_OFFSET
-        ),
+        "selection_batch_seed_start": 1_000_000,
+        "confirmation_batch_seed_start": 1_100_000,
+        "final_info_eval_seed_start": 1_200_000,
     }
     meta = json.loads((tmp_path / "model" / "best_model_meta.json").read_text())
-    assert meta["eval_seed"] == 10_000
+    assert meta["eval_seed"] == 1_000_000
+
+
+def test_seeded_run_without_reset_options_stays_unpaired(tmp_path, monkeypatch):
+    """Pairing is opt-in: a seeded run that sets neither eval_seed nor
+    eval_reset_options hands both info-dict streams eval_seed=None (the
+    de02d13 unpaired stream). Deriving for every seeded run made every
+    paired episode of the humanoid curricula serve from side A (a
+    seeded reset restarts the serve alternation) and replayed the
+    WallBall long-horizon audit's held-out seeds."""
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    train_module = importlib.import_module("courtside_dynamics.training.train")
+    built: list[InfoDictEvalCallback] = []
+
+    class _Recording(InfoDictEvalCallback):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            built.append(self)
+
+    monkeypatch.setattr(train_module, "InfoDictEvalCallback", _Recording)
+    train(_merged_eval_cfg(tmp_path, total_timesteps=200))
+
+    assert len(built) == 2
+    assert [callback.eval_seed for callback in built] == [None, None]
+    config = json.loads((tmp_path / "config.json").read_text())
+    assert config["evaluation_seeding"] == {"paired": False, "eval_seed": None}
 
 
 def test_paired_evaluation_repeats_identical_metrics_end_to_end(tmp_path):
@@ -2113,6 +2153,9 @@ def test_paired_evaluation_repeats_identical_metrics_end_to_end(tmp_path):
         total_timesteps=400,
         n_eval_episodes=3,
         model_kwargs={"learning_starts": 10_000, "buffer_size": 500},
+        # Pairing is opt-in (an explicit seed, or reset options to
+        # derive one for); this env takes no reset options.
+        eval_seed=4_321,
     )
     train(cfg)
     by_step: dict[str, dict[str, str]] = {}
@@ -2125,19 +2168,29 @@ def test_paired_evaluation_repeats_identical_metrics_end_to_end(tmp_path):
 
 
 def test_resolve_eval_seed_derivation():
-    """Explicit wins; a seeded run derives seed + 10_000; unseeded stays
-    unpaired (the legacy stream)."""
+    """Explicit wins; a seeded run with reset options derives
+    seed + 1_000_000; a seeded run without them, and an unseeded run,
+    stay unpaired (the legacy stream)."""
     from courtside_dynamics.training.artifacts import _evaluation_seeding
     from courtside_dynamics.training.train import resolve_eval_seed
+
+    options = ({"serve_side": "a"}, {"serve_side": "b"})
 
     def cfg(**kwargs):
         return TrainConfig(env_fn=_unbuildable_env, **kwargs)
 
-    assert resolve_eval_seed(cfg(seed=3)) == 10_003
+    assert resolve_eval_seed(cfg(seed=3, eval_reset_options=options)) == 1_000_003
+    assert resolve_eval_seed(cfg(seed=3)) is None
     assert resolve_eval_seed(cfg(seed=3, eval_seed=5)) == 5
     assert resolve_eval_seed(cfg(eval_seed=5)) == 5
+    assert resolve_eval_seed(cfg(eval_seed=5, eval_reset_options=options)) == 5
+    assert resolve_eval_seed(cfg(eval_reset_options=options)) is None
     assert resolve_eval_seed(cfg()) is None
     assert _evaluation_seeding(cfg()) == {"paired": False, "eval_seed": None}
+    assert _evaluation_seeding(cfg(seed=3)) == {
+        "paired": False,
+        "eval_seed": None,
+    }
     assert _evaluation_seeding(cfg(eval_seed=5))["derived_from_seed"] is False
 
 

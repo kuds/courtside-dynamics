@@ -14,6 +14,7 @@ new env is one entry in :data:`RECIPES`; the notebook needs no edits.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -1286,13 +1287,17 @@ RECIPES: dict[str, Recipe] = {
             # (review §4.3/§7.2; WallBall precedent). 5 episodes keep
             # evaluations.npz alive.
             "reward_eval_episodes": 5,
-            # Paired evaluation (review §4.1): a seeded run derives
-            # eval_seed = seed + 10_000, so every evaluation replays
-            # the same feeds. A seeded reset always serves side A, so
-            # the options alternate the first serve to keep the batch
-            # half policy-serving, half policy-receiving. Requires a
-            # seeded run (or an explicit eval_seed): train() refuses
-            # reset options it could not apply.
+            # Paired evaluation (review §4.1): setting reset options
+            # opts the recipe in, so a seeded run derives eval_seed =
+            # seed + EVAL_SEED_OFFSET (train.resolve_eval_seed) and
+            # every evaluation replays the same feeds. A seeded reset
+            # always serves side A, so the options alternate the first
+            # serve to keep the batch half policy-serving, half
+            # policy-receiving. An unseeded build (seed=None, no
+            # eval_seed) drops these recipe options with a warning and
+            # evaluates unpaired, where the unseeded resets alternate
+            # the serve on their own; "none" in a run file opts a
+            # seeded run out of pairing the same way.
             "eval_reset_options": (
                 {"serve_side": "a"},
                 {"serve_side": "b"},
@@ -1767,6 +1772,45 @@ def make_eval_env_fn(
     return _factory
 
 
+def _drop_unpairable_recipe_reset_options(
+    env_name: str,
+    cfg_kwargs: dict[str, Any],
+    recipe: Recipe,
+    file_config: Any,
+    overrides: Mapping[str, Any],
+) -> None:
+    """Drop a recipe's own ``eval_reset_options`` from an unseeded build.
+
+    Reset options are applied only by paired evaluation, which needs a
+    seed (``eval_seed``, or ``seed`` to derive one from), and
+    ``train()`` refuses options it could not apply. A recipe that opts
+    into pairing through its options would otherwise turn the
+    documented "``seed=None`` for a nondeterministic run" into a
+    ``train()``-time ValueError. Only options the recipe itself
+    supplied are dropped (with a warning): options a run file or an
+    explicit override set are the caller's choice, and ``train()``
+    still refuses those loudly.
+    """
+    if cfg_kwargs.get("eval_reset_options") is None:
+        return
+    if cfg_kwargs.get("seed") is not None or cfg_kwargs.get("eval_seed") is not None:
+        return
+    if "eval_reset_options" not in recipe.extra_cfg:
+        return
+    if "eval_reset_options" in overrides:
+        return
+    if file_config is not None and "eval_reset_options" in file_config.train:
+        return
+    cfg_kwargs["eval_reset_options"] = None
+    warnings.warn(
+        f"{env_name}: unseeded run (seed=None, no eval_seed), so evaluation "
+        f"is unpaired and the recipe's eval_reset_options are dropped; the "
+        f"unpaired stream's unseeded resets alternate the serve on their "
+        f"own. Seed the run (or set eval_seed) for paired evaluation.",
+        stacklevel=3,
+    )
+
+
 def build_train_config(
     env_name: str,
     *,
@@ -1895,6 +1939,10 @@ def build_train_config(
     if total_timesteps is not None:
         cfg_kwargs["total_timesteps"] = total_timesteps
     cfg_kwargs.update(overrides)
+
+    _drop_unpairable_recipe_reset_options(
+        env_name, cfg_kwargs, recipe, file_config, overrides
+    )
 
     # Validate the merged model_kwargs (recipe extra_cfg, TOML deep-merge,
     # and explicit overrides alike) against the resolved algorithm's
