@@ -414,15 +414,22 @@ class TestServeAlternation:
         env = PaddleTennisEnv()
         try:
             sides = []
-            for index in range(4):
+            # An ODD number of resets before the final seeded one, so
+            # continued alternation would serve "b" there: only the
+            # seed's restart at side A gives "a" (after an even count,
+            # both rules agree and the check cannot tell them apart).
+            for index in range(5):
                 _, info = env.reset(seed=_SMOKE_SEEDS[0] if index == 0 else None)
                 sides.append(info["serve_side"])
                 assert info["serve_side_is_policy"] == (
                     1.0 if info["serve_side"] == "a" else 0.0
                 )
-            assert sides == ["a", "b", "a", "b"]
+            assert sides == ["a", "b", "a", "b", "a"]
             _, info = env.reset(seed=_SMOKE_SEEDS[1])
             assert info["serve_side"] == "a"
+            # ...and the alternation resumes from the restart.
+            _, info = env.reset()
+            assert info["serve_side"] == "b"
         finally:
             env.close()
 
