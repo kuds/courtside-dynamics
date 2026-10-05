@@ -41,10 +41,12 @@ eval_freq = 25_000        # env steps (summed across workers) between evals
 
 # The recipe's per-key selection deltas (a table here REPLACES the
 # recipe's whole mapping; keys must be selection keys, missing ones
-# mean 0.0). Uncomment to retune:
+# mean 0.0). The episode aggregates sit at half their 1/30 granularity
+# (0.5 / 30 at 30 eval episodes) so one extra conversion registers;
+# rescale them with n_eval_episodes. Uncomment to retune:
 # [train.best_metric_min_delta]
-# episode_rally_returns_a_ep_mean = 0.05
-# success_rate = 0.05
+# episode_rally_returns_a_ep_mean = 0.016666666666666666
+# success_rate = 0.016666666666666666
 # episode_reward_mean = 0.25
 
 # [env]

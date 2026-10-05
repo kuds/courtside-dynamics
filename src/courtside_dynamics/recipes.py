@@ -1257,17 +1257,23 @@ RECIPES: dict[str, Recipe] = {
             # Selection/stop hygiene. One scalar delta applied across
             # keys of different scale meant a +20 pp success_rate gain
             # at a tied headline did not count (review §7.2), so the
-            # deltas are per key: about one conversion in 20 episodes
-            # for the headline, a 5 pp success swing, and 0.25 on the
-            # reward tie-break. confirm_best_eval is the WallBall
-            # precedent. The degenerate guard arms on a policy that
-            # never makes a legal hit in the whole episode and needs
-            # only the headline flat: requiring the wandering
+            # deltas are per key. The two episode aggregates take half
+            # their 1/30 per-episode granularity (n_eval_episodes is
+            # the default 30), per best_metric_min_delta's docs: one
+            # extra conversion (+1/30 on the headline, and on
+            # success_rate when it is the episode's first) registers,
+            # where 0.05 needed two and let a converting best be
+            # replaced through the reward tie-break by one that never
+            # converts. 0.25 stays on the continuous reward tie-break.
+            # confirm_best_eval is the WallBall precedent. The
+            # degenerate guard arms on a policy that never makes a
+            # legal hit in the whole episode and needs only the
+            # headline flat: requiring the wandering
             # episode_reward_mean to be flat too stopped a dead statue
             # run at eval 9-26 instead of the designed eval 5.
             "best_metric_min_delta": {
-                "episode_rally_returns_a_ep_mean": 0.05,
-                "success_rate": 0.05,
+                "episode_rally_returns_a_ep_mean": 0.5 / 30,
+                "success_rate": 0.5 / 30,
                 "episode_reward_mean": 0.25,
             },
             "confirm_best_eval": True,

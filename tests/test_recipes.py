@@ -322,8 +322,8 @@ def test_paddle_tennis_recipe_selects_on_policy_rally_conversions(tmp_path):
         "episode_reward_mean",
     )
     assert cfg.best_metric_min_delta == {
-        "episode_rally_returns_a_ep_mean": 0.05,
-        "success_rate": 0.05,
+        "episode_rally_returns_a_ep_mean": pytest.approx(0.5 / 30),
+        "success_rate": pytest.approx(0.5 / 30),
         "episode_reward_mean": 0.25,
     }
     assert tuple(cfg.degenerate_guard_keys) == (
@@ -382,6 +382,36 @@ def test_paddle_tennis_recipe_selects_on_policy_rally_conversions(tmp_path):
         assert len(row) == len(list(cfg.csv_header))
     finally:
         env.close()
+
+
+def test_paddle_tennis_selection_registers_one_extra_conversion(tmp_path):
+    """One k=2 conversion moves the headline (and success_rate, when it
+    is the episode's first) by 1/n_eval_episodes. With the old 0.05
+    deltas at n=30 that tied on both keys, so the run's first single
+    conversion never became best, and a converting best could be
+    replaced through the reward tie-break by one that never converts.
+    Half the granularity makes one conversion decide the comparison."""
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.training.train import _selection_metric_keys
+
+    cfg = build_train_config("PaddleTennis", log_dir=str(tmp_path), seed=0)
+    n = cfg.n_eval_episodes
+    assert n == 30
+    callback = InfoDictEvalCallback(
+        eval_env=object(),
+        best_metric_keys=_selection_metric_keys(cfg),
+        best_metric_min_delta=cfg.best_metric_min_delta,
+    )
+    reward = -4.0
+    one = 1.0 / n
+    # A first single conversion over a zero best (reward up by its +1).
+    assert callback._improves((one, one, reward + one), (0.0, 0.0, reward))
+    # ...and on the headline alone (a second conversion in an episode
+    # that already had one: success_rate unchanged).
+    assert callback._improves((2 * one, one, reward), (one, one, reward))
+    # A converting best is not displaced by a non-converting checkpoint
+    # with more reward: one fewer conversion decides it.
+    assert not callback._improves((0.0, 0.0, reward + 1.0), (one, one, reward))
 
 
 def test_only_recipes_with_reset_options_derive_a_paired_eval_seed(tmp_path):

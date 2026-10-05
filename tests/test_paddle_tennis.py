@@ -1858,8 +1858,8 @@ class TestHoldShaping:
         )
         assert extra["early_stop_degenerate_evals"] == 5
         assert extra["best_metric_min_delta"] == {
-            "episode_rally_returns_a_ep_mean": 0.05,
-            "success_rate": 0.05,
+            "episode_rally_returns_a_ep_mean": pytest.approx(0.5 / 30),
+            "success_rate": pytest.approx(0.5 / 30),
             "episode_reward_mean": 0.25,
         }
         assert extra["confirm_best_eval"] is True
