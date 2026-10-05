@@ -16,8 +16,9 @@ live model at every checkpoint save, writing one report per
 checkpoint plus a cached policy-independent oracle reference row into
 ``reports/diagnosis/``. The callback is exception-isolated -- a
 diagnosis failure must never kill a training run (the video-callback
-lesson) -- and disables itself after a failure rather than failing
-every checkpoint.
+lesson) -- and a failure skips only its own checkpoint; it disables
+itself after three consecutive failures rather than failing every
+checkpoint.
 """
 
 from __future__ import annotations
@@ -113,30 +114,25 @@ def _attribute_ender(
     termination: TerminationReason,
     open_shot: ShotRecord | None,
     expected_returner: CourtSide | None,
-    *,
-    feed_landed_in: bool,
-    feed_receiver: CourtSide,
 ) -> str:
     """Name who/what ended the point, from the rules' perspective.
 
-    OUT_OF_BOUNDS needs the shot ledger's own facts: the rules give
-    it priority over SECOND_BOUNCE, so a never-reached ball that
-    bounced IN and then skipped out terminates OUT_OF_BOUNDS -- the
-    fault belongs to the receiver who never reached it, NOT to the
-    (good) shot. Attributing by hitter alone inverted H1 evidence
-    into H3 (adversarial review, 2026-08-08).
+    The rules decide the rally-state faults before the line call:
+    an untouched ball that bounced IN and then skipped out ends
+    SECOND_BOUNCE (the receiver who never reached it), and a shot
+    that comes down on its hitter's own side ends FAILED_TO_CROSS, so
+    OUT_OF_BOUNDS only ever means the open shot's (or the feed's)
+    first landing was out. The rules used to call that skip-out
+    OUT_OF_BOUNDS, and attributing it by hitter alone inverted H1
+    evidence into H3 (adversarial review, 2026-08-08) -- the label
+    itself is now right, so attribution needs no shot-ledger repair.
     """
     if termination is TerminationReason.NONE:
         return "cap"
     prefix_by_side = {CourtSide.A: "policy", CourtSide.B: "opponent"}
     if termination is TerminationReason.OUT_OF_BOUNDS:
         if open_shot is not None:
-            if open_shot.landed_in:
-                receiver = open_shot.hitter.opponent
-                return f"{prefix_by_side[receiver]}_never_reached"
             return f"{prefix_by_side[open_shot.hitter]}_shot_out"
-        if feed_landed_in:
-            return f"{prefix_by_side[feed_receiver]}_never_reached"
         return "feed_out"
     if termination is TerminationReason.BALL_NET:
         if open_shot is not None:
@@ -178,8 +174,16 @@ def run_episode(
     bounce; a feed that nets or dies without bouncing bounds its
     window at that point's end instead, and the cap bounds the
     last window at episode end).
+
+    The episode's first serve continues the env's own alternation: a
+    seeded reset restarts alternation at side A (the env's
+    reproducible-reset contract), so the walk forces the side the
+    alternation would serve next -- consecutive episodes on one env
+    keep alternating exactly as the instrument always measured them.
     """
-    observation, reset_info = env.reset(seed=seed)
+    observation, reset_info = env.reset(
+        seed=seed, options={"serve_side": env._next_serving_side}
+    )
     serve_side_is_policy = reset_info["serve_side_is_policy"] >= 0.5
     feed_receiver = CourtSide.B if serve_side_is_policy else CourtSide.A
 
@@ -195,7 +199,6 @@ def run_episode(
     recovery_travel: list[float] = []
     ready_errors: list[float] = []
     touched_after_bounce: list[bool] = []
-    feed_landed_in = False
     feed_bounced = False
 
     # Recovery-hold window over the policy paddle: opens
@@ -316,7 +319,6 @@ def run_episode(
                 elif not feed_bounced and open_shot is None:
                     # The serve's own first bounce.
                     feed_bounced = True
-                    feed_landed_in = in_bounds
                     incoming_first_bounce = feed_receiver is CourtSide.A and in_bounds
                     if interpoint_active:
                         # The new feed has arrived: the inter-point
@@ -347,34 +349,28 @@ def run_episode(
                 touched_after_bounce.append(False)
                 awaiting_touch = False
             close_window()
-            after = transition.after
-            termination = after.termination_reason
+            # The info's point-scope termination keys name what ended
+            # this step's point, including the env's forced-nonfinite
+            # backstop (whose rules snapshot still reads "none"), so
+            # unsafe endings are countable from traces alone.
+            termination = TerminationReason(int(info["termination_reason"]))
             if (
                 open_shot is not None
                 and open_shot.outcome == "open"
                 and termination is TerminationReason.BALL_NET
             ):
                 open_shot.outcome = "net"
-            # The env's forced-nonfinite backstop ends the episode
-            # while the rules snapshot still reads "none"; the trace
-            # must carry the authoritative episode-ending flag so
-            # unsafe endings are countable from traces alone.
-            termination_name = str(info["termination_reason_name"])
-            if terminated and float(info.get("term_nonfinite", 0.0)):
-                termination_name = "nonfinite_state"
             traces.append(
                 EpisodeTrace(
                     serve_side_is_policy=serve_side_is_policy,
                     shots=shots,
                     policy_hits=hits_by_side[CourtSide.A],
                     crossings=int(info["crossings"]) - point_crossings_start,
-                    termination=termination_name,
+                    termination=str(info["termination_reason_name"]),
                     ender=_attribute_ender(
                         termination,
                         open_shot,
-                        after.expected_returner,
-                        feed_landed_in=feed_landed_in,
-                        feed_receiver=feed_receiver,
+                        transition.after.expected_returner,
                     ),
                     recovery_travel=recovery_travel,
                     ready_errors=ready_errors,
@@ -395,7 +391,6 @@ def run_episode(
                 recovery_travel = []
                 ready_errors = []
                 touched_after_bounce = []
-                feed_landed_in = False
                 feed_bounced = False
                 # One travel entry per boundary: if the previous
                 # window never met its feed's first bounce (the feed
@@ -555,10 +550,19 @@ class DiagnosisProbeCallback(BaseCallback):
     the diagnosis env too -- the instrument must measure the task the
     run actually trains on, never a silently different stock env.
 
-    Any exception is caught, logged, and disables the callback: a
-    broken diagnosis (wrong env for the instrument, a corrupt
-    normalizer) must cost one warning, never the training run.
+    Any exception is caught and logged -- printed, and appended to
+    ``diagnosis_probe_failures.txt`` in ``save_dir`` so an unattended
+    run's artifacts explain their own gaps -- and costs only that
+    checkpoint's report: a broken diagnosis must never cost the
+    training run. A transient failure (one bad checkpoint, a full
+    disk) skips one report; ``MAX_CONSECUTIVE_FAILURES`` failures in a
+    row (a persistent fault: the wrong env for the instrument, a
+    corrupt normalizer) disable the callback for the rest of the run
+    rather than paying the probe's wall clock at every save.
     """
+
+    #: Consecutive failed checkpoints that disable the probe.
+    MAX_CONSECUTIVE_FAILURES = 3
 
     def __init__(
         self,
@@ -581,6 +585,7 @@ class DiagnosisProbeCallback(BaseCallback):
         self.seed_start = int(seed_start)
         self.env_fn = env_fn
         self._disabled = False
+        self._consecutive_failures = 0
         self._oracle_written = False
 
     def _policy(self) -> Callable[[np.ndarray], np.ndarray]:
@@ -640,15 +645,38 @@ class DiagnosisProbeCallback(BaseCallback):
         if self.verbose:
             print(f"[diagnosis] wrote probe report at {self.num_timesteps} steps")
 
+    def _record_failure(self, message: str) -> None:
+        """Best-effort durable copy of a failure line (never raises)."""
+        try:
+            os.makedirs(self.save_dir, exist_ok=True)
+            path = os.path.join(self.save_dir, "diagnosis_probe_failures.txt")
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(message + "\n")
+        except OSError:
+            pass
+
     def _on_step(self) -> bool:
         if self._disabled or self.n_calls % self.save_freq != 0:
             return True
         try:
             self._run_probe()
         except Exception as error:  # noqa: BLE001 -- isolation by design
-            self._disabled = True
-            print(
-                "[diagnosis] probe failed and is disabled for the "
-                f"rest of the run: {error!r}"
+            self._consecutive_failures += 1
+            self._disabled = (
+                self._consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES
             )
+            message = (
+                f"[diagnosis] probe failed at {self.num_timesteps} steps "
+                f"({self._consecutive_failures}/"
+                f"{self.MAX_CONSECUTIVE_FAILURES} consecutive): {error!r}; "
+                + (
+                    "disabled for the rest of the run"
+                    if self._disabled
+                    else "skipping this checkpoint"
+                )
+            )
+            print(message)
+            self._record_failure(message)
+        else:
+            self._consecutive_failures = 0
         return True

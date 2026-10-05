@@ -76,6 +76,38 @@ class TestDiagnosisInstrument:
             assert trace.policy_hits == 0
             assert trace.ender == "policy_never_reached", trace.ender
             assert trace.touched_after_bounce == [False]
+            # The rules now label the untouched skip-out a second
+            # bounce themselves (it was out_of_bounds, which the
+            # attribution had to repair from the shot ledger).
+            assert trace.termination == "second_bounce", trace.termination
+
+    def test_forced_nonfinite_point_reads_nonfinite(self):
+        """The env's forced-nonfinite backstop (a nonfinite observation
+        after a finite physics step) leaves the rules snapshot at
+        "none"; the trace must still name the unsafe ending -- as its
+        termination AND its ender (the ender used to read "cap")."""
+        from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
+        from courtside_dynamics.training.paddle_diagnosis import run_episode
+
+        env = PaddleTennisEnv()
+        try:
+            real_get_obs = env._get_obs
+            calls = []
+
+            def poisoned():
+                calls.append(1)
+                obs = real_get_obs().copy()
+                if len(calls) > 20:  # finite reset, then blow up mid-point
+                    obs[0] = np.nan
+                return obs
+
+            env._get_obs = poisoned
+            traces, _travels = run_episode(env, scripted_ground_opponent, 1000)
+        finally:
+            env.close()
+        assert len(traces) == 1
+        assert traces[0].termination == "nonfinite_state"
+        assert traces[0].ender == "nonfinite_state"
 
     def test_fault_touches_are_not_hits(self):
         """Adversarial regression (review 2026-08-08): the frozen
@@ -193,7 +225,46 @@ class TestDiagnosisProbeCallback:
         assert not callback._disabled
         assert len(constructed) == 2  # oracle row + checkpoint row
 
-    def test_failure_disables_and_never_raises(self, tmp_path):
+    def test_failure_skips_only_its_checkpoint(self, tmp_path, capsys):
+        """Review 2026-08-28 §3: one failure used to disable the probe
+        for the rest of the run. A failure now costs only its own
+        report (logged to the console and a durable failures file),
+        and a later success resets the consecutive count."""
+        from courtside_dynamics.training.paddle_diagnosis import (
+            DiagnosisProbeCallback,
+        )
+
+        callback = DiagnosisProbeCallback(
+            save_dir=str(tmp_path),
+            save_freq=1,
+            episodes=1,
+            seed_start=1000,
+        )
+        outcomes = (True, True, False, True, True)
+        for step, fail in enumerate(outcomes, start=1):
+            callback.model = self._stub_model(fail=fail)
+            callback.n_calls = step
+            callback.num_timesteps = 100 * step
+            assert callback._on_step() is True  # isolated, not raised
+            assert not callback._disabled
+        names = {p.name for p in tmp_path.iterdir()}
+        # Only the successful checkpoint wrote a report.
+        assert {n for n in names if n.startswith("diagnosis_probe_")} >= {
+            "diagnosis_probe_oracle.txt",
+            "diagnosis_probe_300.txt",
+        }
+        assert not names & {
+            "diagnosis_probe_100.txt",
+            "diagnosis_probe_200.txt",
+            "diagnosis_probe_400.txt",
+            "diagnosis_probe_500.txt",
+        }
+        failures = (tmp_path / "diagnosis_probe_failures.txt").read_text()
+        assert failures.count("probe failed") == 4
+        assert "at 400 steps (1/3 consecutive)" in failures
+        assert "skipping this checkpoint" in capsys.readouterr().out
+
+    def test_three_consecutive_failures_disable(self, tmp_path):
         from courtside_dynamics.training.paddle_diagnosis import (
             DiagnosisProbeCallback,
         )
@@ -205,13 +276,22 @@ class TestDiagnosisProbeCallback:
             seed_start=1000,
         )
         callback.model = self._stub_model(fail=True)
-        callback.n_calls = 1
-        callback.num_timesteps = 100
-        assert callback._on_step() is True  # isolated, not raised
+        for step in range(1, callback.MAX_CONSECUTIVE_FAILURES + 1):
+            assert not callback._disabled
+            callback.n_calls = step
+            callback.num_timesteps = 100 * step
+            assert callback._on_step() is True  # isolated, not raised
         assert callback._disabled
+        assert "disabled for the rest of the run" in (
+            tmp_path / "diagnosis_probe_failures.txt"
+        ).read_text()
         assert not any(
             p.name.startswith("diagnosis_probe_1")
             for p in tmp_path.iterdir()
         )
-        callback.n_calls = 2
-        assert callback._on_step() is True  # stays disabled quietly
+        # Disabled means quiet: a working model is not probed again.
+        callback.model = self._stub_model()
+        callback.n_calls = 10
+        callback.num_timesteps = 1000
+        assert callback._on_step() is True
+        assert not (tmp_path / "diagnosis_probe_1000.txt").exists()
