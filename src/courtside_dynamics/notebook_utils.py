@@ -1616,10 +1616,12 @@ def _paired_evaluation_seed_overlap(
     """Audit seeds a paired run's info-dict evaluators already replayed.
 
     A paired run (``config.json``'s ``evaluation_seeding.paired``)
-    resets episode ``i`` of its selection, confirmation and
-    final-info-eval batches with ``<block start> + i``, every
-    evaluation. An audit drawing from those blocks replays the very
-    episodes the checkpoint was selected on, so it is not held out.
+    resets episode ``i`` of its selection and confirmation batches with
+    ``<block start> + i``, every evaluation (the final-info-eval stream
+    stays fresh-random; runs recorded before that change may still list
+    a ``final_info_eval_seed_start`` block, which is checked too). An
+    audit drawing from those blocks replays the very episodes the
+    checkpoint was selected on, so it is not held out.
     Each block is taken as wide as the run's largest evaluation batch
     (``n_eval_episodes`` / ``final_eval_episodes``), which covers
     every stream's episode count. Returns one description per

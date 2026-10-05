@@ -892,10 +892,35 @@ def test_campaign_warm_start_comment_states_the_policy_warmup() -> None:
 
 
 def _make_finished_attempt(attempt_dir: Path, status: str) -> Path:
-    """A leg attempt as train() leaves it: protected best pair + summary."""
+    """A leg attempt as train() leaves it: the protected best pair, the
+    selection record binding its digests, config.json, and the summary
+    -- everything score_paddle_stage checks before a policy load (the
+    resume point runs the same check)."""
+    import hashlib
+
     (attempt_dir / "model").mkdir(parents=True)
     (attempt_dir / "model" / "best_model.zip").write_bytes(b"zip")
     (attempt_dir / "model" / "best_vec_normalize.pkl").write_bytes(b"pkl")
+    digests = {
+        name: {"sha256": hashlib.sha256(payload).hexdigest()}
+        for name, payload in (
+            ("best_model.zip", b"zip"),
+            ("best_vec_normalize.pkl", b"pkl"),
+        )
+    }
+    (attempt_dir / "model" / "best_model_meta.json").write_text(
+        json.dumps({"timestep": 1, "artifacts": digests})
+    )
+    (attempt_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "evaluation_env": {
+                    "class": "PaddleTennisEnv",
+                    "constructor_kwargs": {},
+                }
+            }
+        )
+    )
     (attempt_dir / "stage_summary.txt").write_text(
         f"Algorithm:      SAC\nStatus:         {status}\n"
     )
