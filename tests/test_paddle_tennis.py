@@ -2201,6 +2201,57 @@ class TestNPointEpisodes:
         finally:
             env.close()
 
+    def test_relaunch_redraws_when_a_nudge_leaves_the_envelope_blocked(
+        self, monkeypatch
+    ):
+        """The post-nudge re-verify loop, which the real nudge never
+        reaches (it always clears): should a nudge leave a head inside
+        the launch envelope, the relaunch redraws against where the
+        paddles now stand. The nudge is stalled (it moves nothing) and
+        the draws are scripted: the protocol's 1 + _SERVE_REDRAWS
+        pre-nudge draws all sit on the policy's paddle head, and every
+        later one is the real, clear draw. The relaunch must nudge
+        once, redraw after it, and launch the ball clear of both
+        heads with the paddles left where they stood."""
+        env = PaddleTennisEnv(points_per_episode=None)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            env._serving_side = CourtSide.A
+            head = env._paddle_position(CourtSide.A).copy()
+            blocked = head + np.array([0.05, 0.0, 0.05])
+            pre_nudge = 1 + env._SERVE_REDRAWS
+            real_draw = env._draw_serve
+            draws: list[np.ndarray] = []
+            nudges: list[np.ndarray] = []
+
+            def scripted_draw():
+                position, velocity = real_draw()
+                if len(draws) < pre_nudge:
+                    position = blocked.copy()
+                draws.append(position.copy())
+                return position, velocity
+
+            def stalled_nudge(position):
+                nudges.append(position.copy())
+
+            monkeypatch.setattr(env, "_draw_serve", scripted_draw)
+            monkeypatch.setattr(env, "_nudge_paddle_clear", stalled_nudge)
+            env._launch_point(mid_episode=True)
+
+            assert len(nudges) == 1
+            np.testing.assert_array_equal(nudges[0], blocked)
+            assert env._point_serve_nudged == 1
+            # The stalled nudge left the head inside the envelope, so
+            # the loop redrew; its first draw is clear and ends it.
+            assert len(draws) == pre_nudge + 1
+            assert not env._clear_launch_envelope(blocked)
+            ball = env._ball_position()
+            np.testing.assert_allclose(ball, draws[-1])
+            assert env._clear_launch_envelope(ball)
+            np.testing.assert_allclose(env._paddle_position(CourtSide.A), head)
+        finally:
+            env.close()
+
     def test_hard_slam_far_side_deaths_cause_no_spurious_faults(self):
         """NP1 relaunch-hazard witness: points ending with the ball
         beyond the far baseline must not open the next point with a
