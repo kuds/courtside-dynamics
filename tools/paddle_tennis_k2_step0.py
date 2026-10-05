@@ -165,7 +165,11 @@ def run_arm(arm: str, library: dict, policy, max_steps: int, reset_seed: int) ->
     rows: list[dict] = []
     try:
         for entry in library["entries"]:
-            env.reset(seed=reset_seed)  # draw discarded by the launch below
+            # draw discarded by the launch below
+            env.reset(
+                seed=reset_seed,
+                options={"serve_side": env._next_serving_side},
+            )
             if arm == "feed":
                 obs = _launch_feed(env, entry)
             else:

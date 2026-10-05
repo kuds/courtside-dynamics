@@ -82,7 +82,9 @@ def run_episode(
     witness: Callable[[np.ndarray], np.ndarray],
     seed: int,
 ) -> EpisodeRow:
-    observation, _ = env.reset(seed=seed)
+    observation, _ = env.reset(
+        seed=seed, options={"serve_side": env._next_serving_side}
+    )
     total = shaping = clawback = 0.0
     hits = confirms = steps = 0
     while True:

@@ -106,8 +106,12 @@ def _run_witness(
     zero = np.zeros(3, dtype=np.float64)
     try:
         for seed in range(seed_start, seed_start + episodes):
-            obs, _ = shaped.reset(seed=seed)
-            mirror_obs, _ = unshaped.reset(seed=seed)
+            obs, _ = shaped.reset(
+                seed=seed, options={"serve_side": shaped._next_serving_side}
+            )
+            mirror_obs, _ = unshaped.reset(
+                seed=seed, options={"serve_side": unshaped._next_serving_side}
+            )
             np.testing.assert_array_equal(obs, mirror_obs)
             episode_paid = episode_clawed = 0.0
             kept_hold = pending_hold = 0.0

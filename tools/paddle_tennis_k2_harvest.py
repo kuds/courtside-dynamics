@@ -160,7 +160,9 @@ def harvest(
     crossings_unarmed = 0  # crossing observed with no armed candidate
     try:
         for seed in range(seed_start, seed_start + episodes):
-            obs, _ = env.reset(seed=seed)
+            obs, _ = env.reset(
+                seed=seed, options={"serve_side": env._next_serving_side}
+            )
             ball_adr = env._ball_qposadr
             ball_dof = env._ball_dofadr
             last_hit_a_point: int | None = None

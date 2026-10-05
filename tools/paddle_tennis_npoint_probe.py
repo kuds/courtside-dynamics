@@ -190,7 +190,9 @@ def run_battery_episode(
     seed: int,
 ) -> EpisodeRow:
     """Walk one n-point episode recording every NP1 observable."""
-    observation, _ = env.reset(seed=seed)
+    observation, _ = env.reset(
+        seed=seed, options={"serve_side": env._next_serving_side}
+    )
     servers = [env._serving_side.name]
     steps = confirms = 0
     total = paid = claw = point_reward = 0.0

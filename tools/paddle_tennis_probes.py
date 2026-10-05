@@ -403,7 +403,11 @@ def certify_frozen_env(
     terminations: Counter = Counter()
     try:
         for seed in range(seed_start, seed_start + episodes):
-            observation, reset_info = env.reset(seed=seed)
+            # A seeded reset restarts alternation at side A; keep
+            # the 50/50 split by continuing the env's own ledger.
+            observation, reset_info = env.reset(
+                seed=seed, options={"serve_side": env._next_serving_side}
+            )
             if reset_info["serve_side"] == CourtSide.A.label:
                 serve_side_a += 1
             info: dict = {}

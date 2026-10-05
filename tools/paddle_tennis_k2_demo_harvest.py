@@ -169,7 +169,10 @@ def harvest_library(
     assert entries is not None  # the drill kwargs above loaded the library
     try:
         for index, entry in enumerate(entries):
-            env.reset(seed=RESET_SEED)
+            env.reset(
+                seed=RESET_SEED,
+                options={"serve_side": env._next_serving_side},
+            )
             env._serving_side = CourtSide.B
             # The relaunch after the demo point serves from the
             # harvested rally's next server (the step-0 tool's full

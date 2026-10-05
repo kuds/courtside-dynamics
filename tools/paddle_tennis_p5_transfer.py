@@ -366,7 +366,9 @@ def run_transfer(
     terminations: Counter = Counter()
     try:
         for seed in range(seed_start, seed_start + episodes):
-            observation, _ = env.reset(seed=seed)
+            observation, _ = env.reset(
+                seed=seed, options={"serve_side": env._next_serving_side}
+            )
             info: dict = {}
             while True:
                 observation, _, terminated, truncated, info = env.step(

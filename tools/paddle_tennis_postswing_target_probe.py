@@ -222,7 +222,9 @@ def run_probe(
     windows: list[WindowRecord] = []
     try:
         for seed in range(seed_start, seed_start + episodes):
-            obs, _ = env.reset(seed=seed)
+            obs, _ = env.reset(
+                seed=seed, options={"serve_side": env._next_serving_side}
+            )
             frames = _SideAFrames(env)
             open_window: dict | None = None
             last_points = 0
