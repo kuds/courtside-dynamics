@@ -2086,13 +2086,20 @@ def test_train_wires_selection_and_paired_evaluation(tmp_path, monkeypatch):
     assert recorded["degenerate_flat_keys"] == ["steps_alive_ep_mean"]
     assert recorded["eval_seed"] is None
     assert recorded["eval_reset_options"] == [dict(o) for o in options]
+    # Exactly the streams that ran: confirm_best is off (no confirmation
+    # block) and the reward stream was merged into the final stream.
     assert config["evaluation_seeding"] == {
         "paired": True,
         "eval_seed": 1_000_000,
         "derived_from_seed": True,
         "selection_batch_seed_start": 1_000_000,
-        "confirmation_batch_seed_start": 1_100_000,
+        "streams": {
+            "eval_info": "paired",
+            "eval_info_final": "unpaired",
+            "closing_eval": "unpaired",
+        },
     }
+    assert selection.confirm_best is False
     meta = json.loads((tmp_path / "model" / "best_model_meta.json").read_text())
     assert meta["eval_seed"] == 1_000_000
 
@@ -2120,7 +2127,15 @@ def test_seeded_run_without_reset_options_stays_unpaired(tmp_path, monkeypatch):
     assert len(built) == 2
     assert [callback.eval_seed for callback in built] == [None, None]
     config = json.loads((tmp_path / "config.json").read_text())
-    assert config["evaluation_seeding"] == {"paired": False, "eval_seed": None}
+    assert config["evaluation_seeding"] == {
+        "paired": False,
+        "eval_seed": None,
+        "streams": {
+            "eval_info": "unpaired",
+            "eval_info_final": "unpaired",
+            "closing_eval": "unpaired",
+        },
+    }
 
 
 class _InitEcho(_StepsAlive):
@@ -2215,12 +2230,99 @@ def test_resolve_eval_seed_derivation():
     assert resolve_eval_seed(cfg(eval_seed=5, eval_reset_options=options)) == 5
     assert resolve_eval_seed(cfg(eval_reset_options=options)) is None
     assert resolve_eval_seed(cfg()) is None
-    assert _evaluation_seeding(cfg()) == {"paired": False, "eval_seed": None}
-    assert _evaluation_seeding(cfg(seed=3)) == {
-        "paired": False,
-        "eval_seed": None,
-    }
+    for unpaired in (cfg(), cfg(seed=3)):
+        seeding = _evaluation_seeding(unpaired)
+        assert (seeding["paired"], seeding["eval_seed"]) == (False, None)
     assert _evaluation_seeding(cfg(eval_seed=5))["derived_from_seed"] is False
+
+
+_ALL_UNPAIRED_SB3 = {"reward_eval": "unpaired", "closing_eval": "unpaired"}
+
+
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        (
+            # An eval_seed no stream applies: no info-dict evaluator runs.
+            {"info_dict_eval": False, "eval_seed": 7},
+            {"paired": False, "eval_seed": None, "streams": _ALL_UNPAIRED_SB3},
+        ),
+        (
+            # confirm_best is only wired under headline selection.
+            {"eval_seed": 7, "confirm_best_eval": True},
+            {
+                "paired": True,
+                "eval_seed": 7,
+                "derived_from_seed": False,
+                "selection_batch_seed_start": 7,
+                "streams": {"eval_info": "paired", **_ALL_UNPAIRED_SB3},
+            },
+        ),
+        (
+            # Headline selection without confirm_best: no confirmation.
+            {"eval_seed": 7, "headline_key": "steps_alive"},
+            {
+                "paired": True,
+                "eval_seed": 7,
+                "derived_from_seed": False,
+                "selection_batch_seed_start": 7,
+                "streams": {"eval_info": "paired", **_ALL_UNPAIRED_SB3},
+            },
+        ),
+        (
+            # Every info-dict stream on; the reward stream merged away.
+            {
+                "seed": 3,
+                "eval_reset_options": ({"serve_side": "a"},),
+                "headline_key": "steps_alive",
+                "confirm_best_eval": True,
+                "final_info_eval": True,
+            },
+            {
+                "paired": True,
+                "eval_seed": 1_000_003,
+                "derived_from_seed": True,
+                "selection_batch_seed_start": 1_000_003,
+                "confirmation_batch_seed_start": 1_100_003,
+                "streams": {
+                    "eval_info": "paired",
+                    "eval_info_confirmation": "paired",
+                    "eval_info_final": "unpaired",
+                    "closing_eval": "unpaired",
+                },
+            },
+        ),
+        (
+            # Unpaired run: the confirmation stream runs, unpaired.
+            {
+                "headline_key": "steps_alive",
+                "confirm_best_eval": True,
+                "final_info_eval": True,
+            },
+            {
+                "paired": False,
+                "eval_seed": None,
+                "streams": {
+                    "eval_info": "unpaired",
+                    "eval_info_confirmation": "unpaired",
+                    "eval_info_final": "unpaired",
+                    "closing_eval": "unpaired",
+                },
+            },
+        ),
+    ],
+)
+def test_evaluation_seeding_records_only_the_streams_that_run(overrides, expected):
+    """config.json's evaluation_seeding used to claim the selection,
+    confirmation and final-stream seed blocks for every paired config,
+    including streams train() never wires (info_dict_eval off, no
+    headline selection or confirm_best, final_info_eval off). It now
+    lists exactly the streams that run, and a seed block only for a
+    paired stream among them."""
+    from courtside_dynamics.training.artifacts import _evaluation_seeding
+
+    cfg = TrainConfig(env_fn=_unbuildable_env, **overrides)
+    assert _evaluation_seeding(cfg) == expected
 
 
 def test_monitor_info_keywords_reach_the_training_monitor(tmp_path):

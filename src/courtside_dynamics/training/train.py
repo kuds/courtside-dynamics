@@ -57,6 +57,7 @@ from courtside_dynamics.callbacks.env_attr_schedule import (
     LinearEnvAttrScheduleCallback,
 )
 from courtside_dynamics.callbacks.info_dict_eval import (
+    CONFIRMATION_SEED_OFFSET,
     InfoDictEvalCallback,
     _reset_options_tuple,
     _resolve_min_deltas,
@@ -790,6 +791,60 @@ def resolve_eval_seed(cfg: TrainConfig) -> int | None:
     if cfg.seed is None or cfg.eval_reset_options is None:
         return None
     return int(cfg.seed) + EVAL_SEED_OFFSET
+
+
+def _merges_reward_eval_into_final(cfg: TrainConfig) -> bool:
+    """Whether the reward ``EvalCallback`` is retired into ``final_info_eval``.
+
+    Under headline selection the reward stream is reporting-only and
+    rolls the same distribution as the final-config info-eval stream,
+    which already collects per-episode returns -- so the duplicate pass
+    is dropped and that stream owns ``evaluations.npz``.
+    """
+    return bool(cfg.info_dict_eval and cfg.headline_key and cfg.final_info_eval)
+
+
+def evaluation_stream_seeding(cfg: TrainConfig) -> dict[str, int | None]:
+    """Every evaluation stream ``train()`` wires for ``cfg``, and its seeding.
+
+    Maps each stream that runs to the first reset seed of its paired
+    block (episode ``i`` of every evaluation resets with ``start + i``),
+    or to ``None`` for an unpaired, fresh-random stream. A stream the
+    configuration does not wire is absent:
+
+    ``eval_info``
+        The info-dict evaluator (``info_dict_eval``): it selects the
+        best model under headline selection and only reports otherwise.
+    ``eval_info_confirmation``
+        Its ``confirm_best`` batch, wired only under headline selection
+        with ``confirm_best_eval``.
+    ``eval_info_final``
+        The ``final_info_eval`` stream, never paired.
+    ``reward_eval``
+        SB3's reward ``EvalCallback``, unpaired; retired into
+        ``eval_info_final`` under headline selection.
+    ``closing_eval``
+        The end-of-training ``evaluate_policy`` pass, unpaired.
+
+    ``config.json``'s ``evaluation_seeding`` block is derived from this
+    map, so it records the streams that run -- not a block for every
+    stream a paired run could have.
+    """
+    eval_seed = resolve_eval_seed(cfg)
+    headline_selection = bool(cfg.info_dict_eval and cfg.headline_key)
+    streams: dict[str, int | None] = {}
+    if cfg.info_dict_eval:
+        streams["eval_info"] = eval_seed
+        if headline_selection and cfg.confirm_best_eval:
+            streams["eval_info_confirmation"] = (
+                None if eval_seed is None else eval_seed + CONFIRMATION_SEED_OFFSET
+            )
+        if cfg.final_info_eval:
+            streams["eval_info_final"] = None
+    if not _merges_reward_eval_into_final(cfg):
+        streams["reward_eval"] = None
+    streams["closing_eval"] = None
+    return streams
 
 
 def _offset_seed(seed: int | None, offset: int) -> int | None:
@@ -1804,9 +1859,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         # a strict superset. Retire the duplicate pass and hand it
         # evaluations.npz -- one env and one rollout fewer per eval, and
         # the goal-task curve stops being a 5-episode estimate.
-        merge_reward_eval_into_final = bool(
-            headline_selection and cfg.info_dict_eval and cfg.final_info_eval
-        )
+        merge_reward_eval_into_final = _merges_reward_eval_into_final(cfg)
         final_eval_episodes = cfg.final_eval_episodes
         if final_eval_episodes is None:
             if merge_reward_eval_into_final:
