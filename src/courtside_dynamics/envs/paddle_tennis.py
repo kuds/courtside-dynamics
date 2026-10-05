@@ -385,10 +385,10 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         # Zeroed by every point launch (reset serve, n-point relaunch,
         # either drill arm), never read from the rules machine: a
         # full-arm drill restores a harvested machine whose
-        # valid_return_count_a already holds the harvest's own k=1
-        # (1-6 on a real library), which would count the policy's
-        # first return of a drilled point as a conversion under arm
-        # "full" but not under arm "feed".
+        # valid_return_count_a already counts the harvested point's
+        # own side-A returns (1-6 in the tests' library), which would
+        # count the policy's first return of a drilled point as a
+        # conversion under arm "full" but not under arm "feed".
         self._point_returns_a = 0
         # The contact depth of the side-A legal hit whose return is
         # still unconfirmed (None = no such shot in flight): held
