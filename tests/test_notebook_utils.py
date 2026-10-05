@@ -914,6 +914,48 @@ def test_evaluate_best_wall_ball_rejects_hash_mismatched_pair(tmp_path):
         raise AssertionError("hash-mismatched model/normalizer pair did not fail")
 
 
+def test_evaluate_best_wall_ball_refuses_seeds_the_paired_selection_replayed(
+    tmp_path,
+):
+    """A paired run resets selection episode i with <block start> + i at
+    every evaluation (likewise its confirmation and final-info-eval
+    blocks). A seed-0 run that derived eval_seed = 10_000 rolled its
+    60-episode selection batch on 10,000-10,059, so the default "held-out"
+    long-horizon seeds 10,000-10,049 replayed the selection episodes.
+    The audit now refuses seeds inside any recorded block, before any
+    policy loads."""
+    from courtside_dynamics.notebook_utils import (
+        _paired_evaluation_seed_overlap,
+    )
+
+    _write_wall_ball_best_artifacts(tmp_path)
+    config = json.loads((tmp_path / "config.json").read_text())
+    config["train_config"]["n_eval_episodes"] = 60
+    config["evaluation_seeding"] = {
+        "paired": True,
+        "eval_seed": 10_000,
+        "derived_from_seed": True,
+        "selection_batch_seed_start": 10_000,
+        "confirmation_batch_seed_start": 110_000,
+        "final_info_eval_seed_start": 210_000,
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+
+    with pytest.raises(ValueError, match="not held out"):
+        evaluate_best_wall_ball(tmp_path, lambda: None, episode_len=3)
+    with pytest.raises(ValueError, match="confirmation_batch_seed_start"):
+        evaluate_best_wall_ball(
+            tmp_path, lambda: None, episode_len=3, seeds=(110_059,)
+        )
+    # Seeds past every block, and any unpaired run, pass the guard.
+    assert _paired_evaluation_seed_overlap(config, range(20_000, 20_050)) == []
+    assert _paired_evaluation_seed_overlap(config, (10_060, 110_060)) == []
+    unpaired = {**config, "evaluation_seeding": {"paired": False}}
+    assert _paired_evaluation_seed_overlap(unpaired, range(10_000, 10_050)) == []
+    legacy = {key: value for key, value in config.items() if key != "evaluation_seeding"}
+    assert _paired_evaluation_seed_overlap(legacy, range(10_000, 10_050)) == []
+
+
 class TestResolveRunConfigFile:
     def test_creates_from_starter_then_reuses_edits(self, tmp_path, capsys):
         from courtside_dynamics.notebook_utils import resolve_run_config_file

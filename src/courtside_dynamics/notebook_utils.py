@@ -1610,6 +1610,52 @@ def _atomic_write_csv(
             os.unlink(tmp_path)
 
 
+def _paired_evaluation_seed_overlap(
+    config: Mapping[str, Any], seeds: Sequence[int]
+) -> list[str]:
+    """Audit seeds a paired run's info-dict evaluators already replayed.
+
+    A paired run (``config.json``'s ``evaluation_seeding.paired``)
+    resets episode ``i`` of its selection, confirmation and
+    final-info-eval batches with ``<block start> + i``, every
+    evaluation. An audit drawing from those blocks replays the very
+    episodes the checkpoint was selected on, so it is not held out.
+    Each block is taken as wide as the run's largest evaluation batch
+    (``n_eval_episodes`` / ``final_eval_episodes``), which covers
+    every stream's episode count. Returns one description per
+    overlapping block (empty for an unpaired run).
+    """
+    seeding = config.get("evaluation_seeding")
+    if not isinstance(seeding, Mapping) or not seeding.get("paired"):
+        return []
+    train_config = config.get("train_config") or {}
+    widths = [
+        value
+        for value in (
+            train_config.get("n_eval_episodes"),
+            train_config.get("final_eval_episodes"),
+        )
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    ]
+    width = max(widths) if widths else 30
+    overlaps = []
+    for label in (
+        "selection_batch_seed_start",
+        "confirmation_batch_seed_start",
+        "final_info_eval_seed_start",
+    ):
+        start = seeding.get(label)
+        if isinstance(start, bool) or not isinstance(start, int):
+            continue
+        shared = sorted(seed for seed in seeds if start <= seed < start + width)
+        if shared:
+            overlaps.append(
+                f"{label}={start} (block [{start}, {start + width})): "
+                f"{len(shared)} audit seed(s) from {shared[0]} to {shared[-1]}"
+            )
+    return overlaps
+
+
 def evaluate_best_wall_ball(
     log_dir: str | Path,
     env_fn: Callable,
@@ -1668,6 +1714,15 @@ def evaluate_best_wall_ball(
         config = json.load(handle)
     with open(meta_path) as handle:
         best_meta = json.load(handle)
+    overlaps = _paired_evaluation_seed_overlap(config, resolved_seeds)
+    if overlaps:
+        raise ValueError(
+            "long-horizon audit seeds are not held out: this paired run's "
+            "evaluators replayed them every evaluation ("
+            + "; ".join(overlaps)
+            + "). Pass seeds disjoint from config.json's evaluation_seeding "
+            "blocks."
+        )
     train_config = config.get("train_config") or {}
     training_env_config = config.get("env") or {}
     configured_evaluation_env = config.get("evaluation_env")
