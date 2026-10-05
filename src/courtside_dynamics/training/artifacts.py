@@ -297,34 +297,42 @@ def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
 
 
 def _evaluation_seeding(cfg: TrainConfig) -> dict[str, Any]:
-    """The paired-evaluation seeds ``train()`` resolves for this config.
+    """How ``train()`` seeds each evaluation stream it runs for this config.
 
     ``train_config.eval_seed`` records the configured value; a seeded
     run with ``eval_seed=None`` and ``eval_reset_options`` derives its
     block from ``seed`` (see ``train.resolve_eval_seed``), so the
     resolved seeds are recorded here, where a replay (or an audit
     checking that its seeds are held out) can read them.
-    """
-    from courtside_dynamics.callbacks.info_dict_eval import (
-        CONFIRMATION_SEED_OFFSET,
-    )
-    from courtside_dynamics.training.train import (
-        FINAL_INFO_EVAL_SEED_OFFSET,
-        resolve_eval_seed,
-    )
 
-    eval_seed = resolve_eval_seed(cfg)
-    if eval_seed is None:
-        return {"paired": False, "eval_seed": None}
-    return {
-        "paired": True,
-        "eval_seed": eval_seed,
-        "derived_from_seed": cfg.eval_seed is None,
-        # Episode i of each batch resets with <block start> + i.
-        "selection_batch_seed_start": eval_seed,
-        "confirmation_batch_seed_start": eval_seed + CONFIRMATION_SEED_OFFSET,
-        "final_info_eval_seed_start": eval_seed + FINAL_INFO_EVAL_SEED_OFFSET,
+    Only streams that run are recorded (``train.evaluation_stream_seeding``
+    is the single source): ``streams`` names each one as ``"paired"`` or
+    ``"unpaired"``, and a ``*_seed_start`` key exists only for a paired
+    block that is actually rolled. ``paired`` / ``eval_seed`` describe
+    the info-dict evaluator, the only stream that pairs, so an
+    ``eval_seed`` without ``info_dict_eval`` records an unpaired run.
+    """
+    from courtside_dynamics.training.train import evaluation_stream_seeding
+
+    streams = evaluation_stream_seeding(cfg)
+    seeding: dict[str, Any] = {"paired": False, "eval_seed": None}
+    selection_start = streams.get("eval_info")
+    if selection_start is not None:
+        seeding = {
+            "paired": True,
+            "eval_seed": selection_start,
+            "derived_from_seed": cfg.eval_seed is None,
+            # Episode i of each paired batch resets with <block start> + i.
+            "selection_batch_seed_start": selection_start,
+        }
+        confirmation_start = streams.get("eval_info_confirmation")
+        if confirmation_start is not None:
+            seeding["confirmation_batch_seed_start"] = confirmation_start
+    seeding["streams"] = {
+        name: "unpaired" if start is None else "paired"
+        for name, start in streams.items()
     }
+    return seeding
 
 
 def write_run_config(cfg: TrainConfig, log_dir: str) -> str:

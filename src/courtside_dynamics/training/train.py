@@ -57,6 +57,7 @@ from courtside_dynamics.callbacks.env_attr_schedule import (
     LinearEnvAttrScheduleCallback,
 )
 from courtside_dynamics.callbacks.info_dict_eval import (
+    CONFIRMATION_SEED_OFFSET,
     InfoDictEvalCallback,
     _reset_options_tuple,
     _resolve_min_deltas,
@@ -542,12 +543,20 @@ class TrainConfig:
         e.g. leaving out a wandering ``episode_reward_mean``.
     eval_seed / eval_reset_options:
         Paired evaluation (see ``InfoDictEvalCallback.eval_seed``):
-        every info-dict evaluation replays the same per-episode reset
-        seeds (``eval_seed + i``; the ``confirm_best`` batch
-        ``eval_seed + 100_000 + i``; the ``final_info_eval`` stream its
-        own block at ``eval_seed + 200_000 + i``) and, when given,
-        cycles ``eval_reset_options`` (e.g. ``({"serve_side": "a"},
-        {"serve_side": "b"})``). Pairing is opt-in: an explicit
+        every evaluation of the matched info-dict stream replays the
+        same per-episode reset seeds (``eval_seed + i``; the
+        ``confirm_best`` batch ``eval_seed + 100_000 + i``) and, when
+        given, cycles ``eval_reset_options`` (e.g.
+        ``({"serve_side": "a"}, {"serve_side": "b"})``). The
+        ``final_info_eval`` stream stays fresh-random (unpaired) even
+        then: it is the unbiased final-config estimate, not a
+        comparison (docs/DECISIONS.md, "Unpaired evaluation is the root
+        of the gate noise"). Before any output is written, ``train()``
+        resets a throwaway evaluation env once per distinct options
+        mapping (with the resolved eval seed), so an option the env's
+        ``reset`` rejects fails the launch rather than the first
+        evaluation; an env whose ``reset`` ignores options accepts
+        any. Pairing is opt-in: an explicit
         ``eval_seed`` always pairs, and ``eval_seed=None`` (default)
         derives ``seed + EVAL_SEED_OFFSET`` only for a seeded run that
         sets ``eval_reset_options`` (the options are applied by the
@@ -649,7 +658,10 @@ class TrainConfig:
         matched stream drives selection while this stream is the honest
         final-task progress metric; the gap between them is the
         transfer deficit, visible per evaluation instead of
-        post-mortem. Requires ``info_dict_eval``.
+        post-mortem. Requires ``info_dict_eval``. The stream is never
+        paired: every evaluation draws fresh episodes, so it stays an
+        unbiased estimate of final-config performance whatever
+        ``eval_seed`` / ``eval_reset_options`` say.
     early_stop_degenerate_evals / degenerate_guard_keys /
     degenerate_min_evals:
         Enable ``InfoDictEvalCallback``'s degenerate-signal stop: end
@@ -764,15 +776,6 @@ class TrainConfig:
 #: block coincided with the next leg's training seeds.
 EVAL_SEED_OFFSET = 1_000_000
 
-#: Offset of the ``final_info_eval`` stream's paired seed block from the
-#: resolved ``eval_seed``. The selection stream owns ``eval_seed + i``
-#: and its confirmations ``eval_seed + 100_000 + i``; without its own
-#: block the final stream would replay the selection stream's exact
-#: episodes whenever the two share a distribution (no gate), turning
-#: evaluations.npz into a copy of the selection batch instead of an
-#: independent sample.
-FINAL_INFO_EVAL_SEED_OFFSET = 200_000
-
 
 def resolve_eval_seed(cfg: TrainConfig) -> int | None:
     """The paired-evaluation seed ``train()`` uses, or None (unpaired).
@@ -793,6 +796,60 @@ def resolve_eval_seed(cfg: TrainConfig) -> int | None:
     if cfg.seed is None or cfg.eval_reset_options is None:
         return None
     return int(cfg.seed) + EVAL_SEED_OFFSET
+
+
+def _merges_reward_eval_into_final(cfg: TrainConfig) -> bool:
+    """Whether the reward ``EvalCallback`` is retired into ``final_info_eval``.
+
+    Under headline selection the reward stream is reporting-only and
+    rolls the same distribution as the final-config info-eval stream,
+    which already collects per-episode returns -- so the duplicate pass
+    is dropped and that stream owns ``evaluations.npz``.
+    """
+    return bool(cfg.info_dict_eval and cfg.headline_key and cfg.final_info_eval)
+
+
+def evaluation_stream_seeding(cfg: TrainConfig) -> dict[str, int | None]:
+    """Every evaluation stream ``train()`` wires for ``cfg``, and its seeding.
+
+    Maps each stream that runs to the first reset seed of its paired
+    block (episode ``i`` of every evaluation resets with ``start + i``),
+    or to ``None`` for an unpaired, fresh-random stream. A stream the
+    configuration does not wire is absent:
+
+    ``eval_info``
+        The info-dict evaluator (``info_dict_eval``): it selects the
+        best model under headline selection and only reports otherwise.
+    ``eval_info_confirmation``
+        Its ``confirm_best`` batch, wired only under headline selection
+        with ``confirm_best_eval``.
+    ``eval_info_final``
+        The ``final_info_eval`` stream, never paired.
+    ``reward_eval``
+        SB3's reward ``EvalCallback``, unpaired; retired into
+        ``eval_info_final`` under headline selection.
+    ``closing_eval``
+        The end-of-training ``evaluate_policy`` pass, unpaired.
+
+    ``config.json``'s ``evaluation_seeding`` block is derived from this
+    map, so it records the streams that run -- not a block for every
+    stream a paired run could have.
+    """
+    eval_seed = resolve_eval_seed(cfg)
+    headline_selection = bool(cfg.info_dict_eval and cfg.headline_key)
+    streams: dict[str, int | None] = {}
+    if cfg.info_dict_eval:
+        streams["eval_info"] = eval_seed
+        if headline_selection and cfg.confirm_best_eval:
+            streams["eval_info_confirmation"] = (
+                None if eval_seed is None else eval_seed + CONFIRMATION_SEED_OFFSET
+            )
+        if cfg.final_info_eval:
+            streams["eval_info_final"] = None
+    if not _merges_reward_eval_into_final(cfg):
+        streams["reward_eval"] = None
+    streams["closing_eval"] = None
+    return streams
 
 
 def _offset_seed(seed: int | None, offset: int) -> int | None:
@@ -1022,6 +1079,107 @@ def _validate_evaluation_config(cfg: TrainConfig) -> None:
         )
 
 
+#: Keys a ``performance_gate`` mapping must set (the rest default).
+_PERFORMANCE_GATE_REQUIRED_KEYS = ("stages", "metric_key", "threshold", "sustain_evals")
+
+#: Keys a ``checkpoint_diagnosis`` mapping may set.
+_CHECKPOINT_DIAGNOSIS_KEYS = frozenset({"episodes", "seed_start"})
+
+
+def _positive_int(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 1
+
+
+def _validate_callback_config(cfg: TrainConfig) -> None:
+    """Refuse malformed eval-stream, diagnosis and gate settings up front.
+
+    Config-only checks, so they run before any env is built or artifact
+    written. They used to sit in ``train()``'s callback wiring -- after
+    ``config.json`` was written and, under ``reuse_log_dir=True``, after
+    the previous attempt's evaluation CSVs were rotated aside -- so a
+    misconfigured retry overwrote the earlier attempt's provenance and
+    moved its logs before failing.
+    """
+    headline_selection = bool(cfg.info_dict_eval and cfg.headline_key)
+    if cfg.reward_eval_episodes is not None:
+        if not _positive_int(cfg.reward_eval_episodes):
+            raise ValueError("reward_eval_episodes must be a positive integer")
+        if not headline_selection:
+            raise ValueError(
+                "reward_eval_episodes requires headline-metric "
+                "selection (info_dict_eval + headline_key): without "
+                "it the reward eval stream owns best-model selection "
+                "and must keep the full n_eval_episodes"
+            )
+    if cfg.final_eval_episodes is not None:
+        if not _positive_int(cfg.final_eval_episodes):
+            raise ValueError("final_eval_episodes must be a positive integer")
+        if not (cfg.info_dict_eval and cfg.final_info_eval):
+            raise ValueError(
+                "final_eval_episodes requires info_dict_eval and "
+                "final_info_eval: it sizes the final-config eval "
+                "stream, which only exists when both are on"
+            )
+    if cfg.checkpoint_diagnosis is not None:
+        if not isinstance(cfg.checkpoint_diagnosis, Mapping):
+            raise TypeError(
+                f"checkpoint_diagnosis must be a mapping or None, got "
+                f"{cfg.checkpoint_diagnosis!r}"
+            )
+        unknown_keys = set(cfg.checkpoint_diagnosis) - _CHECKPOINT_DIAGNOSIS_KEYS
+        if unknown_keys:
+            raise ValueError(
+                "checkpoint_diagnosis has unknown keys "
+                f"{sorted(unknown_keys)}; allowed: episodes, "
+                "seed_start"
+            )
+        if cfg.checkpoint_freq <= 0:
+            raise ValueError(
+                "checkpoint_diagnosis requires checkpoint_freq > 0 "
+                "(it runs at checkpoint cadence)"
+            )
+        try:
+            episodes = int(cfg.checkpoint_diagnosis.get("episodes", 30))
+            int(cfg.checkpoint_diagnosis.get("seed_start", 5200))
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"checkpoint_diagnosis episodes/seed_start must be integers: "
+                f"{error}"
+            ) from error
+        if episodes <= 0:
+            raise ValueError("checkpoint_diagnosis episodes must be positive")
+    if not cfg.info_dict_eval and (
+        cfg.performance_gate is not None or cfg.final_info_eval
+    ):
+        raise ValueError(
+            "performance_gate and final_info_eval require info_dict_eval"
+        )
+    if cfg.performance_gate is not None:
+        if not isinstance(cfg.performance_gate, Mapping):
+            raise TypeError(
+                f"performance_gate must be a mapping or None, got "
+                f"{cfg.performance_gate!r}"
+            )
+        unknown_gate_keys = sorted(
+            set(cfg.performance_gate) - PERFORMANCE_GATE_KEYS
+        )
+        if unknown_gate_keys:
+            # A typo'd gate key was previously a silent no-op --
+            # exactly the failure class this repo bans.
+            raise ValueError(
+                f"unknown performance_gate key(s) {unknown_gate_keys}"
+            )
+        missing_gate_keys = [
+            key
+            for key in _PERFORMANCE_GATE_REQUIRED_KEYS
+            if key not in cfg.performance_gate
+        ]
+        if missing_gate_keys:
+            raise ValueError(
+                f"performance_gate must set {missing_gate_keys}"
+            )
+
+
 def _validate_monitor_info_keywords(cfg: TrainConfig) -> tuple[str, ...]:
     """The training ``Monitor``'s extra columns, checked against the env.
 
@@ -1047,6 +1205,59 @@ def _validate_monitor_info_keywords(cfg: TrainConfig) -> tuple[str, ...]:
             f"at the first episode end; scalar keys: {sorted(available)}"
         )
     return keywords
+
+
+def _same_reset_options(first: Mapping[str, Any], second: Mapping[str, Any]) -> bool:
+    """Equality of two option mappings; incomparable values count as distinct.
+
+    ``==`` on mappings holding numpy arrays raises (ambiguous truth
+    value), and an extra probe reset is harmless, so "unsure" means
+    "distinct".
+    """
+    try:
+        return bool(first == second)
+    except (TypeError, ValueError):
+        return False
+
+
+def _validate_eval_reset_options(cfg: TrainConfig, eval_seed: int | None) -> None:
+    """Reset a throwaway evaluation env once per distinct reset option.
+
+    ``_validate_evaluation_config`` only checks the options' shape; which
+    keys and values are valid is decided inside the env's ``reset``. An
+    invalid entry (``serve_side="c"``, a misspelled key) therefore passed
+    pre-flight, wrote ``config.json``, and crashed ``model.learn()`` at
+    the first evaluation. Mirror the paired reset (the resolved eval
+    seed plus the options) on a fresh instance of the evaluation factory
+    -- not the real evaluation envs, whose streams stay untouched -- so
+    such an entry fails before any output is written.
+
+    An env whose ``reset`` ignores ``options`` (BallBalance, WallBall)
+    accepts any mapping here: whether a key means anything is not
+    observable from outside the env, and refusing would need a per-env
+    option schema. Envs that take options (PaddleTennis, the humanoid
+    tennis envs) reject unknown keys and bad values themselves.
+    """
+    if cfg.eval_reset_options is None or eval_seed is None:
+        return
+    distinct: list[dict[str, Any]] = []
+    for options in _reset_options_tuple(cfg.eval_reset_options):
+        if not any(_same_reset_options(options, seen) for seen in distinct):
+            distinct.append(options)
+    env = (cfg.eval_env_fn or cfg.env_fn)()
+    try:
+        for options in distinct:
+            try:
+                env.reset(seed=eval_seed, options=dict(options))
+            except Exception as error:
+                raise ValueError(
+                    f"eval_reset_options entry {options!r}: the evaluation "
+                    f"env's paired reset (seed={eval_seed}) raised "
+                    f"{error!r}, so every paired evaluation would crash, "
+                    f"the first one after config.json is written"
+                ) from error
+    finally:
+        env.close()
 
 
 def _has_data_rows(path: str) -> bool:
@@ -1619,6 +1830,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     _validate_model_kwargs(cfg.algo, cfg.model_kwargs)
     _check_required_device(cfg)
     _validate_evaluation_config(cfg)
+    _validate_callback_config(cfg)
     env_attr_schedule_callbacks = tuple(
         LinearEnvAttrScheduleCallback(**dict(schedule))
         for schedule in cfg.env_attr_schedules
@@ -1632,8 +1844,15 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     warm_start_artifacts = _prepare_warm_start(cfg)
     monitor_info_keywords = _validate_monitor_info_keywords(cfg)
     resolved_eval_seed = resolve_eval_seed(cfg)
+    _validate_eval_reset_options(cfg, resolved_eval_seed)
     # Last pre-output check: a refusal leaves the directory untouched,
-    # and an opted-in rotation only happens once everything else passed.
+    # and an opted-in rotation only happens once every config-only check
+    # above passed (algo, model kwargs, device, evaluation, eval-stream,
+    # diagnosis and gate settings, warm start, monitor keys, reset
+    # options), so a misconfigured retry cannot strand the previous
+    # attempt. Checks that need the constructed evaluators (the
+    # selection-metric probe, the gate callback's value checks) and the
+    # ladder certification still run after config.json is written.
     _check_log_dir_reuse(cfg)
 
     os.makedirs(cfg.log_dir, exist_ok=True)
@@ -1763,40 +1982,13 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             cfg.verbose if cfg.eval_verbose is None else cfg.eval_verbose
         )
 
-        reward_eval_episodes = cfg.n_eval_episodes
-        if cfg.reward_eval_episodes is not None:
-            if (
-                isinstance(cfg.reward_eval_episodes, bool)
-                or not isinstance(cfg.reward_eval_episodes, int)
-                or cfg.reward_eval_episodes < 1
-            ):
-                raise ValueError(
-                    "reward_eval_episodes must be a positive integer"
-                )
-            if not headline_selection:
-                raise ValueError(
-                    "reward_eval_episodes requires headline-metric "
-                    "selection (info_dict_eval + headline_key): without "
-                    "it the reward eval stream owns best-model selection "
-                    "and must keep the full n_eval_episodes"
-                )
-            reward_eval_episodes = cfg.reward_eval_episodes
-
-        if cfg.final_eval_episodes is not None:
-            if (
-                isinstance(cfg.final_eval_episodes, bool)
-                or not isinstance(cfg.final_eval_episodes, int)
-                or cfg.final_eval_episodes < 1
-            ):
-                raise ValueError(
-                    "final_eval_episodes must be a positive integer"
-                )
-            if not (cfg.info_dict_eval and cfg.final_info_eval):
-                raise ValueError(
-                    "final_eval_episodes requires info_dict_eval and "
-                    "final_info_eval: it sizes the final-config eval "
-                    "stream, which only exists when both are on"
-                )
+        # Validated (with final_eval_episodes) by the pre-flight
+        # _validate_callback_config.
+        reward_eval_episodes = (
+            cfg.n_eval_episodes
+            if cfg.reward_eval_episodes is None
+            else cfg.reward_eval_episodes
+        )
 
         # The reward EvalCallback and the final-config info-eval stream
         # roll the SAME distribution (the recipe's eval_env_overrides --
@@ -1807,9 +1999,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         # a strict superset. Retire the duplicate pass and hand it
         # evaluations.npz -- one env and one rollout fewer per eval, and
         # the goal-task curve stops being a 5-episode estimate.
-        merge_reward_eval_into_final = bool(
-            headline_selection and cfg.info_dict_eval and cfg.final_info_eval
-        )
+        merge_reward_eval_into_final = _merges_reward_eval_into_final(cfg)
         final_eval_episodes = cfg.final_eval_episodes
         if final_eval_episodes is None:
             if merge_reward_eval_into_final:
@@ -1895,19 +2085,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 )
             )
         if cfg.checkpoint_diagnosis is not None:
+            # Keys and checkpoint_freq validated by the pre-flight
+            # _validate_callback_config.
             diagnosis_cfg = dict(cfg.checkpoint_diagnosis)
-            unknown_keys = set(diagnosis_cfg) - {"episodes", "seed_start"}
-            if unknown_keys:
-                raise ValueError(
-                    "checkpoint_diagnosis has unknown keys "
-                    f"{sorted(unknown_keys)}; allowed: episodes, "
-                    "seed_start"
-                )
-            if cfg.checkpoint_freq <= 0:
-                raise ValueError(
-                    "checkpoint_diagnosis requires checkpoint_freq > 0 "
-                    "(it runs at checkpoint cadence)"
-                )
             from courtside_dynamics.training.paddle_diagnosis import (
                 DiagnosisProbeCallback,
             )
@@ -2070,18 +2250,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             callbacks.append(info_eval_callback)
             if cfg.performance_gate is not None:
                 # Ordered after the info-eval callback so a trigger sees
-                # that same trigger's fresh metrics.
+                # that same trigger's fresh metrics. Unknown and missing
+                # keys were refused by the pre-flight
+                # _validate_callback_config.
                 gate_spec = dict(cfg.performance_gate)
-                unknown_gate_keys = sorted(
-                    set(gate_spec) - PERFORMANCE_GATE_KEYS
-                )
-                if unknown_gate_keys:
-                    # A typo'd gate key was previously a silent no-op --
-                    # exactly the failure class this repo bans.
-                    raise ValueError(
-                        f"unknown performance_gate key(s) "
-                        f"{unknown_gate_keys}"
-                    )
                 gate_callback = PerformanceGatedEnvStagesCallback(
                     stages=gate_spec["stages"],
                     metric_key=gate_spec["metric_key"],
@@ -2176,21 +2348,20 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                         # callback's log_prefix keeps the two lines
                         # apart in the cell output.
                         verbose=eval_verbose,
-                        # Paired too, on its own seed block (see
-                        # FINAL_INFO_EVAL_SEED_OFFSET).
-                        eval_seed=(
-                            None
-                            if resolved_eval_seed is None
-                            else resolved_eval_seed
-                            + FINAL_INFO_EVAL_SEED_OFFSET
-                        ),
-                        eval_reset_options=cfg.eval_reset_options,
+                        # Deliberately unpaired (no eval_seed, hence no
+                        # reset options): pairing is for the matched
+                        # stream's eval-to-eval comparisons, while this
+                        # stream is the unbiased final-config estimate
+                        # and must draw fresh episodes every evaluation
+                        # (docs/DECISIONS.md, "Unpaired evaluation is
+                        # the root of the gate noise"; review
+                        # rl_pipeline_review_20260828 section 2.8).
+                        eval_seed=None,
+                        eval_reset_options=None,
                     )
                 )
-        elif cfg.performance_gate is not None or cfg.final_info_eval:
-            raise ValueError(
-                "performance_gate and final_info_eval require info_dict_eval"
-            )
+        # (performance_gate / final_info_eval without info_dict_eval were
+        # refused by the pre-flight _validate_callback_config.)
         callbacks.extend(env_attr_schedule_callbacks)
         callbacks.extend(cfg.extra_callbacks)
 
