@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -36,7 +37,7 @@ _GUARDED_TOOLS = {
     "paddle_tennis_npoint_probe": ((4300, 4399), (5400, 5499)),
     "paddle_tennis_postswing_target_probe": ((5200, 5299),),
     "paddle_tennis_reach_probe": ((5500, 5599),),
-    "paddle_tennis_k2_harvest": (),
+    "paddle_tennis_k2_harvest": ((9030, 9099),),
     "paddle_tennis_shaping_probe": ((5300, 5399),),
     "paddle_tennis_volley_probe": ((5100, 5199),),
     "paddle_tennis_diagnosis_probe": ((5200, 5299),),
@@ -60,13 +61,17 @@ def test_ledger_blocks_are_sorted_disjoint_and_cited():
         assert block.note
         previous_high = block.high
     source = Path(_seed_ledger.__file__).read_text()
-    # Every DECISIONS-booked block is cited by its DECISIONS line.
+    # Every DECISIONS-booked block is cited by its DECISIONS line, and
+    # the recorded scratch consumption by the docs that record it.
     for citation in (
         "DECISIONS.md:554",
         "DECISIONS.md:420",
         "DECISIONS.md:285",
         "DECISIONS.md:125",
         "DECISIONS.md:126",
+        "design_paddle_tennis_k2_drill.md section 7",
+        "paddle_tennis_prefreeze_diagnostics_20260830.md",
+        "design_paddle_tennis_demo_injection.md section 7",
     ):
         assert citation in source
 
@@ -104,6 +109,59 @@ def test_ledger_is_the_union_of_the_former_tool_tables():
     # remainder is still free scratch).
     assert {(6400, 6499), (9200, 9269)} <= ledger
     assert all(not (b.low <= 9270 <= b.high) for b in RESERVED_BLOCKS)
+    # Plus the 9000-9199 scratch block's recorded consumption the tool
+    # tables missed (k2 drill design section 7): the registered harvest,
+    # the LH1c cross-check harvest and the arm-(c) roll-in.
+    assert {(9030, 9099), (9148, 9167), (9168, 9187)} <= ledger
+
+
+#: The design docs' seed-ledger sections that record scratch
+#: consumption, with the ranges each names that are NOT wholly held:
+#: the scratch bookings themselves (partly consumed) and the
+#: unconsumed remainders (which must stay wholly free).
+_SCRATCH_LEDGER_SECTIONS = {
+    "design_paddle_tennis_k2_drill.md": (
+        "## 7. Seed ledger",
+        {"bookings": {(9000, 9199), (9200, 9299)}, "free": {(9188, 9199)}},
+    ),
+    "paddle_tennis_prefreeze_diagnostics_20260830.md": (
+        "## Seed ledger",
+        {"bookings": {(9000, 9199), (9200, 9299)}, "free": {(9188, 9199)}},
+    ),
+    "design_paddle_tennis_demo_injection.md": (
+        "## 7. Seed ledger",
+        {"bookings": set(), "free": {(9188, 9199), (9270, 9299)}},
+    ),
+}
+
+
+@pytest.mark.parametrize("doc", sorted(_SCRATCH_LEDGER_SECTIONS))
+def test_ledger_holds_every_range_the_scratch_ledgers_record(doc):
+    """Every seed range a scratch-consuming design doc's seed ledger
+    names is held by the ledger, unless it is a booking or a named
+    unconsumed remainder -- which must then be wholly free. The docs
+    record consumption; this keeps the guard from drifting behind them
+    (9030-9099, 9148-9167 and 9168-9187 once had)."""
+    heading, expected = _SCRATCH_LEDGER_SECTIONS[doc]
+    text = (REPOSITORY_ROOT / "docs" / doc).read_text()
+    assert heading in text
+    section = text.split(heading, 1)[1].split("\n## ", 1)[0]
+    ranges = {
+        (int(low), int(high))
+        for low, high in re.findall(r"\b(\d{4})\s*[–-]\s*(\d{4})\b", section)
+    }
+    held = {
+        seed
+        for block in RESERVED_BLOCKS
+        for seed in range(block.low, block.high + 1)
+    }
+    assert expected["free"] <= ranges, "a named remainder vanished"
+    for low, high in sorted(ranges):
+        seeds = set(range(low, high + 1))
+        if (low, high) in expected["free"]:
+            assert not seeds & held, f"{low}-{high} is unconsumed scratch"
+        elif (low, high) not in expected["bookings"]:
+            assert seeds <= held, f"{doc} records {low}-{high}; ledger misses it"
 
 
 @pytest.mark.parametrize(
@@ -115,6 +173,10 @@ def test_ledger_is_the_union_of_the_former_tool_tables():
         (4050, 200, "4000-4099"),  # a span covering whole blocks
         (6300, 1, "6300-6399"),  # the burned block the hold probe missed
         (9147, 1, "9147-9147"),  # a single-seed block
+        (9030, 70, "9030-9099"),  # the registered library, unallowed
+        (9148, 1, "9148-9167"),  # the LH1c cross-check harvest
+        (9187, 1, "9168-9187"),  # the arm-(c) roll-in's last seed
+        (9180, 12, "9168-9187"),  # straddles into the free remainder
     ],
 )
 def test_refuse_reserved_exits_on_any_overlap(seed_start, episodes, block):
@@ -128,7 +190,7 @@ def test_refuse_reserved_exits_on_any_overlap(seed_start, episodes, block):
         (2900, 100),  # ends at 2999, one short of 3000-3099
         (3200, 800),  # the 3200-3999 gap exactly
         (6500, 2500),  # 6500-8999, between the battery and the scratch
-        (9030, 70),  # the registered k=2 library's reproduction range
+        (9188, 12),  # the 9000-9199 scratch block's unconsumed remainder
         (9270, 30),  # the unconsumed D-G scratch remainder
         (4100, 0),  # an empty span draws no seed
     ],
@@ -295,6 +357,41 @@ def test_older_probes_refuse_the_sealed_gate(monkeypatch, module_name, argv, bat
     monkeypatch.setattr(module, battery, _fail_if_reached)
     with pytest.raises(SystemExit, match="4100-4199"):
         module.main(argv)
+
+
+def test_k2_harvest_reproduces_only_its_own_library(monkeypatch, tmp_path):
+    """The harvest's default (9030, 70 episodes) reproduces the
+    registered library from its own consumed block -- the one allowance
+    -- while every other consumed scratch range, and a span spilling out
+    of the allowed block, is refused before any checkpoint loads."""
+    from tools import paddle_tennis_k2_harvest as harvest_tool
+
+    harvested = []
+
+    def fake_harvest(model, vec_normalize, seed_start, episodes, steps):
+        harvested.append((seed_start, episodes))
+        return {"entries": []}
+
+    monkeypatch.setattr(harvest_tool, "harvest", fake_harvest)
+    base = ["--model", "m.zip", "--vec-normalize", "v.pkl"]
+    base += ["--out", str(tmp_path / "library.pkl")]
+    harvest_tool.main(base)
+    assert harvested == [(9030, 70)]
+    harvest_tool.main(base + ["--seed-start", "9188", "--episodes", "12"])
+    assert harvested[-1] == (9188, 12)
+
+    monkeypatch.setattr(harvest_tool, "harvest", _fail_if_reached)
+    for seed_start, episodes, block in (
+        (9148, 20, "9148-9167"),  # the LH1c cross-check harvest
+        (9168, 20, "9168-9187"),  # the arm-(c) roll-in
+        (9025, 70, "9000-9029"),  # spills below the allowed block
+        (9090, 20, "9100-9146"),  # spills above it
+        (5200, 30, "5200-5299"),  # the diagnosis calibration block
+    ):
+        argv = base + ["--seed-start", str(seed_start)]
+        argv += ["--episodes", str(episodes)]
+        with pytest.raises(SystemExit, match=block):
+            harvest_tool.main(argv)
 
 
 def test_hold_probe_script_refuses_the_block_it_used_to_accept():

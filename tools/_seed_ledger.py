@@ -8,17 +8,22 @@ block table; the copies drifted to 2/5/7/8/18 entries and one burned
 block (6300-6399) slipped through the hold probe's guard
 (``docs/rl_pipeline_review_20260828.md`` section 3, "Seed-ledger drift
 across probes"). This module is now the single source of truth: the
-union of those five tables plus the blocks booked in
-``docs/DECISIONS.md``, keeping only blocks that are reserved or
-consumed today (a booked scratch range's unconsumed remainder stays
-free scratch).
+union of those five tables, the blocks booked in ``docs/DECISIONS.md``,
+and the scratch consumption the design docs' seed ledgers record
+(``design_paddle_tennis_k2_drill.md`` section 7,
+``paddle_tennis_prefreeze_diagnostics_20260830.md``,
+``design_paddle_tennis_demo_injection.md`` section 7), keeping only
+blocks that are reserved or consumed today. A booked scratch range's
+unconsumed remainder stays free scratch: today 9188-9199 and
+9270-9299.
 
 A tool refuses through :func:`refuse_reserved`. Drawing from a ledger
 block is sanctioned only where a tool names it in ``allow``: a probe
 re-running on its own calibration block (to reproduce the numbers it
 burned the block for), a diagnosis tool on the shared calibration
-block, or a certification's single sanctioned opening of its reserved
-block. A new booking is one entry here plus its citation.
+block, a harvest reproducing the library it consumed the block for,
+or a certification's single sanctioned opening of its reserved block.
+A new booking or consumption is one entry here plus its citation.
 """
 from __future__ import annotations
 
@@ -98,11 +103,21 @@ RESERVED_BLOCKS: tuple[SeedBlock, ...] = (
     # pool on 2026-08-30 (the closed command-rate design's CR2 block,
     # DECISIONS.md:209); the later D-G booking re-reserved it.
     SeedBlock(6400, 6499, "LD1' battery (booked, unconsumed)"),
-    # design_paddle_tennis_k2_drill.md section 7 -- consumed entries of
-    # the 9000-9199 scratch block; k2_harvest.
+    # design_paddle_tennis_k2_drill.md section 7 -- the 9000-9199
+    # scratch block's recorded consumption (all 2026-08-30); 9000-9029,
+    # 9100-9146 and 9147 came from k2_harvest's table. Only 9188-9199
+    # is unconsumed, deliberately not held here.
     SeedBlock(9000, 9029, "k=2 drill feasibility probe (consumed scratch)"),
+    # Section 3a's registered library's source episodes. k2_harvest's
+    # default reproduces that library, so it alone is allowed here.
+    SeedBlock(9030, 9099, "registered k=2 harvest library (consumed scratch)"),
     SeedBlock(9100, 9146, "k=2 drill review probes (consumed scratch)"),
     SeedBlock(9147, 9147, "k=2 step-0 replay reset seed (consumed scratch)"),
+    # Section 3a's simplification-confound cross-check library.
+    SeedBlock(9148, 9167, "LH1c cross-check harvest (consumed scratch)"),
+    # paddle_tennis_prefreeze_diagnostics_20260830.md "Seed ledger"
+    # (and k2_drill section 7) -- the arm-(c) roll-in, 20 episodes.
+    SeedBlock(9168, 9187, "arm-(c) roll-in probe (consumed scratch)"),
     # docs/DECISIONS.md:126 -- (D-G) books the 9200-9299 scratch
     # extension; design_paddle_tennis_demo_injection.md section 7
     # records 9200-9269 consumed by the demo harvest. The remainder
