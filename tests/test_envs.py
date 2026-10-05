@@ -48,11 +48,49 @@ ENV_CLASSES_WITH_KWARGS = [
 ]
 
 
+def _seeded_reset(env, seed=0):
+    """``env.reset(seed=seed)`` with the action space seeded to match.
+
+    ``reset(seed=...)`` seeds the env's own RNG only: the action space
+    keeps a separate, unseeded generator, so ``action_space.sample()``
+    rollouts drew different actions on every run and a NaN one of them
+    found could never be replayed (2026-08-28 review section 3).
+    """
+    result = env.reset(seed=seed)
+    env.action_space.seed(seed)
+    return result
+
+
+@pytest.mark.parametrize("env_cls,kwargs", ENV_CLASSES_WITH_KWARGS)
+def test_random_rollouts_replay_exactly(env_cls, kwargs):
+    """Two runs of the random-rollout procedure draw the same actions
+    and observations, so any failure they find is reproducible."""
+
+    def rollout():
+        env = env_cls(**kwargs)
+        try:
+            obs, _ = _seeded_reset(env)
+            actions, observations = [], [obs]
+            for _ in range(5):
+                action = env.action_space.sample()
+                obs, *_ = env.step(action)
+                actions.append(action)
+                observations.append(obs)
+            return np.stack(actions), np.stack(observations)
+        finally:
+            env.close()
+
+    first_actions, first_observations = rollout()
+    second_actions, second_observations = rollout()
+    assert np.array_equal(first_actions, second_actions)
+    assert np.array_equal(first_observations, second_observations)
+
+
 @pytest.mark.parametrize("env_cls,kwargs", ENV_CLASSES_WITH_KWARGS)
 def test_env_constructs_and_steps(env_cls, kwargs):
     env = env_cls(**kwargs)
     try:
-        obs, info = env.reset(seed=0)
+        obs, info = _seeded_reset(env)
         assert obs.shape == env.observation_space.shape
         for _ in range(5):
             action = env.action_space.sample()
@@ -80,7 +118,7 @@ def test_env_passes_sb3_check_env(env_cls):
 def test_random_rollout_runs_without_nan(env_cls):
     env = env_cls()
     try:
-        env.reset(seed=0)
+        _seeded_reset(env)
         for _ in range(200):
             action = env.action_space.sample()
             obs, reward, terminated, truncated, info = env.step(action)
@@ -110,7 +148,7 @@ def test_random_rollout_produces_some_reward(env_cls, kwargs):
     """
     env = env_cls(**kwargs)
     try:
-        env.reset(seed=0)
+        _seeded_reset(env)
         total = 0.0
         for _ in range(2_000):
             action = env.action_space.sample()
@@ -490,6 +528,71 @@ def test_smoke_wheel_floor_matches_the_registry():
     from tools.smoke_wheel import MIN_EXPECTED_ENV_COUNT, _registered_env_ids
 
     assert len(_registered_env_ids()) == MIN_EXPECTED_ENV_COUNT
+
+
+def _k2_snapshot_after_a_completed_point():
+    """A ``tools/paddle_tennis_k2_harvest.py`` snapshot taken mid-rally in
+    the episode's second point (``crossings_base > 0``), plus the live
+    env it came from and the observation it was taken on. Seed 1000 is
+    in the burned bring-up block; side A rallies to two crossings,
+    concedes the point as a statue, then rallies again."""
+    from courtside_dynamics.envs._paddle_court import (
+        scripted_ground_opponent,
+        scripted_statue_witness,
+    )
+    from tools.paddle_tennis_k2_harvest import _snapshot_env
+    from tools.paddle_tennis_k2_step0 import _make_env
+
+    env = _make_env()
+    obs, _ = env.reset(seed=1000)
+    for _ in range(1500):
+        conceding = env._crossings >= 2 and env._points_played == 0
+        policy = scripted_statue_witness if conceding else scripted_ground_opponent
+        obs, _, terminated, truncated, _ = env.step(policy(obs))
+        assert not (terminated or truncated)
+        if env._points_played >= 1 and env._crossings > env._crossings_base:
+            return env, obs, _snapshot_env(env, obs)
+    raise AssertionError("no mid-rally instant after a completed point")
+
+
+def test_k2_step0_full_restore_keeps_the_crossings_counter_continuous():
+    """The step-0 tool's full-context arm restores the harvested instant
+    exactly -- including the step-time crossings formula's continuity
+    offset. Restoring ``_crossings`` and ``_crossings_base`` alone left
+    ``_crossings_offset`` at reset's 0, so the first replayed step
+    dropped the episode counter by every crossing of the completed
+    points."""
+    from courtside_dynamics.envs._paddle_court import scripted_ground_opponent
+    from tools.paddle_tennis_k2_step0 import _launch_full, _make_env
+
+    live, obs, entry = _k2_snapshot_after_a_completed_point()
+    replay = _make_env()
+    legacy = _make_env()
+    try:
+        assert entry["crossings_base"] > 0
+        assert entry["crossings_offset"] == live._crossings_offset
+        action = scripted_ground_opponent(obs)
+        _, _, _, _, live_info = live.step(action)
+
+        replay.reset(seed=1000)
+        _launch_full(replay, entry)
+        assert replay._crossings_offset == entry["crossings_offset"]
+        _, _, _, _, replay_info = replay.step(action)
+        assert replay_info["crossings"] == live_info["crossings"]
+        assert replay_info["crossings"] >= entry["crossings"]
+
+        # A library harvested before the snapshot recorded the offset
+        # came from a drill-off env, where it equals crossings_base.
+        old_entry = {k: v for k, v in entry.items() if k != "crossings_offset"}
+        legacy.reset(seed=1000)
+        _launch_full(legacy, old_entry)
+        assert legacy._crossings_offset == entry["crossings_base"]
+        _, _, _, _, legacy_info = legacy.step(action)
+        assert legacy_info["crossings"] == live_info["crossings"]
+    finally:
+        live.close()
+        replay.close()
+        legacy.close()
 
 
 @pytest.mark.parametrize("env_cls", ENV_CLASSES)

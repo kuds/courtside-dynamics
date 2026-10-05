@@ -52,17 +52,25 @@ from courtside_dynamics.envs._paddle_court import (
 )
 from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
 
+try:
+    from tools._seed_ledger import refuse_reserved
+except ModuleNotFoundError:  # run as a script: tools/ itself is on sys.path
+    from _seed_ledger import refuse_reserved  # type: ignore[no-redef]
+
 #: Reserved for this probe (docs/design_paddle_tennis_reach_shaping.md
 #: §3): fresh calibration block. 5200-5299 is the diagnosis block,
 #: 5300-5399 the contact-shaping block, 5400-5499 the n-point block;
 #: 4100-4199 and 4300-4399 stay reserved.
 PROBE_SEED_START = 5500
 PROBE_EPISODES = 100
+#: The RS1 block this probe burned: re-running on it reproduces the
+#: booked battery. Every other ledger block (tools/_seed_ledger.py) is
+#: refused.
+_OWN_BLOCK = (5500, 5599)
 REACH = 0.25
 RADIUS = 3.0
 
 _IDENTITY_TOL = 1e-9
-_RESERVED_BLOCKS = ((4100, 4199), (4300, 4399), (5200, 5299), (5300, 5399), (5400, 5499))
 
 
 # The statue and off-line camper are frozen scripted witnesses in
@@ -161,22 +169,12 @@ def _run_witness(
         unshaped.close()
 
 
-def _refuse_reserved(seed_start: int, episodes: int) -> None:
-    span = range(seed_start, seed_start + episodes)
-    for low, high in _RESERVED_BLOCKS:
-        if any(low <= seed <= high for seed in span):
-            raise SystemExit(
-                f"seed range [{seed_start}, {seed_start + episodes}) intersects "
-                f"reserved/burned block {low}-{high}; refuse to run"
-            )
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--episodes", type=int, default=PROBE_EPISODES)
     parser.add_argument("--seed-start", type=int, default=PROBE_SEED_START)
     args = parser.parse_args()
-    _refuse_reserved(args.seed_start, args.episodes)
+    refuse_reserved(args.seed_start, args.episodes, allow=(_OWN_BLOCK,))
 
     witnesses: list[tuple[str, Callable[[np.ndarray], np.ndarray], bool]] = [
         ("statue", scripted_statue_witness, False),

@@ -176,6 +176,13 @@ def run_cell(
 
 def evaluate_criteria(cells: dict[tuple[str, str], CellResult]) -> list[str]:
     """Apply the pre-registered adoption criteria; return verdict lines."""
+    return adoption_verdict(cells)[0]
+
+
+def adoption_verdict(
+    cells: dict[tuple[str, str], CellResult],
+) -> tuple[list[str], bool]:
+    """The verdict lines plus the overall ADOPT (True) / DO NOT ADOPT."""
     lines = []
     kill_ok = True
     for player in ("volley", "patting"):
@@ -234,7 +241,7 @@ def evaluate_criteria(cells: dict[tuple[str, str], CellResult]) -> list[str]:
             else "DO NOT ADOPT -- record and diagnose"
         )
     )
-    return lines
+    return lines, bool(verdict)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -278,9 +285,12 @@ def main(argv: list[str] | None = None) -> int:
     for key in sorted(cells):
         print(cells[key].row())
     print()
-    for line in evaluate_criteria(cells):
+    lines, verdict = adoption_verdict(cells)
+    for line in lines:
         print(line)
-    return 0
+    # DO NOT ADOPT is the battery's FAIL: automation gating on the exit
+    # status must not read it as a pass.
+    return 0 if verdict else 1
 
 
 if __name__ == "__main__":

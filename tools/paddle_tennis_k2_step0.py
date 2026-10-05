@@ -132,6 +132,12 @@ def _launch_full(env: PaddleTennisEnv, entry: dict) -> np.ndarray:
     env.step_number = entry["step_number"]
     env._crossings = entry["crossings"]
     env._crossings_base = entry["crossings_base"]
+    # The step-time crossings formula adds this continuity offset, not
+    # _crossings_base; left at reset's 0 the first replayed step drops
+    # the counter by the snapshot's offset. Libraries harvested before
+    # the snapshot recorded it come from a drill-off env, where the
+    # offset equals crossings_base by construction.
+    env._crossings_offset = entry.get("crossings_offset", entry["crossings_base"])
     env._points_played = entry["points_played"]
     env._pending_shaping = entry["pending_shaping"]
     env._pending_reach = entry["pending_reach"]
