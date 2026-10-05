@@ -1281,6 +1281,17 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
                 ),
                 "episode_rally_returns_a": float(self._episode_rally_returns_a),
                 "contact_depth_a": float(contact_depth_a),
+                # The summed contact depth of the episode's side-A
+                # legal hits. Over a batch of episodes, its total
+                # divided by the episode_legal_hit_count_a total is
+                # the hit-weighted mean depth. The per-episode mean
+                # below reads a 0.0 SENTINEL until the episode's first
+                # legal hit (so a hitless episode ends on 0.0), and
+                # averaging it across episodes dilutes the depth with
+                # every hitless one.
+                "episode_contact_depth_sum_a": float(
+                    self._episode_contact_depth_sum_a
+                ),
                 "episode_mean_contact_depth_a": (
                     self._episode_contact_depth_sum_a / self._episode_legal_hits_a
                     if self._episode_legal_hits_a

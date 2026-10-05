@@ -359,8 +359,13 @@ def test_paddle_tennis_recipe_selects_on_policy_rally_conversions(tmp_path):
         "episode_rally_returns_a",
         "episode_deep_returns_a",
         "episode_mean_contact_depth_a",
+        # The undiluted numerator of the batch's hit-weighted mean
+        # depth (sum _ep_mean / legal-hit _ep_mean): the per-episode
+        # mean reads a 0.0 sentinel on hitless episodes.
+        "episode_contact_depth_sum_a",
     ):
         assert key in _PADDLE_TENNIS_TERMINAL_EVAL_KEYS
+    assert "episode_contact_depth_sum_a" in _PADDLE_TENNIS_CSV_HEADER
     assert "contact_depth_a" not in _PADDLE_TENNIS_TERMINAL_EVAL_KEYS
     assert "episode_rally_returns_a" in cfg.info_eval_distribution_keys
     _validate_evaluation_config(cfg)

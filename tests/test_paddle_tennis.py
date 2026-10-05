@@ -826,6 +826,7 @@ class TestEpisodePolicyCounters:
             assert info["episode_rally_returns_a"] == rally
             assert info["episode_deep_returns_a"] == deep
             assert info["contact_depth_a"] == (depths[-1] if depths else 0.0)
+            assert info["episode_contact_depth_sum_a"] == depth_sum
             assert info["episode_mean_contact_depth_a"] == (
                 depth_sum / legal if legal else 0.0
             )
@@ -881,9 +882,49 @@ class TestEpisodePolicyCounters:
             assert touches > 0
             assert info["episode_legal_hit_count_a"] == 0.0
             assert info["episode_valid_return_count_a"] == 0.0
+            assert info["episode_contact_depth_sum_a"] == 0.0
             assert info["episode_mean_contact_depth_a"] == 0.0
         finally:
             env.close()
+
+    def test_contact_depth_sum_gives_the_hit_weighted_batch_mean(self):
+        """episode_mean_contact_depth_a reads a 0.0 sentinel on a
+        hitless episode, so its across-episode mean (the eval
+        callback's terminal _ep_mean) is diluted by every hitless
+        episode in the batch. episode_contact_depth_sum_a's _ep_mean
+        over episode_legal_hit_count_a's _ep_mean is the hit-weighted
+        mean depth the recipe points readers to."""
+        env = PaddleTennisEnv(**_RECIPE_KWARGS)
+        try:
+            hitter, _ = self._recount(env, _SMOKE_SEEDS[0])
+            # The lead-charge volleyer's every touch faults (measured
+            # on this seed in test_fault_touches_are_not_legal_hits).
+            obs, _ = env.reset(seed=1003)
+            while True:
+                obs, _r, term, trunc, hitless = env.step(
+                    scripted_lead_charge_opponent(obs)
+                )
+                if term or trunc:
+                    break
+        finally:
+            env.close()
+        assert hitless["episode_legal_hit_count_a"] == 0.0
+        assert hitless["episode_contact_depth_sum_a"] == 0.0
+        assert hitless["episode_mean_contact_depth_a"] == 0.0  # sentinel
+        hits = hitter["episode_legal_hit_count_a"]
+        depth = hitter["episode_mean_contact_depth_a"]
+        assert hits > 0
+        assert hitter["episode_contact_depth_sum_a"] == pytest.approx(depth * hits)
+
+        def ep_mean(key: str) -> float:
+            return (hitter[key] + hitless[key]) / 2
+
+        weighted = ep_mean("episode_contact_depth_sum_a") / ep_mean(
+            "episode_legal_hit_count_a"
+        )
+        assert weighted == pytest.approx(depth)
+        # The sentinel halves the per-episode mean's batch average.
+        assert ep_mean("episode_mean_contact_depth_a") == pytest.approx(depth / 2)
 
     def test_deep_returns_respond_to_the_depth_threshold(self):
         totals = {}
@@ -918,6 +959,7 @@ class TestEpisodePolicyCounters:
                     "episode_legal_hit_count_a",
                     "episode_valid_return_count_a",
                     "episode_rally_returns_a",
+                    "episode_contact_depth_sum_a",
                     "episode_mean_contact_depth_a",
                     "episode_deep_returns_a",
                 )
