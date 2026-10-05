@@ -64,6 +64,11 @@ from courtside_dynamics.envs.tennis_rules import (
     TerminationReason,
 )
 
+try:
+    from tools._seed_ledger import refuse_reserved
+except ModuleNotFoundError:  # run as a script: tools/ itself is on sys.path
+    from _seed_ledger import refuse_reserved  # type: ignore[no-redef]
+
 #: Default control-frame budget per point: 12 s of simulated time at
 #: the 100 Hz control rate. A point that exhausts it shows up honestly
 #: in the taxonomy as termination NONE (truncated), never silently.
@@ -331,6 +336,9 @@ def sweep_serve_rules(
 #: >=1-crossing rate 0.97), before any reserved seed was drawn.
 CERTIFICATION_SEED_START = 4200
 CERTIFICATION_EPISODES = 100
+#: The ledger block ``--certify`` is sanctioned to open (the ground-era
+#: certification's reserved block); every other ledger block is refused.
+_CERT_BLOCK = (4200, 4299)
 #: Probe mean (7.04, same instrument as this certification) minus two
 #: combined sampling standard errors of two 100-episode means
 #: (2 x sqrt(2) x 0.396), rounded down.
@@ -497,6 +505,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     if args.certify:
+        refuse_reserved(
+            args.certify_seed_start,
+            args.certify_episodes,
+            allow=(_CERT_BLOCK,),
+        )
         result = certify_frozen_env(
             episodes=args.certify_episodes,
             seed_start=args.certify_seed_start,

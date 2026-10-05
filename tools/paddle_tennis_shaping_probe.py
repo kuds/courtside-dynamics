@@ -44,12 +44,21 @@ from courtside_dynamics.envs._paddle_court import (
 )
 from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
 
+try:
+    from tools._seed_ledger import refuse_reserved
+except ModuleNotFoundError:  # run as a script: tools/ itself is on sys.path
+    from _seed_ledger import refuse_reserved  # type: ignore[no-redef]
+
 #: Reserved for this probe (docs/design_paddle_tennis_contact_shaping.md
 #: §3): fresh calibration block; 5200+ is the diagnosis block and
 #: 4100-4199 stays reserved for the registered run's held-out gate.
 PROBE_SEED_START = 5300
 PROBE_EPISODES = 100
 SHAPING = 0.25
+#: The S1 calibration block this probe burned: re-running on it
+#: reproduces the booked battery. Every other ledger block (the shared
+#: tools/_seed_ledger.py) is refused.
+_OWN_BLOCK = (5300, 5399)
 
 _IDENTITY_TOL = 1e-9
 
@@ -238,6 +247,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--episodes", type=int, default=PROBE_EPISODES)
     parser.add_argument("--seed-start", type=int, default=PROBE_SEED_START)
     args = parser.parse_args(argv)
+    refuse_reserved(args.seed_start, args.episodes, allow=(_OWN_BLOCK,))
 
     results: dict[str, tuple[list[EpisodeRow], list[EpisodeRow]]] = {}
     for name, witness in WITNESSES:

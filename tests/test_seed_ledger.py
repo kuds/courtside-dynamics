@@ -2,9 +2,11 @@
 
 Both close the same 2026-08-28 review finding group (section 3,
 "Ladder envs + tools"): five probes carried drifted private copies of
-the reserved-block table (one accepted a burned block), and three
-probes printed a FAIL verdict yet exited 0, so automation gating on
-the exit status read a failed battery as a pass. No test here draws a
+the reserved-block table (one accepted a burned block), five older
+probes (shaping, volley, diagnosis, P5 transfer, and the serve-rules
+probes' --certify) had no guard at all, and three probes printed a
+FAIL verdict yet exited 0, so automation gating on the exit status read
+a failed battery as a pass. No test here draws a
 seed from any block: the refusal checks run before any env exists, and
 the exit-status checks replace the batteries with canned results.
 """
@@ -25,16 +27,26 @@ from tools._seed_ledger import RESERVED_BLOCKS, refuse_reserved
 REPOSITORY_ROOT = Path(__file__).parents[1]
 TOOLS_DIR = REPOSITORY_ROOT / "tools"
 
-#: Every tool that guards its --seed-start, with the ledger blocks it is
-#: sanctioned to draw from (its own burned calibration block, or the
-#: shared diagnosis block for the diagnosis-side probe).
+#: Every tool that guards its --seed-start, with every ledger block it
+#: is sanctioned to draw from (its own burned calibration block, the
+#: shared diagnosis block for the diagnosis-side probes, or a
+#: certification's single sanctioned opening of its reserved block).
 _GUARDED_TOOLS = {
     "paddle_tennis_hold_probe": ((6200, 6299),),
-    "paddle_tennis_npoint_probe": ((5400, 5499),),
+    "paddle_tennis_npoint_probe": ((4300, 4399), (5400, 5499)),
     "paddle_tennis_postswing_target_probe": ((5200, 5299),),
     "paddle_tennis_reach_probe": ((5500, 5599),),
     "paddle_tennis_k2_harvest": (),
+    "paddle_tennis_shaping_probe": ((5300, 5399),),
+    "paddle_tennis_volley_probe": ((5100, 5199),),
+    "paddle_tennis_diagnosis_probe": ((5200, 5299),),
+    "paddle_tennis_p5_transfer": ((5000, 5099),),
+    "paddle_tennis_probes": ((4200, 4299),),
 }
+
+#: The sealed registered-result gate: no tool may ever be sanctioned to
+#: draw from it.
+_SEALED_GATE = (4100, 4199)
 
 
 # --- the ledger itself ------------------------------------------------
@@ -171,21 +183,118 @@ def test_no_tool_defines_its_own_reserved_table_or_refusal():
     assert offenders == []
 
 
+def _passed_allowances(module, module_name: str) -> tuple[int, set]:
+    """The ``refuse_reserved`` call sites in a tool's source, and the
+    allowance blocks they pass, resolved against the imported module.
+
+    ``allow=`` must be a tuple of module-level names or literal pairs,
+    so the resolved values are exactly what the tool hands the ledger.
+    """
+    tree = ast.parse((TOOLS_DIR / f"{module_name}.py").read_text())
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "refuse_reserved"
+    ]
+    passed = set()
+    for call in calls:
+        for keyword in call.keywords:
+            if keyword.arg != "allow":
+                continue
+            assert isinstance(keyword.value, ast.Tuple), ast.dump(keyword.value)
+            for element in keyword.value.elts:
+                if isinstance(element, ast.Name):
+                    value = getattr(module, element.id)
+                else:
+                    value = ast.literal_eval(element)
+                passed.add(tuple(value))
+    return len(calls), passed
+
+
 @pytest.mark.parametrize(("module_name", "allowed"), sorted(_GUARDED_TOOLS.items()))
 def test_guarded_tools_refuse_through_the_shared_ledger(module_name, allowed):
-    """Import-level: each guarded tool's refusal IS the ledger's, and
-    every allowance it passes names a ledger block (the helper would
-    raise on an unknown one at the tool's first run)."""
+    """Import-level: each guarded tool's refusal IS the ledger's, and the
+    allowances its ``refuse_reserved`` calls actually pass (read from the
+    tool, not from this table) are exactly the expected ledger blocks --
+    never the sealed gate. A typo'd or widened allowance constant would
+    otherwise pass here and only surface when that tool path runs."""
     import importlib
 
     module = importlib.import_module(f"tools.{module_name}")
     assert module.refuse_reserved is refuse_reserved
     for name in ("RESERVED_BLOCKS", "_RESERVED_BLOCKS", "_REFUSED_BLOCKS"):
         assert getattr(module, name, None) is None, name
-    source = (TOOLS_DIR / f"{module_name}.py").read_text()
-    assert "refuse_reserved(" in source
+    calls, passed = _passed_allowances(module, module_name)
+    assert calls >= 1
     ledger = {(block.low, block.high) for block in RESERVED_BLOCKS}
-    assert set(allowed) <= ledger
+    assert passed == set(allowed)
+    assert passed <= ledger
+    assert _SEALED_GATE not in passed
+
+
+def test_allowance_check_reads_the_tool_constants(monkeypatch):
+    """The check above follows the tool's own constants: drifting one
+    (here to the sealed gate) is caught."""
+    import importlib
+
+    module = importlib.import_module("tools.paddle_tennis_hold_probe")
+    monkeypatch.setattr(module, "_OWN_BLOCK", _SEALED_GATE)
+    _calls, passed = _passed_allowances(module, "paddle_tennis_hold_probe")
+    assert passed == {_SEALED_GATE}
+
+
+def _fail_if_reached(*_args, **_kwargs):
+    raise AssertionError("the battery ran: the refusal did not fire first")
+
+
+@pytest.mark.parametrize(
+    ("module_name", "argv", "battery"),
+    [
+        (
+            "paddle_tennis_shaping_probe",
+            ["--seed-start", "4100", "--episodes", "1"],
+            "run_witness",
+        ),
+        (
+            "paddle_tennis_volley_probe",
+            ["--seed-start", "4150", "--quick"],
+            "run_cell",
+        ),
+        (
+            "paddle_tennis_diagnosis_probe",
+            ["--seed-start", "4199", "--episodes", "1"],
+            "run_player",
+        ),
+        (
+            "paddle_tennis_p5_transfer",
+            ["--seed-start", "4100", "--episodes", "1"],
+            "run_transfer",
+        ),
+        (
+            "paddle_tennis_probes",
+            [
+                "--certify",
+                "--certify-seed-start",
+                "4100",
+                "--certify-episodes",
+                "1",
+            ],
+            "certify_frozen_env",
+        ),
+    ],
+)
+def test_older_probes_refuse_the_sealed_gate(monkeypatch, module_name, argv, battery):
+    """The five older probes the 2026-08-28 review found unguarded refuse
+    a mistyped --seed-start into the sealed 4100-4199 gate before any
+    episode is drawn."""
+    import importlib
+
+    module = importlib.import_module(f"tools.{module_name}")
+    monkeypatch.setattr(module, battery, _fail_if_reached)
+    with pytest.raises(SystemExit, match="4100-4199"):
+        module.main(argv)
 
 
 def test_hold_probe_script_refuses_the_block_it_used_to_accept():

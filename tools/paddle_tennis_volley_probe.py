@@ -68,8 +68,17 @@ from courtside_dynamics.envs._paddle_court import (
 )
 from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
 
+try:
+    from tools._seed_ledger import refuse_reserved
+except ModuleNotFoundError:  # run as a script: tools/ itself is on sys.path
+    from _seed_ledger import refuse_reserved  # type: ignore[no-redef]
+
 PROBE_SEED_START = 5100
 PROBE_EPISODES = 100
+#: The ground-rules calibration block this probe burned: re-running on
+#: it reproduces the booked matrix. Every other ledger block (the
+#: shared tools/_seed_ledger.py) is refused.
+_OWN_BLOCK = (5100, 5199)
 
 PLAYERS: dict[str, Callable[[np.ndarray], np.ndarray]] = {
     "ground": scripted_ground_opponent,
@@ -262,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     episodes = 4 if args.quick else args.episodes
+    refuse_reserved(args.seed_start, episodes, allow=(_OWN_BLOCK,))
 
     cells: dict[tuple[str, str], CellResult] = {}
     for player in PLAYERS:
