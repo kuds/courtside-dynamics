@@ -501,7 +501,7 @@ The maintainer approved fixing every bug before the pilot.
 - **How it was built.** Three parallel implementers (env/rules,
   training infrastructure, notebooks/tools) and an integrator, followed
   by a six-lens adversarial review.
-  - 14 medium findings were verified by execution and fixed. The most
+  - 14 findings were verified by execution and fixed. The most
     important: paired evaluation had been switched on for every seeded
     run, the selection deltas were too coarse to see one conversion,
     and confirmation compared different seed blocks.
