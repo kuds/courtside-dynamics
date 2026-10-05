@@ -1565,11 +1565,13 @@ def test_campaign_fingerprint_adopts_late_keys_only_where_unrecorded():
 
 
 def _finished_leg(run_dir, *, status="completed", pair=True):
-    """A leg attempt dir as train() leaves it."""
-    (run_dir / "model").mkdir(parents=True)
+    """A leg attempt dir as train() leaves it: with ``pair``, the
+    protected best pair, the selection record binding it, and
+    config.json -- everything score_paddle_stage checks before a load."""
     if pair:
-        (run_dir / "model" / "best_model.zip").write_bytes(b"zip")
-        (run_dir / "model" / "best_vec_normalize.pkl").write_bytes(b"pkl")
+        _write_paddle_best_pair(run_dir)
+    else:
+        (run_dir / "model").mkdir(parents=True)
     if status is not None:
         (run_dir / "stage_summary.txt").write_text(
             f"Algorithm:      SAC\nStatus:         {status}\nGit SHA:        x\n"
@@ -1643,6 +1645,128 @@ def test_campaign_leg_resume_point(tmp_path, capsys):
     for name, record in retrain_cases.items():
         assert campaign_leg_resume_point(record) == ("train", None), name
     assert "training a fresh attempt" in capsys.readouterr().out
+
+
+class _ReachedPolicyLoader(Exception):
+    """score_paddle_stage got past every precondition to the load."""
+
+
+def test_campaign_leg_resume_point_scores_only_what_the_scorer_accepts(
+    tmp_path, capsys, monkeypatch
+):
+    """The 2026-10-05 follow-up review's ops F2: the resume point sent a
+    'trained' leg to scoring on the pair's presence alone, but
+    score_paddle_stage also requires best_model_meta.json and a pair it
+    verifies -- a leg failing either stayed 'trained' and every resume
+    re-raised, wedging the campaign. Resume now runs the scorer's own
+    precondition check: it re-enters at scoring exactly when the scorer
+    reaches the policy load, and otherwise retrains with the reason
+    printed, leaving the unscoreable attempt on disk as evidence."""
+    from courtside_dynamics.notebook_utils import campaign_leg_resume_point
+    from courtside_dynamics.training import paddle_diagnosis
+
+    def reached_loader(*args, **kwargs):
+        raise _ReachedPolicyLoader
+
+    monkeypatch.setattr(
+        paddle_diagnosis, "native_checkpoint_policy", reached_loader
+    )
+
+    def leg(name, *, normalizer_bytes=b"pkl", meta=True, meta_text=None, config=None):
+        """A finished, validated leg, then one artifact broken."""
+        run_dir = tmp_path / name
+        _finished_leg(run_dir)
+        model_dir = run_dir / "model"
+        (model_dir / "best_vec_normalize.pkl").write_bytes(normalizer_bytes)
+        if not meta:
+            (model_dir / "best_model_meta.json").unlink()
+        if meta_text is not None:
+            (model_dir / "best_model_meta.json").write_text(meta_text)
+        if config == "missing":
+            (run_dir / "config.json").unlink()
+        elif config is not None:
+            (run_dir / "config.json").write_text(json.dumps(config))
+        return run_dir
+
+    cases = {
+        # (run dir, expected action, reason the retrain prints)
+        "verified": (leg("verified"), "score", None),
+        # A meta from before the digests were bound: the scorer accepts it.
+        "legacy meta": (
+            leg("legacy", meta_text=json.dumps({"timestep": 1})),
+            "score",
+            None,
+        ),
+        "no meta": (leg("no_meta", meta=False), "train", "best_model_meta.json"),
+        "swapped normalizer": (
+            leg("swapped", normalizer_bytes=b"stale-normalizer"),
+            "train",
+            "best_vec_normalize.pkl does not match",
+        ),
+        "malformed meta": (leg("malformed", meta_text="[]"), "train", "JSON object"),
+        "unparseable meta": (leg("truncated", meta_text="{"), "train", "Expecting"),
+        "wrong env": (
+            leg("wrong_env", config={"evaluation_env": {"class": "WallBallEnv"}}),
+            "train",
+            "PaddleTennisEnv",
+        ),
+        "no config": (leg("no_config", config="missing"), "train", "config.json"),
+        "config not an object": (
+            leg("list_config", config=[]),
+            "train",
+            "config.json must be a JSON object",
+        ),
+    }
+    for name, (run_dir, action, reason) in cases.items():
+        before = {
+            path: path.read_bytes() for path in run_dir.rglob("*") if path.is_file()
+        }
+        record = {
+            "status": "trained",
+            "run_dir": str(run_dir),
+            "config_validation": {"verdict": "ok"},
+        }
+        result = campaign_leg_resume_point(record)
+        out = capsys.readouterr().out
+        # The attempt is evidence: resume never touches it.
+        after = {
+            path: path.read_bytes() for path in run_dir.rglob("*") if path.is_file()
+        }
+        assert after == before, name
+        if action == "score":
+            assert result == ("score", str(run_dir)), name
+            assert "re-entering at scoring" in out, name
+            with pytest.raises(_ReachedPolicyLoader):
+                score_paddle_stage(run_dir, bars=_LS_C_BARS, episodes=1)
+        else:
+            assert result == ("train", None), name
+            assert "cannot be scored" in out, name
+            assert reason in out, (name, out)
+            with pytest.raises((FileNotFoundError, ValueError)):
+                score_paddle_stage(run_dir, bars=_LS_C_BARS, episodes=1)
+        assert not (run_dir / "reports").exists(), name
+
+
+def test_campaign_leg_resume_point_propagates_other_io_errors(
+    tmp_path, monkeypatch
+):
+    """Only the scorer's refusals (FileNotFoundError, ValueError) send a
+    leg back to training; any other I/O failure -- a flaky Drive mount
+    -- propagates instead of silently costing a 1M-3M-step retrain."""
+    import courtside_dynamics.notebook_utils as notebook_utils
+
+    def flaky_mount(run_dir):
+        raise PermissionError("transport endpoint is not connected")
+
+    monkeypatch.setattr(notebook_utils, "verify_best_checkpoint_pair", flaky_mount)
+    run_dir = _finished_leg(tmp_path / "leg")
+    record = {
+        "status": "trained",
+        "run_dir": run_dir,
+        "config_validation": {"verdict": "ok"},
+    }
+    with pytest.raises(PermissionError):
+        notebook_utils.campaign_leg_resume_point(record)
 
 
 def test_next_stage_attempt_dir_numbers_attempts(tmp_path):

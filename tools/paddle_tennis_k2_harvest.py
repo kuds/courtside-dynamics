@@ -23,9 +23,11 @@ Seeds must come from the scratch/workpaper range proposed in the design's
 instrument's own scenarios training data, and every reserved/burned
 ledger block plus the consumed probe seeds are refused outright. The
 default range (9030, 70 episodes) reproduces the §3a registered
-library; a harvest of a DIFFERENT checkpoint must draw fresh seeds
-from the unconsumed scratch remainder (9168+) — consumed harvest
-ranges may be reused only to reproduce their own library.
+library, the one consumed block this tool may draw from; a harvest of
+a DIFFERENT checkpoint must draw fresh seeds from the unconsumed
+scratch remainder (9188–9199, or the 9270–9299 extension remainder) —
+consumed harvest ranges may be reused only to reproduce their own
+library.
 
 The library is a single pickle file (schema ``k2-drill-library-v0``).
 
@@ -60,8 +62,10 @@ SCHEMA = "k2-drill-library-v0"
 # Every reserved/burned ledger block, the sealed gate, the diagnosis
 # calibration block (train-on-test refusal), and already-consumed
 # scratch ranges are refused through the shared ledger
-# (tools/_seed_ledger.py) with no allowance: the harvest draws only
-# from unconsumed scratch.
+# (tools/_seed_ledger.py). The one allowance is the registered
+# library's own source block, so the default reproduces that library;
+# any other harvest draws only from unconsumed scratch.
+_REGISTERED_LIBRARY_BLOCK = (9030, 9099)
 
 
 def _sha256(path: str) -> str:
@@ -281,7 +285,7 @@ def harvest(
     }
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--model", required=True)
     parser.add_argument("--vec-normalize", required=True)
@@ -289,8 +293,10 @@ def main() -> None:
     parser.add_argument("--seed-start", type=int, default=9030)
     parser.add_argument("--episodes", type=int, default=70)
     parser.add_argument("--continuation-steps", type=int, default=200)
-    args = parser.parse_args()
-    refuse_reserved(args.seed_start, args.episodes)
+    args = parser.parse_args(argv)
+    refuse_reserved(
+        args.seed_start, args.episodes, allow=(_REGISTERED_LIBRARY_BLOCK,)
+    )
     library = harvest(
         args.model,
         args.vec_normalize,
