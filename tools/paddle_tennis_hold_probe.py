@@ -52,23 +52,22 @@ from courtside_dynamics.envs._paddle_court import (
 )
 from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
 
+try:
+    from tools._seed_ledger import refuse_reserved
+except ModuleNotFoundError:  # run as a script: tools/ itself is on sys.path
+    from _seed_ledger import refuse_reserved  # type: ignore[no-redef]
+
 #: Fresh block burned by this probe
 #: (docs/design_paddle_tennis_postswing_hold.md §3/§5).
 PROBE_SEED_START = 6200
 PROBE_EPISODES = 100
 HOLD = 0.25
 TRAVEL_BUDGET = 4.0
+#: The PH1 block this probe burned: re-running on it reproduces the
+#: booked battery. The §4b re-battery block 6300-6399 stays refused.
+_OWN_BLOCK = (6200, 6299)
 
 _IDENTITY_TOL = 1e-9
-_RESERVED_BLOCKS = (
-    (4100, 4199),
-    (4300, 4399),
-    (5200, 5299),
-    (5300, 5399),
-    (5400, 5499),
-    (5500, 5599),
-    (5600, 6199),
-)
 
 
 @dataclasses.dataclass
@@ -176,16 +175,6 @@ def _run_witness(
         unshaped.close()
 
 
-def _refuse_reserved(seed_start: int, episodes: int) -> None:
-    span = range(seed_start, seed_start + episodes)
-    for low, high in _RESERVED_BLOCKS:
-        if any(low <= seed <= high for seed in span):
-            raise SystemExit(
-                f"seed range [{seed_start}, {seed_start + episodes}) intersects "
-                f"reserved/burned block {low}-{high}; refuse to run"
-            )
-
-
 def main() -> None:
     global HOLD, TRAVEL_BUDGET
     parser = argparse.ArgumentParser(description=__doc__)
@@ -194,7 +183,7 @@ def main() -> None:
     parser.add_argument("--hold-shaping", type=float, default=HOLD)
     parser.add_argument("--travel-budget", type=float, default=TRAVEL_BUDGET)
     args = parser.parse_args()
-    _refuse_reserved(args.seed_start, args.episodes)
+    refuse_reserved(args.seed_start, args.episodes, allow=(_OWN_BLOCK,))
     HOLD = args.hold_shaping
     TRAVEL_BUDGET = args.travel_budget
 

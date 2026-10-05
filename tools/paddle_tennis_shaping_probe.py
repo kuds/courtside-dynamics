@@ -230,11 +230,12 @@ def report(
     return "\n".join(lines)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
+    """Run the S1 battery; the exit status is non-zero on an S1 FAIL."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--episodes", type=int, default=PROBE_EPISODES)
     parser.add_argument("--seed-start", type=int, default=PROBE_SEED_START)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     results: dict[str, tuple[list[EpisodeRow], list[EpisodeRow]]] = {}
     for name, witness in WITNESSES:
@@ -254,7 +255,11 @@ def main() -> None:
         print(f"[{name}] {args.episodes} episodes x 2 arms done")
     print()
     print(report(results))
+    # The same criteria report() printed: automation gating on the exit
+    # status must not read a failed battery as a pass.
+    passed = all(ok for _name, ok, _detail in evaluate_criteria(results))
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
