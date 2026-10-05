@@ -2821,3 +2821,82 @@ def test_misconfigured_reuse_retry_leaves_the_previous_attempt_untouched(
     ]
     for name in ("eval_info.csv", "eval_info_final.csv"):
         assert (metrics / name).read_text() == rows
+
+
+@pytest.mark.parametrize(
+    "bad_entry, message",
+    [
+        ({"serve_side": "c"}, "serve_side must be 'a', 'b'"),
+        ({"serve_sdie": "b"}, r"unsupported reset options: \['serve_sdie'\]"),
+    ],
+)
+def test_invalid_eval_reset_options_fail_before_any_output(
+    tmp_path, bad_entry, message
+):
+    """eval_reset_options were only shape-checked up front, so an option
+    the env's reset rejects passed pre-flight, wrote config.json and
+    crashed model.learn() at the first paired evaluation. A throwaway
+    evaluation env now replays the paired reset for every distinct
+    entry before any output is written."""
+    from courtside_dynamics.envs import PaddleTennisEnv
+
+    log_dir = tmp_path / "run"
+    cfg = TrainConfig(
+        env_fn=PaddleTennisEnv,
+        algo="SAC",
+        total_timesteps=16,
+        log_dir=str(log_dir),
+        n_envs=1,
+        seed=0,
+        eval_freq=8,
+        checkpoint_freq=0,
+        record_video=False,
+        n_eval_episodes=1,
+        # First, so the unprobed run reached it at its first evaluation
+        # (episode i uses entry i % len); later entries are probed too.
+        eval_reset_options=(bad_entry, {"serve_side": "a"}),
+    )
+    with pytest.raises(ValueError, match="eval_reset_options entry") as raised:
+        train(cfg)
+    assert raised.match(message)
+    assert not log_dir.exists()
+
+
+def test_eval_reset_option_probe_resets_once_per_distinct_mapping():
+    """The pre-flight probe uses the evaluation factory (not the training
+    one), resets one throwaway instance once per distinct mapping with the
+    resolved eval seed, and closes it."""
+    from courtside_dynamics.training.train import _validate_eval_reset_options
+
+    resets: list[tuple[int | None, dict[str, Any] | None]] = []
+    closed: list[bool] = []
+
+    class _Recorder(gym.Wrapper):
+        def reset(self, *, seed=None, options=None):
+            resets.append((seed, options))
+            return self.env.reset(seed=seed, options=options)
+
+        def close(self):
+            closed.append(True)
+            super().close()
+
+    cfg = TrainConfig(
+        env_fn=_unbuildable_env,
+        eval_env_fn=lambda: _Recorder(BallBalanceEnv(episode_len=12)),
+        seed=4,
+        eval_reset_options=(
+            {"serve_side": "a"},
+            {"serve_side": "b"},
+            {"serve_side": "a"},
+        ),
+    )
+    _validate_eval_reset_options(cfg, 1_000_004)
+    assert resets == [
+        (1_000_004, {"serve_side": "a"}),
+        (1_000_004, {"serve_side": "b"}),
+    ]
+    assert closed == [True]
+    # Unpaired (no options): nothing to probe, no env built.
+    _validate_eval_reset_options(
+        TrainConfig(env_fn=_unbuildable_env, seed=4), None
+    )

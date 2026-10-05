@@ -551,7 +551,12 @@ class TrainConfig:
         ``final_info_eval`` stream stays fresh-random (unpaired) even
         then: it is the unbiased final-config estimate, not a
         comparison (docs/DECISIONS.md, "Unpaired evaluation is the root
-        of the gate noise"). Pairing is opt-in: an explicit
+        of the gate noise"). Before any output is written, ``train()``
+        resets a throwaway evaluation env once per distinct options
+        mapping (with the resolved eval seed), so an option the env's
+        ``reset`` rejects fails the launch rather than the first
+        evaluation; an env whose ``reset`` ignores options accepts
+        any. Pairing is opt-in: an explicit
         ``eval_seed`` always pairs, and ``eval_seed=None`` (default)
         derives ``seed + EVAL_SEED_OFFSET`` only for a seeded run that
         sets ``eval_reset_options`` (the options are applied by the
@@ -1202,6 +1207,59 @@ def _validate_monitor_info_keywords(cfg: TrainConfig) -> tuple[str, ...]:
     return keywords
 
 
+def _same_reset_options(first: Mapping[str, Any], second: Mapping[str, Any]) -> bool:
+    """Equality of two option mappings; incomparable values count as distinct.
+
+    ``==`` on mappings holding numpy arrays raises (ambiguous truth
+    value), and an extra probe reset is harmless, so "unsure" means
+    "distinct".
+    """
+    try:
+        return bool(first == second)
+    except (TypeError, ValueError):
+        return False
+
+
+def _validate_eval_reset_options(cfg: TrainConfig, eval_seed: int | None) -> None:
+    """Reset a throwaway evaluation env once per distinct reset option.
+
+    ``_validate_evaluation_config`` only checks the options' shape; which
+    keys and values are valid is decided inside the env's ``reset``. An
+    invalid entry (``serve_side="c"``, a misspelled key) therefore passed
+    pre-flight, wrote ``config.json``, and crashed ``model.learn()`` at
+    the first evaluation. Mirror the paired reset (the resolved eval
+    seed plus the options) on a fresh instance of the evaluation factory
+    -- not the real evaluation envs, whose streams stay untouched -- so
+    such an entry fails before any output is written.
+
+    An env whose ``reset`` ignores ``options`` (BallBalance, WallBall)
+    accepts any mapping here: whether a key means anything is not
+    observable from outside the env, and refusing would need a per-env
+    option schema. Envs that take options (PaddleTennis, the humanoid
+    tennis envs) reject unknown keys and bad values themselves.
+    """
+    if cfg.eval_reset_options is None or eval_seed is None:
+        return
+    distinct: list[dict[str, Any]] = []
+    for options in _reset_options_tuple(cfg.eval_reset_options):
+        if not any(_same_reset_options(options, seen) for seen in distinct):
+            distinct.append(options)
+    env = (cfg.eval_env_fn or cfg.env_fn)()
+    try:
+        for options in distinct:
+            try:
+                env.reset(seed=eval_seed, options=dict(options))
+            except Exception as error:
+                raise ValueError(
+                    f"eval_reset_options entry {options!r}: the evaluation "
+                    f"env's paired reset (seed={eval_seed}) raised "
+                    f"{error!r}, so every paired evaluation would crash, "
+                    f"the first one after config.json is written"
+                ) from error
+    finally:
+        env.close()
+
+
 def _has_data_rows(path: str) -> bool:
     """Whether a long-format CSV holds at least one row past its header."""
     try:
@@ -1786,14 +1844,15 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     warm_start_artifacts = _prepare_warm_start(cfg)
     monitor_info_keywords = _validate_monitor_info_keywords(cfg)
     resolved_eval_seed = resolve_eval_seed(cfg)
+    _validate_eval_reset_options(cfg, resolved_eval_seed)
     # Last pre-output check: a refusal leaves the directory untouched,
     # and an opted-in rotation only happens once every config-only check
     # above passed (algo, model kwargs, device, evaluation, eval-stream,
-    # diagnosis and gate settings, warm start, monitor keys), so a
-    # misconfigured retry cannot strand the previous attempt. Checks
-    # that need the constructed evaluators (the selection-metric probe,
-    # the gate callback's value checks) and the ladder certification
-    # still run after config.json is written.
+    # diagnosis and gate settings, warm start, monitor keys, reset
+    # options), so a misconfigured retry cannot strand the previous
+    # attempt. Checks that need the constructed evaluators (the
+    # selection-metric probe, the gate callback's value checks) and the
+    # ladder certification still run after config.json is written.
     _check_log_dir_reuse(cfg)
 
     os.makedirs(cfg.log_dir, exist_ok=True)
