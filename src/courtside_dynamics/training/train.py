@@ -542,12 +542,15 @@ class TrainConfig:
         e.g. leaving out a wandering ``episode_reward_mean``.
     eval_seed / eval_reset_options:
         Paired evaluation (see ``InfoDictEvalCallback.eval_seed``):
-        every info-dict evaluation replays the same per-episode reset
-        seeds (``eval_seed + i``; the ``confirm_best`` batch
-        ``eval_seed + 100_000 + i``; the ``final_info_eval`` stream its
-        own block at ``eval_seed + 200_000 + i``) and, when given,
-        cycles ``eval_reset_options`` (e.g. ``({"serve_side": "a"},
-        {"serve_side": "b"})``). Pairing is opt-in: an explicit
+        every evaluation of the matched info-dict stream replays the
+        same per-episode reset seeds (``eval_seed + i``; the
+        ``confirm_best`` batch ``eval_seed + 100_000 + i``) and, when
+        given, cycles ``eval_reset_options`` (e.g.
+        ``({"serve_side": "a"}, {"serve_side": "b"})``). The
+        ``final_info_eval`` stream stays fresh-random (unpaired) even
+        then: it is the unbiased final-config estimate, not a
+        comparison (docs/DECISIONS.md, "Unpaired evaluation is the root
+        of the gate noise"). Pairing is opt-in: an explicit
         ``eval_seed`` always pairs, and ``eval_seed=None`` (default)
         derives ``seed + EVAL_SEED_OFFSET`` only for a seeded run that
         sets ``eval_reset_options`` (the options are applied by the
@@ -649,7 +652,10 @@ class TrainConfig:
         matched stream drives selection while this stream is the honest
         final-task progress metric; the gap between them is the
         transfer deficit, visible per evaluation instead of
-        post-mortem. Requires ``info_dict_eval``.
+        post-mortem. Requires ``info_dict_eval``. The stream is never
+        paired: every evaluation draws fresh episodes, so it stays an
+        unbiased estimate of final-config performance whatever
+        ``eval_seed`` / ``eval_reset_options`` say.
     early_stop_degenerate_evals / degenerate_guard_keys /
     degenerate_min_evals:
         Enable ``InfoDictEvalCallback``'s degenerate-signal stop: end
@@ -763,15 +769,6 @@ class TrainConfig:
 #: batch replayed the long-horizon audit's "held-out" seeds and a leg's
 #: block coincided with the next leg's training seeds.
 EVAL_SEED_OFFSET = 1_000_000
-
-#: Offset of the ``final_info_eval`` stream's paired seed block from the
-#: resolved ``eval_seed``. The selection stream owns ``eval_seed + i``
-#: and its confirmations ``eval_seed + 100_000 + i``; without its own
-#: block the final stream would replay the selection stream's exact
-#: episodes whenever the two share a distribution (no gate), turning
-#: evaluations.npz into a copy of the selection batch instead of an
-#: independent sample.
-FINAL_INFO_EVAL_SEED_OFFSET = 200_000
 
 
 def resolve_eval_seed(cfg: TrainConfig) -> int | None:
@@ -2176,15 +2173,16 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                         # callback's log_prefix keeps the two lines
                         # apart in the cell output.
                         verbose=eval_verbose,
-                        # Paired too, on its own seed block (see
-                        # FINAL_INFO_EVAL_SEED_OFFSET).
-                        eval_seed=(
-                            None
-                            if resolved_eval_seed is None
-                            else resolved_eval_seed
-                            + FINAL_INFO_EVAL_SEED_OFFSET
-                        ),
-                        eval_reset_options=cfg.eval_reset_options,
+                        # Deliberately unpaired (no eval_seed, hence no
+                        # reset options): pairing is for the matched
+                        # stream's eval-to-eval comparisons, while this
+                        # stream is the unbiased final-config estimate
+                        # and must draw fresh episodes every evaluation
+                        # (docs/DECISIONS.md, "Unpaired evaluation is
+                        # the root of the gate noise"; review
+                        # rl_pipeline_review_20260828 section 2.8).
+                        eval_seed=None,
+                        eval_reset_options=None,
                     )
                 )
         elif cfg.performance_gate is not None or cfg.final_info_eval:

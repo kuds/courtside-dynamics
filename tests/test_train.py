@@ -2066,23 +2066,19 @@ def test_train_wires_selection_and_paired_evaluation(tmp_path, monkeypatch):
     # offset constant cannot pass by construction.
     assert selection.eval_seed == 1_000_000
     assert selection.eval_reset_options == options
-    # The final-config stream is paired on its own block.
-    assert final.eval_seed == 1_200_000
-    assert final.eval_reset_options == options
-    # ...which no stream shares: the selection batch, its confirmation
-    # batch and the final stream each own a disjoint seed range.
-    blocks = [
-        range(selection.eval_seed, selection.eval_seed + selection.n_eval_episodes),
-        range(
-            selection.eval_seed + CONFIRMATION_SEED_OFFSET,
-            selection.eval_seed + CONFIRMATION_SEED_OFFSET
-            + selection.n_eval_episodes,
-        ),
-        range(final.eval_seed, final.eval_seed + final.n_eval_episodes),
-    ]
-    for index, block in enumerate(blocks):
-        for other in blocks[index + 1 :]:
-            assert not set(block) & set(other)
+    # The final-config stream stays fresh-random: no seed block, and so
+    # no reset options either (they only ride on paired resets).
+    assert final.eval_seed is None
+    assert final.eval_reset_options is None
+    # The selection batch and its confirmation batch own disjoint seed
+    # ranges.
+    selection_block = set(
+        range(selection.eval_seed, selection.eval_seed + selection.n_eval_episodes)
+    )
+    confirmation_start = selection.eval_seed + CONFIRMATION_SEED_OFFSET
+    assert not selection_block & set(
+        range(confirmation_start, confirmation_start + selection.n_eval_episodes)
+    )
 
     config = json.loads((tmp_path / "config.json").read_text())
     recorded = config["train_config"]
@@ -2096,7 +2092,6 @@ def test_train_wires_selection_and_paired_evaluation(tmp_path, monkeypatch):
         "derived_from_seed": True,
         "selection_batch_seed_start": 1_000_000,
         "confirmation_batch_seed_start": 1_100_000,
-        "final_info_eval_seed_start": 1_200_000,
     }
     meta = json.loads((tmp_path / "model" / "best_model_meta.json").read_text())
     assert meta["eval_seed"] == 1_000_000
@@ -2128,24 +2123,37 @@ def test_seeded_run_without_reset_options_stays_unpaired(tmp_path, monkeypatch):
     assert config["evaluation_seeding"] == {"paired": False, "eval_seed": None}
 
 
+class _InitEcho(_StepsAlive):
+    """``_StepsAlive`` echoing the episode's noisy reset state as
+    ``init_x``, so an eval row shows whether its episodes were replayed
+    (paired) or freshly drawn (unpaired)."""
+
+    def reset(self, **kwargs):
+        obs, info = super().reset(**kwargs)
+        self._init_x = float(obs[0])
+        return obs, {**info, "init_x": self._init_x}
+
+    def step(self, action):
+        *head, info = super().step(action)
+        return (*head, {**info, "init_x": self._init_x})
+
+
+def _eval_rows_by_step(path) -> dict[str, dict[str, str]]:
+    import csv
+
+    by_step: dict[str, dict[str, str]] = {}
+    with open(path) as stream:
+        for row in csv.DictReader(stream):
+            by_step.setdefault(row["timestep"], {})[row["metric"]] = row["value"]
+    return by_step
+
+
 def test_paired_evaluation_repeats_identical_metrics_end_to_end(tmp_path):
     """A policy that never updates (learning_starts beyond the budget),
     evaluated twice by a seeded run: paired evaluation replays the same
     feeds, so both eval_info.csv rows are identical metric for metric --
     including ``init_x``, the episode's noisy reset state, which the
     legacy unpaired stream re-draws at every evaluation."""
-    import csv
-
-    class _InitEcho(_StepsAlive):
-        def reset(self, **kwargs):
-            obs, info = super().reset(**kwargs)
-            self._init_x = float(obs[0])
-            return obs, {**info, "init_x": self._init_x}
-
-        def step(self, action):
-            *head, info = super().step(action)
-            return (*head, {**info, "init_x": self._init_x})
-
     cfg = _merged_eval_cfg(
         tmp_path,
         env_fn=lambda: _InitEcho(BallBalanceEnv(episode_len=12)),
@@ -2158,13 +2166,34 @@ def test_paired_evaluation_repeats_identical_metrics_end_to_end(tmp_path):
         eval_seed=4_321,
     )
     train(cfg)
-    by_step: dict[str, dict[str, str]] = {}
-    with open(tmp_path / "metrics" / "eval_info.csv") as stream:
-        for row in csv.DictReader(stream):
-            by_step.setdefault(row["timestep"], {})[row["metric"]] = row["value"]
+    by_step = _eval_rows_by_step(tmp_path / "metrics" / "eval_info.csv")
     assert sorted(by_step, key=int) == ["200", "400"]
     assert "init_x_ep_mean" in by_step["200"]
     assert by_step["200"] == by_step["400"]
+
+
+def test_final_info_eval_stream_stays_fresh_random_under_pairing(tmp_path):
+    """docs/DECISIONS.md ("Unpaired evaluation is the root of the gate
+    noise") and review 20260828 section 2.8 pair the *matched* stream and
+    keep the final-config stream fresh-random, the unbiased estimate.
+    A paired run of a never-updating policy therefore replays its
+    selection rows exactly while every final-stream evaluation draws new
+    episodes (a different mean reset state). The final stream used to
+    be paired on its own fixed block, replaying identical rows too."""
+    cfg = _merged_eval_cfg(
+        tmp_path,
+        env_fn=lambda: _InitEcho(BallBalanceEnv(episode_len=12)),
+        total_timesteps=400,
+        n_eval_episodes=3,
+        model_kwargs={"learning_starts": 10_000, "buffer_size": 500},
+        eval_seed=4_321,
+    )
+    train(cfg)
+    selection = _eval_rows_by_step(tmp_path / "metrics" / "eval_info.csv")
+    final = _eval_rows_by_step(tmp_path / "metrics" / "eval_info_final.csv")
+    assert sorted(selection, key=int) == sorted(final, key=int) == ["200", "400"]
+    assert selection["200"] == selection["400"]
+    assert final["200"]["init_x_ep_mean"] != final["400"]["init_x_ep_mean"]
 
 
 def test_resolve_eval_seed_derivation():

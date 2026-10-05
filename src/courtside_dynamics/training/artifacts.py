@@ -308,14 +308,13 @@ def _evaluation_seeding(cfg: TrainConfig) -> dict[str, Any]:
     from courtside_dynamics.callbacks.info_dict_eval import (
         CONFIRMATION_SEED_OFFSET,
     )
-    from courtside_dynamics.training.train import (
-        FINAL_INFO_EVAL_SEED_OFFSET,
-        resolve_eval_seed,
-    )
+    from courtside_dynamics.training.train import resolve_eval_seed
 
     eval_seed = resolve_eval_seed(cfg)
     if eval_seed is None:
         return {"paired": False, "eval_seed": None}
+    # The final_info_eval stream is never paired (it stays the
+    # fresh-random final-config estimate), so it owns no seed block.
     return {
         "paired": True,
         "eval_seed": eval_seed,
@@ -323,7 +322,6 @@ def _evaluation_seeding(cfg: TrainConfig) -> dict[str, Any]:
         # Episode i of each batch resets with <block start> + i.
         "selection_batch_seed_start": eval_seed,
         "confirmation_batch_seed_start": eval_seed + CONFIRMATION_SEED_OFFSET,
-        "final_info_eval_seed_start": eval_seed + FINAL_INFO_EVAL_SEED_OFFSET,
     }
 
 
