@@ -118,8 +118,14 @@ def resolve_run_config_file(
     Always prints the resolved path, its sha256, and whether it was
     created or reused, so the choice stays visible; the run additionally
     records both in ``config.json`` and copies the file into the run
-    directory. Returns None (with a printed reason) for recipes without
-    a packaged starter, so a default-config run is never blocked.
+    directory. A reused copy is compared with the packaged starter by
+    content hash: a copy whose settings differ gets a loud ``WARNING``
+    naming each differing setting (an intended experiment edit and a
+    stale copy from an older era -- whose values silently override the
+    current recipe -- look identical otherwise), and a comment-only
+    difference is reported as such. The file itself is never touched.
+    Returns None (with a printed reason) for recipes without a packaged
+    starter, so a default-config run is never blocked.
     """
     from courtside_dynamics.run_config import (
         available_run_configs,
@@ -151,7 +157,8 @@ def resolve_run_config_file(
         )
         return None
 
-    destination = Path(root) / catalog[env_name].name
+    starter = catalog[env_name]
+    destination = Path(root) / starter.name
     created = not destination.exists()
     if created:
         destination = copy_starter_config(env_name, root)
@@ -161,7 +168,90 @@ def resolve_run_config_file(
         f"({'created from packaged starter' if created else 'reusing existing copy'}, "
         f"sha256 {digest[:12]})"
     )
+    if not created:
+        _report_run_config_drift(destination, starter, digest)
     return destination
+
+
+#: How many differing settings the drift warning lists before eliding.
+_RUN_CONFIG_DRIFT_LINES = 20
+
+
+def _flatten_toml(table: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
+    """``{"train": {"n_envs": 4}}`` -> ``{"train.n_envs": 4}``."""
+    flat: dict[str, Any] = {}
+    for key, value in table.items():
+        path = f"{prefix}{key}"
+        if isinstance(value, Mapping):
+            flat.update(_flatten_toml(value, f"{path}."))
+        else:
+            flat[path] = value
+    return flat
+
+
+def _report_run_config_drift(
+    copy_path: Path, starter_path: Path, copy_digest: str
+) -> None:
+    """Say how a reused run-config copy differs from the packaged starter.
+
+    The copy wins over the recipe by design (the user's edits between
+    runs are the point), so a stale copy from an older era silently
+    reruns old settings -- a Drive copy pinning a retired 3M budget
+    beat the recipe this way (2026-08-28 review section 3). Prints one
+    line when the copy is byte-identical; otherwise a ``WARNING`` that
+    lists each differing setting (parsed TOML, so comment and layout
+    edits are told apart from value changes). Never writes anything.
+    """
+    import tomllib
+
+    starter_bytes = starter_path.read_bytes()
+    starter_digest = hashlib.sha256(starter_bytes).hexdigest()
+    if copy_digest == starter_digest:
+        print(
+            "[notebook_utils] run config matches the packaged starter "
+            "byte-for-byte."
+        )
+        return
+    header = (
+        f"[notebook_utils] WARNING: run config {copy_path} DIFFERS from the "
+        f"packaged starter {starter_path.name} (copy sha256 "
+        f"{copy_digest[:12]}, packaged sha256 {starter_digest[:12]})"
+    )
+    try:
+        copy_values = _flatten_toml(tomllib.loads(copy_path.read_text("utf-8")))
+        starter_values = _flatten_toml(tomllib.loads(starter_bytes.decode("utf-8")))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as error:
+        print(f"{header}; the copy does not parse as TOML ({error}).")
+        return
+    if copy_values == starter_values:
+        print(
+            f"{header} in comments/layout only -- every setting matches. "
+            "The packaged starter's notes may have moved on; diff the two "
+            "files to read them."
+        )
+        return
+
+    def _shown(values: Mapping[str, Any], key: str) -> str:
+        return repr(values[key]) if key in values else "(absent)"
+
+    missing = object()
+    lines = [
+        f"  {key}: copy {_shown(copy_values, key)}, "
+        f"starter {_shown(starter_values, key)}"
+        for key in sorted(set(copy_values) | set(starter_values))
+        if copy_values.get(key, missing) != starter_values.get(key, missing)
+    ]
+    shown = lines[:_RUN_CONFIG_DRIFT_LINES]
+    if len(lines) > len(shown):
+        shown.append(f"  ... and {len(lines) - len(shown)} more")
+    print(
+        f"{header} in {len(lines)} setting(s); the copy's values override "
+        "the packaged ones for this run:\n"
+        + "\n".join(shown)
+        + "\nIntended experiment edits can stay. A stale copy from an "
+        "older era should be deleted (the next run re-copies the current "
+        "starter) or re-edited from the packaged file."
+    )
 
 
 def disconnect_runtime(delay_seconds: int = 5) -> None:
@@ -196,6 +286,45 @@ def _read_monitor_logs(monitor_dir: str) -> tuple[np.ndarray, np.ndarray]:
     return np.array(rewards, dtype=float), np.array(lengths, dtype=int)
 
 
+def _best_checkpoint_marker(log_dir: str, eval_data) -> tuple[int | None, str]:
+    """Timestep and legend label of the checkpoint ``best_model.zip`` holds.
+
+    Under headline selection ``InfoDictEvalCallback`` saves
+    ``best_model.zip`` by the task metric and records the save's
+    timestep in ``best_model_meta.json``; the argmax of the mean eval
+    reward is then a different checkpoint, and marking it would point
+    at a model nobody saved. Only runs without the meta file
+    (reward-selected recipes, where SB3's ``EvalCallback`` saved the
+    reward argmax) fall back to that argmax. A meta file without a
+    usable timestep gets no marker rather than the wrong one.
+    """
+    from courtside_dynamics.training.artifacts import _read_best_model_meta
+
+    if locate_artifact(log_dir, "best_model_meta") is not None:
+        meta = _read_best_model_meta(log_dir) or {}
+        timestep = meta.get("timestep")
+        if (
+            isinstance(timestep, bool)
+            or not isinstance(timestep, int)
+            or timestep < 0
+        ):
+            print(
+                "[notebook_utils] best_model_meta.json records no valid "
+                "timestep; the eval panels omit the best-checkpoint marker "
+                "rather than mark the reward argmax"
+            )
+            return None, ""
+        keys = meta.get("selection_keys") or []
+        label = f"best checkpoint ({keys[0]})" if keys else "best checkpoint"
+        return timestep, label
+    if eval_data is not None and "results" in eval_data:
+        results = eval_data["results"]
+        if results.size:
+            best_index = int(results.mean(axis=1).argmax())
+            return int(eval_data["timesteps"][best_index]), "best checkpoint"
+    return None, ""
+
+
 def plot_learning_curve(
     log_dir: str | Path,
     *,
@@ -210,7 +339,10 @@ def plot_learning_curve(
     overlay. Bottom row: deterministic eval returns and episode lengths
     (mean +/- std) from ``metrics/evaluations.npz`` (written by SB3's
     ``EvalCallback``). Both are resolved through ``locate_artifact`` so
-    legacy flat-layout runs plot identically.
+    legacy flat-layout runs plot identically. The eval panels mark the
+    checkpoint ``best_model.zip`` actually holds: the timestep
+    ``best_model_meta.json`` records under headline selection, else the
+    reward argmax (see :func:`_best_checkpoint_marker`).
     """
     import matplotlib.pyplot as plt
 
@@ -250,16 +382,11 @@ def plot_learning_curve(
     eval_npz = locate_artifact(log_dir, "evaluations")
     eval_data = np.load(eval_npz) if eval_npz is not None else None
 
-    # Best-checkpoint step (what EvalCallback saved as best_model.zip).
-    # Marked on the eval panels so a post-best collapse -- curve falling
-    # away right of the marker -- is visible at a glance.
-    best_step = None
-    if eval_data is not None and "results" in eval_data:
-        results = eval_data["results"]
-        if results.size:
-            best_step = int(
-                eval_data["timesteps"][int(results.mean(axis=1).argmax())]
-            )
+    # Best-checkpoint step (the save best_model.zip holds: the headline
+    # selection's timestep from best_model_meta.json, else EvalCallback's
+    # reward argmax). Marked on the eval panels so a post-best collapse
+    # -- curve falling away right of the marker -- is visible at a glance.
+    best_step, best_label = _best_checkpoint_marker(log_dir, eval_data)
 
     def _plot_eval(ax, key, title, ylabel):
         if eval_data is None:
@@ -281,7 +408,7 @@ def plot_learning_curve(
                     color="tab:green",
                     linestyle="--",
                     alpha=0.8,
-                    label="best checkpoint",
+                    label=best_label,
                 )
             ax.legend()
         ax.set_title(title)
@@ -330,8 +457,9 @@ _ARTIFACT_HINTS: dict[str, str] = {
     RUN_LAYOUT["progress_csv"]: "written by the CSV logger train() wires up; appears after SB3's first metric dump",
     RUN_LAYOUT["evaluations"]: "written by the reward eval stream; check eval_freq <= total_timesteps",
     RUN_LAYOUT["eval_info_csv"]: "written by InfoDictEvalCallback each eval; requires info_dict_eval=True",
-    RUN_LAYOUT["best_model"]: "saved by EvalCallback on its first completed evaluation",
+    RUN_LAYOUT["best_model"]: "saved on the first completed evaluation -- by InfoDictEvalCallback (with best_model_meta.json) when the recipe selects by a headline metric, else by the reward EvalCallback",
     RUN_LAYOUT["best_vec_normalize"]: "needs VecNormalize enabled plus at least one new-best eval",
+    RUN_LAYOUT["best_model_meta"]: "written only under headline (task-metric) selection, beside best_model.zip; absent is expected for reward-selected recipes",
     RUN_LAYOUT["checkpoints_dir"]: "requires checkpoint_freq > 0 and a run long enough to reach the first checkpoint",
     RUN_LAYOUT["videos_dir"]: "requires record_video=True, video_freq > 0, and moviepy installed",
     RUN_LAYOUT["final_model"]: "written when learn() finishes, is interrupted, or raises (salvaged before the error re-raises); absent means the process died hard",
@@ -1322,6 +1450,114 @@ def _sha256(path: str) -> str:
     return digest.hexdigest()
 
 
+def _verify_pair_against_meta(
+    best_meta: Mapping[str, Any] | None,
+    *,
+    model_path: str,
+    normalizer_path: str,
+) -> tuple[str, str, str]:
+    """Check a best model + normalizer pair against its selection record.
+
+    ``InfoDictEvalCallback`` writes ``best_model.zip``, the paired
+    ``best_vec_normalize.pkl`` snapshot, and ``best_model_meta.json``
+    binding both files' sha256 in one selection event. A same-shape
+    normalizer from any other save (another attempt or run, or a later
+    best whose normalizer write failed) loads without error and
+    silently rescales every observation the policy sees, so a pair the
+    meta does not vouch for raises ``ValueError`` instead of being
+    evaluated.
+
+    Returns ``(model_sha256, normalizer_sha256, pair_verification)``
+    where the verification reads ``"verified_by_best_model_meta_sha256"``
+    (both digests match), ``"same_run_directory_legacy_metadata"`` (a
+    meta written before the digests were bound), or
+    ``"unverified_no_best_model_meta"`` (``best_meta`` is ``None``:
+    reward-selected runs write no meta).
+    """
+    model_sha256 = _sha256(model_path)
+    normalizer_sha256 = _sha256(normalizer_path)
+    if best_meta is None:
+        return model_sha256, normalizer_sha256, "unverified_no_best_model_meta"
+    meta_artifacts = best_meta.get("artifacts")
+    if meta_artifacts is None:
+        return (
+            model_sha256,
+            normalizer_sha256,
+            "same_run_directory_legacy_metadata",
+        )
+    if not isinstance(meta_artifacts, Mapping):
+        raise ValueError("best_model_meta.json artifacts must be an object")
+    actual_hashes = {
+        "best_model.zip": model_sha256,
+        "best_vec_normalize.pkl": normalizer_sha256,
+    }
+    for filename, actual_hash in actual_hashes.items():
+        entry = meta_artifacts.get(filename)
+        expected_hash = entry.get("sha256") if isinstance(entry, Mapping) else None
+        if expected_hash != actual_hash:
+            raise ValueError(
+                f"{filename} does not match the SHA-256 bound into "
+                "best_model_meta.json"
+            )
+    return model_sha256, normalizer_sha256, "verified_by_best_model_meta_sha256"
+
+
+def verify_best_checkpoint_pair(run_dir: str | Path) -> dict[str, Any]:
+    """Prove a run's best checkpoint and its normalizer are one saved pair.
+
+    Locates ``best_model.zip`` and ``best_vec_normalize.pkl`` (both
+    required: every consumer here replays the policy on normalized
+    observations) and the optional ``best_model_meta.json``, then runs
+    the pairing check :func:`evaluate_best_wall_ball` applies (see
+    :func:`_verify_pair_against_meta`; a mismatch raises
+    ``ValueError``). :func:`score_paddle_stage` calls it before scoring
+    a campaign leg, and the campaign notebook before warm-starting a leg
+    from a source run: ``train()``'s own warm-start resolution checks
+    source digests only against pins the plan names.
+
+    Returns ``{"model_path", "normalizer_path", "model_sha256",
+    "normalizer_sha256", "pair_verification", "best_model_meta"}``.
+    """
+    run_dir = str(run_dir)
+    located = {
+        name: locate_artifact(run_dir, name)
+        for name in ("best_model", "best_vec_normalize", "best_model_meta")
+    }
+    model_path = located["best_model"]
+    normalizer_path = located["best_vec_normalize"]
+    if model_path is None or normalizer_path is None:
+        missing = [
+            os.path.join(run_dir, RUN_LAYOUT[name])
+            for name in ("best_model", "best_vec_normalize")
+            if located[name] is None
+        ]
+        raise FileNotFoundError(
+            f"best checkpoint pair is incomplete; missing: {missing}"
+        )
+    best_meta: Any = None
+    meta_path = located["best_model_meta"]
+    if meta_path is not None:
+        with open(meta_path) as handle:
+            best_meta = json.load(handle)
+        if not isinstance(best_meta, dict):
+            raise ValueError(
+                f"best_model_meta.json must be a JSON object: {meta_path}"
+            )
+    model_sha256, normalizer_sha256, pair_verification = (
+        _verify_pair_against_meta(
+            best_meta, model_path=model_path, normalizer_path=normalizer_path
+        )
+    )
+    return {
+        "model_path": model_path,
+        "normalizer_path": normalizer_path,
+        "model_sha256": model_sha256,
+        "normalizer_sha256": normalizer_sha256,
+        "pair_verification": pair_verification,
+        "best_model_meta": best_meta,
+    }
+
+
 def _atomic_write_json(path: str, payload: dict[str, Any]) -> None:
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
@@ -1470,27 +1706,11 @@ def evaluate_best_wall_ball(
             f"recorded algorithm {recorded_algo}"
         )
 
-    model_sha256 = _sha256(model_path)
-    normalizer_sha256 = _sha256(normalizer_path)
-    meta_artifacts = best_meta.get("artifacts")
-    if meta_artifacts is None:
-        pair_verification = "same_run_directory_legacy_metadata"
-    else:
-        if not isinstance(meta_artifacts, Mapping):
-            raise ValueError("best_model_meta.json artifacts must be an object")
-        actual_hashes = {
-            "best_model.zip": model_sha256,
-            "best_vec_normalize.pkl": normalizer_sha256,
-        }
-        for filename, actual_hash in actual_hashes.items():
-            entry = meta_artifacts.get(filename)
-            expected_hash = entry.get("sha256") if isinstance(entry, Mapping) else None
-            if expected_hash != actual_hash:
-                raise ValueError(
-                    f"{filename} does not match the SHA-256 bound into "
-                    "best_model_meta.json"
-                )
-        pair_verification = "verified_by_best_model_meta_sha256"
+    model_sha256, normalizer_sha256, pair_verification = (
+        _verify_pair_against_meta(
+            best_meta, model_path=model_path, normalizer_path=normalizer_path
+        )
+    )
 
     from stable_baselines3.common.utils import check_for_correct_spaces
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
@@ -1842,8 +2062,11 @@ def _json_normalized(value: Any) -> Any:
 
 
 def require_campaign_fingerprint(
-    manifest: Mapping[str, Any], fingerprint: Mapping[str, Any]
-) -> None:
+    manifest: Mapping[str, Any],
+    fingerprint: Mapping[str, Any],
+    *,
+    late_keys: Sequence[str] = (),
+) -> dict[str, Any]:
     """Refuse to resume a campaign whose frozen settings changed.
 
     The campaign notebook's settings cell is the campaign's frozen
@@ -1854,6 +2077,16 @@ def require_campaign_fingerprint(
     campaign whose main leg silently runs under different rules than
     the gate leg it chains from (the standing "changes after start
     void the run" doctrine, enforced in code).
+
+    ``late_keys`` names settings that joined the fingerprint after
+    campaigns were already in flight. A recorded fingerprint that
+    predates such a key (lacks it entirely) adopts the current value
+    instead of refusing: the setting was never frozen, so the value
+    acting from here on is the only one there is to freeze, and any
+    decision it already drove is reused from the manifest. The adopted
+    entries are returned (empty when nothing was adopted) for the
+    caller to persist; from then on the key is refused like any other.
+    A late key whose recorded value differs is still refused.
     """
     recorded = manifest.get("fingerprint")
     if not isinstance(recorded, Mapping):
@@ -1862,10 +2095,15 @@ def require_campaign_fingerprint(
             "created by the campaign notebook -- choose a fresh "
             "CAMPAIGN_ID instead of resuming it"
         )
-    recorded_normalized = _json_normalized(dict(recorded))
+    adopted = {
+        key: fingerprint[key]
+        for key in late_keys
+        if key in fingerprint and key not in recorded
+    }
+    recorded_normalized = _json_normalized({**recorded, **adopted})
     current_normalized = _json_normalized(dict(fingerprint))
     if recorded_normalized == current_normalized:
-        return
+        return adopted
     missing = object()
     changed = sorted(
         key
@@ -1910,6 +2148,82 @@ def next_stage_attempt_dir(campaign_root: str | Path, stage_name: str) -> str:
     )
     os.makedirs(path)
     return path
+
+
+def stage_summary_status(run_dir: str | Path) -> str | None:
+    """The ``Status:`` value of a run's ``stage_summary.txt``.
+
+    ``train()`` writes ``completed``, ``interrupted`` (KeyboardInterrupt
+    salvage), or ``crashed`` (exception salvage). ``None`` when the
+    report is absent (the process died hard) or carries no status line.
+    """
+    path = locate_artifact(run_dir, "stage_summary")
+    if path is None:
+        return None
+    with open(path) as handle:
+        for line in handle:
+            if line.startswith("Status:"):
+                return line.split(":", 1)[1].strip()
+    return None
+
+
+def campaign_leg_resume_point(
+    record: Mapping[str, Any] | None,
+) -> tuple[str, str | None]:
+    """Where a resumed campaign re-enters one leg: train, score, or done.
+
+    Returns ``(action, run_dir)``:
+
+    - ``("done", run_dir)``: the leg is ``complete`` (trained, scored,
+      recorded); reuse its report.
+    - ``("score", run_dir)``: the leg was recorded ``trained`` -- its
+      ``config.json`` passed the frozen-plan check -- but the session
+      ended before its scoring was recorded. Re-scoring the protected
+      best checkpoint takes minutes; retraining took 1M-3M steps (the
+      2026-08-28 review's resume finding). Taken only when the attempt
+      is provably a finished run: validation verdict ``ok``,
+      ``stage_summary.txt`` status ``completed``, and both halves of the
+      best checkpoint pair on disk.
+    - ``("train", None)``: anything else -- no record, a config
+      mismatch, an interrupted leg (notebooks before this helper booked
+      those ``trained`` before their interruption check), or a recorded
+      run dir that no longer holds its artifacts. The reason is printed;
+      the retry trains a fresh attempt dir and leaves the old one in
+      place as evidence.
+    """
+    if record is None:
+        return "train", None
+    status = record.get("status")
+    run_dir = record.get("run_dir")
+    if status == "complete" and run_dir:
+        return "done", str(run_dir)
+    if status != "trained" or not run_dir:
+        print(
+            f"[campaign] leg recorded as {status!r}; training a fresh attempt"
+        )
+        return "train", None
+    run_dir = str(run_dir)
+    validation = record.get("config_validation")
+    problems = []
+    if not isinstance(validation, Mapping) or validation.get("verdict") != "ok":
+        problems.append("no 'ok' config validation verdict")
+    summary_status = stage_summary_status(run_dir)
+    if summary_status != "completed":
+        problems.append(f"stage_summary status {summary_status!r}")
+    for name in ("best_model", "best_vec_normalize"):
+        if locate_artifact(run_dir, name) is None:
+            problems.append(f"no {RUN_LAYOUT[name]}")
+    if problems:
+        print(
+            f"[campaign] {run_dir} was recorded trained but cannot be "
+            f"scored ({'; '.join(problems)}); training a fresh attempt"
+        )
+        return "train", None
+    print(
+        f"[campaign] {run_dir} finished training but was never scored; "
+        "re-entering at scoring instead of retraining"
+    )
+    return "score", run_dir
 
 
 def paddle_campaign_metrics(
@@ -2102,7 +2416,12 @@ def score_paddle_stage(
     """Score a finished PaddleTennis leg's best checkpoint against bars.
 
     Loads the leg's protected ``best_model.zip`` with its paired
-    ``best_vec_normalize.pkl``, rebuilds the evaluation environment
+    ``best_vec_normalize.pkl`` -- refusing a pair whose digests
+    ``best_model_meta.json`` does not vouch for (the
+    :func:`verify_best_checkpoint_pair` check, the same one
+    :func:`evaluate_best_wall_ball` applies; the meta file is required,
+    since the PaddleTennis recipe selects by its headline metric and
+    always writes one) -- rebuilds the evaluation environment
     from the run's own recorded constructor kwargs (the instrument
     must measure the task the leg actually trained on -- the
     ``DiagnosisProbeCallback`` contract), replays the behavioral
@@ -2137,7 +2456,12 @@ def score_paddle_stage(
 
     located = {
         name: locate_artifact(run_dir, name)
-        for name in ("config", "best_model", "best_vec_normalize")
+        for name in (
+            "config",
+            "best_model",
+            "best_vec_normalize",
+            "best_model_meta",
+        )
     }
     missing = [
         os.path.join(run_dir, RUN_LAYOUT[name])
@@ -2150,9 +2474,7 @@ def score_paddle_stage(
             f"checkpoint; missing: {missing}"
         )
     config_path = located["config"]
-    model_path = located["best_model"]
-    normalizer_path = located["best_vec_normalize"]
-    assert config_path and model_path and normalizer_path
+    assert config_path
 
     with open(config_path) as handle:
         config = json.load(handle)
@@ -2170,6 +2492,9 @@ def score_paddle_stage(
         )
     env_kwargs = dict(constructor_kwargs)
 
+    pair = verify_best_checkpoint_pair(run_dir)
+    model_path = pair["model_path"]
+    normalizer_path = pair["normalizer_path"]
     policy = native_checkpoint_policy(model_path, normalizer_path)
     traces, travels = run_player(
         policy,
@@ -2186,11 +2511,16 @@ def score_paddle_stage(
         "run_dir": run_dir,
         "policy": {
             "artifact": os.path.basename(model_path),
-            "sha256": _sha256(model_path),
+            "sha256": pair["model_sha256"],
+            "pair_verification": pair["pair_verification"],
+            # The selection event's timestep only: the meta's metric
+            # values may hold non-finite floats this strict-JSON report
+            # refuses to write.
+            "selected_timestep": pair["best_model_meta"].get("timestep"),
         },
         "normalization": {
             "artifact": os.path.basename(normalizer_path),
-            "sha256": _sha256(normalizer_path),
+            "sha256": pair["normalizer_sha256"],
         },
         "environment": {
             "class": "PaddleTennisEnv",
@@ -2286,6 +2616,14 @@ _PLAN_WARM_START_KEYS = frozenset(
         "transfer_log_ent_coef",
         "expected_artifact_sha256",
     }
+)
+#: The source artifacts ``WarmStartConfig.expected_artifact_sha256`` may
+#: pin -- and therefore the only names ``train()`` ever records under
+#: ``initialization.source_artifacts``.
+_PLAN_PINNABLE_ARTIFACTS = (
+    "best_model.zip",
+    "best_vec_normalize.pkl",
+    "config.json",
 )
 _PLAN_MISSING = object()
 
@@ -2394,12 +2732,17 @@ def validate_run_config_against_plan(
         no temperature to move, so they record the flag alone (the
         documented no-op) and pass on the flag comparison;
       - ``"expected_artifact_sha256"``: mapping of source artifact name
-        to the full sha256 or a prefix -- lowercase hex, 8 to 64 chars,
-        validated like
+        (``best_model.zip``, ``best_vec_normalize.pkl``,
+        ``config.json``) to the full sha256 or a prefix -- lowercase
+        hex, 8 to 64 chars, validated like
         :class:`~courtside_dynamics.training.WarmStartConfig` (a
-        malformed pin is a bad plan, not a mismatch) -- matched against
-        ``initialization.source_artifacts`` (``None`` skips the check,
-        mirroring ``WarmStartConfig``).
+        malformed pin or an unknown artifact name is a bad plan, not a
+        mismatch) -- matched against ``initialization.source_artifacts``
+        (``None`` skips the check, mirroring ``WarmStartConfig``).
+
+    A ``config.json`` without a ``train_config`` block is not a run's
+    config (``train()`` writes one at run start) and raises plain
+    :class:`ValueError`.
     """
     if not expected:
         raise ValueError("an expected plan with at least one key is required")
@@ -2419,7 +2762,14 @@ def validate_run_config_against_plan(
     mismatches: list[str] = []
     train_config = config.get("train_config")
     if not isinstance(train_config, Mapping):
-        train_config = {}
+        # train() writes this block at run start, so its absence means
+        # the file is not a run's config.json: an instrument error, not
+        # drift the campaign should book against a run.
+        raise ValueError(
+            "config.json records no train_config block (found "
+            f"{type(train_config).__name__}); not a run's config.json: "
+            f"{config_json_path}"
+        )
     env_info = config.get("env")
     if not isinstance(env_info, Mapping):
         env_info = {}
@@ -2645,6 +2995,16 @@ def _warm_start_plan_mismatches(
             raise ValueError(
                 "expected expected_artifact_sha256 must be a mapping of "
                 "artifact name to a sha256 string (or None)"
+            )
+        # WarmStartConfig's artifact allowlist, mirrored: a typo'd name
+        # ("best_model.pkl") can never be recorded, so comparing it
+        # would book drift against a healthy run.
+        unknown_names = sorted(set(pins) - set(_PLAN_PINNABLE_ARTIFACTS))
+        if unknown_names:
+            raise ValueError(
+                f"expected_artifact_sha256 names unknown artifacts "
+                f"{unknown_names}; allowed: "
+                f"{', '.join(_PLAN_PINNABLE_ARTIFACTS)}"
             )
         for value in pins.values():
             # WarmStartConfig's pin rule, mirrored: an empty pin would
