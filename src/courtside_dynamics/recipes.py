@@ -259,10 +259,14 @@ _PADDLE_TENNIS_CSV_KEYS = (
     # above reset at every n-point boundary, so these are the policy's
     # own whole-episode record; contact_depth_a is per step (|x| of a
     # side-A legal hit's contact, 0.0 on other steps).
+    # episode_mean_contact_depth_a reads a 0.0 sentinel until the
+    # episode's first legal hit; episode_contact_depth_sum_a is the
+    # undiluted running sum behind it.
     "episode_legal_hit_count_a",
     "episode_valid_return_count_a",
     "episode_rally_returns_a",
     "contact_depth_a",
+    "episode_contact_depth_sum_a",
     "episode_mean_contact_depth_a",
     "episode_deep_returns_a",
 )
@@ -326,6 +330,12 @@ _PADDLE_TENNIS_TERMINAL_EVAL_KEYS = (
     "episode_valid_return_count_a",
     "episode_rally_returns_a",
     "episode_deep_returns_a",
+    # The batch's hit-weighted mean contact depth is
+    # episode_contact_depth_sum_a_ep_mean /
+    # episode_legal_hit_count_a_ep_mean. episode_mean_contact_depth_a
+    # reads its 0.0 sentinel on every hitless episode, so its _ep_mean
+    # is diluted by them (it stays as the per-episode view).
+    "episode_contact_depth_sum_a",
     "episode_mean_contact_depth_a",
 )
 
@@ -1227,7 +1237,9 @@ RECIPES: dict[str, Recipe] = {
             # each of 3 episodes; the terminal key read 7/7/3).
             # episode_rally_returns_a counts side-A confirmed returns
             # that were not side A's first of their point, over the
-            # whole episode, so it is the k=2 target itself; success =
+            # whole episode (k counts from each point's launch, so a
+            # drilled point starts at k=0 under either drill arm), so
+            # it is the k=2 target itself; success =
             # the fraction of eval episodes with at least one such
             # conversion. crossings stays logged as a diagnostic.
             "success_key": "episode_rally_returns_a",
@@ -1242,8 +1254,13 @@ RECIPES: dict[str, Recipe] = {
                 # Episode-cumulative side-A counters and the
                 # contact-depth instrument (C1; see the CSV keys).
                 # contact_depth_a is per step and 0.0 off a hit, so
-                # its _mean is diluted; read _max here and
-                # episode_mean_contact_depth_a for the mean depth.
+                # its _mean is diluted; read its _max here. The
+                # hit-weighted mean depth over an eval batch is
+                # episode_contact_depth_sum_a_ep_mean /
+                # episode_legal_hit_count_a_ep_mean (terminal keys):
+                # episode_mean_contact_depth_a reads a 0.0 sentinel
+                # before an episode's first legal hit, so its _mean
+                # and _ep_mean are diluted too.
                 "episode_legal_hit_count_a",
                 "episode_valid_return_count_a",
                 "episode_rally_returns_a",

@@ -414,15 +414,22 @@ class TestServeAlternation:
         env = PaddleTennisEnv()
         try:
             sides = []
-            for index in range(4):
+            # An ODD number of resets before the final seeded one, so
+            # continued alternation would serve "b" there: only the
+            # seed's restart at side A gives "a" (after an even count,
+            # both rules agree and the check cannot tell them apart).
+            for index in range(5):
                 _, info = env.reset(seed=_SMOKE_SEEDS[0] if index == 0 else None)
                 sides.append(info["serve_side"])
                 assert info["serve_side_is_policy"] == (
                     1.0 if info["serve_side"] == "a" else 0.0
                 )
-            assert sides == ["a", "b", "a", "b"]
+            assert sides == ["a", "b", "a", "b", "a"]
             _, info = env.reset(seed=_SMOKE_SEEDS[1])
             assert info["serve_side"] == "a"
+            # ...and the alternation resumes from the restart.
+            _, info = env.reset()
+            assert info["serve_side"] == "b"
         finally:
             env.close()
 
@@ -826,6 +833,7 @@ class TestEpisodePolicyCounters:
             assert info["episode_rally_returns_a"] == rally
             assert info["episode_deep_returns_a"] == deep
             assert info["contact_depth_a"] == (depths[-1] if depths else 0.0)
+            assert info["episode_contact_depth_sum_a"] == depth_sum
             assert info["episode_mean_contact_depth_a"] == (
                 depth_sum / legal if legal else 0.0
             )
@@ -881,9 +889,49 @@ class TestEpisodePolicyCounters:
             assert touches > 0
             assert info["episode_legal_hit_count_a"] == 0.0
             assert info["episode_valid_return_count_a"] == 0.0
+            assert info["episode_contact_depth_sum_a"] == 0.0
             assert info["episode_mean_contact_depth_a"] == 0.0
         finally:
             env.close()
+
+    def test_contact_depth_sum_gives_the_hit_weighted_batch_mean(self):
+        """episode_mean_contact_depth_a reads a 0.0 sentinel on a
+        hitless episode, so its across-episode mean (the eval
+        callback's terminal _ep_mean) is diluted by every hitless
+        episode in the batch. episode_contact_depth_sum_a's _ep_mean
+        over episode_legal_hit_count_a's _ep_mean is the hit-weighted
+        mean depth the recipe points readers to."""
+        env = PaddleTennisEnv(**_RECIPE_KWARGS)
+        try:
+            hitter, _ = self._recount(env, _SMOKE_SEEDS[0])
+            # The lead-charge volleyer's every touch faults (measured
+            # on this seed in test_fault_touches_are_not_legal_hits).
+            obs, _ = env.reset(seed=1003)
+            while True:
+                obs, _r, term, trunc, hitless = env.step(
+                    scripted_lead_charge_opponent(obs)
+                )
+                if term or trunc:
+                    break
+        finally:
+            env.close()
+        assert hitless["episode_legal_hit_count_a"] == 0.0
+        assert hitless["episode_contact_depth_sum_a"] == 0.0
+        assert hitless["episode_mean_contact_depth_a"] == 0.0  # sentinel
+        hits = hitter["episode_legal_hit_count_a"]
+        depth = hitter["episode_mean_contact_depth_a"]
+        assert hits > 0
+        assert hitter["episode_contact_depth_sum_a"] == pytest.approx(depth * hits)
+
+        def ep_mean(key: str) -> float:
+            return (hitter[key] + hitless[key]) / 2
+
+        weighted = ep_mean("episode_contact_depth_sum_a") / ep_mean(
+            "episode_legal_hit_count_a"
+        )
+        assert weighted == pytest.approx(depth)
+        # The sentinel halves the per-episode mean's batch average.
+        assert ep_mean("episode_mean_contact_depth_a") == pytest.approx(depth / 2)
 
     def test_deep_returns_respond_to_the_depth_threshold(self):
         totals = {}
@@ -910,14 +958,27 @@ class TestEpisodePolicyCounters:
         try:
             obs, _ = env.reset(seed=_SMOKE_SEEDS[0])
             info: dict = {}
-            while not info.get("episode_valid_return_count_a"):
-                obs, _r, _t, _tr, info = env.step(scripted_ground_opponent(obs))
+            # Bounded by the episode: a counter that never moves must
+            # fail here, not spin past truncation into the timeout.
+            for _ in range(env.episode_len):
+                obs, _r, term, trunc, info = env.step(scripted_ground_opponent(obs))
+                assert not (term or trunc), (
+                    "episode ended before side A's first confirmed return"
+                )
+                if info["episode_valid_return_count_a"]:
+                    break
+            # The precondition: nonzero counters reach the guard step,
+            # so "carried" below cannot pass vacuously on zeros.
+            assert info["episode_valid_return_count_a"] >= 1.0
+            assert info["episode_legal_hit_count_a"] >= 1.0
+            assert info["episode_contact_depth_sum_a"] > 0.0
             carried = {
                 key: info[key]
                 for key in (
                     "episode_legal_hit_count_a",
                     "episode_valid_return_count_a",
                     "episode_rally_returns_a",
+                    "episode_contact_depth_sum_a",
                     "episode_mean_contact_depth_a",
                     "episode_deep_returns_a",
                 )
@@ -2159,6 +2220,57 @@ class TestNPointEpisodes:
         finally:
             env.close()
 
+    def test_relaunch_redraws_when_a_nudge_leaves_the_envelope_blocked(
+        self, monkeypatch
+    ):
+        """The post-nudge re-verify loop, which the real nudge never
+        reaches (it always clears): should a nudge leave a head inside
+        the launch envelope, the relaunch redraws against where the
+        paddles now stand. The nudge is stalled (it moves nothing) and
+        the draws are scripted: the protocol's 1 + _SERVE_REDRAWS
+        pre-nudge draws all sit on the policy's paddle head, and every
+        later one is the real, clear draw. The relaunch must nudge
+        once, redraw after it, and launch the ball clear of both
+        heads with the paddles left where they stood."""
+        env = PaddleTennisEnv(points_per_episode=None)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            env._serving_side = CourtSide.A
+            head = env._paddle_position(CourtSide.A).copy()
+            blocked = head + np.array([0.05, 0.0, 0.05])
+            pre_nudge = 1 + env._SERVE_REDRAWS
+            real_draw = env._draw_serve
+            draws: list[np.ndarray] = []
+            nudges: list[np.ndarray] = []
+
+            def scripted_draw():
+                position, velocity = real_draw()
+                if len(draws) < pre_nudge:
+                    position = blocked.copy()
+                draws.append(position.copy())
+                return position, velocity
+
+            def stalled_nudge(position):
+                nudges.append(position.copy())
+
+            monkeypatch.setattr(env, "_draw_serve", scripted_draw)
+            monkeypatch.setattr(env, "_nudge_paddle_clear", stalled_nudge)
+            env._launch_point(mid_episode=True)
+
+            assert len(nudges) == 1
+            np.testing.assert_array_equal(nudges[0], blocked)
+            assert env._point_serve_nudged == 1
+            # The stalled nudge left the head inside the envelope, so
+            # the loop redrew; its first draw is clear and ends it.
+            assert len(draws) == pre_nudge + 1
+            assert not env._clear_launch_envelope(blocked)
+            ball = env._ball_position()
+            np.testing.assert_allclose(ball, draws[-1])
+            assert env._clear_launch_envelope(ball)
+            np.testing.assert_allclose(env._paddle_position(CourtSide.A), head)
+        finally:
+            env.close()
+
     def test_hard_slam_far_side_deaths_cause_no_spurious_faults(self):
         """NP1 relaunch-hazard witness: points ending with the ball
         beyond the far baseline must not open the next point with a
@@ -2968,6 +3080,79 @@ class TestK2Drill:
             assert all(entry == -1.0 for _flag, entry in undrilled)
         finally:
             env.close()
+
+    def test_rally_returns_restart_at_every_drilled_launch_in_both_arms(
+        self, drill_library_path
+    ):
+        """episode_rally_returns_a counts the policy's k>=2 confirms
+        per LAUNCHED point, so the two drill arms count the same
+        thing. Arm "full" restores the harvested rules machine, whose
+        valid_return_count_a already holds the harvest's own side-A
+        returns (1-6 on this library); reading k from that snapshot
+        counted the policy's FIRST return of a drilled point as a
+        conversion under arm "full" only. The oracle plays side A
+        through drilled policy-receiving points on both arms, and a
+        recount whose k restarts at every launch must match the env
+        on every step, and the two arms' episode totals agree."""
+        restored: dict[str, list[int]] = {}
+        totals: dict[str, tuple[float, float]] = {}
+        for context in ("feed", "full"):
+            env = PaddleTennisEnv(
+                points_per_episode=None,
+                drill_library=drill_library_path,
+                drill_fraction=1.0,
+                drill_context=context,
+            )
+            try:
+                obs, info = env.reset(
+                    seed=_SMOKE_SEEDS[2], options={"serve_side": "b"}
+                )
+                assert info["drill_point"] == 1.0
+                k = valid = rally = prev_points = 0
+                restored[context] = []
+                while True:
+                    obs, _r, term, trunc, sinfo = env.step(
+                        scripted_ground_opponent(obs)
+                    )
+                    transition = env._last_transition
+                    for side in transition.confirmed_returns:
+                        if side is not CourtSide.A:
+                            continue
+                        valid += 1
+                        k += 1
+                        rally += k >= 2
+                        if k == 1 and sinfo["drill_point"] == 1.0:
+                            # The policy's first return of a drilled
+                            # point: what the rules machine had
+                            # already counted for side A this point.
+                            restored[context].append(
+                                transition.before.valid_return_count_a
+                            )
+                    assert sinfo["episode_valid_return_count_a"] == valid
+                    assert sinfo["episode_rally_returns_a"] == rally
+                    if int(sinfo["points_played"]) != prev_points:
+                        prev_points = int(sinfo["points_played"])
+                        k = 0  # the next point launches from k=0
+                    if term or trunc:
+                        break
+                assert sinfo["drill_fallback_count"] == 0.0
+                assert rally >= 1  # k>=2 conversions exercised
+                totals[context] = (
+                    sinfo["episode_valid_return_count_a"],
+                    sinfo["episode_rally_returns_a"],
+                )
+            finally:
+                env.close()
+        # Both arms played a drilled point the policy returned; only
+        # the full arm's restored machine had already counted side-A
+        # returns there -- the case the snapshot-read k got wrong.
+        assert restored["feed"] and restored["full"], restored
+        assert all(count == 0 for count in restored["feed"]), restored
+        assert all(count >= 1 for count in restored["full"]), restored
+        # Measured on this seed: each arm plays a drilled point with
+        # one policy return, then a drawn point with five (6 returns,
+        # 4 conversions); the snapshot-read k gave arm "full" 5.
+        assert totals["full"] == totals["feed"], totals
 
     def test_ezpickle_round_trip_keeps_drill_kwargs(
         self, drill_library_path

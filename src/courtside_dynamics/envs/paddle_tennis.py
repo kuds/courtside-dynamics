@@ -380,6 +380,16 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._episode_rally_returns_a = 0
         self._episode_deep_returns_a = 0
         self._episode_contact_depth_sum_a = 0.0
+        # Side A's confirmed returns in the CURRENT point of this
+        # episode, the k behind episode_rally_returns_a's k>=2 test.
+        # Zeroed by every point launch (reset serve, n-point relaunch,
+        # either drill arm), never read from the rules machine: a
+        # full-arm drill restores a harvested machine whose
+        # valid_return_count_a already counts the harvested point's
+        # own side-A returns (1-6 in the tests' library), which would
+        # count the policy's first return of a drilled point as a
+        # conversion under arm "full" but not under arm "feed".
+        self._point_returns_a = 0
         # The contact depth of the side-A legal hit whose return is
         # still unconfirmed (None = no such shot in flight): held
         # until that return confirms or the point ends, so a deep
@@ -1084,17 +1094,18 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             hit_depth = abs(float(event.position[0]))
             self._episode_legal_hits_a += 1
             self._episode_contact_depth_sum_a += hit_depth
-        # The rules count confirmed returns per point, so the snapshot
-        # before this step says which of this step's side-A confirms
-        # is the point's first (k=1) and which convert k>=2.
-        point_returns_a = transition.before.valid_return_count_a
+        # The episode's own per-point count says which of this step's
+        # side-A confirms is the launched point's first (k=1) and which
+        # convert k>=2. It equals the rules' per-point
+        # valid_return_count_a on every freshly built machine, and
+        # keeps a full-arm drill's restored harvest count out of it.
         hit_open = hit_depth is not None
         for side in transition.confirmed_returns:
             if side is not CourtSide.A:
                 continue
             self._episode_valid_returns_a += 1
-            point_returns_a += 1
-            if point_returns_a >= 2:
+            self._point_returns_a += 1
+            if self._point_returns_a >= 2:
                 self._episode_rally_returns_a += 1
             depth = self._pending_contact_depth_a
             self._pending_contact_depth_a = None
@@ -1270,6 +1281,17 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
                 ),
                 "episode_rally_returns_a": float(self._episode_rally_returns_a),
                 "contact_depth_a": float(contact_depth_a),
+                # The summed contact depth of the episode's side-A
+                # legal hits. Over a batch of episodes, its total
+                # divided by the episode_legal_hit_count_a total is
+                # the hit-weighted mean depth. The per-episode mean
+                # below reads a 0.0 SENTINEL until the episode's first
+                # legal hit (so a hitless episode ends on 0.0), and
+                # averaging it across episodes dilutes the depth with
+                # every hitless one.
+                "episode_contact_depth_sum_a": float(
+                    self._episode_contact_depth_sum_a
+                ),
                 "episode_mean_contact_depth_a": (
                     self._episode_contact_depth_sum_a / self._episode_legal_hits_a
                     if self._episode_legal_hits_a
@@ -1521,6 +1543,10 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         launches and the drill-off env consume nothing extra), and a
         clearance-passing entry replaces the serve draw entirely.
         """
+        # Every launch path -- drawn serve and both drill arms, at
+        # reset and mid-episode -- starts the policy's per-point
+        # return count over (episode_rally_returns_a's k).
+        self._point_returns_a = 0
         if self._drill_entries is not None and self._serving_side is CourtSide.B:
             if float(self.np_random.random()) < self.drill_fraction:
                 index = int(self.np_random.integers(len(self._drill_entries)))
