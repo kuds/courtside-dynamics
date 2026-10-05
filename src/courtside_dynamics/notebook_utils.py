@@ -2236,15 +2236,20 @@ def campaign_leg_resume_point(
       ended before its scoring was recorded. Re-scoring the protected
       best checkpoint takes minutes; retraining took 1M-3M steps (the
       2026-08-28 review's resume finding). Taken only when the attempt
-      is provably a finished run: validation verdict ``ok``,
-      ``stage_summary.txt`` status ``completed``, and both halves of the
-      best checkpoint pair on disk.
+      is provably a finished run the scorer will accept: validation
+      verdict ``ok``, ``stage_summary.txt`` status ``completed``, and
+      :func:`score_paddle_stage`'s own preconditions -- the same
+      check, not a copy: ``config.json`` recording a PaddleTennisEnv
+      evaluation env, ``best_model_meta.json`` on disk, and the best
+      pair verified against it (:func:`verify_best_checkpoint_pair`).
     - ``("train", None)``: anything else -- no record, a config
       mismatch, an interrupted leg (notebooks before this helper booked
-      those ``trained`` before their interruption check), or a recorded
-      run dir that no longer holds its artifacts. The reason is printed;
-      the retry trains a fresh attempt dir and leaves the old one in
-      place as evidence.
+      those ``trained`` before their interruption check), a recorded
+      run dir that no longer holds its artifacts, or a best pair the
+      scorer would refuse (sending that to scoring would re-raise on
+      every resume and wedge the campaign). The reason is printed; the
+      retry trains a fresh attempt dir and leaves the old one in place
+      as evidence.
     """
     if record is None:
         return "train", None
@@ -2265,9 +2270,12 @@ def campaign_leg_resume_point(
     summary_status = stage_summary_status(run_dir)
     if summary_status != "completed":
         problems.append(f"stage_summary status {summary_status!r}")
-    for name in ("best_model", "best_vec_normalize"):
-        if locate_artifact(run_dir, name) is None:
-            problems.append(f"no {RUN_LAYOUT[name]}")
+    try:
+        _paddle_stage_scoring_inputs(run_dir)
+    except (FileNotFoundError, ValueError) as err:
+        # Only the scorer's refusals: any other OSError (a flaky mount)
+        # propagates rather than costing a 1M-3M-step retrain.
+        problems.append(str(err))
     if problems:
         print(
             f"[campaign] {run_dir} was recorded trained but cannot be "
@@ -2460,6 +2468,65 @@ def score_campaign_bars(
     return {"bars": scored, "verdict": overall}
 
 
+def _paddle_stage_scoring_inputs(
+    run_dir: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """:func:`score_paddle_stage`'s preconditions, checked before any load.
+
+    Returns ``(env_kwargs, pair)``: the evaluation constructor kwargs
+    ``config.json`` records, and the best checkpoint pair as
+    :func:`verify_best_checkpoint_pair` verified it. Raises
+    ``FileNotFoundError`` when ``config.json``, either half of the best
+    pair, or ``best_model_meta.json`` is missing, and ``ValueError``
+    when the config is not a PaddleTennisEnv run with constructor
+    kwargs or the pair fails its digest check.
+    :func:`campaign_leg_resume_point` runs this same check, so a leg it
+    re-enters at scoring is one the scorer accepts.
+    """
+    located = {
+        name: locate_artifact(run_dir, name)
+        for name in (
+            "config",
+            "best_model",
+            "best_vec_normalize",
+            "best_model_meta",
+        )
+    }
+    missing = [
+        os.path.join(run_dir, RUN_LAYOUT[name])
+        for name, path in located.items()
+        if path is None
+    ]
+    if missing:
+        raise FileNotFoundError(
+            "stage scoring requires a finished run with a protected best "
+            f"checkpoint; missing: {missing}"
+        )
+    config_path = located["config"]
+    assert config_path
+
+    with open(config_path) as handle:
+        config = json.load(handle)
+    if not isinstance(config, Mapping):
+        raise ValueError(f"config.json must be a JSON object: {config_path}")
+    env_config = config.get("evaluation_env") or config.get("env") or {}
+    if not isinstance(env_config, Mapping):
+        env_config = {}
+    if env_config.get("class") != "PaddleTennisEnv":
+        raise ValueError(
+            "stage scoring requires a PaddleTennisEnv run; config.json "
+            f"records {env_config.get('class')!r}"
+        )
+    constructor_kwargs = env_config.get("constructor_kwargs")
+    if not isinstance(constructor_kwargs, Mapping):
+        raise ValueError(
+            "config.json records no evaluation constructor kwargs; the "
+            "instrument cannot rebuild the leg's environment"
+        )
+    pair = verify_best_checkpoint_pair(run_dir)
+    return dict(constructor_kwargs), pair
+
+
 def score_paddle_stage(
     run_dir: str | Path,
     *,
@@ -2509,45 +2576,7 @@ def score_paddle_stage(
     ):
         raise ValueError("episodes must be a positive integer")
 
-    located = {
-        name: locate_artifact(run_dir, name)
-        for name in (
-            "config",
-            "best_model",
-            "best_vec_normalize",
-            "best_model_meta",
-        )
-    }
-    missing = [
-        os.path.join(run_dir, RUN_LAYOUT[name])
-        for name, path in located.items()
-        if path is None
-    ]
-    if missing:
-        raise FileNotFoundError(
-            "stage scoring requires a finished run with a protected best "
-            f"checkpoint; missing: {missing}"
-        )
-    config_path = located["config"]
-    assert config_path
-
-    with open(config_path) as handle:
-        config = json.load(handle)
-    env_config = config.get("evaluation_env") or config.get("env") or {}
-    if env_config.get("class") != "PaddleTennisEnv":
-        raise ValueError(
-            "stage scoring requires a PaddleTennisEnv run; config.json "
-            f"records {env_config.get('class')!r}"
-        )
-    constructor_kwargs = env_config.get("constructor_kwargs")
-    if not isinstance(constructor_kwargs, Mapping):
-        raise ValueError(
-            "config.json records no evaluation constructor kwargs; the "
-            "instrument cannot rebuild the leg's environment"
-        )
-    env_kwargs = dict(constructor_kwargs)
-
-    pair = verify_best_checkpoint_pair(run_dir)
+    env_kwargs, pair = _paddle_stage_scoring_inputs(run_dir)
     model_path = pair["model_path"]
     normalizer_path = pair["normalizer_path"]
     policy = native_checkpoint_policy(model_path, normalizer_path)
