@@ -1779,7 +1779,12 @@ def build_train_config(
         "name_prefix": f"{recipe.name_prefix}_{resolved_algo.lower()}",
         "total_timesteps": recipe.default_total_timesteps,
     }
-    cfg_kwargs.update(recipe.extra_cfg)
+    # Deep-copied: TrainConfig keeps the dicts it is given, so a shallow
+    # update would alias the recipe's own model_kwargs/checkpoint_diagnosis
+    # into every config -- one notebook leg mutating its
+    # cfg.model_kwargs would silently retune every later build of the
+    # same recipe in that process.
+    cfg_kwargs.update(deepcopy(recipe.extra_cfg))
 
     if file_config is not None:
         from courtside_dynamics.run_config import merge_train_overrides

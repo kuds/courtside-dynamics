@@ -1463,6 +1463,11 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 eval_freq=_calls(cfg.eval_freq),
                 callback_on_new_best=on_new_best,
                 callback_after_eval=after_eval,
+                # SB3 defaults to verbose=1, which printed "New best mean
+                # reward!" every eval even under headline selection, where
+                # this callback saves nothing -- silent there, and it
+                # follows eval_verbose when it is the selector.
+                verbose=0 if headline_selection else eval_verbose,
             )
 
         callbacks: list[BaseCallback] = (

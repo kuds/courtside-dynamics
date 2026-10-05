@@ -118,8 +118,10 @@ available recipe keys are:
 - `WallBallTrueBaseline` (0.25.0 — the current era task on the extended
   ITF-baseline workspace)
 - `PaddleTennis` (unreleased — the first two-sided rung: 1v1 cooperative
-  rally on the probe-frozen paddle court vs the frozen scripted opponent;
-  selection follows the `crossings` rally tail)
+  rally on the probe-frozen paddle court vs the frozen scripted opponent,
+  in continuous n-point play with the escrowed contact and reach
+  shapings; selection follows the `crossings` rally tail, success the
+  policy's own legal-hit count)
 - `HumanoidTennisStage0Intercept`
 - `HumanoidTennisStage1AnchoredReturn`
 - `HumanoidTennisStage2RandomizedReturn`

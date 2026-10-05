@@ -59,6 +59,21 @@ def test_explicit_overrides_win_over_quick_test(tmp_path):
     assert cfg.n_envs == 2
 
 
+def test_built_configs_do_not_alias_recipe_dicts(tmp_path):
+    """Mutating one config's nested dicts must not retune the recipe:
+    a notebook building several legs in one process edits
+    ``cfg.model_kwargs`` per leg, and a shallow copy leaked the edit
+    into every later build of the same recipe."""
+    first = build_train_config("PaddleTennis", log_dir=str(tmp_path / "a"))
+    assert first.model_kwargs is not RECIPES["PaddleTennis"].extra_cfg["model_kwargs"]
+    first.model_kwargs["learning_rate"] = 1e-4
+    first.checkpoint_diagnosis["episodes"] = 1
+
+    second = build_train_config("PaddleTennis", log_dir=str(tmp_path / "b"))
+    assert "learning_rate" not in second.model_kwargs
+    assert second.checkpoint_diagnosis["episodes"] == 30
+
+
 def test_unknown_env_raises_keyerror(tmp_path):
     with pytest.raises(KeyError):
         build_train_config("NoSuchEnv", log_dir=str(tmp_path))
