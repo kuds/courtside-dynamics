@@ -1328,6 +1328,80 @@ def test_info_dict_eval_confirm_best_banks_weaker_by_delta_order(
     assert cb._best_score == (1.010, 0.90)
 
 
+def test_paired_confirm_best_compares_each_seed_block_with_itself():
+    """Paired evaluation replays one fixed seed block for the standard
+    batch and another for the confirmation batch. Banking the weaker
+    sample stored a confirmation-block best that every later standard
+    batch was measured against, so an unchanged policy reading higher
+    on its standard block passed the first test and re-rolled (and lost)
+    a confirmation at every evaluation: 19 extra 30-episode batches in
+    20 evaluations. Each block is now compared only with itself."""
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    cb = InfoDictEvalCallback(
+        eval_env=object(),
+        best_metric_keys=_PADDLE_SELECTION_KEYS,
+        best_metric_min_delta={
+            "crossings_ep_mean": 0.5 / 30,
+            "success_rate": 0.5 / 30,
+            "episode_reward_mean": 0.25,
+        },
+        confirm_best=True,
+        eval_seed=7,
+    )
+    cb.model = _FakeSavableModel(action_dim=3)
+    # policy -> (standard-block reading, confirmation-block reading); a
+    # deterministic policy reads the same on a block at every evaluation.
+    policy = {"blocks": None}
+    confirmations: list[int] = []
+
+    def reading(crossings, success, reward):
+        return {
+            "crossings_ep_mean": crossings,
+            "success_rate": success,
+            "episode_reward_mean": reward,
+        }
+
+    def collect():
+        standard, confirmation = policy["blocks"]
+        if cb._confirmation_pass:
+            confirmations.append(cb.num_timesteps)
+            return dict(confirmation)
+        return dict(standard)
+
+    cb._collect_metrics = collect  # type: ignore[method-assign]
+
+    def evaluate(step, standard, confirmation):
+        policy["blocks"] = (standard, confirmation)
+        cb.num_timesteps = step
+        assert cb._update_best_and_maybe_stop(cb._collect_metrics())
+
+    evaluate(1, reading(0.0, 0.0, 0.0), reading(0.0, 0.0, -0.5))
+    # An improved policy: +1.6 reward on the standard block, +1.3 on the
+    # confirmation block. Accepted on its confirmation.
+    unchanged = (reading(0.0, 0.0, 1.6), reading(0.0, 0.0, 1.3))
+    for step in range(2, 21):
+        evaluate(step, *unchanged)
+    assert confirmations == [2]
+    assert cb._best_score == (0.0, 0.0, 1.6)
+    assert cb._best_confirm_score == (0.0, 0.0, 1.3)
+
+    # One more conversion on both blocks: accepted, both blocks banked.
+    one = 1.0 / 30
+    evaluate(21, reading(one, one, 1.6), reading(one, one, 1.3))
+    assert confirmations == [2, 21]
+    assert cb._best_score == (one, one, 1.6)
+    assert cb._best_confirm_score == (one, one, 1.3)
+    # Better on the standard block only: its confirmation block ties its
+    # own best, so it is rejected and the best is unchanged.
+    evaluate(22, reading(2 * one, 2 * one, 1.6), reading(one, one, 1.3))
+    assert confirmations == [2, 21, 22]
+    assert cb._best_score == (one, one, 1.6)
+    # A stage reset forgets both blocks' bests.
+    cb.reset_selection_state()
+    assert cb._best_score is None and cb._best_confirm_score is None
+
+
 def test_info_dict_eval_confirm_best_requires_second_batch(
     tmp_path, monkeypatch
 ):

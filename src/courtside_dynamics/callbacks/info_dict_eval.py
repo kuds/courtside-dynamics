@@ -265,7 +265,10 @@ class InfoDictEvalCallback(BaseCallback):
         one lucky 2-bounce episode in 30; confirmation makes a
         single-batch fluke twice as unlikely at the cost of one extra
         eval pass per candidate best. The first evaluation is always
-        accepted unconfirmed (there is no best to defend yet).
+        accepted unconfirmed (there is no best to defend yet). Unpaired,
+        the stored best is the weaker of the two samples; paired (see
+        ``eval_seed``), the best keeps one score per seed block and each
+        batch is compared only with its own block's score.
     degenerate_stop_evals:
         When ``> 0``, stop training once this many *consecutive*
         evaluations produced a flat selection score (every
@@ -536,6 +539,10 @@ class InfoDictEvalCallback(BaseCallback):
         # confirmation seed block (see _rollout_seed_base).
         self._confirmation_pass = False
         self._best_score: tuple[float, ...] | None = None
+        # Paired evaluation only: the confirmation-block score of the
+        # stored best (None until a best was accepted on a
+        # confirmation), so each seed block is compared with itself.
+        self._best_confirm_score: tuple[float, ...] | None = None
         self._evals_since_best = 0
         self._eval_count = 0
         # Caller-owned scalars merged into every evaluation's metrics
@@ -1155,6 +1162,7 @@ class InfoDictEvalCallback(BaseCallback):
         evaluation produces a new best and overwrites them.
         """
         self._best_score = None
+        self._best_confirm_score = None
         self._evals_since_best = 0
         self._recent_signal.clear()
 
@@ -1238,6 +1246,7 @@ class InfoDictEvalCallback(BaseCallback):
         score = self._score_of(metrics)
         improved = self._improves(score, self._best_score)
         confirmation: Mapping[str, float] | None = None
+        confirm_score: tuple[float, ...] | None = None
         if improved and self.confirm_best and self._best_score is not None:
             # One independent second sample before dethroning the best:
             # with 30-episode evals a single lucky episode moves an
@@ -1250,8 +1259,29 @@ class InfoDictEvalCallback(BaseCallback):
             # sample set that depends on the selection outcome.
             self.last_confirmation_metrics = dict(confirmation)
             confirm_score = self._score_of(confirmation)
-            if self._improves(confirm_score, self._best_score):
-                # Bank the weaker of the two samples -- under the same
+            if self.eval_seed is not None:
+                # Paired: the standard and confirmation batches each
+                # replay their own fixed seed block, so each is compared
+                # only with the stored best's score on the same block
+                # (the standard test above already is). Banking the
+                # weaker sample would store a confirmation-block score
+                # that every later standard batch is then measured
+                # against: a policy reading higher on the standard block
+                # would pass the first test and re-roll a confirmation
+                # at every evaluation, unchanged. Until a best was
+                # accepted on a confirmation (the first best is banked
+                # unconfirmed), the gate falls back to its standard
+                # score.
+                reference = (
+                    self._best_score
+                    if self._best_confirm_score is None
+                    else self._best_confirm_score
+                )
+                if not self._improves(confirm_score, reference):
+                    improved = False
+            elif self._improves(confirm_score, self._best_score):
+                # Unpaired: both batches are draws from one stream. Bank
+                # the weaker of the two samples -- under the same
                 # delta-tolerant ordering used everywhere else, not raw
                 # tuple order -- so the stored best stays an estimate a
                 # future genuine improvement can beat, not a lucky
@@ -1263,6 +1293,8 @@ class InfoDictEvalCallback(BaseCallback):
 
         if improved:
             self._best_score = score
+            if self.eval_seed is not None:
+                self._best_confirm_score = confirm_score
             self._evals_since_best = 0
             self._save_best(metrics, confirmation=confirmation)
         elif self._eval_count > self.early_stop_min_evals:
