@@ -307,3 +307,185 @@ delete, with a pointer in `DECISIONS.md`, so reproducibility survives.
 | `PaddleTennisEnv`: `_draw_serve` duplicates `PaddleCourtScene.serve`; joint/actuator names repeated 4×; nine reward-component kwargs and two clawback blocks could become a dict and one helper | about 250 lines; `step()` drops from 210 to about 120 lines | |
 | WallBall → `PaddleInterface` delegation | about 200 lines + a drift test | |
 | Docs | — | stale statements remain (CHANGELOG "recipe does NOT enable n-point/shaping"; LT1 prereg §4a 3M "recipe default"; `docs/README.md` says "three kinds" and lists four); replace dated PaddleTennis status docs with one living page |
+
+## 7. Follow-up audit: humanoid removal, fix-first, cleanup-first (2026-10-05)
+
+The maintainer's goal for PaddleTennis is **baseline rallies where the
+ball bounces once in the singles court before being hit back across the
+net**. Three questions followed. A second pass answered them with four
+scoped audits: humanoid removal map, bug triage against the next run,
+foundation readiness, and a rules-engine audit against that goal.
+
+- Every medium-or-higher *new* finding and every load-bearing claim got
+  an independent adversarial verifier. That was 14 verifications, 12
+  confirmed and 2 refuted or downgraded; the corrections are applied
+  below.
+- A completeness critic then checked all four scopes.
+- Scratch probes are under the session scratchpad; none are committed.
+
+### 7.1 Remove the humanoid code now? Yes, as an archive, in parallel with the fixes, not as a prerequisite
+
+**Evidence:**
+
+- **No runtime coupling.** At runtime the PaddleTennis path never calls
+  humanoid code; the coupling is import-time only (`envs/__init__.py`,
+  `training/__init__.py`, `recipes.py`, `scripted_policies.py`, and the
+  gym registration).
+  - Today every paddle import also loads `humanoid_tennis`,
+    `robot_models` and both `tennis_curriculum` modules, so a broken
+    edit to dormant humanoid code can take down paddle training on
+    Colab.
+  - A deletion dry-run kept ruff and mypy clean and the paddle,
+    DemoSAC, train and notebook_utils tests green. PaddleTennis obs,
+    reward and full info stayed **byte-identical** across random,
+    oracle and lead-charge play (*confirmed*).
+- **Size.**
+  - About 4.7k src lines go: 4.0k humanoid-only, plus about 0.7k in
+    `recipes.py` and `scripted_policies.py`.
+  - About 4.1k test lines go, and 1.07k XML lines.
+  - The G1 assets are 19.7 MB, which is **96.7% of the wheel**
+    (9.04 MB → about 0.3 MB) on every Colab `pip install`.
+  - The CI saving is real but small: about 30 s per matrix leg (about
+    15%).
+- **Dormant either way.** No humanoid training has run since 0.16.0
+  (2026-07-21). Resuming already needs the three [humanoid-resume] bugs
+  and the four structural transfer gaps from the 2026-08-28 review, so
+  resumption is a re-design regardless.
+
+**Conditions:**
+
+- **Tag first.** Create `humanoid-tennis-archive-v0.25.0` plus an
+  archive branch, from a full clone (this one is shallow and the repo
+  has no tags).
+- **Port before deleting.** Port the ~29 shared-coverage tests to the
+  paddle court *before* deleting anything.
+  - 32 of 36 `test_tennis_events.py` items build the humanoid scene.
+  - The markov-state and safety-drain sampler tests, the only GL render
+    smoke (`ci.yml:128`) and the only gymnasium `env_checker` test are
+    humanoid tests.
+  - Porting them gives the paddle court its first `in_bounds` coverage
+    at half-length 6.5 m.
+- **Carry the reset pattern over.** Copy the seeded `reset(options)`
+  serve-side pattern (`humanoid_tennis.py:741-811`) for §5b #3.
+- **Keep the old docs working.** Pin the humanoid notebook's install to
+  the tag, add a README roadmap section, and bump the version, since a
+  registered ID is removed.
+- **Pruning can ride along.** Pruning the dead humanoid enum members and
+  contact channels may go in the same PR. The PaddleTennis recipe pins
+  its CSV and eval keys, so dropping the 24 always-zero humanoid info
+  keys changes no log. Keep the explicit `TerminationReason` integers.
+
+### 7.2 Fix bugs before more training? Yes: a targeted 1–2 day batch, chosen by which run is next
+
+Nothing found corrupts physics, the rules machine's legal/illegal calls,
+or the reward-escrow identity, so past verdicts stand. What is broken are
+the **instruments that judge, select and stop the next run**:
+
+| Fix | Why (evidence) |
+|---|---|
+| Episode-cumulative policy hit/return counters; point `success_key` and the degenerate guard at them | They read the last, truncation-cut point. The oracle made 7 hits in each of 3 episodes, but the terminal key read 7/7/3 (*confirmed*) |
+| Per-key `best_metric_min_delta`; a policy-side headline (k≥2 rate or policy returns per point) instead of opponent-dominated `crossings` | A +20 pp `success_rate` gain at tied crossings does not count as an improvement (*confirmed*) |
+| Guard flatness: drop `episode_reward_mean` from the flatness test | A dead statue run is stopped at about eval 9–26, not the designed eval 5 (*confirmed*; wasted compute only) |
+| Reproducible `reset(seed)` (`options={"serve_side": ...}`) and paired eval seeds | The same seed twice gives different observations (*confirmed*) |
+| `reward_eval_episodes=5` for PaddleTennis (WallBall already does this) | 60 × 1,500 = 90k eval steps per 25k training steps, before `confirm_best` |
+| Contact-depth info key and a depth-gated success key | Nothing measures "from the baseline" today |
+| **Observation fingerprint**: record observation names and env kwargs in `config.json`; check them on warm start and on demo-library load | Today both check only shapes. A same-shape meaning change (world-frame spin, scaled counters) would silently load every old checkpoint and the LD1′ demo library onto a different task (*new*) |
+| Tag the current era before merging the batch | Both notebooks install from `main`, so any merge changes what the next Colab session runs |
+
+Then, depending on the next run:
+
+- **§4.2 context-blind pilot (recommended next run).**
+  - **Read the oracle's observation fields by name first.** The ground
+    oracle and the diagnosis reference read `obs[30]` and `obs[33]` by
+    literal index from the same vector the policy sees. Dropping dims
+    without a layout object silently corrupts the opponent or the
+    reference row: the oracle's rally count fell from 1–13 to 0–1
+    (*confirmed*).
+  - **Land the obs changes behind the `observation_profile` flag or
+    one declared era break:** world-frame spin (§5b #1), scaled
+    counters (#6) and the label fixes (#4, plus a new own-side
+    `failed_to_cross` mislabel).
+  - **Declare γ = 0.995 as part of the bundle,** or give it its own
+    arm, because γ has never been varied on this task.
+- **LD1′ first instead.**
+  - Fix the uniform-random warm-start warmup (§5b #7).
+  - Keep every obs or reward fix default-off and bit-identical.
+- **Decide explicitly (low impact): truncation clawback.** The escrow
+  claws back at time-limit truncation, which SB3 also bootstraps
+  through, so the pending escrow is double-counted. That happens at
+  most once per 1500-step episode.
+
+### 7.3 Wider clean-up first? No: resume after the targeted fixes
+
+**Health is good.**
+- ruff and mypy are clean, and 1073 tests pass.
+- CI covers ruff, mypy, a wheel smoke test, pytest on 3.11–3.13 with
+  thread pinning, a render smoke test and a weekly re-resolve.
+- Validation fails loudly.
+
+**The §6 register can wait.** It is almost entirely off the paddle
+critical path (WallBall ladders, `depth_stage_sweep`, gate ladder
+machinery, splitting `notebook_utils`, decomposing `train()`). Doing it
+now adds regression risk and makes no run more trustworthy. Do it
+opportunistically after the first new pilots.
+
+**Targeted structural work before the baseline era** (not before the
+§4.2 pilot), about 3–5 days with the oracle re-probe:
+
+- **A single source of truth for paddle geometry.**
+  `PADDLE_HOME_X`/`PADDLE_LOCAL_*` are hand-copied from the XML, and no
+  test names them. They calibrate the oracle, which is also the
+  opponent. Add an A/B mirror test of the XML.
+- **One serve-draw function, with a clearance check on every launch.**
+  `_draw_serve` duplicates `PaddleCourtScene.serve`, and reset does no
+  clearance check. A serve origin 0.2 m from the server's home ends
+  38/40 points `wrong_hitter` with no warning (latent under the frozen
+  serve).
+- **A per-instance observation layout object,** read by name.
+- **Retire hold shaping.** Keep the k=2 drill while LD1′ is still a
+  candidate: it is LD1′'s named RE-AIM escalation, and the demo harvest
+  loads through it.
+- **Probe tools build the env from the recipe,** with one seed ledger.
+
+### 7.4 Rules engine against the stated goal
+
+The engine already enforces the target drill correctly. Probes set the
+ball state directly on the env; the sampler had 0 of 2,381 bounces on
+the wrong side and no tunnelling. Specifically:
+
+- **In/out:** judged on the singles court (|y| ≤ 4.115, |x| ≤ 6.5). A
+  line ball is in, using the ball-centre convention, about 2.5 cm
+  stricter than tennis.
+- **Bounce rule:** exactly one bounce before the return. A pre-bounce
+  hit is `volley_return` and a second bounce is a fault.
+- **Return credit:** only when the shot crosses the net and its first
+  bounce is in.
+- **Baseline-era positions:** contact from behind the baseline or
+  outside the sideline is legal.
+
+Gaps to close when the baseline-era env is built:
+
+| Gap | Evidence | Route |
+|---|---|---|
+| Lateral reach is \|y\| ≤ 3.2 m (head ±3.0 plus a 0.2 m face) against the 4.115 m singles half-width; x reach stops at −6.4, inside the −6.5 baseline | Probe; dormant today because oracle landings reach at most \|y\| 2.23 | baseline era |
+| The net panel ends at the singles sideline, so a low ball can pass *beside* it and count | Probe: crossing at y = 4.49, z = 0.65, then a confirmed return | before any y-workspace widening |
+| Racket–net contacts are never generated (collision bits 8&2 \| 4&2 = 0), so the paddle would pass *through* the net; obs dims 40, 41, 46 and 47 are constant zero | Probe; unreachable today by a 1.7 cm workspace gap | baseline era; drop the dims with §4.2 |
+| Bad feeds (long, wide, net) are charged as point-ending faults with no let, and feed origins behind the baseline are refused | 3 of 2,000 frozen-band feeds land out; re-centring at 5.5–6 m would put about 10–25% long | baseline era: feed faults become lets |
+| Any net touch ends the rally (`ball_net_is_fault=True`); the rigid tape pops clipped balls up at 60–93° | `ball_net` ends 86% of oracle one-point rallies, and 20–34% of those would be play-on in tennis; oracle net clearance is the binding limit on reference rally length | keep as a deliberate drill rule; document it in DECISIONS |
+| An untouched ball's second bounce past the line is labelled `out_of_bounds` (§5b #4), and a shot landing behind the hitter's own baseline is labelled `out_of_bounds`, not `failed_to_cross` (*new*) | About 89% of oracle `out_of_bounds` labels are really second bounces | era boundary, one fault-taxonomy change |
+| About 1% of tape grazes deflect the ball with no event (contacts sampled only after each RK4 step) | 1 unexplained deflection against about 86 detected net faults in 100 oracle points | park until a declared break |
+
+### 7.5 The decision that sets the before-training list
+
+The scopes disagreed only because none of them chose the next run.
+Recommended order:
+
+1. Tag the current era. The humanoid archive can proceed in parallel.
+2. Land the §7.2 instrument batch and the observation fingerprint.
+3. Run the §4.2 context-blind pilot: from scratch, 2 seeds × 3M,
+   γ = 0.995, with the bundle declared.
+4. Whatever k=2 does, do the §7.3 foundation pass and the §7.4 gaps,
+   re-probe the oracle pair on the baseline geometry, then train the
+   baseline era.
+
+LD1′ stays the fallback if the pilot leaves k=2 at or below 1%.
