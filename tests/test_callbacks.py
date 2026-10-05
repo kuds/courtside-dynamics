@@ -1827,3 +1827,406 @@ def test_missing_selection_key_is_reported_every_evaluation(capsys):
     # The documented -inf semantics are untouched: a reward jump cannot
     # dethrone a best banked on the (now missing) primary key.
     assert cb._best_score == (1.0, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-05 fix batch (docs/repo_review_20261005.md §5b, §7.2)
+# ---------------------------------------------------------------------------
+
+
+def test_scalar_info_keys_accepts_numpy_scalars():
+    """numpy registers its integer/floating scalars with ``numbers`` but
+    not ``np.bool_``, so a flag computed as ``np.abs(x) > y`` vanished
+    from every aggregate -- including terminal and success keys."""
+    info = {
+        "flag": np.bool_(True),
+        "count": np.int64(3),
+        "small": np.uint8(2),
+        "ratio": np.float32(0.5),
+        "zero_d_bool": np.array(False),
+    }
+    assert _scalar_info_keys(info) == sorted(info)
+
+
+def test_info_dict_eval_aggregates_numpy_bool_terminal_flags():
+    """End-to-end: an ``np.bool_`` fault flag reaches ``<key>_ep_mean``."""
+    import gymnasium as gym
+    from gymnasium import spaces
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    class _Env(gym.Env):
+        metadata = {"render_modes": []}
+
+        def __init__(self) -> None:
+            self.action_space = spaces.Box(-1.0, 1.0, (1,), dtype=np.float32)
+            self.observation_space = spaces.Box(
+                -1.0, 1.0, (1,), dtype=np.float32
+            )
+            self.episode_index = -1
+
+        def reset(self, *, seed=None, options=None):
+            super().reset(seed=seed)
+            self.episode_index += 1
+            return np.zeros(1, dtype=np.float32), {}
+
+        def step(self, action):
+            del action
+            info = {"term_net": np.bool_(self.episode_index % 2 == 0)}
+            return np.zeros(1, dtype=np.float32), 0.0, True, False, info
+
+    eval_env = make_vec_env(_Env, n_envs=1)
+    cb = InfoDictEvalCallback(
+        eval_env=eval_env,
+        n_eval_episodes=4,
+        eval_freq=1,
+        info_keys=(),
+        terminal_info_keys=("term_net",),
+        success_key="term_net",
+    )
+    cb.model = _FakeModel(action_dim=1)
+    try:
+        metrics = cb._collect_metrics()
+    finally:
+        eval_env.close()
+    assert metrics["term_net_ep_mean"] == pytest.approx(0.5)
+    assert metrics["success_rate"] == pytest.approx(0.5)
+
+
+_PADDLE_SELECTION_KEYS = (
+    "crossings_ep_mean",
+    "success_rate",
+    "episode_reward_mean",
+)
+
+
+def test_per_key_min_delta_lets_a_rate_tie_break_register():
+    """Review §5b #8 (*confirmed*): one 0.25 delta sized for crossings
+    made a +20 pp success_rate gain at tied crossings a non-improvement.
+    A per-key mapping scales each key's threshold to its own noise."""
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    best = (5.0, 0.50, 3.0)
+    candidate = (5.1, 0.70, 3.1)
+
+    scalar = InfoDictEvalCallback(
+        eval_env=object(),
+        best_metric_keys=_PADDLE_SELECTION_KEYS,
+        best_metric_min_delta=0.25,
+    )
+    assert not scalar._improves(candidate, best)
+
+    per_key = InfoDictEvalCallback(
+        eval_env=object(),
+        best_metric_keys=_PADDLE_SELECTION_KEYS,
+        best_metric_min_delta={
+            "crossings_ep_mean": 0.25,
+            "success_rate": 0.05,
+            "episode_reward_mean": 0.25,
+        },
+    )
+    assert per_key._improves(candidate, best)
+    # The crossings key still absorbs its own noise: a crossings-only
+    # wobble inside 0.25 at tied rates is no improvement.
+    assert not per_key._improves((5.2, 0.50, 3.0), best)
+    # The configured mapping stays inspectable.
+    assert per_key.best_metric_min_delta == {
+        "crossings_ep_mean": 0.25,
+        "success_rate": 0.05,
+        "episode_reward_mean": 0.25,
+    }
+
+
+def test_min_delta_mapping_validation():
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    def build(delta):
+        return InfoDictEvalCallback(
+            eval_env=object(),
+            best_metric_keys=_PADDLE_SELECTION_KEYS,
+            best_metric_min_delta=delta,
+        )
+
+    # Missing keys mean 0.0 (strict comparison on that key).
+    partial = build({"crossings_ep_mean": 0.25})
+    assert partial._min_deltas == (0.25, 0.0, 0.0)
+    assert build(0.1)._min_deltas == (0.1, 0.1, 0.1)
+    with pytest.raises(ValueError, match=r"\['crossings'\].*not selection"):
+        build({"crossings": 0.25})
+    with pytest.raises(TypeError, match="must be a number"):
+        build({"success_rate": True})
+    with pytest.raises(TypeError, match="must be a number"):
+        build({"success_rate": "0.05"})
+    with pytest.raises(TypeError, match="must be a number"):
+        build(True)
+    for bad in (-0.1, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="finite and nonnegative"):
+            build({"success_rate": bad})
+        with pytest.raises(ValueError, match="finite and nonnegative"):
+            build(bad)
+    # No selection keys: any named key is unknown.
+    with pytest.raises(ValueError, match="not selection keys"):
+        InfoDictEvalCallback(
+            eval_env=object(), best_metric_min_delta={"success_rate": 0.05}
+        )
+
+
+def _statue_stream(evaluations: int):
+    """A dead PaddleTennis run's evaluations: zero side-A contact, the
+    opponent's crossings flat within noise, and an episode reward that
+    wanders by ~0.3 per evaluation (escrow clawbacks, opponent faults)."""
+    for index in range(evaluations):
+        yield {
+            "crossings_ep_mean": 3.0 + (0.1 if index % 3 == 1 else 0.0),
+            "success_rate": 0.0,
+            "episode_reward_mean": -1.0 + (0.3 if index % 2 else 0.0),
+            "legal_hit_count_a_ep_mean": 0.0,
+        }
+
+
+def _run_guard(degenerate_flat_keys, evaluations: int = 12):
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    cb = InfoDictEvalCallback(
+        eval_env=object(),
+        best_metric_keys=_PADDLE_SELECTION_KEYS,
+        best_metric_min_delta={
+            "crossings_ep_mean": 0.25,
+            "success_rate": 0.05,
+            "episode_reward_mean": 0.25,
+        },
+        degenerate_stop_evals=5,
+        degenerate_guard_keys=("legal_hit_count_a_ep_mean",),
+        degenerate_flat_keys=degenerate_flat_keys,
+    )
+    cb.model = _FakeSavableModel(action_dim=3)
+    for step, metrics in enumerate(_statue_stream(evaluations), 1):
+        cb.num_timesteps = step
+        if not cb._update_best_and_maybe_stop(metrics):
+            return step, cb.stop_reason
+    return None, cb.stop_reason
+
+
+def test_degenerate_guard_fires_on_statue_when_flat_keys_exclude_reward():
+    """Review §7.2 (*confirmed*): a dead statue run was stopped at eval
+    9-26 instead of the designed 5, because its wandering reward broke
+    the all-keys flatness test. Judging flatness on the count/rate keys
+    fires at the designed window."""
+    stopped_at, reason = _run_guard(("crossings_ep_mean", "success_rate"))
+    assert stopped_at == 5
+    assert reason is not None
+    assert reason.startswith(
+        "degenerate_signal: crossings_ep_mean/success_rate flat"
+    )
+    # Legacy None (every selection key must be flat): the wandering
+    # reward keeps this very stream alive, exactly as before.
+    stopped_at, reason = _run_guard(None)
+    assert stopped_at is None
+    assert reason is None
+
+
+def test_degenerate_flat_keys_validation():
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    def build(flat_keys):
+        return InfoDictEvalCallback(
+            eval_env=object(),
+            best_metric_keys=_PADDLE_SELECTION_KEYS,
+            degenerate_flat_keys=flat_keys,
+        )
+
+    assert build(None).degenerate_flat_keys is None
+    assert build(["success_rate"])._flat_indices == (1,)
+    with pytest.raises(ValueError, match=r"\['crossings'\] are not selection"):
+        build(("crossings",))
+    with pytest.raises(ValueError, match="at least one"):
+        build(())
+    with pytest.raises(TypeError, match="sequence of strings"):
+        build("success_rate")
+
+
+def _make_seed_echo_env():
+    """Two-step episodes whose content is a pure function of the reset
+    seed and options: ``draw`` comes from the seeded ``np_random`` and
+    ``serve_a`` reports the ``serve_side`` option. Every non-None reset
+    seed and every options dict lands in the class-level logs."""
+    import gymnasium as gym
+    from gymnasium import spaces
+
+    class _SeedEchoEnv(gym.Env):
+        metadata = {"render_modes": []}
+        seeds: list[int] = []
+        options_seen: list[dict] = []
+
+        def __init__(self) -> None:
+            self.action_space = spaces.Box(-1.0, 1.0, (1,), dtype=np.float32)
+            self.observation_space = spaces.Box(
+                -10.0, 10.0, (2,), dtype=np.float32
+            )
+            self.draw = 0.0
+            self.serve_a = 0.0
+            self.step_index = 0
+
+        def reset(self, *, seed=None, options=None):
+            super().reset(seed=seed)
+            if seed is not None:
+                type(self).seeds.append(int(seed))
+            if options:
+                type(self).options_seen.append(dict(options))
+            self.draw = float(self.np_random.uniform(-1.0, 1.0))
+            self.serve_a = float((options or {}).get("serve_side") == "a")
+            self.step_index = 0
+            return self._obs(), {}
+
+        def _obs(self):
+            return np.array([self.draw, self.serve_a], dtype=np.float32)
+
+        def step(self, action):
+            del action
+            self.step_index += 1
+            done = self.step_index >= 2
+            info = {"draw": self.draw, "serve_a": self.serve_a}
+            return self._obs(), self.draw, done, False, info
+
+    return _SeedEchoEnv
+
+
+def _paired_callback(env_cls, *, normalize: bool, **kwargs):
+    from stable_baselines3.common.env_util import make_vec_env
+    from stable_baselines3.common.vec_env import VecNormalize
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    eval_env = make_vec_env(env_cls, n_envs=1, seed=123)
+    if normalize:
+        # train()'s eval wrapper: frozen statistics, true reward.
+        eval_env = VecNormalize(
+            eval_env, norm_obs=True, norm_reward=False, training=False
+        )
+    cb = InfoDictEvalCallback(
+        eval_env=eval_env,
+        n_eval_episodes=4,
+        eval_freq=1,
+        info_keys=("draw", "serve_a"),
+        **kwargs,
+    )
+    cb.model = _FakeModel(action_dim=1)
+    return cb, eval_env
+
+
+@pytest.mark.parametrize("normalize", [False, True], ids=["raw", "vecnormalize"])
+def test_paired_evaluation_replays_identical_feeds(normalize):
+    """Contract C3: with ``eval_seed`` every evaluation replays the same
+    per-episode seeds (and options), so two consecutive evaluations of a
+    fixed deterministic policy measure exactly the same thing -- also
+    through train()'s ``VecNormalize(training=False)`` eval wrapper."""
+    from courtside_dynamics.callbacks.info_dict_eval import (
+        CONFIRMATION_SEED_OFFSET,
+    )
+
+    env_cls = _make_seed_echo_env()
+    cb, eval_env = _paired_callback(
+        env_cls,
+        normalize=normalize,
+        eval_seed=500,
+        eval_reset_options=({"serve_side": "a"}, {"serve_side": "b"}),
+    )
+    try:
+        first = cb._collect_metrics()
+        first_samples = cb._last_episode_samples
+        second = cb._collect_metrics()
+        assert second == first
+        assert cb._last_episode_samples == first_samples
+        assert env_cls.seeds == [500, 501, 502, 503] * 2
+        # Options cycle i % len: episodes 0 and 2 serve from side a.
+        assert first["serve_a_ep_mean"] == pytest.approx(0.5)
+        assert env_cls.options_seen == [
+            {"serve_side": "a"},
+            {"serve_side": "b"},
+        ] * 4
+
+        # The confirm_best batch rolls its own block: an independent
+        # sample, itself identical at every evaluation.
+        env_cls.seeds.clear()
+        confirmation = cb._collect_confirmation_metrics()
+        assert env_cls.seeds == [
+            500 + CONFIRMATION_SEED_OFFSET + index for index in range(4)
+        ]
+        assert confirmation["draw_ep_mean"] != first["draw_ep_mean"]
+        assert cb._collect_confirmation_metrics() == confirmation
+        # ...and the standard batch is untouched by it.
+        assert cb._collect_metrics() == first
+    finally:
+        eval_env.close()
+
+
+def test_unpaired_evaluation_keeps_the_legacy_stream():
+    """``eval_seed=None``: one reset opens each batch and the eval env's
+    RNG continues across evaluations, exactly as before."""
+    env_cls = _make_seed_echo_env()
+    cb, eval_env = _paired_callback(env_cls, normalize=False)
+    try:
+        first = cb._collect_metrics()
+        second = cb._collect_metrics()
+    finally:
+        eval_env.close()
+    # Only make_vec_env's construction seed ever reached reset().
+    assert env_cls.seeds == [123]
+    assert env_cls.options_seen == []
+    assert first["draw_ep_mean"] != second["draw_ep_mean"]
+
+
+def test_paired_evaluation_validation():
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    with pytest.raises(TypeError, match="eval_seed must be an integer"):
+        InfoDictEvalCallback(eval_env=object(), eval_seed=True)
+    with pytest.raises(ValueError, match="nonnegative"):
+        InfoDictEvalCallback(eval_env=object(), eval_seed=-1)
+    with pytest.raises(ValueError, match="requires eval_seed"):
+        InfoDictEvalCallback(
+            eval_env=object(), eval_reset_options=({"serve_side": "a"},)
+        )
+    with pytest.raises(TypeError, match="sequence of option mappings"):
+        InfoDictEvalCallback(
+            eval_env=object(), eval_seed=0, eval_reset_options={"a": 1}
+        )
+    with pytest.raises(TypeError, match="string keys"):
+        InfoDictEvalCallback(
+            eval_env=object(), eval_seed=0, eval_reset_options=({1: "a"},)
+        )
+    with pytest.raises(ValueError, match="at least one"):
+        InfoDictEvalCallback(
+            eval_env=object(), eval_seed=0, eval_reset_options=()
+        )
+
+
+def test_best_model_meta_records_the_selecting_batch(tmp_path):
+    """stage_summary's best-checkpoint block reads the batch that won
+    selection from best_model_meta.json (``metrics``), not another
+    stream's reward or one episode's ``_final`` counters."""
+    import json
+
+    env_cls = _make_seed_echo_env()
+    cb, eval_env = _paired_callback(
+        env_cls,
+        normalize=False,
+        eval_seed=7,
+        best_metric_keys=("draw_ep_mean",),
+        best_model_save_path=str(tmp_path),
+    )
+    cb.model = _FakeSavableModel(action_dim=1)
+    cb.model.get_vec_normalize_env = lambda: None  # type: ignore[attr-defined]
+    cb.n_calls = 1
+    cb.num_timesteps = 100
+    try:
+        assert cb._on_step() is True
+    finally:
+        eval_env.close()
+    with open(tmp_path / "best_model_meta.json") as stream:
+        meta = json.load(stream)
+    assert cb.last_metrics is not None
+    assert meta["metrics"] == pytest.approx(cb.last_metrics)
+    assert "episode_reward_mean" in meta["metrics"]
+    assert meta["eval_seed"] == 7

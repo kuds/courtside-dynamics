@@ -27,7 +27,10 @@ loads, so the point-boundary relaunch inside a kept row is a plain
 drawn serve exactly as the drill-off pilot env would produce.
 
 Schema ``k2-demo-library-v0``: a pickle with header provenance
-(sources with sha256, git sha, env kwargs, oracle name, counts) and
+(sources with sha256, git sha, env kwargs, oracle name, counts, and the
+observation fingerprint ``observation_names`` /
+``observation_names_sha256`` that DemoSAC checks against the training
+env at load) and
 ``trajectories`` = list of dicts with float64 arrays ``obs``
 (T×48), ``actions`` (T×3), ``next_obs`` (T×48), ``rewards`` (T),
 ``terminated``/``truncated`` (T, bool), plus ``hit_step``,
@@ -53,6 +56,10 @@ import numpy as np
 from courtside_dynamics.envs._paddle_court import scripted_ground_opponent
 from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
 from courtside_dynamics.envs.tennis_rules import CourtSide
+from courtside_dynamics.training.artifacts import (
+    env_observation_names,
+    observation_names_sha256,
+)
 
 SCHEMA = "k2-demo-library-v0"
 ORACLE = "scripted_ground_opponent"
@@ -106,6 +113,24 @@ def _git_sha() -> str:
         return f"{sha}-dirty-{tag}"
     except Exception:
         return "unknown"
+
+
+def _observation_layout() -> list[str]:
+    """The observation names of the env shape the demos are recorded in.
+
+    Banked in the library header as the observation fingerprint: DemoSAC
+    refuses a library whose layout differs from its training env's,
+    which the shape checks alone cannot see (a same-width meaning
+    change).
+    """
+    env = PaddleTennisEnv(**ENV_KWARGS)
+    try:
+        names = env_observation_names(env)
+    finally:
+        env.close()
+    if names is None:
+        raise SystemExit("PaddleTennisEnv exposes no observation_names")
+    return list(names)
 
 
 def _empty_counts() -> dict[str, int]:
@@ -283,11 +308,14 @@ def main() -> None:
             f"working tree changed during the harvest ({git_sha} -> "
             f"{_git_sha()}); re-run on a stable tree"
         )
+    observation_names = _observation_layout()
     library = {
         "schema": SCHEMA,
         "git_sha": git_sha,
         "oracle": ORACLE,
         "env_kwargs": dict(ENV_KWARGS),
+        "observation_names": observation_names,
+        "observation_names_sha256": observation_names_sha256(observation_names),
         "reset_seed": RESET_SEED,
         "max_steps": args.max_steps,
         "holdout_every": args.holdout_every,

@@ -7,7 +7,10 @@ optional top-level tables:
   fields. Mapping-valued fields (``model_kwargs``, ``phase_labels``,
   ``info_eval_survival_thresholds``) deep-merge one level onto the
   recipe's values; ``performance_gate`` replaces wholesale (an ordered
-  stage ladder has no unambiguous element-wise merge); everything else
+  stage ladder has no unambiguous element-wise merge), and so does a
+  ``[train.best_metric_min_delta]`` per-key table (a scalar and a
+  mapping have no element-wise merge, and a partial merge would keep
+  deltas for keys the file may have dropped); everything else
   replaces.
 - ``[env]``: environment constructor kwargs, applied to the training
   AND evaluation environments (like the recipe's own ``env_kwargs``
@@ -72,6 +75,9 @@ _REJECTED_TRAIN_KEYS = {
     "derives from it before the file merges",
     "log_dir": "pass log_dir= to build_train_config; a file must not "
     "silently redirect run artifacts",
+    "reuse_log_dir": "pass reuse_log_dir= alongside log_dir=; whether a "
+    "run may overwrite an earlier attempt's directory is the caller's "
+    "decision, not the experiment's",
     "recipe_name": "recorded from the recipe actually built",
 }
 
@@ -305,6 +311,64 @@ def _validate_performance_gate(gate: Any, path: str) -> None:
             f"{path}: [train.performance_gate] stage_eval_budget_action "
             f"must be 'stop' or 'advance', got "
             f"{gate['stage_eval_budget_action']!r}"
+        )
+
+
+def _is_number(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float))
+
+
+def _validate_evaluation_fields(train: dict[str, Any], path: str) -> None:
+    """Shape-check the selection, pairing and monitor fields at load.
+
+    TOML gives these no type of their own, and ``train()`` re-validates
+    them against the resolved selection keys and the env -- but a
+    malformed value should fail here with the file named, not after the
+    recipe and file layers have merged. Semantics (subset of the
+    selection keys, keys the env emits) stay with ``train()``.
+    """
+    if "best_metric_min_delta" in train:
+        delta = train["best_metric_min_delta"]
+        if isinstance(delta, dict):
+            for key, value in delta.items():
+                if not _is_number(value):
+                    raise ValueError(
+                        f"{path}: [train.best_metric_min_delta] {key} must "
+                        f"be a number, got {value!r}"
+                    )
+        elif not _is_number(delta):
+            raise ValueError(
+                f"{path}: [train] best_metric_min_delta must be a number or "
+                f"a table of per-selection-key numbers, got {delta!r}"
+            )
+    for key in ("degenerate_flat_keys", "monitor_info_keywords"):
+        if key not in train or train[key] is None:
+            continue
+        value = train[key]
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise ValueError(
+                f"{path}: [train] {key} must be an array of strings, got "
+                f"{value!r}"
+            )
+    if train.get("eval_seed") is not None and not (
+        isinstance(train["eval_seed"], int)
+        and not isinstance(train["eval_seed"], bool)
+    ):
+        raise ValueError(
+            f"{path}: [train] eval_seed must be an integer (or the "
+            f'"none" sentinel), got {train["eval_seed"]!r}'
+        )
+    options = train.get("eval_reset_options")
+    if options is not None and (
+        not isinstance(options, list)
+        or not all(isinstance(entry, dict) for entry in options)
+    ):
+        raise ValueError(
+            f"{path}: [train] eval_reset_options must be an array of "
+            f'tables (e.g. [{{serve_side = "a"}}, {{serve_side = "b"}}]), '
+            f"got {options!r}"
         )
 
 
@@ -553,6 +617,7 @@ def load_run_config(path: str | Path) -> RunFileConfig:
             train["phase_labels"] = _convert_phase_labels(
                 phase_labels, str(resolved)
             )
+    _validate_evaluation_fields(train, str(resolved))
     gate = train.get("performance_gate")
     if gate is not None:
         _validate_performance_gate(gate, str(resolved))
