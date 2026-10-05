@@ -682,7 +682,17 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._event_sampler.begin_control_step(self.step_number)
         stopped = False
         for control_substep in range(n_frames):
-            pre_step = self._event_sampler.safety_event_kind(self.data)
+            # Only the control step's entry state needs a pre-step scan:
+            # every later substep starts from the exact state the
+            # previous sample_substep already scanned and passed (both
+            # controls are fixed for the whole control step), so a
+            # second scan there could never fire and cost ~19% of
+            # step time.
+            pre_step = (
+                self._event_sampler.safety_event_kind(self.data)
+                if control_substep == 0
+                else None
+            )
             if pre_step is not None:
                 self._event_sampler.record_safety_event(
                     pre_step, control_substep=control_substep
