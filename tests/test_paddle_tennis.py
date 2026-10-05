@@ -951,8 +951,20 @@ class TestEpisodePolicyCounters:
         try:
             obs, _ = env.reset(seed=_SMOKE_SEEDS[0])
             info: dict = {}
-            while not info.get("episode_valid_return_count_a"):
-                obs, _r, _t, _tr, info = env.step(scripted_ground_opponent(obs))
+            # Bounded by the episode: a counter that never moves must
+            # fail here, not spin past truncation into the timeout.
+            for _ in range(env.episode_len):
+                obs, _r, term, trunc, info = env.step(scripted_ground_opponent(obs))
+                assert not (term or trunc), (
+                    "episode ended before side A's first confirmed return"
+                )
+                if info["episode_valid_return_count_a"]:
+                    break
+            # The precondition: nonzero counters reach the guard step,
+            # so "carried" below cannot pass vacuously on zeros.
+            assert info["episode_valid_return_count_a"] >= 1.0
+            assert info["episode_legal_hit_count_a"] >= 1.0
+            assert info["episode_contact_depth_sum_a"] > 0.0
             carried = {
                 key: info[key]
                 for key in (
