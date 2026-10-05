@@ -236,6 +236,49 @@ class TestPaddleCourtPrototype:
             dofadr = int(scene.model.joint(joint).dofadr[0])
             assert float(scene.model.dof_damping[dofadr]) == 8.0
 
+    @pytest.mark.parametrize(
+        "names",
+        [
+            (
+                "court_line_baseline_a",
+                "court_line_baseline_b",
+                "court_line_side_left",
+                "court_line_side_right",
+            ),
+            (
+                "court_tennis_baseline_a",
+                "court_tennis_baseline_b",
+                "court_tennis_singles_left",
+                "court_tennis_singles_right",
+            ),
+        ],
+        ids=["diagnostic", "tennis"],
+    )
+    def test_boundary_lines_paint_inside_the_rules_boundary(self, names):
+        """A line ball is in (the rules' convention), so a boundary
+        line belongs to the court: its outer edge sits exactly on the
+        rules boundary. The diagnostic lines used to be centred on it,
+        painting half their width out of bounds. Render-only sites --
+        and never collidable."""
+        scene = PaddleCourtScene()
+        baseline_a, baseline_b, side_left, side_right = (
+            scene.model.site(name) for name in names
+        )
+        for site, axis, sign, bound in (
+            (baseline_a, 0, -1.0, PADDLE_COURT.half_length),
+            (baseline_b, 0, 1.0, PADDLE_COURT.half_length),
+            (side_left, 1, -1.0, PADDLE_COURT.half_width),
+            (side_right, 1, 1.0, PADDLE_COURT.half_width),
+        ):
+            centre = sign * float(site.pos[axis])
+            half_width = float(site.size[axis])
+            assert centre + half_width == pytest.approx(bound, abs=1e-9)
+            assert centre - half_width < bound
+        site_names = {scene.model.site(i).name for i in range(scene.model.nsite)}
+        geom_names = {scene.model.geom(i).name for i in range(scene.model.ngeom)}
+        assert set(names) <= site_names
+        assert not set(names) & geom_names
+
     def test_serve_launches_a_legal_feed_that_the_rules_score(self):
         scene = PaddleCourtScene()
         rng = np.random.default_rng(0)
