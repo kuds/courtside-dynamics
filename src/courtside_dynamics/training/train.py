@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -55,7 +56,12 @@ from stable_baselines3.common.vec_env import (
 from courtside_dynamics.callbacks.env_attr_schedule import (
     LinearEnvAttrScheduleCallback,
 )
-from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+from courtside_dynamics.callbacks.info_dict_eval import (
+    InfoDictEvalCallback,
+    _reset_options_tuple,
+    _resolve_min_deltas,
+    _string_keys,
+)
 from courtside_dynamics.callbacks.performance_gate import (
     STAGE_CONTEXT_METRIC,
     PerformanceGatedEnvStagesCallback,
@@ -76,7 +82,9 @@ from courtside_dynamics.training.algos import (
 from courtside_dynamics.training.artifacts import (
     RUN_LAYOUT,
     artifact_path,
+    env_observation_names,
     locate_artifact,
+    observation_fingerprint_mismatch,
     update_run_config_with_initialization,
     update_run_config_with_model,
     write_run_config,
@@ -231,6 +239,10 @@ class _WarmStartArtifacts:
     target_env_class: str
     target_curriculum: dict[str, Any] | None
     reset_observation_values: tuple[float, ...]
+    # How the observation fingerprint check resolved: "verified",
+    # "source_lacks_fingerprint" (a pre-fingerprint source config: the
+    # shape check alone stands), or "target_exposes_no_names".
+    observation_fingerprint: str = "verified"
 
 
 class SelectiveVecNormalize(VecNormalize):
@@ -406,9 +418,21 @@ class TrainConfig:
         policy/observation state is transferred into a fresh target
         model (for SAC, also the auto-tuned entropy temperature). This
         is intentionally not a training resume: optimizers, buffers,
-        timesteps, and callback state start fresh, so an off-policy
-        continuation should pair this with a raised ``learning_starts``
-        (fresh data before the first update).
+        timesteps, and callback state start fresh. An off-policy
+        continuation typically raises ``learning_starts`` so the fresh
+        replay buffer refills before the first update -- but note WHO
+        acts during that refill: SB3 samples *uniform-random* actions
+        for the first ``learning_starts`` steps unless ``use_sde`` and
+        ``use_sde_at_warmup`` are both on. So for an SAC-family warm
+        start with ``use_sde=True`` and ``learning_starts > 0``,
+        ``train()`` defaults ``use_sde_at_warmup=True`` (unless
+        ``model_kwargs`` sets it), and the transferred policy -- with
+        its gSDE exploration noise -- collects the refill; without
+        gSDE the refill stays uniform-random and ``train()`` says so.
+        The effective choice is recorded in ``config.json``
+        (``initialization.warmup``). The source run's observation
+        fingerprint (``env.observation_names_sha256``) must match the
+        target env's ``observation_names`` when both exist.
     csv_header / info_row_fn:
         Passed through to ``VideoRecordCallback`` so envs can log their
         custom info rows.
@@ -506,6 +530,48 @@ class TrainConfig:
         (``0.5 / n``) so a real one-episode change registers while
         float noise (run 20260714_211111's 1e-8 reward "improvement")
         cannot crown a best model or reset the early-stop patience.
+        A mapping sets one delta per selection key (keys must be a
+        subset of the resolved selection keys; missing keys mean
+        ``0.0``) for key sets of different scale; it requires headline
+        selection, since without it there are no selection keys.
+    degenerate_flat_keys:
+        Selection keys that must be flat for the degenerate-signal stop
+        (see ``InfoDictEvalCallback.degenerate_flat_keys``). ``None``
+        (default) keeps the historical "every selection key flat";
+        otherwise a non-empty subset of the resolved selection keys --
+        e.g. leaving out a wandering ``episode_reward_mean``.
+    eval_seed / eval_reset_options:
+        Paired evaluation (see ``InfoDictEvalCallback.eval_seed``):
+        every info-dict evaluation replays the same per-episode reset
+        seeds (``eval_seed + i``; the ``confirm_best`` batch
+        ``eval_seed + 100_000 + i``; the ``final_info_eval`` stream its
+        own block at ``eval_seed + 200_000 + i``) and, when given,
+        cycles ``eval_reset_options`` (e.g. ``({"serve_side": "a"},
+        {"serve_side": "b"})``). ``eval_seed=None`` (default) derives
+        ``seed + 10_000`` when ``seed`` is set and keeps the legacy
+        unpaired stream when it is not. The reward ``EvalCallback`` and
+        the closing evaluation stay unpaired. The resolved seed is
+        recorded in ``config.json`` (``evaluation_seeding``).
+    monitor_info_keywords:
+        Scalar ``info`` keys the training workers' SB3 ``Monitor``
+        appends as extra columns of every ``*.monitor.csv`` row, read
+        from each episode's final step (e.g. episode-cumulative
+        counters). Every key must be a scalar the training env emits;
+        ``train()`` probes the env and refuses others before any output
+        is written (``Monitor`` would raise ``KeyError`` at the first
+        episode end otherwise). Default ``()`` keeps the plain
+        ``r,l,t`` rows.
+    reuse_log_dir:
+        ``log_dir`` holding a previous attempt's evaluation rows
+        (``metrics/eval_info*.csv``) is refused by default: those CSVs
+        append, so a second attempt used to mix its rows into the
+        first's, and the stage summary joined the two by timestep;
+        the best-model triple and checkpoints of the earlier attempt
+        would also sit beside the new ``config.json``. ``True`` opts in
+        to reusing the directory: the old evaluation CSVs are rotated
+        aside (``eval_info.attempt_<UTC time>.csv``) with a loud message,
+        and every other artifact is overwritten as the new attempt
+        writes it.
     confirm_best_eval:
         When ``True``, a candidate best must also win an independent
         second eval batch before ``best_model.zip`` is overwritten
@@ -650,7 +716,7 @@ class TrainConfig:
         default_factory=tuple
     )
     best_metric_keys: Sequence[str] | None = None
-    best_metric_min_delta: float = 0.0
+    best_metric_min_delta: float | Mapping[str, float] = 0.0
     confirm_best_eval: bool = False
     early_stop_degenerate_evals: int = 0
     degenerate_guard_keys: Sequence[str] = field(default_factory=tuple)
@@ -671,6 +737,40 @@ class TrainConfig:
     # directory. ``Any`` to keep this module free of a run_config import.
     run_config_file: Any = None
     require_device: str | None = None
+    degenerate_flat_keys: Sequence[str] | None = None
+    eval_seed: int | None = None
+    eval_reset_options: Sequence[Mapping[str, Any]] | None = None
+    monitor_info_keywords: Sequence[str] = field(default_factory=tuple)
+    reuse_log_dir: bool = False
+
+
+#: Offset of the derived paired-evaluation seed block from ``cfg.seed``
+#: (``TrainConfig.eval_seed=None`` with a seeded run): far past the
+#: training workers (``seed + i``) and the helper envs
+#: (``seed + n_envs + k``).
+EVAL_SEED_OFFSET = 10_000
+
+#: Offset of the ``final_info_eval`` stream's paired seed block from the
+#: resolved ``eval_seed``. The selection stream owns ``eval_seed + i``
+#: and its confirmations ``eval_seed + 100_000 + i``; without its own
+#: block the final stream would replay the selection stream's exact
+#: episodes whenever the two share a distribution (no gate), turning
+#: evaluations.npz into a copy of the selection batch instead of an
+#: independent sample.
+FINAL_INFO_EVAL_SEED_OFFSET = 200_000
+
+
+def resolve_eval_seed(cfg: TrainConfig) -> int | None:
+    """The paired-evaluation seed ``train()`` uses, or None (unpaired).
+
+    An explicit ``cfg.eval_seed`` wins; otherwise a seeded run derives
+    ``cfg.seed + EVAL_SEED_OFFSET`` and an unseeded one stays unpaired.
+    """
+    if cfg.eval_seed is not None:
+        return int(cfg.eval_seed)
+    if cfg.seed is None:
+        return None
+    return int(cfg.seed) + EVAL_SEED_OFFSET
 
 
 def _offset_seed(seed: int | None, offset: int) -> int | None:
@@ -808,6 +908,242 @@ def _check_model_device(model: BaseAlgorithm, required: str | None) -> None:
             f"require_device={required!r} but the model was built on "
             f"{device}"
         )
+
+
+def _selection_metric_keys(cfg: TrainConfig) -> tuple[str, ...]:
+    """The lexicographic selection keys ``train()`` hands the info evaluator.
+
+    Empty when the headline metric does not own selection (no
+    ``headline_key`` or ``info_dict_eval`` off): there are then no
+    selection keys for a per-key delta or a flatness subset to name.
+    """
+    if not (cfg.info_dict_eval and cfg.headline_key):
+        return ()
+    if cfg.best_metric_keys:
+        return _string_keys(cfg.best_metric_keys, "best_metric_keys")
+    return (
+        f"{cfg.headline_key}_ep_mean",
+        *(("success_rate",) if cfg.success_key else ()),
+        "episode_reward_mean",
+    )
+
+
+def _validate_evaluation_config(cfg: TrainConfig) -> None:
+    """Refuse malformed selection/pairing/monitor settings up front.
+
+    Runs before any env is built or artifact written, like the algo and
+    device checks: these values otherwise fail (or, worse, silently do
+    nothing) only once the callbacks are constructed or the first
+    episode ends.
+    """
+    selection_keys = _selection_metric_keys(cfg)
+    if isinstance(cfg.best_metric_min_delta, Mapping) and not selection_keys:
+        raise ValueError(
+            "a per-key best_metric_min_delta mapping requires headline-"
+            "metric selection (info_dict_eval + headline_key): without it "
+            "there are no selection keys for the mapping to name"
+        )
+    # Same validation the callback applies, so a bad delta fails here
+    # (before output) with the resolved key set in the message.
+    _resolve_min_deltas(cfg.best_metric_min_delta, selection_keys)
+    if cfg.degenerate_flat_keys is not None:
+        flat_keys = _string_keys(
+            cfg.degenerate_flat_keys, "degenerate_flat_keys"
+        )
+        if not selection_keys:
+            raise ValueError(
+                "degenerate_flat_keys requires headline-metric selection "
+                "(info_dict_eval + headline_key): the degenerate guard only "
+                "runs on the selecting evaluator"
+            )
+        if not flat_keys:
+            raise ValueError(
+                "degenerate_flat_keys must name at least one selection key "
+                "(None requires every selection key to be flat)"
+            )
+        unknown = [key for key in flat_keys if key not in selection_keys]
+        if unknown:
+            raise ValueError(
+                f"degenerate_flat_keys {unknown} are not selection keys; "
+                f"the resolved best_metric_keys are {list(selection_keys)}"
+            )
+    if cfg.eval_seed is not None:
+        if isinstance(cfg.eval_seed, bool) or not isinstance(cfg.eval_seed, int):
+            raise TypeError(
+                f"eval_seed must be an integer or None, got {cfg.eval_seed!r}"
+            )
+        if cfg.eval_seed < 0:
+            raise ValueError("eval_seed must be nonnegative")
+    resolved_eval_seed = resolve_eval_seed(cfg)
+    if resolved_eval_seed is not None and resolved_eval_seed < 0:
+        raise ValueError(
+            f"the derived eval seed (seed + {EVAL_SEED_OFFSET} = "
+            f"{resolved_eval_seed}) is negative; set eval_seed explicitly"
+        )
+    if cfg.eval_reset_options is not None:
+        if not cfg.info_dict_eval:
+            raise ValueError(
+                "eval_reset_options requires info_dict_eval: only the "
+                "info-dict evaluators apply them"
+            )
+        if resolved_eval_seed is None:
+            raise ValueError(
+                "eval_reset_options requires paired evaluation: set "
+                "eval_seed (or seed, from which it derives); unpaired "
+                "evaluations never apply reset options"
+            )
+        _reset_options_tuple(cfg.eval_reset_options)
+    _string_keys(cfg.monitor_info_keywords, "monitor_info_keywords")
+    if not isinstance(cfg.reuse_log_dir, bool):
+        raise TypeError(
+            f"reuse_log_dir must be a bool, got {cfg.reuse_log_dir!r}"
+        )
+
+
+def _validate_monitor_info_keywords(cfg: TrainConfig) -> tuple[str, ...]:
+    """The training ``Monitor``'s extra columns, checked against the env.
+
+    ``Monitor`` reads ``info[key]`` at every episode end and raises
+    ``KeyError`` for a key the env does not emit -- an hour into a run,
+    after artifacts exist. Probe one fresh training env (reset + one
+    step, the same probe the selection keys use) instead.
+    """
+    keywords = _string_keys(cfg.monitor_info_keywords, "monitor_info_keywords")
+    if not keywords:
+        return ()
+    available = _probe_eval_info_keys(cfg.env_fn)
+    missing = [key for key in keywords if key not in available]
+    if missing:
+        hints = []
+        for key in missing:
+            suggestion = difflib.get_close_matches(key, sorted(available), n=1)
+            hint = f" (did you mean {suggestion[0]!r}?)" if suggestion else ""
+            hints.append(f"{key!r}{hint}")
+        raise ValueError(
+            f"monitor_info_keywords {', '.join(hints)} are not scalar info "
+            f"keys the training env emits, so Monitor would raise KeyError "
+            f"at the first episode end; scalar keys: {sorted(available)}"
+        )
+    return keywords
+
+
+def _has_data_rows(path: str) -> bool:
+    """Whether a long-format CSV holds at least one row past its header."""
+    try:
+        with open(path) as stream:
+            stream.readline()
+            return any(line.strip() for line in stream)
+    except OSError:
+        return False
+
+
+def _check_log_dir_reuse(cfg: TrainConfig) -> None:
+    """Refuse (or, opted in, rotate) a previous attempt's evaluation logs.
+
+    ``InfoDictEvalCallback`` appends to ``eval_info.csv`` /
+    ``eval_info_final.csv`` -- correct within one run, but a second
+    attempt in the same ``log_dir`` silently appended its rows after
+    the first attempt's, and ``stage_summary`` then joined the two
+    attempts by timestep. Refusing is the default because the CSVs are
+    not the only leftover: the earlier attempt's best-model triple and
+    checkpoints would sit beside the new ``config.json`` until (if
+    ever) the new attempt overwrites them. Every shipped caller already
+    starts in a fresh directory (``resolve_run_dir`` timestamps one,
+    the campaign's ``next_stage_attempt_dir`` numbers one).
+    """
+    stale = [
+        path
+        for path in (
+            locate_artifact(cfg.log_dir, name)
+            for name in ("eval_info_csv", "eval_info_final_csv")
+        )
+        if path is not None and _has_data_rows(path)
+    ]
+    if not stale:
+        return
+    if not cfg.reuse_log_dir:
+        raise ValueError(
+            f"log_dir {cfg.log_dir} already holds a previous training "
+            f"attempt's evaluation rows ({', '.join(stale)}); a new run "
+            f"would append to them and mix two attempts' artifacts. Use a "
+            f"fresh log_dir (resolve_run_dir() timestamps one), or pass "
+            f"reuse_log_dir=True to rotate those CSVs aside and overwrite "
+            f"the rest of the directory"
+        )
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    for path in stale:
+        root, extension = os.path.splitext(path)
+        destination = f"{root}.attempt_{stamp}{extension}"
+        suffix = 1
+        while os.path.exists(destination):
+            suffix += 1
+            destination = f"{root}.attempt_{stamp}_{suffix}{extension}"
+        os.replace(path, destination)
+        print(
+            f"[train] reuse_log_dir=True: rotated the previous attempt's "
+            f"{path} to {destination}; config.json, model/, checkpoints/ "
+            f"and the other artifacts in {cfg.log_dir} are overwritten as "
+            f"this attempt writes them"
+        )
+
+
+def _resolve_warm_start_warmup(
+    cfg: TrainConfig, model_kwargs: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Pick (and record) who acts during an SAC-family warm start's warmup.
+
+    SB3 samples uniform-random actions for the first ``learning_starts``
+    steps unless ``use_sde`` and ``use_sde_at_warmup`` are both on, so
+    every warm-started leg used to spend its replay refill on random
+    actions instead of the transferred policy (known since the
+    2026-08-28 review; docs/repo_review_20261005.md §5b #7). With gSDE
+    on, default ``use_sde_at_warmup=True`` -- unless the caller pinned
+    it -- so the transferred policy plus its gSDE noise collects the
+    refill. Mutates ``model_kwargs``; returns the provenance block for
+    ``config.json``'s ``initialization.warmup`` (None when not an
+    SAC-family warm start).
+    """
+    if cfg.warm_start is None or cfg.algo.upper() not in _OFF_POLICY_ALGOS:
+        return None
+    from stable_baselines3 import SAC
+
+    defaults = inspect.signature(SAC.__init__).parameters
+    use_sde = bool(model_kwargs.get("use_sde", defaults["use_sde"].default))
+    learning_starts = int(
+        model_kwargs.get("learning_starts", defaults["learning_starts"].default)
+    )
+    if "use_sde_at_warmup" in model_kwargs:
+        source = "model_kwargs"
+    elif use_sde and learning_starts > 0:
+        model_kwargs["use_sde_at_warmup"] = True
+        source = "warm_start_default"
+    else:
+        source = "sb3_default"
+    use_sde_at_warmup = bool(
+        model_kwargs.get(
+            "use_sde_at_warmup", defaults["use_sde_at_warmup"].default
+        )
+    )
+    if learning_starts <= 0:
+        warmup_actions = "none"
+    elif use_sde and use_sde_at_warmup:
+        warmup_actions = "policy_with_gsde_noise"
+    else:
+        warmup_actions = "uniform_random"
+        print(
+            f"[train] warning: this warm start's first {learning_starts:,} "
+            f"steps (learning_starts) take uniform-random actions, not the "
+            f"transferred policy's: SB3 only acts with the policy during "
+            f"warmup under use_sde=True with use_sde_at_warmup=True "
+            f"(use_sde={use_sde}, use_sde_at_warmup={use_sde_at_warmup})"
+        )
+    return {
+        "learning_starts": learning_starts,
+        "use_sde": use_sde,
+        "use_sde_at_warmup": use_sde_at_warmup,
+        "use_sde_at_warmup_source": source,
+        "warmup_actions": warmup_actions,
+    }
 
 
 def _probe_eval_info_keys(env_fn: Callable) -> set[str]:
@@ -1077,6 +1413,7 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
         target_class = type(target_env).__name__
         target_observation_shape = list(target_env.observation_space.shape or ())
         target_action_shape = list(target_env.action_space.shape or ())
+        target_observation_names = env_observation_names(target_env)
         target_curriculum_value = getattr(target_env, "curriculum_metadata", None)
         target_curriculum = (
             dict(target_curriculum_value)
@@ -1112,6 +1449,40 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
         raise ValueError("source and target observation spaces differ")
     if source_env.get("action_shape") != target_action_shape:
         raise ValueError("source and target action spaces differ")
+    # Observation fingerprint: equal shapes do not mean equal meaning (a
+    # world-frame spin or a scaled counter keeps the width), so compare
+    # the recorded layout by name whenever both sides have one.
+    source_names_sha = source_env.get("observation_names_sha256")
+    if not isinstance(source_names_sha, str):
+        observation_fingerprint = "source_lacks_fingerprint"
+        print(
+            "[train] warm-start source config.json predates the observation "
+            "fingerprint (no env.observation_names_sha256); only the "
+            "observation shape was checked"
+        )
+    elif target_observation_names is None:
+        observation_fingerprint = "target_exposes_no_names"
+        print(
+            "[train] warm-start target env exposes no observation_names; "
+            "the source's observation fingerprint could not be checked, "
+            "only the observation shape"
+        )
+    else:
+        source_names = source_env.get("observation_names")
+        mismatch = observation_fingerprint_mismatch(
+            recorded_sha256=source_names_sha,
+            recorded_names=(
+                source_names if isinstance(source_names, list) else None
+            ),
+            actual_names=target_observation_names,
+        )
+        if mismatch is not None:
+            raise ValueError(
+                f"warm-start source and target observation layouts differ: "
+                f"{mismatch}. The shapes match, so the transfer would load "
+                f"silently onto a different task"
+            )
+        observation_fingerprint = "verified"
 
     source_hashes = {
         "best_model.zip": _sha256_file(model_path),
@@ -1142,6 +1513,7 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
         target_env_class=target_class,
         target_curriculum=target_curriculum,
         reset_observation_values=reset_values,
+        observation_fingerprint=observation_fingerprint,
     )
 
 
@@ -1224,6 +1596,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     # written -- or, for the string ent_coef, a full rollout later.
     _validate_model_kwargs(cfg.algo, cfg.model_kwargs)
     _check_required_device(cfg)
+    _validate_evaluation_config(cfg)
     env_attr_schedule_callbacks = tuple(
         LinearEnvAttrScheduleCallback(**dict(schedule))
         for schedule in cfg.env_attr_schedules
@@ -1235,6 +1608,11 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     if cfg.normalize_obs_excluded_indices and not cfg.normalize_obs:
         raise ValueError("normalize_obs_excluded_indices require normalize_obs=True")
     warm_start_artifacts = _prepare_warm_start(cfg)
+    monitor_info_keywords = _validate_monitor_info_keywords(cfg)
+    resolved_eval_seed = resolve_eval_seed(cfg)
+    # Last pre-output check: a refusal leaves the directory untouched,
+    # and an opted-in rotation only happens once everything else passed.
+    _check_log_dir_reuse(cfg)
 
     os.makedirs(cfg.log_dir, exist_ok=True)
     write_run_config(cfg, cfg.log_dir)
@@ -1291,6 +1669,14 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             n_envs=cfg.n_envs,
             seed=cfg.seed,
             monitor_dir=artifact_path(cfg.log_dir, "monitor_dir"),
+            # Extra per-episode columns (e.g. episode-cumulative
+            # counters) in every worker's monitor CSV; None keeps
+            # SB3's plain r,l,t rows.
+            monitor_kwargs=(
+                {"info_keywords": monitor_info_keywords}
+                if monitor_info_keywords
+                else None
+            ),
         )
         opened_envs.append(train_env)
         eval_env = make_vec_env(
@@ -1556,19 +1942,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 # as the last tie-break unless the recipe overrides
                 # the keys.
                 info_eval_episodes = cfg.n_eval_episodes
-                if cfg.best_metric_keys:
-                    best_metric_keys = tuple(cfg.best_metric_keys)
-                else:
-                    best_metric_keys = (
-                        f"{cfg.headline_key}_ep_mean",
-                        *(("success_rate",) if cfg.success_key else ()),
-                        "episode_reward_mean",
-                    )
                 selection_kwargs: dict[str, Any] = {
-                    "best_metric_keys": best_metric_keys,
+                    "best_metric_keys": _selection_metric_keys(cfg),
                     "best_model_save_path": best_model_dir,
                     "best_metric_min_delta": cfg.best_metric_min_delta,
                     "confirm_best": cfg.confirm_best_eval,
+                    "degenerate_flat_keys": cfg.degenerate_flat_keys,
                 }
                 if cfg.early_stop_degenerate_evals > 0:
                     selection_kwargs["degenerate_stop_evals"] = (
@@ -1644,6 +2023,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 # printed. Forward the evaluation verbosity so
                 # `eval_verbose=1` restores a per-evaluation heartbeat.
                 verbose=eval_verbose,
+                # Paired evaluation: every evaluation replays the same
+                # feeds (None keeps the legacy unpaired stream).
+                eval_seed=resolved_eval_seed,
+                eval_reset_options=cfg.eval_reset_options,
                 **selection_kwargs,
             )
             if headline_selection or cfg.success_key is not None:
@@ -1769,6 +2152,15 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                         # callback's log_prefix keeps the two lines
                         # apart in the cell output.
                         verbose=eval_verbose,
+                        # Paired too, on its own seed block (see
+                        # FINAL_INFO_EVAL_SEED_OFFSET).
+                        eval_seed=(
+                            None
+                            if resolved_eval_seed is None
+                            else resolved_eval_seed
+                            + FINAL_INFO_EVAL_SEED_OFFSET
+                        ),
+                        eval_reset_options=cfg.eval_reset_options,
                     )
                 )
         elif cfg.performance_gate is not None or cfg.final_info_eval:
@@ -1786,6 +2178,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             model_kwargs.setdefault("seed", cfg.seed)
         model_kwargs.setdefault("verbose", cfg.verbose)
         effective_verbose = model_kwargs["verbose"]
+        # Who acts while a warm start's fresh replay buffer refills
+        # (may set use_sde_at_warmup; None unless SAC-family warm start).
+        warm_start_warmup = _resolve_warm_start_warmup(cfg, model_kwargs)
 
         # Load the source before constructing the target. SB3 restores the saved
         # source seed while loading; constructing the fresh target afterwards
@@ -1954,6 +2349,17 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 "observation_rms_count": float(train_env.obs_rms.count),
                 "reward_statistics_reset": True,
                 "optimizer_state_transferred": False,
+                # "verified", or why only the shape check stood.
+                "observation_fingerprint": (
+                    warm_start_artifacts.observation_fingerprint
+                ),
+                # Who acted during the learning_starts refill (SAC
+                # family only; PPO has no warmup phase).
+                **(
+                    {"warmup": warm_start_warmup}
+                    if warm_start_warmup is not None
+                    else {}
+                ),
             }
             update_run_config_with_initialization(initialization, cfg.log_dir)
             del source_model

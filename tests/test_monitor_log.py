@@ -41,6 +41,28 @@ def _write_monitor_csv(
             writer.writerow([r, length, t])
 
 
+def test_info_keyword_columns_are_tolerated(tmp_path: Path):
+    """``TrainConfig.monitor_info_keywords`` makes SB3's Monitor append
+    one column per info key; every reader must keep working and carry
+    the extra columns through."""
+    from courtside_dynamics.training.monitor_log import (
+        read_monitor_rewards_lengths,
+    )
+
+    path = tmp_path / "0.monitor.csv"
+    with open(path, "w", newline="") as fh:
+        fh.write("#" + json.dumps({"t_start": 0.0, "env_id": "x"}) + "\n")
+        writer = csv.writer(fh)
+        writer.writerow(["r", "l", "t", "episode_legal_hit_count_a", "flag"])
+        writer.writerow([1.5, 100, 1.0, 3, True])
+        writer.writerow([0.5, 90, 2.0, 0, False])
+
+    df = load_monitor_episodes(str(tmp_path)).episodes
+    assert list(df["episode_legal_hit_count_a"]) == [3, 0]
+    assert list(df["cumulative_episode_steps"]) == [100, 190]
+    assert read_monitor_rewards_lengths(str(tmp_path)) == ([1.5, 0.5], [100, 90])
+
+
 def test_episodes_interleaved_by_wall_clock(tmp_path: Path):
     # Worker 0 finishes at t = 1, 4, 7. Worker 1 at t = 2, 3, 6.
     # Naive file-order concat gives 1,4,7,2,3,6 — the artifact. The

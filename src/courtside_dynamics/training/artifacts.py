@@ -8,12 +8,13 @@ runtime that produced it is gone.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import platform
 import statistics
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -150,6 +151,93 @@ def _gpu_info() -> dict[str, Any]:
     return info
 
 
+def observation_names_sha256(names: Sequence[str]) -> str:
+    """Canonical digest of an observation layout (its ordered names).
+
+    The observation fingerprint: shapes alone cannot tell two layouts
+    apart when a meaning changes at fixed width (world-frame instead of
+    body-frame spin, a counter that becomes scaled), and every
+    warm start and demo library would then load silently onto a
+    different task. One encoding for every producer -- ``config.json``'s
+    env probe, the demo-library harvest -- and every checker.
+    """
+    payload = json.dumps([str(name) for name in names], separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def env_observation_names(env: Any) -> tuple[str, ...] | None:
+    """The env's ``observation_names``, or None when it exposes none.
+
+    Read through Gymnasium's ``get_wrapper_attr`` so a wrapped env (a
+    ``TimeLimit``, a test wrapper) still reports its inner layout; a
+    missing or malformed attribute yields None rather than a guess.
+    """
+    getter = getattr(env, "get_wrapper_attr", None)
+    try:
+        names = (
+            getter("observation_names")
+            if callable(getter)
+            else env.observation_names
+        )
+    except AttributeError:
+        return None
+    if isinstance(names, (str, bytes)) or not isinstance(names, Sequence):
+        return None
+    if not all(isinstance(name, str) for name in names):
+        return None
+    return tuple(names)
+
+
+def vec_env_observation_names(venv: Any) -> tuple[str, ...] | None:
+    """:func:`env_observation_names` for worker 0 of an SB3 ``VecEnv``."""
+    if venv is None:
+        return None
+    try:
+        names = venv.get_attr("observation_names", indices=[0])[0]
+    except (AttributeError, IndexError):
+        return None
+    if isinstance(names, (str, bytes)) or not isinstance(names, Sequence):
+        return None
+    if not all(isinstance(name, str) for name in names):
+        return None
+    return tuple(names)
+
+
+def observation_fingerprint_mismatch(
+    *,
+    recorded_sha256: str,
+    recorded_names: Sequence[str] | None,
+    actual_names: Sequence[str],
+) -> str | None:
+    """Describe how ``actual_names`` differs from a recorded fingerprint.
+
+    Returns None on a match. Otherwise names the first differing index
+    (and both names) when the recorded side kept its name list, or the
+    two digests when only the digest survives.
+    """
+    if observation_names_sha256(actual_names) == recorded_sha256:
+        return None
+    if recorded_names is not None:
+        recorded = [str(name) for name in recorded_names]
+        actual = list(actual_names)
+        for index, (old, new) in enumerate(zip(recorded, actual, strict=False)):
+            if old != new:
+                return (
+                    f"observation index {index} is {old!r} in the recorded "
+                    f"layout but {new!r} in this env"
+                )
+        if len(recorded) != len(actual):
+            return (
+                f"the recorded layout has {len(recorded)} observation names "
+                f"and this env has {len(actual)} (first difference at index "
+                f"{min(len(recorded), len(actual))})"
+            )
+    return (
+        f"observation_names_sha256 {recorded_sha256[:12]} recorded, "
+        f"{observation_names_sha256(actual_names)[:12]} in this env"
+    )
+
+
 def _probe_env_fn(env_fn: Any) -> dict[str, Any]:
     """Construct one factory's env to capture class + space metadata."""
     info: dict[str, Any] = {
@@ -169,6 +257,14 @@ def _probe_env_fn(env_fn: Any) -> dict[str, Any]:
             info["observation_shape"] = list(obs_shape)
         if act_shape is not None:
             info["action_shape"] = list(act_shape)
+        observation_names = env_observation_names(env)
+        if observation_names is not None:
+            # The observation fingerprint warm starts check: a same-shape
+            # layout change must not load an old checkpoint silently.
+            info["observation_names"] = list(observation_names)
+            info["observation_names_sha256"] = observation_names_sha256(
+                observation_names
+            )
         constructor_kwargs = getattr(env, "_ezpickle_kwargs", None)
         if isinstance(constructor_kwargs, dict):
             # EzPickle captures every resolved constructor default, including
@@ -200,6 +296,35 @@ def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
     return _probe_env_fn(cfg.env_fn)
 
 
+def _evaluation_seeding(cfg: TrainConfig) -> dict[str, Any]:
+    """The paired-evaluation seeds ``train()`` resolves for this config.
+
+    ``train_config.eval_seed`` records the configured value; a seeded
+    run with ``eval_seed=None`` derives its block from ``seed``, so the
+    resolved seeds are recorded here, where a replay can read them.
+    """
+    from courtside_dynamics.callbacks.info_dict_eval import (
+        CONFIRMATION_SEED_OFFSET,
+    )
+    from courtside_dynamics.training.train import (
+        FINAL_INFO_EVAL_SEED_OFFSET,
+        resolve_eval_seed,
+    )
+
+    eval_seed = resolve_eval_seed(cfg)
+    if eval_seed is None:
+        return {"paired": False, "eval_seed": None}
+    return {
+        "paired": True,
+        "eval_seed": eval_seed,
+        "derived_from_seed": cfg.eval_seed is None,
+        # Episode i of each batch resets with <block start> + i.
+        "selection_batch_seed_start": eval_seed,
+        "confirmation_batch_seed_start": eval_seed + CONFIRMATION_SEED_OFFSET,
+        "final_info_eval_seed_start": eval_seed + FINAL_INFO_EVAL_SEED_OFFSET,
+    }
+
+
 def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
     """Snapshot the resolved cfg + provenance to ``log_dir/config.json``.
 
@@ -228,6 +353,7 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             else None
         ),
         "recipe_name": cfg.recipe_name,
+        "evaluation_seeding": _evaluation_seeding(cfg),
         "env": _probe_env(cfg),
         # Keep ``env`` as the training profile for backwards compatibility.
         # Evaluation may intentionally disable curriculum reset modes while
@@ -311,11 +437,31 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
                 if cfg.best_metric_keys is not None
                 else None
             ),
-            "best_metric_min_delta": cfg.best_metric_min_delta,
+            # A scalar or the per-key mapping, exactly as configured.
+            "best_metric_min_delta": (
+                dict(cfg.best_metric_min_delta)
+                if isinstance(cfg.best_metric_min_delta, Mapping)
+                else cfg.best_metric_min_delta
+            ),
             "confirm_best_eval": cfg.confirm_best_eval,
             "early_stop_degenerate_evals": cfg.early_stop_degenerate_evals,
             "degenerate_guard_keys": list(cfg.degenerate_guard_keys),
+            "degenerate_flat_keys": (
+                list(cfg.degenerate_flat_keys)
+                if cfg.degenerate_flat_keys is not None
+                else None
+            ),
             "degenerate_min_evals": cfg.degenerate_min_evals,
+            # As configured; the resolved seed (None here derives from
+            # ``seed``) is the top-level ``evaluation_seeding`` block.
+            "eval_seed": cfg.eval_seed,
+            "eval_reset_options": (
+                [dict(options) for options in cfg.eval_reset_options]
+                if cfg.eval_reset_options is not None
+                else None
+            ),
+            "monitor_info_keywords": list(cfg.monitor_info_keywords),
+            "reuse_log_dir": cfg.reuse_log_dir,
             "performance_gate": (
                 {
                     "metric_key": cfg.performance_gate["metric_key"],
@@ -427,6 +573,10 @@ def _model_info(model: Any) -> dict[str, Any]:
         "tau", "buffer_size", "learning_starts", "train_freq",
         "gradient_steps", "ent_coef", "target_entropy",
         "target_update_interval",
+        # Exploration noise: gSDE, and whether it (rather than uniform
+        # sampling) drives the learning_starts warmup -- train() turns
+        # the latter on for gSDE warm starts, so record the effect.
+        "use_sde", "use_sde_at_warmup",
         # On-policy (PPO, A2C)
         "n_steps", "n_epochs", "gae_lambda", "clip_range",
         "clip_range_vf", "vf_coef", "normalize_advantage",
@@ -671,6 +821,29 @@ def _read_best_model_meta(log_dir: str) -> dict[str, Any] | None:
         )
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _selecting_batch_metrics(
+    best_meta: Mapping[str, Any], log_dir: str, step: int
+) -> dict[str, float]:
+    """The aggregate of the evaluation batch that selected the best model.
+
+    ``best_model_meta.json`` carries it under ``metrics`` since the
+    2026-10-05 fix batch. Older metas lack it; their selecting batch is
+    the selecting evaluator's own ``eval_info.csv`` row at the selected
+    step (the same callback wrote both in the same evaluation).
+    """
+    recorded = best_meta.get("metrics")
+    if isinstance(recorded, Mapping):
+        metrics: dict[str, float] = {}
+        for key, value in recorded.items():
+            try:
+                metrics[str(key)] = float(value)
+            except (TypeError, ValueError):
+                continue
+        if metrics:
+            return metrics
+    return _read_eval_info_at_step(log_dir, step)
 
 
 _PROJECT_NAME = "courtside-dynamics"
@@ -1110,39 +1283,67 @@ def write_run_summary(
         lines.extend(
             _section(f"Best Checkpoint Evaluation (step {section_step:,})")
         )
-        section_mean: float | None = None
-        section_std: float | None = None
-        if section_step == best_step:
-            section_mean, section_std = best_mean, best_std
-        elif eval_timesteps is not None:
-            matches = np.flatnonzero(eval_timesteps == section_step)
-            if matches.size:
-                assert eval_means is not None and eval_stds is not None
-                section_mean = float(eval_means[matches[0]])
-                section_std = float(eval_stds[matches[0]])
-        if section_mean is not None and section_std is not None:
-            lines.append(
-                f"  {_kv('Reward', f'{section_mean:.3f} +/- {section_std:.3f}')}"
-            )
-        eval_info = _read_eval_info_at_step(log_dir, section_step)
+        eval_info: dict[str, float]
+        if selected_step is not None:
+            # Task-metric selection: report the batch that won it. The
+            # reward series in evaluations.npz is a different stream's
+            # episodes (and, merged or not, never the selecting batch),
+            # so it must not stand in for this checkpoint's reward.
+            assert best_meta is not None
+            eval_info = _selecting_batch_metrics(best_meta, log_dir, section_step)
+            reward = eval_info.get("episode_reward_mean")
+            if reward is not None:
+                lines.append(
+                    f"  {_kv('Reward', f'{reward:.3f}  [selecting batch]')}"
+                )
+        else:
+            section_mean: float | None = None
+            section_std: float | None = None
+            if section_step == best_step:
+                section_mean, section_std = best_mean, best_std
+            elif eval_timesteps is not None:
+                matches = np.flatnonzero(eval_timesteps == section_step)
+                if matches.size:
+                    assert eval_means is not None and eval_stds is not None
+                    section_mean = float(eval_means[matches[0]])
+                    section_std = float(eval_stds[matches[0]])
+            if section_mean is not None and section_std is not None:
+                lines.append(
+                    f"  {_kv('Reward', f'{section_mean:.3f} +/- {section_std:.3f}')}"
+                )
+            eval_info = _read_eval_info_at_step(log_dir, section_step)
         if eval_info:
             ep_len = eval_info.get("episode_length")
             if ep_len is not None:
                 lines.append(f"  {_kv('Episode length', f'{ep_len:.1f}')}")
-            # Counter-style keys: render `<key>: final X  max Y`.
+            success_rate = eval_info.get("success_rate")
+            if success_rate is not None:
+                lines.append(
+                    f"  {_kv('Success rate', f'{success_rate * 100:.1f}%')}"
+                )
+            # Counter-style keys: `<key>: ep-mean A  last-episode B  max C`.
+            # ``_ep_mean`` is the batch's mean terminal value; ``_final``
+            # is ONE episode's (the batch's last), which an earlier
+            # layout printed as an unlabeled "final" -- easy to misread
+            # as the checkpoint's result.
             counter_finals = sorted(
                 k[: -len("_final")] for k in eval_info if k.endswith("_final")
             )
             if counter_finals:
                 key_width = max(len(k) for k in counter_finals) + 2
                 for base in counter_finals:
+                    batch_mean = eval_info.get(f"{base}_ep_mean")
                     final = eval_info.get(f"{base}_final")
                     peak = eval_info.get(f"{base}_max")
-                    parts = [f"final {final:.2f}" if final is not None else ""]
+                    parts = []
+                    if batch_mean is not None:
+                        parts.append(f"ep-mean {batch_mean:.2f}")
+                    if final is not None:
+                        parts.append(f"last-episode {final:.2f}")
                     if peak is not None:
                         parts.append(f"max {peak:.2f}")
                     lines.append(
-                        f"  {(base + ':').ljust(key_width)}{'  '.join(p for p in parts if p)}"
+                        f"  {(base + ':').ljust(key_width)}{'  '.join(parts)}"
                     )
             if cfg.headline_key:
                 survival_parts = []

@@ -39,6 +39,14 @@ file aborts the launch instead of voiding the run after the fact.
 Not supported with n-step returns (``n_steps > 1``): refused at
 construction rather than silently mixing 1-step demo targets into
 n-step live targets.
+
+Observation fingerprint: a library whose header carries
+``observation_names_sha256`` (and ``observation_names``; the harvest
+tool writes both) is refused at load when the training env's
+``observation_names`` differ -- equal shapes do not mean equal meaning
+(world-frame spin, scaled counters keep the width). A library without
+the header (every library harvested before the fingerprint existed)
+still loads on the shape checks alone, with a one-line notice.
 """
 from __future__ import annotations
 
@@ -54,6 +62,11 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.type_aliases import ReplayBufferSamples
 from stable_baselines3.common.utils import polyak_update
 from torch.nn import functional as F
+
+from courtside_dynamics.training.artifacts import (
+    observation_fingerprint_mismatch,
+    vec_env_observation_names,
+)
 
 DEMO_LIBRARY_SCHEMA = "k2-demo-library-v0"
 _BC_FILTERS = ("none", "q")
@@ -261,6 +274,7 @@ class DemoSAC(SAC):
                 f"demo_library {path!r} has schema {schema!r}; expected "
                 f"{DEMO_LIBRARY_SCHEMA!r}"
             )
+        self._check_observation_fingerprint(library, path)
         trajectories = list(library["trajectories"])
         obs_shape = self.observation_space.shape
         act_shape = self.action_space.shape
@@ -351,6 +365,53 @@ class DemoSAC(SAC):
             self.demo_holdout_launch = (
                 np.stack(launch_obs, axis=0),
                 np.stack(launch_act, axis=0),
+            )
+
+    def _check_observation_fingerprint(
+        self, library: dict[str, Any], path: str
+    ) -> None:
+        """Refuse a library harvested on a different observation layout.
+
+        The shape checks below cannot see a same-width meaning change;
+        the harvest header's name list can. Libraries without the
+        header (pre-fingerprint harvests) and envs exposing no
+        ``observation_names`` fall back to the shape checks, saying so.
+        """
+        recorded_sha = library.get("observation_names_sha256")
+        if recorded_sha is None:
+            print(
+                f"[DemoSAC] demo_library {path!r} carries no observation "
+                f"fingerprint (a pre-fingerprint harvest); only the "
+                f"observation/action shapes are checked"
+            )
+            return
+        if not isinstance(recorded_sha, str):
+            raise ValueError(
+                f"demo_library {path!r} has a malformed "
+                f"observation_names_sha256 {recorded_sha!r}"
+            )
+        env_names = vec_env_observation_names(self.env)
+        if env_names is None:
+            print(
+                f"[DemoSAC] the training env exposes no observation_names; "
+                f"demo_library {path!r}'s observation fingerprint could not "
+                f"be checked, only the observation/action shapes"
+            )
+            return
+        recorded_names = library.get("observation_names")
+        mismatch = observation_fingerprint_mismatch(
+            recorded_sha256=recorded_sha,
+            recorded_names=(
+                recorded_names
+                if isinstance(recorded_names, (list, tuple))
+                else None
+            ),
+            actual_names=env_names,
+        )
+        if mismatch is not None:
+            raise ValueError(
+                f"demo_library {path!r} was harvested on a different "
+                f"observation layout than the training env: {mismatch}"
             )
 
     # -- the D-C arming measurement ----------------------------------------
