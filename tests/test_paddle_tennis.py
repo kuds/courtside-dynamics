@@ -26,11 +26,17 @@ from courtside_dynamics.envs._paddle_court import (
     scripted_lead_charge_opponent,
 )
 from courtside_dynamics.envs.paddle_tennis import (
+    _TERM_GROUPS,
     PADDLE_TENNIS_ACTION_NAMES,
     PADDLE_TENNIS_NORMALIZED_SLICE,
     PADDLE_TENNIS_OBSERVATION_NAMES,
 )
-from courtside_dynamics.envs.tennis_rules import CourtSide
+from courtside_dynamics.envs.tennis_rules import (
+    CourtSide,
+    RallyEventKind,
+    RallyPhase,
+    TerminationReason,
+)
 
 #: Bring-up seeds (calibration block 1000-1119, already burned by the
 #: P3 harness diagnostics); the reserved held-out blocks 3100-3199 and
@@ -40,6 +46,18 @@ _SMOKE_SEEDS = (1000, 1001, 1002)
 
 def _zero_action() -> np.ndarray:
     return np.zeros(3, dtype=np.float32)
+
+
+def _serve_options(index: int) -> dict[str, str]:
+    """Reset options alternating the first serve by episode index.
+
+    A seeded reset restarts serve alternation at side A (the
+    reproducible-reset contract), so a loop that reuses one env
+    across seeds forces the serve side to keep covering both serve
+    slots -- the A, B, A, ... sequence those loops relied on when the
+    alternation ignored the seed.
+    """
+    return {"serve_side": "a" if index % 2 == 0 else "b"}
 
 
 class TestObservationContract:
@@ -125,9 +143,9 @@ class TestObservationContract:
 class TestMirrorIdentity:
     """P4, observed end-to-end through the registered env.
 
-    Twin envs on the same seed: env_a serves side A; env_b consumes
-    one extra reset so the alternation serves side B from the same
-    noise draw -- the exact mirrored initial state. With the same
+    Twin envs on the same seed: env_a serves side A; env_b forces the
+    side-B serve through the reset options, from the same noise draw
+    -- the exact mirrored initial state. With the same
     deterministic controller driving the policy side of both envs (and
     the opponent side, via the default scripted controller), the pair
     must stay mirrored: env_b's policy observation equals env_a's
@@ -140,8 +158,7 @@ class TestMirrorIdentity:
         try:
             seed = _SMOKE_SEEDS[1]
             obs_a, info_a = env_a.reset(seed=seed)
-            env_b.reset(seed=seed)
-            obs_b, info_b = env_b.reset(seed=seed)
+            obs_b, info_b = env_b.reset(seed=seed, options={"serve_side": "b"})
             assert info_a["serve_side"] == "a"
             assert info_b["serve_side"] == "b"
             assert info_b["serve_side_is_policy"] == 0.0
@@ -178,8 +195,8 @@ class TestRewardAccounting:
         env = PaddleTennisEnv()
         try:
             best_crossings = 0
-            for seed in _SMOKE_SEEDS:
-                obs, _ = env.reset(seed=seed)
+            for index, seed in enumerate(_SMOKE_SEEDS):
+                obs, _ = env.reset(seed=seed, options=_serve_options(index))
                 total = 0.0
                 total_return = 0.0
                 while True:
@@ -307,8 +324,8 @@ class TestVolleyRule:
         env = PaddleTennisEnv(volley_rule="legal")
         try:
             best = 0
-            for seed in _SMOKE_SEEDS:
-                obs, _ = env.reset(seed=seed)
+            for index, seed in enumerate(_SMOKE_SEEDS):
+                obs, _ = env.reset(seed=seed, options=_serve_options(index))
                 while True:
                     obs, _, term, trunc, info = env.step(
                         scripted_lead_charge_opponent(obs)
@@ -388,30 +405,139 @@ class TestVolleyRule:
 
 
 class TestServeAlternation:
-    def test_sides_alternate_across_resets(self):
+    def test_sides_alternate_across_unseeded_resets(self):
+        # The contract changed with the reproducible reset: the
+        # alternation runs across UNSEEDED resets (the vectorized
+        # auto-reset path), and a seeded reset restarts it at side A
+        # (previously a seed was ignored, and the same loop over four
+        # seeds read a, b, a, b).
         env = PaddleTennisEnv()
         try:
             sides = []
             for index in range(4):
-                _, info = env.reset(seed=_SMOKE_SEEDS[0] + index)
+                _, info = env.reset(seed=_SMOKE_SEEDS[0] if index == 0 else None)
                 sides.append(info["serve_side"])
                 assert info["serve_side_is_policy"] == (
                     1.0 if info["serve_side"] == "a" else 0.0
                 )
             assert sides == ["a", "b", "a", "b"]
+            _, info = env.reset(seed=_SMOKE_SEEDS[1])
+            assert info["serve_side"] == "a"
         finally:
             env.close()
 
     def test_side_b_serve_mirrors_the_draw(self):
         env = PaddleTennisEnv()
         try:
-            env.reset(seed=_SMOKE_SEEDS[0])
-            _, info = env.reset(seed=_SMOKE_SEEDS[0])
+            _, info_a = env.reset(seed=_SMOKE_SEEDS[0])
+            _, info = env.reset(seed=_SMOKE_SEEDS[0], options={"serve_side": "b"})
             assert info["serve_side"] == "b"
             position = np.asarray(info["serve_ball_position"])
             velocity = np.asarray(info["serve_ball_velocity"])
             assert position[0] > 0.0
             assert velocity[0] < 0.0
+            # The same seed's draw, rotated onto the other half.
+            np.testing.assert_allclose(
+                position, np.asarray(info_a["serve_ball_position"]) * [-1, -1, 1]
+            )
+        finally:
+            env.close()
+
+
+class TestReproducibleReset:
+    """The reset contract shared with the humanoid env: a seed (plus
+    options) fully determines the launch, so evaluations can replay
+    identical feeds; ``options={"serve_side": ...}`` picks the slot."""
+
+    @staticmethod
+    def _rollout(env, seed, options, actions):
+        obs, info = env.reset(seed=seed, options=options)
+        trace = [obs]
+        rewards = []
+        for action in actions:
+            obs, reward, term, trunc, _ = env.step(action)
+            trace.append(obs)
+            rewards.append(reward)
+            if term or trunc:
+                break
+        return info, np.concatenate(trace), rewards
+
+    def test_same_seed_twice_replays_identically(self):
+        """Regression: the serve side used to come from the alternation
+        ledger alone, so the same seed twice on one env served from
+        different sides (different observations)."""
+        env = PaddleTennisEnv()
+        try:
+            obs_first, info_first = env.reset(seed=_SMOKE_SEEDS[0])
+            obs_second, info_second = env.reset(seed=_SMOKE_SEEDS[0])
+            np.testing.assert_array_equal(obs_first, obs_second)
+            assert info_first == info_second
+        finally:
+            env.close()
+
+        # Whole rollouts replay too, from a dirtied env (paddles moved,
+        # n-point relaunches flipping the ledger), with and without a
+        # forced serve side.
+        actions = np.random.default_rng(7).uniform(-1.0, 1.0, size=(300, 3))
+        env = PaddleTennisEnv(points_per_episode=None)
+        try:
+            for options in (None, {"serve_side": "b"}):
+                first = self._rollout(env, _SMOKE_SEEDS[0], options, actions)
+                # Dirty the env in between: an unseeded episode moves
+                # the paddles and advances the alternation ledger.
+                env.reset()
+                for action in actions[:200]:
+                    env.step(action)
+                second = self._rollout(env, _SMOKE_SEEDS[0], options, actions)
+                assert first[0] == second[0]
+                np.testing.assert_array_equal(first[1], second[1])
+                assert first[2] == second[2]
+        finally:
+            env.close()
+
+    def test_serve_side_option_is_honored_and_alternation_continues(self):
+        env = PaddleTennisEnv()
+        try:
+            for value, label in (
+                ("b", "b"),
+                ("A", "a"),
+                (CourtSide.B, "b"),
+                (CourtSide.A, "a"),
+            ):
+                obs, info = env.reset(seed=_SMOKE_SEEDS[0], options={"serve_side": value})
+                assert info["serve_side"] == label
+                names = list(PADDLE_TENNIS_OBSERVATION_NAMES)
+                assert obs[names.index("own_is_serving")] == (
+                    1.0 if label == "a" else 0.0
+                )
+                # Alternation continues from the forced side.
+                _, info = env.reset()
+                assert info["serve_side"] == ("a" if label == "b" else "b")
+            # An unseeded forced reset leaves the seed stream alone.
+            _, info = env.reset(options={"serve_side": "b"})
+            assert info["serve_side"] == "b"
+        finally:
+            env.close()
+
+    def test_bad_options_raise_before_touching_the_ledger(self):
+        env = PaddleTennisEnv()
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            for options in (
+                {"serve_side": "c"},
+                {"serve_side": 1},
+                {"ball_position": (0.0, 0.0, 1.0)},
+                {"serve_side": "a", "bogus": True},
+            ):
+                with pytest.raises(ValueError):
+                    env.reset(seed=_SMOKE_SEEDS[1], options=options)
+            # The failed resets neither restarted nor advanced the
+            # alternation: the next unseeded reset still serves B.
+            _, info = env.reset()
+            assert info["serve_side"] == "b"
+            # Empty options are the plain reset.
+            _, info = env.reset(seed=_SMOKE_SEEDS[0], options={})
+            assert info["serve_side"] == "a"
         finally:
             env.close()
 
@@ -526,12 +652,46 @@ class TestOpponentInjection:
         finally:
             env.close()
 
-    def test_bad_opponent_action_fails_loudly(self):
+    def test_wrong_shaped_opponent_action_fails_loudly(self):
+        """A wrong shape is a controller wiring bug: it still raises."""
         env = PaddleTennisEnv(opponent_controller=lambda observation: np.zeros(2))
         try:
             env.reset(seed=_SMOKE_SEEDS[0])
             with pytest.raises(ValueError, match="opponent_controller"):
                 env.step(_zero_action())
+        finally:
+            env.close()
+
+    def test_nonfinite_opponent_action_ends_through_the_unsafe_guard(self):
+        """A blown-up opponent (a frozen policy fed an extreme state)
+        is a runtime failure, not a bug: the episode ends through the
+        nonfinite guard with the unsafe penalty, the pending escrow
+        clawed back, and no physics stepped -- it used to raise and
+        crash the whole vectorized rollout."""
+        calls = []
+
+        def opponent(observation: np.ndarray) -> np.ndarray:
+            calls.append(1)
+            return np.zeros(3) if len(calls) < 3 else np.array([0.0, np.inf, 0.0])
+
+        env = PaddleTennisEnv(opponent_controller=opponent, contact_shaping=0.25)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            for _ in range(2):
+                _obs, _reward, term, trunc, info = env.step(_zero_action())
+                assert not (term or trunc)
+            env._pending_shaping = 0.25
+            qpos_before = env.data.qpos.copy()
+            obs_before = env._last_finite_observation.copy()
+            echoed, reward, term, trunc, info = env.step(_zero_action())
+            assert term and not trunc
+            assert reward == pytest.approx(-env.unsafe_physics_penalty - 0.25)
+            assert info["rew_unsafe"] == -env.unsafe_physics_penalty
+            assert info["rew_shaping_clawback"] == -0.25
+            assert info["term_nonfinite"] == 1.0
+            assert info["termination_reason_name"] == "nonfinite_state"
+            assert np.array_equal(env.data.qpos, qpos_before)
+            assert np.array_equal(echoed, obs_before)
         finally:
             env.close()
 
@@ -604,6 +764,277 @@ class TestGuards:
             env.close()
 
 
+#: The recipe's adopted env kwargs (continuous n-point play + escrows).
+_RECIPE_KWARGS = {
+    "points_per_episode": None,
+    "contact_shaping": 0.25,
+    "reach_shaping": 0.25,
+}
+
+
+class TestEpisodePolicyCounters:
+    """The episode-cumulative side-A instruments: legal hits, confirmed
+    returns, k>=2 conversions, contact depth and deep returns. The
+    rules' own counters restart with every point, so under n-point
+    play the terminal step used to read only the last (truncation-cut)
+    point."""
+
+    @staticmethod
+    def _recount(env, seed, *, threshold=None, options=None):
+        """Roll one oracle-as-A episode, recounting every counter
+        independently from ``env._last_transition`` at each step."""
+        threshold = env.deep_contact_depth if threshold is None else threshold
+        obs, _ = env.reset(seed=seed, options=options)
+        legal = returns = rally = deep = 0
+        depth_sum = 0.0
+        pending: float | None = None
+        max_point_hits = 0
+        info: dict = {}
+        while True:
+            obs, _r, term, trunc, info = env.step(scripted_ground_opponent(obs))
+            transition = env._last_transition
+            # The diagnosis instrument's ledger rule: a fault touch
+            # ends the point, so the legal side-A racket events are
+            # the first ones of the step's processed stream.
+            legal_now = transition.valid_racket_hits.count(CourtSide.A)
+            confirms_now = transition.confirmed_returns.count(CourtSide.A)
+            depths = [
+                abs(event.position[0])
+                for event in transition.processed_events
+                if event.kind is RallyEventKind.BALL_RACKET_A
+            ][:legal_now]
+            # A shot needs >100 ms to cross and land: a side-A hit and
+            # a side-A confirm never share one 10 ms step.
+            assert not (legal_now and confirms_now)
+            k = transition.before.valid_return_count_a
+            for _ in range(confirms_now):
+                returns += 1
+                k += 1
+                rally += k >= 2
+                if pending is not None and pending >= threshold:
+                    deep += 1
+                pending = None
+            for depth in depths:
+                legal += 1
+                depth_sum += depth
+                pending = depth
+            if transition.terminated_now or term or trunc:
+                pending = None  # the point ended: its shot is void
+            max_point_hits = max(max_point_hits, transition.after.legal_hit_count_a)
+            assert info["episode_legal_hit_count_a"] == legal
+            assert info["episode_valid_return_count_a"] == returns
+            assert info["episode_rally_returns_a"] == rally
+            assert info["episode_deep_returns_a"] == deep
+            assert info["contact_depth_a"] == (depths[-1] if depths else 0.0)
+            assert info["episode_mean_contact_depth_a"] == (
+                depth_sum / legal if legal else 0.0
+            )
+            if term or trunc:
+                return info, max_point_hits
+
+    def test_counters_match_an_independent_recount(self):
+        env = PaddleTennisEnv(**_RECIPE_KWARGS)
+        try:
+            # Burned bring-up episodes that cross absorbed boundaries
+            # (measured: 1 and 2 completed points before the cap).
+            for seed, side in ((_SMOKE_SEEDS[2], "b"), (1003, "a")):
+                info, max_point_hits = self._recount(
+                    env, seed, options={"serve_side": side}
+                )
+                assert info["points_played"] >= 1
+                assert info["episode_legal_hit_count_a"] >= max_point_hits
+                # The per-point rules counter at the terminal step
+                # misses every earlier point's hits.
+                assert info["episode_legal_hit_count_a"] > info["legal_hit_count_a"]
+                assert info["episode_rally_returns_a"] > 0  # k>=2 exercised
+                assert 0.0 < info["episode_mean_contact_depth_a"] < 6.5
+        finally:
+            env.close()
+
+    def test_deep_returns_respond_to_the_depth_threshold(self):
+        totals = {}
+        for depth in (1e-6, 5.5, 100.0):
+            env = PaddleTennisEnv(deep_contact_depth=depth, **_RECIPE_KWARGS)
+            try:
+                info, _ = self._recount(env, _SMOKE_SEEDS[0])
+                totals[depth] = (
+                    info["episode_deep_returns_a"],
+                    info["episode_valid_return_count_a"],
+                )
+            finally:
+                env.close()
+        deep_all, returns = totals[1e-6]
+        assert returns > 0
+        assert deep_all == returns  # every hit sits beyond the net plane
+        assert totals[100.0][0] == 0.0
+        # The default 5.5 m band discriminates on this episode
+        # (measured: 2 of 6 confirmed returns struck that deep).
+        assert 0.0 < totals[5.5][0] < returns
+
+    def test_counters_restart_at_reset_and_survive_every_ending_path(self):
+        env = PaddleTennisEnv(**_RECIPE_KWARGS)
+        try:
+            obs, _ = env.reset(seed=_SMOKE_SEEDS[0])
+            info: dict = {}
+            while not info.get("episode_valid_return_count_a"):
+                obs, _r, _t, _tr, info = env.step(scripted_ground_opponent(obs))
+            carried = {
+                key: info[key]
+                for key in (
+                    "episode_legal_hit_count_a",
+                    "episode_valid_return_count_a",
+                    "episode_rally_returns_a",
+                    "episode_mean_contact_depth_a",
+                    "episode_deep_returns_a",
+                )
+            }
+            # The early nonfinite guard steps no physics: the counters
+            # carry, and no hit happened on that step.
+            *_, term, _trunc, info = env.step(np.array([np.nan, 0.0, 0.0]))
+            assert term
+            assert info["contact_depth_a"] == 0.0
+            for key, value in carried.items():
+                assert info[key] == value, key
+            _obs, _ = env.reset()
+            *_, info = env.step(_zero_action())
+            for key in (*carried, "contact_depth_a"):
+                assert info[key] == 0.0, key
+        finally:
+            env.close()
+
+    def test_deep_contact_depth_validated_and_pickled(self):
+        for bad in (0.0, -1.0, float("nan"), float("inf")):
+            with pytest.raises(ValueError, match="deep_contact_depth"):
+                PaddleTennisEnv(deep_contact_depth=bad)
+        env = PaddleTennisEnv(deep_contact_depth=4.0)
+        try:
+            assert env.deep_contact_depth == 4.0
+            clone = pickle.loads(pickle.dumps(env))
+            try:
+                assert clone.deep_contact_depth == 4.0
+            finally:
+                clone.close()
+        finally:
+            env.close()
+
+
+class TestTerminationScopes:
+    """One scope per key family (the _build_info comment): every
+    ``term_*`` flag -- grouped and per-reason -- describes the
+    EPISODE's ending; ``termination_reason(_name)``, ``rally_terminal``
+    and ``rally_phase`` describe the step's own POINT. At an absorbed
+    boundary the per-reason flags used to keep the point's fault
+    (``term_volley_return`` True beside ``term_volley`` 0.0), and the
+    forced-nonfinite ending read ``termination_reason_name="none"``."""
+
+    @staticmethod
+    def _assert_scopes(info, *, terminated, truncated):
+        fired = {key for key, value in info.items() if key.startswith("term_") and value}
+        if not (terminated or truncated):
+            assert fired == set(), fired
+            return
+        if truncated:
+            assert fired == {"term_timeout"}, fired
+            return
+        reason = TerminationReason(int(info["termination_reason"]))
+        assert info["termination_reason_name"] == reason.name.lower()
+        group = next(name for name, reasons in _TERM_GROUPS if reason in reasons)
+        assert fired == {f"term_{reason.name.lower()}", group}, fired
+
+    def test_absorbed_boundaries_and_episode_endings_agree(self):
+        boundary_reasons = set()
+        for policy, kwargs in (
+            # The volley-capable controller faults VOLLEY_RETURN on
+            # every receiving point: a per-reason key the grouped flag
+            # does not shadow.
+            (scripted_lead_charge_opponent, {"points_per_episode": None}),
+            (scripted_ground_opponent, {"points_per_episode": 3}),
+        ):
+            env = PaddleTennisEnv(**kwargs)
+            try:
+                obs, _ = env.reset(seed=_SMOKE_SEEDS[0])
+                ends = {
+                    "point_end_" + name.removeprefix("term_"): 0.0
+                    for name, _ in _TERM_GROUPS
+                    if name != "term_nonfinite"
+                }
+                while True:
+                    obs, _r, term, trunc, info = env.step(policy(obs))
+                    self._assert_scopes(info, terminated=term, truncated=trunc)
+                    if env._last_transition.terminated_now:
+                        # The point scope names the point's fault, and
+                        # the same step books it in its group counter.
+                        reason = TerminationReason(int(info["termination_reason"]))
+                        assert reason is not TerminationReason.NONE
+                        assert info["rally_terminal"] is True
+                        assert info["rally_phase"] == int(RallyPhase.TERMINAL)
+                        group = next(
+                            name for name, reasons in _TERM_GROUPS if reason in reasons
+                        )
+                        key = "point_end_" + group.removeprefix("term_")
+                        assert info[key] == ends[key] + 1.0
+                        if not term:
+                            boundary_reasons.add(reason)
+                    for key in ends:
+                        ends[key] = info[key]
+                    if term or trunc:
+                        break
+            finally:
+                env.close()
+        assert TerminationReason.VOLLEY_RETURN in boundary_reasons
+
+    def test_forced_nonfinite_ending_names_itself_everywhere(self):
+        env = PaddleTennisEnv()
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            real_get_obs = env._get_obs
+
+            def poisoned():
+                obs = real_get_obs().copy()
+                obs[0] = np.nan
+                return obs
+
+            env._get_obs = poisoned
+            *_, term, trunc, info = env.step(_zero_action())
+            assert term and not trunc
+            # The rules machine never saw the blow-up (its snapshot
+            # reads "none"); the published info must not.
+            assert env._last_transition.after.termination_reason is (
+                TerminationReason.NONE
+            )
+            assert info["termination_reason_name"] == "nonfinite_state"
+            assert info["termination_reason"] == int(TerminationReason.NONFINITE_STATE)
+            assert info["rally_terminal"] is True
+            assert info["rally_phase"] == int(RallyPhase.TERMINAL)
+            self._assert_scopes(info, terminated=term, truncated=trunc)
+        finally:
+            env.close()
+        env = PaddleTennisEnv()
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            *_, term, trunc, info = env.step(np.array([np.nan, 0.0, 0.0]))
+            assert info["termination_reason_name"] == "nonfinite_state"
+            self._assert_scopes(info, terminated=term, truncated=trunc)
+        finally:
+            env.close()
+
+    def test_recipe_consumed_keys_survive(self):
+        """The fix renames nothing the recipe logs or evaluates."""
+        from courtside_dynamics.recipes import (
+            _PADDLE_TENNIS_CSV_KEYS,
+            _PADDLE_TENNIS_TERMINAL_EVAL_KEYS,
+        )
+
+        env = PaddleTennisEnv(points_per_episode=None)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            *_, info = env.step(_zero_action())
+            for key in (*_PADDLE_TENNIS_CSV_KEYS, *_PADDLE_TENNIS_TERMINAL_EVAL_KEYS):
+                assert key in info, key
+        finally:
+            env.close()
+
+
 class TestRecipeExplorationPackage:
     """The ground-era exploration remedy is part of the training
     definition (docs/paddle_tennis_exploration_20260808.md): auto
@@ -645,12 +1076,12 @@ class TestContactShaping:
     frozen task."""
 
     @staticmethod
-    def _drive(env, policy, seed, mirror_env=None):
+    def _drive(env, policy, seed, mirror_env=None, options=None):
         """Step ``env`` (and optionally ``mirror_env`` in lockstep)
         with ``policy``; return per-step info sums and totals."""
-        obs, _ = env.reset(seed=seed)
+        obs, _ = env.reset(seed=seed, options=options)
         if mirror_env is not None:
-            mirror_obs, _ = mirror_env.reset(seed=seed)
+            mirror_obs, _ = mirror_env.reset(seed=seed, options=options)
             np.testing.assert_array_equal(obs, mirror_obs)
         totals = {"reward": 0.0, "mirror_reward": 0.0}
         sums = dict.fromkeys(_SHAPING_COMPONENTS, 0.0)
@@ -680,9 +1111,13 @@ class TestContactShaping:
         shaped = PaddleTennisEnv(contact_shaping=0.25)
         unshaped = PaddleTennisEnv()
         try:
-            for seed in _SMOKE_SEEDS:
+            for index, seed in enumerate(_SMOKE_SEEDS):
                 totals, sums, confirms = self._drive(
-                    shaped, scripted_ground_opponent, seed, unshaped
+                    shaped,
+                    scripted_ground_opponent,
+                    seed,
+                    unshaped,
+                    options=_serve_options(index),
                 )
                 expected = 0.25 * confirms
                 assert sums["rew_shaping"] + sums[
@@ -851,13 +1286,13 @@ class TestReachShaping:
     bit-identical to the frozen task."""
 
     @staticmethod
-    def _drive(env, policy, seed, mirror_env=None):
+    def _drive(env, policy, seed, mirror_env=None, options=None):
         """Step ``env`` (optionally with a lockstep mirror); return
         totals, per-component sums, and the tracker-computed kept
         escrow (commit-before-pay ordering, the implementation's)."""
-        obs, _ = env.reset(seed=seed)
+        obs, _ = env.reset(seed=seed, options=options)
         if mirror_env is not None:
-            mirror_obs, _ = mirror_env.reset(seed=seed)
+            mirror_obs, _ = mirror_env.reset(seed=seed, options=options)
             np.testing.assert_array_equal(obs, mirror_obs)
         totals = {"reward": 0.0, "mirror_reward": 0.0}
         sums = dict.fromkeys(_SHAPING_COMPONENTS, 0.0)
@@ -896,9 +1331,13 @@ class TestReachShaping:
         shaped = PaddleTennisEnv(reach_shaping=0.25)
         unshaped = PaddleTennisEnv()
         try:
-            for seed in _SMOKE_SEEDS:
+            for index, seed in enumerate(_SMOKE_SEEDS):
                 totals, sums, kept, _hits = self._drive(
-                    shaped, scripted_ground_opponent, seed, unshaped
+                    shaped,
+                    scripted_ground_opponent,
+                    seed,
+                    unshaped,
+                    options=_serve_options(index),
                 )
                 assert sums["rew_reach"] + sums["rew_reach_clawback"] == pytest.approx(
                     kept, abs=1e-12
@@ -999,9 +1438,13 @@ class TestReachShaping:
         plain = PaddleTennisEnv(points_per_episode=None)
         try:
             paid_any = False
-            for seed in _SMOKE_SEEDS:
+            for index, seed in enumerate(_SMOKE_SEEDS):
                 totals, sums, kept, hits = self._drive(
-                    shaped, lambda _obs: _zero_action(), seed, plain
+                    shaped,
+                    lambda _obs: _zero_action(),
+                    seed,
+                    plain,
+                    options=_serve_options(index),
                 )
                 assert hits == 0
                 assert kept == 0.0
@@ -1050,9 +1493,12 @@ class TestReachShaping:
         env = PaddleTennisEnv(reach_shaping=0.25)
         try:
             paid_any = False
-            for seed in _SMOKE_SEEDS:
+            for index, seed in enumerate(_SMOKE_SEEDS):
                 totals, sums, kept, hits = self._drive(
-                    env, scripted_reach_camper_witness, seed
+                    env,
+                    scripted_reach_camper_witness,
+                    seed,
+                    options=_serve_options(index),
                 )
                 assert hits == 0
                 assert kept == 0.0
@@ -1071,9 +1517,11 @@ class TestReachShaping:
         shaped = PaddleTennisEnv(contact_shaping=0.25, reach_shaping=0.25)
         unshaped = PaddleTennisEnv()
         try:
-            for seed in _SMOKE_SEEDS:
-                obs, _ = shaped.reset(seed=seed)
-                mirror_obs, _ = unshaped.reset(seed=seed)
+            for index, seed in enumerate(_SMOKE_SEEDS):
+                obs, _ = shaped.reset(seed=seed, options=_serve_options(index))
+                mirror_obs, _ = unshaped.reset(
+                    seed=seed, options=_serve_options(index)
+                )
                 np.testing.assert_array_equal(obs, mirror_obs)
                 total = mirror_total = 0.0
                 kept_reach = pending_reach = 0.0
@@ -1118,13 +1566,13 @@ class TestHoldShaping:
     path claws back — with the default-off stream bit-identical."""
 
     @staticmethod
-    def _drive(env, policy, seed, mirror_env=None):
+    def _drive(env, policy, seed, mirror_env=None, options=None):
         """Step ``env`` (optionally with a lockstep mirror); return
         totals, per-component sums, and the tracker-computed kept hold
         escrow (keep-before-arm ordering, the implementation's)."""
-        obs, _ = env.reset(seed=seed)
+        obs, _ = env.reset(seed=seed, options=options)
         if mirror_env is not None:
-            mirror_obs, _ = mirror_env.reset(seed=seed)
+            mirror_obs, _ = mirror_env.reset(seed=seed, options=options)
             np.testing.assert_array_equal(obs, mirror_obs)
         totals = {"reward": 0.0, "mirror_reward": 0.0}
         sums = dict.fromkeys(_SHAPING_COMPONENTS, 0.0)
@@ -1163,9 +1611,13 @@ class TestHoldShaping:
         unshaped = PaddleTennisEnv(points_per_episode=None)
         try:
             kept_any = False
-            for seed in _SMOKE_SEEDS:
+            for index, seed in enumerate(_SMOKE_SEEDS):
                 totals, sums, kept, _hits = self._drive(
-                    shaped, scripted_ground_opponent, seed, unshaped
+                    shaped,
+                    scripted_ground_opponent,
+                    seed,
+                    unshaped,
+                    options=_serve_options(index),
                 )
                 assert sums["rew_hold"] + sums["rew_hold_clawback"] == pytest.approx(
                     kept, abs=1e-12
@@ -1274,9 +1726,12 @@ class TestHoldShaping:
         a statue across full continuous-play episodes."""
         env = PaddleTennisEnv(points_per_episode=None, hold_shaping=0.25)
         try:
-            for seed in _SMOKE_SEEDS:
+            for index, seed in enumerate(_SMOKE_SEEDS):
                 _totals, sums, kept, hits = self._drive(
-                    env, lambda _obs: _zero_action(), seed
+                    env,
+                    lambda _obs: _zero_action(),
+                    seed,
+                    options=_serve_options(index),
                 )
                 assert hits == 0
                 assert kept == 0.0
@@ -1293,8 +1748,8 @@ class TestHoldShaping:
         env = PaddleTennisEnv(hold_shaping=0.25)
         try:
             paid_any = False
-            for seed in _SMOKE_SEEDS:
-                obs, _ = env.reset(seed=seed)
+            for index, seed in enumerate(_SMOKE_SEEDS):
+                obs, _ = env.reset(seed=seed, options=_serve_options(index))
                 frozen = False
                 sums = {"rew_hold": 0.0, "rew_hold_clawback": 0.0}
                 while True:
@@ -1568,8 +2023,11 @@ class TestNPointEpisodes:
         env = PaddleTennisEnv(points_per_episode=None, episode_len=1200)
         try:
             servers: list[str] = []
-            for seed in _SMOKE_SEEDS[:2]:
-                env.reset(seed=seed)
+            for index in range(2):
+                # Alternation carries across episode boundaries on the
+                # UNSEEDED reset (the vectorized auto-reset path); a
+                # seeded reset restarts it at side A by contract.
+                env.reset(seed=_SMOKE_SEEDS[0] if index == 0 else None)
                 servers.append(env._serving_side.name)
                 prev = 0
                 while True:
@@ -1593,6 +2051,69 @@ class TestNPointEpisodes:
             env._nudge_paddle_clear(target)
             env.set_state(env.data.qpos.copy(), env.data.qvel.copy())
             assert env._clear_launch_envelope(target)
+        finally:
+            env.close()
+
+    @staticmethod
+    def _slides_within_range(env) -> bool:
+        for side in "ab":
+            for axis in "xyz":
+                joint = env.model.joint(f"player_{side}_slide_{axis}")
+                value = float(env.data.qpos[int(joint.qposadr[0])])
+                if not float(joint.range[0]) <= value <= float(joint.range[1]):
+                    return False
+        return True
+
+    def test_nudge_clamps_to_slide_ranges_near_a_limit(self):
+        """Regression: the radial nudge wrote slide targets past the
+        joint limits (here x, with the paddle parked at its deepest
+        reach and the origin just in front of it), which the solver
+        snaps back toward the ball. The clamped nudge must stay in
+        range AND clear, taking the smallest feasible exit."""
+        env = PaddleTennisEnv(points_per_episode=None)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            slide_x = env.model.joint("player_a_slide_x")
+            qpos = env.data.qpos.copy()
+            qpos[int(slide_x.qposadr[0])] = float(slide_x.range[0])
+            env.set_state(qpos, env.data.qvel.copy())
+            head = env._paddle_position(CourtSide.A)
+            assert head[0] == pytest.approx(-6.4)
+            target = head + np.array([0.1, 0.0, 0.1])
+            assert not env._clear_launch_envelope(target)
+            env._nudge_paddle_clear(target)
+            assert self._slides_within_range(env)
+            env.set_state(env.data.qpos.copy(), env.data.qvel.copy())
+            assert env._clear_launch_envelope(target)
+            moved = env._paddle_position(CourtSide.A) - head
+            # The minimal feasible exit here is straight down.
+            assert moved[0] == pytest.approx(0.0, abs=1e-12)
+            assert moved[1] == pytest.approx(0.0, abs=1e-12)
+            assert moved[2] < 0.0
+            assert float(np.linalg.norm(moved)) < 0.45
+        finally:
+            env.close()
+
+    def test_relaunch_reverifies_a_nudge_at_a_limit(self):
+        """The relaunch protocol end to end on a serve origin parked in
+        front of the paddle's deepest reach (zero jitter: every redraw
+        is blocked): the nudge fires once, the slides stay in range,
+        and the launched ball starts clear of both heads."""
+        serve = PaddleCourtServe(start_distance_from_net=6.3, position_noise=(0, 0, 0))
+        env = PaddleTennisEnv(points_per_episode=None, serve_config=serve)
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            slide_x = env.model.joint("player_a_slide_x")
+            qpos = env.data.qpos.copy()
+            qpos[int(slide_x.qposadr[0])] = float(slide_x.range[0])
+            env.set_state(qpos, env.data.qvel.copy())
+            env._serving_side = CourtSide.A
+            env._launch_point(mid_episode=True)
+            assert env._point_serve_nudged == 1
+            assert self._slides_within_range(env)
+            ball = env._ball_position()
+            np.testing.assert_allclose(ball, (-6.3, 0.0, serve.height))
+            assert env._clear_launch_envelope(ball)
         finally:
             env.close()
 
@@ -1760,6 +2281,33 @@ class TestDeterminism:
         second = run(_SMOKE_SEEDS[2])
         assert np.array_equal(first, second)
 
+    def test_independent_instances_match_bit_for_bit(self):
+        """Two independently constructed envs, same seed and actions:
+        observations, rewards, terminations and truncations agree
+        exactly -- for the frozen default and for the recipe's n-point
+        + escrow kwargs, across both serve slots (the seeded reset,
+        then the unseeded alternation)."""
+        actions = np.random.default_rng(11).uniform(-1.0, 1.0, size=(400, 3))
+
+        def stream(kwargs: dict) -> list:
+            env = PaddleTennisEnv(**kwargs)
+            try:
+                rows: list = []
+                for seed in (_SMOKE_SEEDS[0], None):
+                    obs, _ = env.reset(seed=seed)
+                    rows.append(obs.tobytes())
+                    for action in actions:
+                        obs, reward, term, trunc, _ = env.step(action)
+                        rows.append((obs.tobytes(), reward, term, trunc))
+                        if term or trunc:
+                            break
+                return rows
+            finally:
+                env.close()
+
+        for kwargs in ({}, _RECIPE_KWARGS):
+            assert stream(kwargs) == stream(kwargs)
+
 
 @pytest.fixture(scope="module")
 def drill_library_path(tmp_path_factory) -> str:
@@ -1779,11 +2327,10 @@ def drill_library_path(tmp_path_factory) -> str:
         # (the module ledger comment): ledger compliance is
         # structural, not empirical.
         while len(entries) < 6 and seed <= 1119:
-            obs, info = env.reset(seed=seed)
-            if info["serve_side"] == "a":
-                # Land on a policy-receiving first point (the
-                # alternation flips per reset, not per seed).
-                obs, info = env.reset(seed=seed)
+            # Land on a policy-receiving first point (a seeded reset
+            # would otherwise serve A; this is the same seed's draw the
+            # old reset-twice idiom reached through the alternation).
+            obs, info = env.reset(seed=seed, options={"serve_side": "b"})
             seed += 1
             hit_a = struck_b = False
             prev_points = 0
@@ -1874,9 +2421,9 @@ class TestK2Drill:
             drill_context="full",
         )
         try:
-            for seed in _SMOKE_SEEDS[:2]:
-                oa, ia = a.reset(seed=seed)
-                ob, ib = b.reset(seed=seed)
+            for index, seed in enumerate(_SMOKE_SEEDS[:2]):
+                oa, ia = a.reset(seed=seed, options=_serve_options(index))
+                ob, ib = b.reset(seed=seed, options=_serve_options(index))
                 np.testing.assert_array_equal(oa, ob)
                 assert ia == ib
                 while True:
@@ -1944,12 +2491,14 @@ class TestK2Drill:
             drill_fraction=1.0,
         )
         try:
-            _obs, info = env.reset(seed=seed)  # first reset serves A
+            _obs, info = env.reset(seed=seed)  # a seeded reset serves A
             assert info["serve_side"] == "a"
             twin = _twin_after_serve_draws(seed, env)
             assert env.np_random.bit_generator.state == twin.bit_generator.state
 
-            _obs, info = env.reset(seed=seed)  # second reset serves B
+            # The policy-receiving slot, forced (a seeded reset
+            # serves A by contract).
+            _obs, info = env.reset(seed=seed, options={"serve_side": "b"})
             assert info["serve_side"] == "b"
             assert info["drill_point"] == 1.0
             rng, _ = seeding.np_random(seed)
@@ -2097,8 +2646,7 @@ class TestK2Drill:
             drill_fraction=1.0,
         )
         try:
-            env.reset(seed=_SMOKE_SEEDS[0])
-            obs, info = env.reset(seed=_SMOKE_SEEDS[0])
+            obs, info = env.reset(seed=_SMOKE_SEEDS[0], options={"serve_side": "b"})
             assert info["serve_side"] == "b"
             assert info["drill_point"] == 1.0
             index = int(info["drill_entry_index"])
@@ -2139,8 +2687,7 @@ class TestK2Drill:
             drill_context="full",
         )
         try:
-            env.reset(seed=_SMOKE_SEEDS[0])
-            obs, info = env.reset(seed=_SMOKE_SEEDS[0])
+            obs, info = env.reset(seed=_SMOKE_SEEDS[0], options={"serve_side": "b"})
             assert info["drill_point"] == 1.0
             entry = env._drill_entries[int(info["drill_entry_index"])]
             deviation = np.abs(obs - entry["obs"])
@@ -2244,8 +2791,7 @@ class TestK2Drill:
             drill_fraction=1.0,
         )
         try:
-            env.reset(seed=_SMOKE_SEEDS[0])
-            obs, info = env.reset(seed=_SMOKE_SEEDS[0])
+            obs, info = env.reset(seed=_SMOKE_SEEDS[0], options={"serve_side": "b"})
             assert info["serve_side"] == "b"
             assert info["drill_point"] == 0.0
             assert info["drill_entry_index"] == -1.0
@@ -2277,14 +2823,12 @@ class TestK2Drill:
             # it): a fresh policy-serving episode reads 0 (a leaked
             # counter would carry the previous episode's fallback),
             # and the next policy-receiving episode counts only its
-            # OWN reset-launch fallback. The mid-episode boundary
-            # above consumed an alternation turn, so this reset
-            # serves A.
+            # OWN reset-launch fallback. A seeded reset serves A.
             _obs, info = env.reset(seed=_SMOKE_SEEDS[0])
             assert info["serve_side"] == "a"
             _o, _r, _t, _tr, step_info = env.step(_zero_action())
             assert step_info["drill_fallback_count"] == 0.0
-            _obs, info = env.reset(seed=_SMOKE_SEEDS[0])
+            _obs, info = env.reset(seed=_SMOKE_SEEDS[0], options={"serve_side": "b"})
             assert info["serve_side"] == "b"
             _o, _r, _t, _tr, step_info = env.step(_zero_action())
             assert step_info["drill_fallback_count"] == 1.0
@@ -2350,8 +2894,12 @@ class TestK2Drill:
         )
         try:
             receiving_flags: list[tuple[float, float]] = []
-            for seed in (_SMOKE_SEEDS[2], _SMOKE_SEEDS[2]):
-                obs, info = env.reset(seed=seed)
+            # Both serve slots on one seed (the same seed twice with
+            # no options would replay the identical episode).
+            for index in range(2):
+                obs, info = env.reset(
+                    seed=_SMOKE_SEEDS[2], options=_serve_options(index)
+                )
                 prev_points = 0
                 while True:
                     obs, _r, term, trunc, sinfo = env.step(_zero_action())

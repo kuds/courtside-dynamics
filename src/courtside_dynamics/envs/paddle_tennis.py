@@ -26,10 +26,11 @@ docs/paddle_tennis_probes_p3_p4_20260802.md):
 - **Serve**: the P3-measured band (origin 3.25 m behind the net,
   9 m/s, 21°, probe-standard jitter — 100% legal, mean landing
   4.55 m; the ground pair returns 97-99% of serves). One point per
-  episode; the serving side alternates on every reset, matching the
-  humanoid env's alternation contract. The episode terminates when
-  the rules machine terminates the point and truncates at
-  ``episode_len``.
+  episode; the serving side alternates on every unseeded reset and
+  restarts at side A on a seeded one (``options={"serve_side": ...}``
+  forces it), matching the humanoid env's alternation contract. The
+  episode terminates when the rules machine terminates the point and
+  truncates at ``episode_len``.
 - **Opponent**: side B is driven through the side-relative mirror by
   ``opponent_controller`` (default: the era's rule-matched scripted
   controller — the bounce-waiting ground oracle under
@@ -74,6 +75,7 @@ from courtside_dynamics.assets import asset_path
 from courtside_dynamics.envs._base import (
     CourtsideMujocoEnv,
     finite_nonnegative,
+    finite_positive,
 )
 from courtside_dynamics.envs._paddle import PaddleInterface
 from courtside_dynamics.envs._paddle_court import (
@@ -91,6 +93,7 @@ from courtside_dynamics.envs._tennis_events import (
     TennisStepEventBatch,
 )
 from courtside_dynamics.envs.tennis_rules import (
+    TERMINATION_REASON_NAMES,
     CourtSide,
     RallyEvent,
     RallyEventKind,
@@ -255,6 +258,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         drill_library: str | None = None,
         drill_fraction: float = 0.0,
         drill_context: str = "feed",
+        deep_contact_depth: float = 5.5,
         **kwargs: Any,
     ) -> None:
         utils.EzPickle.__init__(
@@ -276,6 +280,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             drill_library=drill_library,
             drill_fraction=drill_fraction,
             drill_context=drill_context,
+            deep_contact_depth=deep_contact_depth,
             **kwargs,
         )
         if volley_rule not in self._VOLLEY_RULES:
@@ -359,6 +364,30 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._crossings_offset = 0
         self._point_serve_nudged = 0
         self._point_end_counts: dict[str, int] = {}
+        # Episode-cumulative side-A instruments (info only; nothing
+        # here feeds the observation or the reward). The rules
+        # snapshot's legal_hit_count_a / valid_return_count_a are
+        # per POINT, so under n-point play an episode's terminal step
+        # reads only its last, truncation-cut point; these counters
+        # span every point of the episode. ``deep_contact_depth`` is
+        # the |x| contact depth at or beyond which a side-A legal
+        # hit's confirmed return counts as a deep (baseline) return.
+        self.deep_contact_depth = finite_positive(
+            "deep_contact_depth", deep_contact_depth
+        )
+        self._episode_legal_hits_a = 0
+        self._episode_valid_returns_a = 0
+        self._episode_rally_returns_a = 0
+        self._episode_deep_returns_a = 0
+        self._episode_contact_depth_sum_a = 0.0
+        # The contact depth of the side-A legal hit whose return is
+        # still unconfirmed (None = no such shot in flight): held
+        # until that return confirms or the point ends, so a deep
+        # return is credited to exactly the hit that produced it.
+        self._pending_contact_depth_a: float | None = None
+        # reset() validates ``options`` and hands the forced serve
+        # side to reset_model through this slot (None = alternate).
+        self._reset_serve_side: CourtSide | None = None
         # k=2 drill (docs/design_paddle_tennis_k2_drill.md §2; default
         # off keeps the frozen task definition): a policy-receiving
         # point launches, with probability ``drill_fraction``, directly
@@ -736,13 +765,19 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             self.opponent_controller(self.observation_for_side(CourtSide.B)),
             dtype=np.float64,
         )
-        if opponent_action.shape != (3,) or not bool(
-            np.isfinite(opponent_action).all()
-        ):
+        if opponent_action.shape != (3,):
+            # A wrong shape is a wiring bug in the controller, never a
+            # runtime state: fail loudly.
             raise ValueError(
                 "opponent_controller must return a finite action of "
                 f"shape (3,), got {opponent_action!r}"
             )
+        if not bool(np.isfinite(opponent_action).all()):
+            # A blown-up opponent (a frozen policy fed an extreme
+            # state) is a runtime failure like a nonfinite policy
+            # action: end the episode through the same unsafe guard
+            # instead of crashing a vectorized rollout.
+            return self._nonfinite_termination()
         self._apply_side_action(CourtSide.A, np.clip(action, -1.0, 1.0))
         self._apply_side_action(CourtSide.B, np.clip(opponent_action, -1.0, 1.0))
         # Not gymnasium's do_simulation: its ctrl-shape gate compares
@@ -763,6 +798,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             0,
             int(after.net_crossing_count) - int(after.feed_crossed_net),
         )
+        contact_depth_a = self._advance_policy_counters(transition)
 
         rew_return = self.return_reward * len(transition.confirmed_returns)
         rew_fault = 0.0
@@ -860,6 +896,9 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             # into the next point's travel.
             self._hold_anchor_xy = None
             self._hold_travel = 0.0
+            # A shot still in flight at a point's end can never be
+            # confirmed: its depth leaves the pending register.
+            self._pending_contact_depth_a = None
         serving_side_of_step = self._serving_side
         # Like the serve side, the step's drill provenance describes
         # the step's own (just-ended or ongoing) point — captured
@@ -926,6 +965,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             serving_side=serving_side_of_step,
             drill_point=drill_point_of_step,
             drill_entry_index=drill_entry_of_step,
+            contact_depth_a=contact_depth_a,
         )
         return obs, float(reward), terminated, truncated, info
 
@@ -1019,6 +1059,54 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             self._hold_travel = 0.0
         return payment
 
+    def _advance_policy_counters(self, transition: RallyTransition) -> float:
+        """Fold one rules transition into the episode's side-A counters.
+
+        Returns the step's ``contact_depth_a``: |x| of the contact
+        position of the step's side-A legal hit (the rules' own
+        processed racket event, so a fault touch never counts), 0.0
+        without one. A confirmed side-A return is credited to the hit
+        held in the pending register; confirms run before the step's
+        new hit opens the register (the escrows' commit-before-open
+        order). The only confirm that can find the register empty is
+        one sharing its step with its own hit, which then takes that
+        hit's depth -- every side-A legal hit after the first needs
+        the opponent's legal hit in between, and that hit confirms
+        the previous side-A shot, so the register never holds a
+        stale shot (a full-arm drill launch restores a side-B shot in
+        flight, never a side-A one).
+        """
+        hit_depth: float | None = None
+        for event in transition.valid_racket_hit_events:
+            if event.kind is not RallyEventKind.BALL_RACKET_A:
+                continue
+            assert event.position is not None  # sampled contacts carry one
+            hit_depth = abs(float(event.position[0]))
+            self._episode_legal_hits_a += 1
+            self._episode_contact_depth_sum_a += hit_depth
+        # The rules count confirmed returns per point, so the snapshot
+        # before this step says which of this step's side-A confirms
+        # is the point's first (k=1) and which convert k>=2.
+        point_returns_a = transition.before.valid_return_count_a
+        hit_open = hit_depth is not None
+        for side in transition.confirmed_returns:
+            if side is not CourtSide.A:
+                continue
+            self._episode_valid_returns_a += 1
+            point_returns_a += 1
+            if point_returns_a >= 2:
+                self._episode_rally_returns_a += 1
+            depth = self._pending_contact_depth_a
+            self._pending_contact_depth_a = None
+            if depth is None and hit_open:
+                depth = hit_depth
+                hit_open = False
+            if depth is not None and depth >= self.deep_contact_depth:
+                self._episode_deep_returns_a += 1
+        if hit_open:
+            self._pending_contact_depth_a = hit_depth
+        return 0.0 if hit_depth is None else hit_depth
+
     def _record_point_end(self, reason: TerminationReason) -> None:
         for name, reasons in _TERM_GROUPS:
             if reason in reasons:
@@ -1056,6 +1144,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._pending_hold = 0.0
         self._hold_anchor_xy = None
         self._hold_travel = 0.0
+        self._pending_contact_depth_a = None
         reward = (
             rew_unsafe
             + rew_shaping_clawback
@@ -1097,7 +1186,29 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         serving_side: CourtSide | None = None,
         drill_point: bool | None = None,
         drill_entry_index: int | None = None,
+        contact_depth_a: float = 0.0,
     ) -> dict[str, Any]:
+        # Two scopes, one per key family, so no two keys can disagree:
+        #
+        # - EPISODE scope: every ``term_*`` flag -- the env's grouped
+        #   flags (term_volley, term_net_touch, ..., term_timeout)
+        #   AND the rules snapshot's per-reason flags
+        #   (term_volley_return, term_racket_a_net, ...). They fire
+        #   only on the episode's final step; exactly one grouped
+        #   flag fires there, its per-reason flag with it (npoint
+        #   design §2: an absorbed point boundary is not an episode
+        #   ending, so at a boundary every term_* flag is 0/False).
+        # - POINT scope: ``termination_reason``,
+        #   ``termination_reason_name``, ``rally_terminal`` and
+        #   ``rally_phase`` keep the rules machine's view of the
+        #   step's own point, so an absorbed boundary still names the
+        #   fault that ended its point (alongside that step's
+        #   point_end_* increment, the durable record).
+        #
+        # The unsafe guard is both: whenever it ends the episode
+        # (forced_nonfinite) it ended the point too, so every key of
+        # both scopes reads nonfinite_state -- including the
+        # rules-quiet forced path, whose snapshot still says "none".
         if transition is not None:
             info = transition.to_info()
             reason = transition.after.termination_reason
@@ -1106,13 +1217,16 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             reason = TerminationReason.NONE
         if forced_nonfinite:
             reason = TerminationReason.NONFINITE_STATE
+            info["rally_phase"] = int(RallyPhase.TERMINAL)
+            info["rally_terminal"] = True
+            info["termination_reason"] = int(reason)
+            info["termination_reason_name"] = TERMINATION_REASON_NAMES[reason]
         elif absorbed_point:
-            # The env's group flags are strictly episode-ending
-            # descriptors (npoint design §2): an absorbed point
-            # boundary is not an episode ending. The rules snapshot's
-            # own keys in ``info`` still describe the point's fault;
-            # the durable record is the point_end_* counters.
             reason = TerminationReason.NONE
+        for rules_reason in TerminationReason:
+            if rules_reason is not TerminationReason.NONE:
+                name = TERMINATION_REASON_NAMES[rules_reason]
+                info[f"term_{name}"] = rules_reason is reason
         # On absorbed-boundary steps the server has already flipped
         # for the relaunched point; serve_side_is_policy must agree
         # with the snapshot's serve_side keys, which describe the
@@ -1147,6 +1261,21 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
                 "points_played": float(self._points_played),
                 "completed_point_crossings": float(self._crossings_base),
                 "point_serve_nudged": float(self._point_serve_nudged),
+                # Episode-cumulative side-A instruments, carried
+                # across absorbed boundaries (the per-point rules
+                # counters above restart with every point).
+                "episode_legal_hit_count_a": float(self._episode_legal_hits_a),
+                "episode_valid_return_count_a": float(
+                    self._episode_valid_returns_a
+                ),
+                "episode_rally_returns_a": float(self._episode_rally_returns_a),
+                "contact_depth_a": float(contact_depth_a),
+                "episode_mean_contact_depth_a": (
+                    self._episode_contact_depth_sum_a / self._episode_legal_hits_a
+                    if self._episode_legal_hits_a
+                    else 0.0
+                ),
+                "episode_deep_returns_a": float(self._episode_deep_returns_a),
             }
         )
         for name, reasons in _TERM_GROUPS:
@@ -1227,7 +1356,8 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
 
         The one sanctioned exception to carryover; the moved paddle's
         joint velocities are zeroed so it cannot re-enter the envelope
-        in the same instant.
+        in the same instant. The caller re-verifies the envelope from
+        the updated kinematics.
         """
         for side, names in (
             (
@@ -1240,19 +1370,75 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             ),
         ):
             head = self._paddle_position(side)
-            offset = head - position
-            distance = float(np.linalg.norm(offset))
-            if distance >= self._SERVE_CLEARANCE:
+            if float(np.linalg.norm(head - position)) >= self._SERVE_CLEARANCE:
                 continue
-            direction = (
-                offset / distance if distance > 1e-9 else np.array([0.0, 0.0, 1.0])
-            )
-            world_delta = direction * (self._SERVE_CLEARANCE - distance + 1e-3)
-            for name in names:
-                joint = self.model.joint(name)
-                axis = np.asarray(self.data.joint(name).xaxis, dtype=np.float64)
-                self.data.qpos[int(joint.qposadr[0])] += float(world_delta @ axis)
-                self.data.qvel[int(joint.dofadr[0])] = 0.0
+            self._nudge_slides_clear(head, position, names)
+
+    def _nudge_slides_clear(
+        self,
+        head: np.ndarray,
+        position: np.ndarray,
+        names: tuple[str, str, str],
+    ) -> None:
+        """Move one paddle's head out of the launch envelope.
+
+        Every slide target is clamped to its joint range: past a limit
+        the write is not a displacement but a limit violation the
+        solver snaps back -- toward the ball -- on the next substep.
+        The radial push (the minimal displacement) is tried first and
+        is written unchanged whenever no limit clamps it; when one does
+        and the clamped head would still sit in the envelope, the
+        smallest single-slide exit that clears within the ranges
+        replaces it (every slide range on this court is far wider than
+        the envelope's diameter, so one always exists).
+        """
+        offset = head - position
+        distance = float(np.linalg.norm(offset))
+        joints = [self.model.joint(name) for name in names]
+        addresses = [int(joint.qposadr[0]) for joint in joints]
+        current = [float(self.data.qpos[address]) for address in addresses]
+        limits = [(float(joint.range[0]), float(joint.range[1])) for joint in joints]
+        axes = [
+            np.asarray(self.data.joint(name).xaxis, dtype=np.float64)
+            for name in names
+        ]
+
+        def _clamped(deltas: list[float]) -> list[float]:
+            return [
+                min(max(value + delta, low), high)
+                for value, delta, (low, high) in zip(
+                    current, deltas, limits, strict=True
+                )
+            ]
+
+        def _clears(targets: list[float]) -> bool:
+            moved = head.copy()
+            for target, value, axis in zip(targets, current, axes, strict=True):
+                moved += (target - value) * axis
+            return float(np.linalg.norm(moved - position)) >= self._SERVE_CLEARANCE
+
+        direction = (
+            offset / distance if distance > 1e-9 else np.array([0.0, 0.0, 1.0])
+        )
+        world_delta = direction * (self._SERVE_CLEARANCE - distance + 1e-3)
+        targets = _clamped([float(world_delta @ axis) for axis in axes])
+        if not _clears(targets):
+            radius = self._SERVE_CLEARANCE + 1e-3
+            exits: list[tuple[float, list[float]]] = []
+            for index, axis in enumerate(axes):
+                along = float(offset @ axis)
+                reach = float(np.sqrt(max(0.0, radius**2 - (distance**2 - along**2))))
+                for sign in (1.0, -1.0):
+                    deltas = [0.0, 0.0, 0.0]
+                    deltas[index] = sign * reach - along
+                    candidate = _clamped(deltas)
+                    if _clears(candidate):
+                        exits.append((abs(deltas[index]), candidate))
+            if exits:
+                targets = min(exits, key=lambda item: item[0])[1]
+        for address, target, joint in zip(addresses, targets, joints, strict=True):
+            self.data.qpos[address] = target
+            self.data.qvel[int(joint.dofadr[0])] = 0.0
 
     def _load_drill_library(self, path: str) -> list[dict[str, Any]]:
         """Load + validate a harvest library; record its sha256.
@@ -1363,6 +1549,17 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             if not self._clear_launch_envelope(position):
                 self._nudge_paddle_clear(position)
                 self._point_serve_nudged += 1
+                # Re-verify against the nudged paddles' real heads
+                # (kinematics only: set_state below recomputes every
+                # derived quantity, so this changes nothing
+                # downstream). Should a nudge ever leave the envelope
+                # blocked, the protocol's own first remedy applies
+                # again: redraw against where the paddles now stand.
+                mujoco.mj_kinematics(self.model, self.data)
+                for _ in range(self._SERVE_REDRAWS):
+                    if self._clear_launch_envelope(position):
+                        break
+                    position, velocity = self._draw_serve()
             qpos = self.data.qpos.copy()
             qvel = self.data.qvel.copy()
         else:
@@ -1440,6 +1637,54 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._drill_point_active = True
         self._drill_entry_index = index
 
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        """Reset; a seed restarts serve alternation at side A.
+
+        The humanoid env's contract (``HumanoidTennisCoopEnv.reset``):
+        passing a ``seed`` restarts the alternation, so the same seed
+        and options always reproduce the same launch, observation and
+        reset info -- the precondition for paired evaluation (the
+        alternation used to ignore the seed, so the same seed twice
+        served from different sides). Normal episode resets omit
+        ``seed`` and alternate thereafter, across n-point relaunches
+        too.
+
+        ``options`` accepts one key, ``serve_side`` (``"a"``/``"b"``
+        or a :class:`CourtSide`), which forces this episode's first
+        serve; alternation continues from it. Drill eligibility and
+        n-point relaunches follow the forced side exactly as they
+        follow an alternated one. Unknown keys raise ``ValueError``.
+        """
+        serve_side = self._validate_reset_options(options or {})
+        if seed is not None:
+            self._next_serving_side = CourtSide.A
+        self._reset_serve_side = serve_side
+        try:
+            return super().reset(seed=seed, options=options)
+        finally:
+            self._reset_serve_side = None
+
+    @staticmethod
+    def _validate_reset_options(options: dict[str, Any]) -> CourtSide | None:
+        unknown = set(options) - {"serve_side"}
+        if unknown:
+            raise ValueError(f"unsupported reset options: {sorted(unknown)}")
+        if "serve_side" not in options:
+            return None
+        value = options["serve_side"]
+        if isinstance(value, CourtSide):
+            return value
+        if isinstance(value, str) and value.strip().lower() in ("a", "b"):
+            return CourtSide.A if value.strip().lower() == "a" else CourtSide.B
+        raise ValueError(
+            f"serve_side must be 'a', 'b' or a CourtSide, got {value!r}"
+        )
+
     def reset_model(self):
         self.step_number = 0
         self._crossings = 0
@@ -1453,9 +1698,19 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         self._pending_hold = 0.0
         self._hold_anchor_xy = None
         self._hold_travel = 0.0
+        self._episode_legal_hits_a = 0
+        self._episode_valid_returns_a = 0
+        self._episode_rally_returns_a = 0
+        self._episode_deep_returns_a = 0
+        self._episode_contact_depth_sum_a = 0.0
+        self._pending_contact_depth_a = None
         self._drill_fallback_count = 0
         self._last_transition = None
-        self._serving_side = self._next_serving_side
+        self._serving_side = (
+            self._reset_serve_side
+            if self._reset_serve_side is not None
+            else self._next_serving_side
+        )
         self._next_serving_side = self._serving_side.opponent
 
         self._launch_point(mid_episode=False)
