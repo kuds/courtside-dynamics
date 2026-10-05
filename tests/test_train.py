@@ -2727,3 +2727,97 @@ def test_reuse_log_dir_rotates_the_previous_attempts_eval_logs(
     second_rows = eval_rows(csv_path)
     # One row per (timestep, metric): no second attempt appended.
     assert len(second_rows) == len(set(second_rows)) == len(first_rows)
+
+
+_GATE = {
+    "stages": [{"x": 1.0}],
+    "metric_key": "steps_alive_ep_mean",
+    "threshold": 1.0,
+    "sustain_evals": 1,
+}
+
+
+@pytest.mark.parametrize(
+    "overrides, error, message",
+    [
+        ({"reward_eval_episodes": 0}, ValueError, "reward_eval_episodes must be"),
+        ({"reward_eval_episodes": 5}, ValueError, "requires headline-metric"),
+        (
+            {"headline_key": "steps_alive", "final_eval_episodes": 0},
+            ValueError,
+            "final_eval_episodes must be",
+        ),
+        ({"final_eval_episodes": 4}, ValueError, "requires info_dict_eval and"),
+        (
+            {"checkpoint_diagnosis": {"episodez": 3}},
+            ValueError,
+            r"checkpoint_diagnosis has unknown keys \['episodez'\]",
+        ),
+        (
+            {"checkpoint_diagnosis": {"episodes": 3}, "checkpoint_freq": 0},
+            ValueError,
+            "requires checkpoint_freq > 0",
+        ),
+        (
+            {"checkpoint_diagnosis": {"episodes": 0}},
+            ValueError,
+            "episodes must be positive",
+        ),
+        ({"checkpoint_diagnosis": ("episodes",)}, TypeError, "must be a mapping"),
+        (
+            {"info_dict_eval": False, "final_info_eval": True},
+            ValueError,
+            "require info_dict_eval",
+        ),
+        (
+            {"info_dict_eval": False, "performance_gate": _GATE},
+            ValueError,
+            "require info_dict_eval",
+        ),
+        (
+            {"performance_gate": {**_GATE, "sustain_evalz": 2}},
+            ValueError,
+            r"unknown performance_gate key\(s\) \['sustain_evalz'\]",
+        ),
+        (
+            {
+                "performance_gate": {
+                    key: value for key, value in _GATE.items() if key != "threshold"
+                }
+            },
+            ValueError,
+            r"performance_gate must set \['threshold'\]",
+        ),
+    ],
+)
+def test_misconfigured_reuse_retry_leaves_the_previous_attempt_untouched(
+    tmp_path, overrides, error, message
+):
+    """The eval-stream, diagnosis and gate checks used to run inside the
+    callback wiring -- after reuse_log_dir=True had already rotated the
+    previous attempt's eval CSVs aside and overwritten its config.json.
+    They are pre-flight checks now: the retry fails before any env is
+    built and the earlier attempt's artifacts stay exactly where they
+    were."""
+    previous_config = '{"previous": "attempt"}\n'
+    (tmp_path / "config.json").write_text(previous_config)
+    metrics = tmp_path / "metrics"
+    metrics.mkdir()
+    rows = "timestep,metric,value\n25000,steps_alive_ep_mean,3.0\n"
+    for name in ("eval_info.csv", "eval_info_final.csv"):
+        (metrics / name).write_text(rows)
+    cfg = TrainConfig(
+        env_fn=_unbuildable_env,
+        log_dir=str(tmp_path),
+        reuse_log_dir=True,
+        **overrides,
+    )
+    with pytest.raises(error, match=message):
+        train(cfg)
+    assert (tmp_path / "config.json").read_text() == previous_config
+    assert sorted(path.name for path in metrics.iterdir()) == [
+        "eval_info.csv",
+        "eval_info_final.csv",
+    ]
+    for name in ("eval_info.csv", "eval_info_final.csv"):
+        assert (metrics / name).read_text() == rows

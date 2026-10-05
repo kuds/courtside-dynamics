@@ -1074,6 +1074,107 @@ def _validate_evaluation_config(cfg: TrainConfig) -> None:
         )
 
 
+#: Keys a ``performance_gate`` mapping must set (the rest default).
+_PERFORMANCE_GATE_REQUIRED_KEYS = ("stages", "metric_key", "threshold", "sustain_evals")
+
+#: Keys a ``checkpoint_diagnosis`` mapping may set.
+_CHECKPOINT_DIAGNOSIS_KEYS = frozenset({"episodes", "seed_start"})
+
+
+def _positive_int(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 1
+
+
+def _validate_callback_config(cfg: TrainConfig) -> None:
+    """Refuse malformed eval-stream, diagnosis and gate settings up front.
+
+    Config-only checks, so they run before any env is built or artifact
+    written. They used to sit in ``train()``'s callback wiring -- after
+    ``config.json`` was written and, under ``reuse_log_dir=True``, after
+    the previous attempt's evaluation CSVs were rotated aside -- so a
+    misconfigured retry overwrote the earlier attempt's provenance and
+    moved its logs before failing.
+    """
+    headline_selection = bool(cfg.info_dict_eval and cfg.headline_key)
+    if cfg.reward_eval_episodes is not None:
+        if not _positive_int(cfg.reward_eval_episodes):
+            raise ValueError("reward_eval_episodes must be a positive integer")
+        if not headline_selection:
+            raise ValueError(
+                "reward_eval_episodes requires headline-metric "
+                "selection (info_dict_eval + headline_key): without "
+                "it the reward eval stream owns best-model selection "
+                "and must keep the full n_eval_episodes"
+            )
+    if cfg.final_eval_episodes is not None:
+        if not _positive_int(cfg.final_eval_episodes):
+            raise ValueError("final_eval_episodes must be a positive integer")
+        if not (cfg.info_dict_eval and cfg.final_info_eval):
+            raise ValueError(
+                "final_eval_episodes requires info_dict_eval and "
+                "final_info_eval: it sizes the final-config eval "
+                "stream, which only exists when both are on"
+            )
+    if cfg.checkpoint_diagnosis is not None:
+        if not isinstance(cfg.checkpoint_diagnosis, Mapping):
+            raise TypeError(
+                f"checkpoint_diagnosis must be a mapping or None, got "
+                f"{cfg.checkpoint_diagnosis!r}"
+            )
+        unknown_keys = set(cfg.checkpoint_diagnosis) - _CHECKPOINT_DIAGNOSIS_KEYS
+        if unknown_keys:
+            raise ValueError(
+                "checkpoint_diagnosis has unknown keys "
+                f"{sorted(unknown_keys)}; allowed: episodes, "
+                "seed_start"
+            )
+        if cfg.checkpoint_freq <= 0:
+            raise ValueError(
+                "checkpoint_diagnosis requires checkpoint_freq > 0 "
+                "(it runs at checkpoint cadence)"
+            )
+        try:
+            episodes = int(cfg.checkpoint_diagnosis.get("episodes", 30))
+            int(cfg.checkpoint_diagnosis.get("seed_start", 5200))
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"checkpoint_diagnosis episodes/seed_start must be integers: "
+                f"{error}"
+            ) from error
+        if episodes <= 0:
+            raise ValueError("checkpoint_diagnosis episodes must be positive")
+    if not cfg.info_dict_eval and (
+        cfg.performance_gate is not None or cfg.final_info_eval
+    ):
+        raise ValueError(
+            "performance_gate and final_info_eval require info_dict_eval"
+        )
+    if cfg.performance_gate is not None:
+        if not isinstance(cfg.performance_gate, Mapping):
+            raise TypeError(
+                f"performance_gate must be a mapping or None, got "
+                f"{cfg.performance_gate!r}"
+            )
+        unknown_gate_keys = sorted(
+            set(cfg.performance_gate) - PERFORMANCE_GATE_KEYS
+        )
+        if unknown_gate_keys:
+            # A typo'd gate key was previously a silent no-op --
+            # exactly the failure class this repo bans.
+            raise ValueError(
+                f"unknown performance_gate key(s) {unknown_gate_keys}"
+            )
+        missing_gate_keys = [
+            key
+            for key in _PERFORMANCE_GATE_REQUIRED_KEYS
+            if key not in cfg.performance_gate
+        ]
+        if missing_gate_keys:
+            raise ValueError(
+                f"performance_gate must set {missing_gate_keys}"
+            )
+
+
 def _validate_monitor_info_keywords(cfg: TrainConfig) -> tuple[str, ...]:
     """The training ``Monitor``'s extra columns, checked against the env.
 
@@ -1671,6 +1772,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     _validate_model_kwargs(cfg.algo, cfg.model_kwargs)
     _check_required_device(cfg)
     _validate_evaluation_config(cfg)
+    _validate_callback_config(cfg)
     env_attr_schedule_callbacks = tuple(
         LinearEnvAttrScheduleCallback(**dict(schedule))
         for schedule in cfg.env_attr_schedules
@@ -1685,7 +1787,13 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     monitor_info_keywords = _validate_monitor_info_keywords(cfg)
     resolved_eval_seed = resolve_eval_seed(cfg)
     # Last pre-output check: a refusal leaves the directory untouched,
-    # and an opted-in rotation only happens once everything else passed.
+    # and an opted-in rotation only happens once every config-only check
+    # above passed (algo, model kwargs, device, evaluation, eval-stream,
+    # diagnosis and gate settings, warm start, monitor keys), so a
+    # misconfigured retry cannot strand the previous attempt. Checks
+    # that need the constructed evaluators (the selection-metric probe,
+    # the gate callback's value checks) and the ladder certification
+    # still run after config.json is written.
     _check_log_dir_reuse(cfg)
 
     os.makedirs(cfg.log_dir, exist_ok=True)
@@ -1815,40 +1923,13 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             cfg.verbose if cfg.eval_verbose is None else cfg.eval_verbose
         )
 
-        reward_eval_episodes = cfg.n_eval_episodes
-        if cfg.reward_eval_episodes is not None:
-            if (
-                isinstance(cfg.reward_eval_episodes, bool)
-                or not isinstance(cfg.reward_eval_episodes, int)
-                or cfg.reward_eval_episodes < 1
-            ):
-                raise ValueError(
-                    "reward_eval_episodes must be a positive integer"
-                )
-            if not headline_selection:
-                raise ValueError(
-                    "reward_eval_episodes requires headline-metric "
-                    "selection (info_dict_eval + headline_key): without "
-                    "it the reward eval stream owns best-model selection "
-                    "and must keep the full n_eval_episodes"
-                )
-            reward_eval_episodes = cfg.reward_eval_episodes
-
-        if cfg.final_eval_episodes is not None:
-            if (
-                isinstance(cfg.final_eval_episodes, bool)
-                or not isinstance(cfg.final_eval_episodes, int)
-                or cfg.final_eval_episodes < 1
-            ):
-                raise ValueError(
-                    "final_eval_episodes must be a positive integer"
-                )
-            if not (cfg.info_dict_eval and cfg.final_info_eval):
-                raise ValueError(
-                    "final_eval_episodes requires info_dict_eval and "
-                    "final_info_eval: it sizes the final-config eval "
-                    "stream, which only exists when both are on"
-                )
+        # Validated (with final_eval_episodes) by the pre-flight
+        # _validate_callback_config.
+        reward_eval_episodes = (
+            cfg.n_eval_episodes
+            if cfg.reward_eval_episodes is None
+            else cfg.reward_eval_episodes
+        )
 
         # The reward EvalCallback and the final-config info-eval stream
         # roll the SAME distribution (the recipe's eval_env_overrides --
@@ -1945,19 +2026,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 )
             )
         if cfg.checkpoint_diagnosis is not None:
+            # Keys and checkpoint_freq validated by the pre-flight
+            # _validate_callback_config.
             diagnosis_cfg = dict(cfg.checkpoint_diagnosis)
-            unknown_keys = set(diagnosis_cfg) - {"episodes", "seed_start"}
-            if unknown_keys:
-                raise ValueError(
-                    "checkpoint_diagnosis has unknown keys "
-                    f"{sorted(unknown_keys)}; allowed: episodes, "
-                    "seed_start"
-                )
-            if cfg.checkpoint_freq <= 0:
-                raise ValueError(
-                    "checkpoint_diagnosis requires checkpoint_freq > 0 "
-                    "(it runs at checkpoint cadence)"
-                )
             from courtside_dynamics.training.paddle_diagnosis import (
                 DiagnosisProbeCallback,
             )
@@ -2120,18 +2191,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             callbacks.append(info_eval_callback)
             if cfg.performance_gate is not None:
                 # Ordered after the info-eval callback so a trigger sees
-                # that same trigger's fresh metrics.
+                # that same trigger's fresh metrics. Unknown and missing
+                # keys were refused by the pre-flight
+                # _validate_callback_config.
                 gate_spec = dict(cfg.performance_gate)
-                unknown_gate_keys = sorted(
-                    set(gate_spec) - PERFORMANCE_GATE_KEYS
-                )
-                if unknown_gate_keys:
-                    # A typo'd gate key was previously a silent no-op --
-                    # exactly the failure class this repo bans.
-                    raise ValueError(
-                        f"unknown performance_gate key(s) "
-                        f"{unknown_gate_keys}"
-                    )
                 gate_callback = PerformanceGatedEnvStagesCallback(
                     stages=gate_spec["stages"],
                     metric_key=gate_spec["metric_key"],
@@ -2238,10 +2301,8 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                         eval_reset_options=None,
                     )
                 )
-        elif cfg.performance_gate is not None or cfg.final_info_eval:
-            raise ValueError(
-                "performance_gate and final_info_eval require info_dict_eval"
-            )
+        # (performance_gate / final_info_eval without info_dict_eval were
+        # refused by the pre-flight _validate_callback_config.)
         callbacks.extend(env_attr_schedule_callbacks)
         callbacks.extend(cfg.extra_callbacks)
 
