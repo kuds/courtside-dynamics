@@ -2969,6 +2969,79 @@ class TestK2Drill:
         finally:
             env.close()
 
+    def test_rally_returns_restart_at_every_drilled_launch_in_both_arms(
+        self, drill_library_path
+    ):
+        """episode_rally_returns_a counts the policy's k>=2 confirms
+        per LAUNCHED point, so the two drill arms count the same
+        thing. Arm "full" restores the harvested rules machine, whose
+        valid_return_count_a already holds the harvest's own side-A
+        returns (1-6 on this library); reading k from that snapshot
+        counted the policy's FIRST return of a drilled point as a
+        conversion under arm "full" only. The oracle plays side A
+        through drilled policy-receiving points on both arms, and a
+        recount whose k restarts at every launch must match the env
+        on every step, and the two arms' episode totals agree."""
+        restored: dict[str, list[int]] = {}
+        totals: dict[str, tuple[float, float]] = {}
+        for context in ("feed", "full"):
+            env = PaddleTennisEnv(
+                points_per_episode=None,
+                drill_library=drill_library_path,
+                drill_fraction=1.0,
+                drill_context=context,
+            )
+            try:
+                obs, info = env.reset(
+                    seed=_SMOKE_SEEDS[2], options={"serve_side": "b"}
+                )
+                assert info["drill_point"] == 1.0
+                k = valid = rally = prev_points = 0
+                restored[context] = []
+                while True:
+                    obs, _r, term, trunc, sinfo = env.step(
+                        scripted_ground_opponent(obs)
+                    )
+                    transition = env._last_transition
+                    for side in transition.confirmed_returns:
+                        if side is not CourtSide.A:
+                            continue
+                        valid += 1
+                        k += 1
+                        rally += k >= 2
+                        if k == 1 and sinfo["drill_point"] == 1.0:
+                            # The policy's first return of a drilled
+                            # point: what the rules machine had
+                            # already counted for side A this point.
+                            restored[context].append(
+                                transition.before.valid_return_count_a
+                            )
+                    assert sinfo["episode_valid_return_count_a"] == valid
+                    assert sinfo["episode_rally_returns_a"] == rally
+                    if int(sinfo["points_played"]) != prev_points:
+                        prev_points = int(sinfo["points_played"])
+                        k = 0  # the next point launches from k=0
+                    if term or trunc:
+                        break
+                assert sinfo["drill_fallback_count"] == 0.0
+                assert rally >= 1  # k>=2 conversions exercised
+                totals[context] = (
+                    sinfo["episode_valid_return_count_a"],
+                    sinfo["episode_rally_returns_a"],
+                )
+            finally:
+                env.close()
+        # Both arms played a drilled point the policy returned; only
+        # the full arm's restored machine had already counted side-A
+        # returns there -- the case the snapshot-read k got wrong.
+        assert restored["feed"] and restored["full"], restored
+        assert all(count == 0 for count in restored["feed"]), restored
+        assert all(count >= 1 for count in restored["full"]), restored
+        # Measured on this seed: each arm plays a drilled point with
+        # one policy return, then a drawn point with five (6 returns,
+        # 4 conversions); the snapshot-read k gave arm "full" 5.
+        assert totals["full"] == totals["feed"], totals
+
     def test_ezpickle_round_trip_keeps_drill_kwargs(
         self, drill_library_path
     ):

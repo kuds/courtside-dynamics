@@ -1227,7 +1227,9 @@ RECIPES: dict[str, Recipe] = {
             # each of 3 episodes; the terminal key read 7/7/3).
             # episode_rally_returns_a counts side-A confirmed returns
             # that were not side A's first of their point, over the
-            # whole episode, so it is the k=2 target itself; success =
+            # whole episode (k counts from each point's launch, so a
+            # drilled point starts at k=0 under either drill arm), so
+            # it is the k=2 target itself; success =
             # the fraction of eval episodes with at least one such
             # conversion. crossings stays logged as a diagnostic.
             "success_key": "episode_rally_returns_a",
