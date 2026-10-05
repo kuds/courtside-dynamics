@@ -23,9 +23,11 @@ Seeds must come from the scratch/workpaper range proposed in the design's
 instrument's own scenarios training data, and every reserved/burned
 ledger block plus the consumed probe seeds are refused outright. The
 default range (9030, 70 episodes) reproduces the §3a registered
-library; a harvest of a DIFFERENT checkpoint must draw fresh seeds
-from the unconsumed scratch remainder (9168+) — consumed harvest
-ranges may be reused only to reproduce their own library.
+library, the one consumed block this tool may draw from; a harvest of
+a DIFFERENT checkpoint must draw fresh seeds from the unconsumed
+scratch remainder (9188–9199, or the 9270–9299 extension remainder) —
+consumed harvest ranges may be reused only to reproduce their own
+library.
 
 The library is a single pickle file (schema ``k2-drill-library-v0``).
 
@@ -50,41 +52,20 @@ from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
 from courtside_dynamics.envs.tennis_rules import CourtSide
 from courtside_dynamics.training.paddle_diagnosis import native_checkpoint_policy
 
+try:
+    from tools._seed_ledger import refuse_reserved
+except ModuleNotFoundError:  # run as a script: tools/ itself is on sys.path
+    from _seed_ledger import refuse_reserved  # type: ignore[no-redef]
+
 SCHEMA = "k2-drill-library-v0"
 
 # Every reserved/burned ledger block, the sealed gate, the diagnosis
 # calibration block (train-on-test refusal), and already-consumed
-# scratch ranges. See docs/README.md's ledger and the drill design §7.
-_REFUSED_BLOCKS = (
-    (3000, 3099),
-    (3100, 3199),
-    (4000, 4099),
-    (4100, 4199),
-    (4200, 4299),
-    (4300, 4399),
-    (5000, 5099),
-    (5100, 5199),
-    (5200, 5299),  # diagnosis calibration: harvesting here would be train-on-test
-    (5300, 5399),
-    (5400, 5499),
-    (5500, 5599),
-    (5600, 6199),
-    (6200, 6299),
-    (6300, 6399),
-    (9000, 9029),  # 2026-08-30 feasibility probe (consumed scratch)
-    (9100, 9146),  # 2026-08-30 review probes (consumed scratch)
-    (9147, 9147),  # 2026-08-30 step-0 replay reset seed (consumed scratch)
-)
-
-
-def _refuse_reserved(seed_start: int, episodes: int) -> None:
-    span = range(seed_start, seed_start + episodes)
-    for low, high in _REFUSED_BLOCKS:
-        if any(low <= seed <= high for seed in span):
-            raise SystemExit(
-                f"seed range [{seed_start}, {seed_start + episodes}) intersects "
-                f"refused block {low}-{high}; refuse to harvest"
-            )
+# scratch ranges are refused through the shared ledger
+# (tools/_seed_ledger.py). The one allowance is the registered
+# library's own source block, so the default reproduces that library;
+# any other harvest draws only from unconsumed scratch.
+_REGISTERED_LIBRARY_BLOCK = (9030, 9099)
 
 
 def _sha256(path: str) -> str:
@@ -140,6 +121,10 @@ def _snapshot_env(env: PaddleTennisEnv, obs: np.ndarray) -> dict:
         "step_number": int(env.step_number),
         "crossings": int(env._crossings),
         "crossings_base": int(env._crossings_base),
+        # The step-time crossings formula's continuity offset: equal to
+        # crossings_base except inside a full-context drilled point, so
+        # a restore without it would make the episode counter jump.
+        "crossings_offset": int(env._crossings_offset),
         "points_played": int(env._points_played),
         "pending_shaping": float(env._pending_shaping),
         "pending_reach": float(env._pending_reach),
@@ -179,7 +164,9 @@ def harvest(
     crossings_unarmed = 0  # crossing observed with no armed candidate
     try:
         for seed in range(seed_start, seed_start + episodes):
-            obs, _ = env.reset(seed=seed)
+            obs, _ = env.reset(
+                seed=seed, options={"serve_side": env._next_serving_side}
+            )
             ball_adr = env._ball_qposadr
             ball_dof = env._ball_dofadr
             last_hit_a_point: int | None = None
@@ -298,7 +285,7 @@ def harvest(
     }
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--model", required=True)
     parser.add_argument("--vec-normalize", required=True)
@@ -306,8 +293,10 @@ def main() -> None:
     parser.add_argument("--seed-start", type=int, default=9030)
     parser.add_argument("--episodes", type=int, default=70)
     parser.add_argument("--continuation-steps", type=int, default=200)
-    args = parser.parse_args()
-    _refuse_reserved(args.seed_start, args.episodes)
+    args = parser.parse_args(argv)
+    refuse_reserved(
+        args.seed_start, args.episodes, allow=(_REGISTERED_LIBRARY_BLOCK,)
+    )
     library = harvest(
         args.model,
         args.vec_normalize,

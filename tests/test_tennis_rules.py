@@ -659,6 +659,156 @@ def test_court_geometry_parameterizes_the_out_of_bounds_rule():
     assert after.termination_reason is TerminationReason.OUT_OF_BOUNDS
 
 
+def _paddle_machine(serving_side: CourtSide = CourtSide.B) -> RallyStateMachine:
+    from courtside_dynamics.envs._paddle_court import PADDLE_COURT
+
+    return RallyStateMachine(serving_side=serving_side, court=PADDLE_COURT)
+
+
+@pytest.mark.parametrize("x", [-6.6, -7.5])
+@pytest.mark.parametrize("same_group_rackets", [False, True])
+def test_untouched_ball_skipping_past_the_lines_is_a_second_bounce(
+    x, same_group_rackets
+):
+    """Relabel (2026-10-05 review §5b #4): a feed that bounced IN on
+    side A and, untouched, came down again behind A's baseline was
+    OUT_OF_BOUNDS -- blaming the good feed for the receiver's miss (and
+    ~89% of the oracle pair's out_of_bounds labels were this). Any
+    further court contact of a ball that already bounced in is its
+    second bounce, wherever it lands. Through advance() the
+    same-substep fault pre-scan decides every out-of-bounds court
+    contact, with or without rackets in the group; the racket case
+    pins that the court fault outranks a simultaneous racket fault.
+    The sequential handler's mirror of this order is pinned directly
+    in test_sequential_court_handler_mirrors_the_pre_scan_order."""
+    machine = _paddle_machine()
+    machine.advance([_crossing(CourtSide.A, 0)])
+    first = machine.advance([_court(CourtSide.A, 1, position=(-5.0, 0.0, 0.0), episode=0)])
+    assert first.first_bounces == (CourtSide.A,)
+    events = [_court(CourtSide.A, 2, position=(x, 0.0, 0.0), episode=1)]
+    if same_group_rackets:
+        events += [_racket(CourtSide.A, 2), _racket(CourtSide.B, 2)]
+    second = machine.advance(events)
+    assert second.after.termination_reason is TerminationReason.SECOND_BOUNCE
+    assert second.confirmed_returns == ()
+
+
+def test_untouched_ball_skipping_past_the_sideline_is_a_second_bounce():
+    machine = _paddle_machine()
+    machine.advance([_crossing(CourtSide.A, 0)])
+    machine.advance([_court(CourtSide.A, 1, position=(-3.0, 3.9, 0.0), episode=0)])
+    second = machine.advance(
+        [_court(CourtSide.A, 2, position=(-4.0, 4.6, 0.0), episode=1)]
+    )
+    assert second.after.termination_reason is TerminationReason.SECOND_BOUNCE
+
+
+@pytest.mark.parametrize(
+    "landing",
+    [
+        (7.2, 0.0, 0.0),  # behind the hitter's own baseline
+        (3.0, 4.5, 0.0),  # wide of the hitter's own sideline
+        (3.0, 0.0, 0.0),  # in (already FAILED_TO_CROSS before the relabel)
+    ],
+)
+@pytest.mark.parametrize("same_group_rackets", [False, True])
+def test_shot_landing_on_its_hitters_own_side_failed_to_cross(
+    landing, same_group_rackets
+):
+    """Relabel (2026-10-05 review §7.4): a hit ball whose first court
+    contact is on its hitter's OWN side never crossed -- in or out of
+    the lines. Landing behind the hitter's own baseline used to read
+    OUT_OF_BOUNDS, as if a crossed shot had gone long."""
+    machine = _paddle_machine(serving_side=CourtSide.A)
+    machine.advance([_crossing(CourtSide.B, 0)])
+    machine.advance([_court(CourtSide.B, 1, position=(4.5, 0.0, 0.0), episode=0)])
+    hit = machine.advance([_racket(CourtSide.B, 2)])
+    assert hit.valid_racket_hits == (CourtSide.B,)
+    events = [_court(CourtSide.B, 3, position=landing, episode=1)]
+    if same_group_rackets:
+        events += [_racket(CourtSide.A, 3), _racket(CourtSide.B, 3)]
+    landed = machine.advance(events)
+    assert landed.after.termination_reason is TerminationReason.FAILED_TO_CROSS
+    assert landed.after.rally_count == 0
+
+
+def test_rally_state_labels_outrank_the_line_call_in_one_group():
+    """The pre-scan's tie-break map ranks the rally-state labels above
+    the line call: in one substep group holding both a line call (a
+    far-side landing out) and a never-crossed own-side landing, the
+    rally-state label wins. (Unreachable through the sampler, which
+    emits one court contact per substep. This pins the pre-scan only;
+    the sequential handler's order is pinned directly in
+    test_sequential_court_handler_mirrors_the_pre_scan_order.)"""
+    machine = _paddle_machine(serving_side=CourtSide.A)
+    machine.advance([_crossing(CourtSide.B, 0)])
+    machine.advance([_court(CourtSide.B, 1, position=(4.5, 0.0, 0.0), episode=0)])
+    machine.advance([_racket(CourtSide.B, 2)])
+    transition = machine.advance(
+        [
+            _court(CourtSide.A, 3, position=(-7.0, 0.0, 0.0), episode=1),
+            _court(CourtSide.B, 3, position=(7.0, 0.0, 0.0), episode=2),
+        ]
+    )
+    assert transition.after.termination_reason is TerminationReason.FAILED_TO_CROSS
+    assert [event.kind for event in transition.processed_events] == [
+        RallyEventKind.BALL_COURT_B
+    ]
+
+
+def test_sequential_court_handler_mirrors_the_pre_scan_order():
+    """``_court_fault_candidate`` runs on every event group holding a
+    court contact and claims every out-of-bounds one, so through
+    advance() ``_handle_court_contact`` never sees an out-of-bounds
+    contact and its rally-state-first branches are unreachable (the
+    relabel tests above all exercise the pre-scan). They mirror the
+    pre-scan's order defensively; called directly, an out-of-bounds
+    second contact is SECOND_BOUNCE and an own-side landing beyond the
+    hitter's baseline is FAILED_TO_CROSS, as the pre-scan rules."""
+    machine = _paddle_machine()
+    machine.advance([_crossing(CourtSide.A, 0)])
+    machine.advance([_court(CourtSide.A, 1, position=(-5.0, 0.0, 0.0), episode=0)])
+    assert machine.snapshot().bounce_count == 1
+    machine._handle_court_contact(
+        _court(CourtSide.A, 2, position=(-7.5, 0.0, 0.0), episode=1)
+    )
+    assert machine.snapshot().termination_reason is TerminationReason.SECOND_BOUNCE
+
+    machine = _paddle_machine(serving_side=CourtSide.A)
+    machine.advance([_crossing(CourtSide.B, 0)])
+    machine.advance([_court(CourtSide.B, 1, position=(4.5, 0.0, 0.0), episode=0)])
+    machine.advance([_racket(CourtSide.B, 2)])
+    assert machine.snapshot().phase is RallyPhase.RETURN_IN_FLIGHT
+    machine._handle_court_contact(
+        _court(CourtSide.B, 3, position=(7.2, 0.0, 0.0), episode=1)
+    )
+    assert (
+        machine.snapshot().termination_reason is TerminationReason.FAILED_TO_CROSS
+    )
+
+
+def test_first_landing_out_is_still_out_of_bounds_on_the_paddle_court():
+    """The line call keeps its meaning: a crossed ball whose FIRST
+    landing is out (the feed here, a return elsewhere) stays
+    OUT_OF_BOUNDS."""
+    machine = _paddle_machine()
+    machine.advance([_crossing(CourtSide.A, 0)])
+    out = machine.advance([_court(CourtSide.A, 1, position=(-6.6, 0.0, 0.0))])
+    assert out.after.termination_reason is TerminationReason.OUT_OF_BOUNDS
+
+
+def test_valid_racket_hit_events_list_only_the_legal_contacts():
+    machine = RallyStateMachine(serving_side=CourtSide.A)
+    _deliver_feed(machine, CourtSide.A)
+    legal = _racket(CourtSide.B, 1, episode=0)
+    transition = machine.advance([legal])
+    assert transition.valid_racket_hit_events == (legal,)
+    fault = machine.advance([_racket(CourtSide.B, 2, episode=1)])
+    assert fault.after.termination_reason is TerminationReason.DOUBLE_HIT
+    assert len(fault.processed_events) == 1
+    assert fault.valid_racket_hit_events == ()
+
+
 def test_court_geometry_validates_dimensions():
     from courtside_dynamics.envs._tennis_physics import CourtGeometry
 

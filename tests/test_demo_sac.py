@@ -34,7 +34,10 @@ from courtside_dynamics.training.algos import (
     OFF_POLICY_ALGOS,
     validate_model_kwargs,
 )
-from courtside_dynamics.training.artifacts import _model_info
+from courtside_dynamics.training.artifacts import (
+    _model_info,
+    observation_names_sha256,
+)
 from courtside_dynamics.training.demo_sac import DEMO_LIBRARY_SCHEMA, DemoSAC
 from courtside_dynamics.training.train import (
     SelectiveVecNormalize,
@@ -558,6 +561,17 @@ class TestInjection:
         assert config["resolved_model"]["hyperparameters"]["demo_transitions"] == 0
         assert "demo_library_sha256" not in config["resolved_model"]
 
+    def test_model_probe_records_the_warmup_mode(self, venv, tmp_path):
+        path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)
+        model = DemoSAC(
+            "MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL
+        )
+        hyperparameters = _model_info(model)["hyperparameters"]
+        # Who drives the learning_starts warmup is resolved provenance
+        # (train() turns use_sde_at_warmup on for gSDE warm starts).
+        assert hyperparameters["use_sde"] is False
+        assert hyperparameters["use_sde_at_warmup"] is False
+
     def test_model_probe_records_the_consumed_digest(self, venv, tmp_path):
         path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)
         model = DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL)
@@ -569,3 +583,111 @@ class TestInjection:
         assert info["hyperparameters"]["demo_library"] == path
         plain = SAC("MlpPolicy", venv, **_SMALL)
         assert "demo_library_sha256" not in _model_info(plain)
+
+
+def _rewrite_header(path, **header):
+    with open(path, "rb") as f:
+        library = pickle.load(f)
+    library.update(header)
+    with open(path, "wb") as f:
+        pickle.dump(library, f)
+
+
+class TestObservationFingerprint:
+    """Review §7.2 (*new*): the demo library was checked by shape only, so
+    a same-width observation meaning change (world-frame spin, scaled
+    counters) would load the LD1′ library onto a different task."""
+
+    def test_matching_fingerprint_loads(self, venv, tmp_path, capsys):
+        path, n_train = _synthetic_library(tmp_path / "lib.pkl", venv)
+        names = list(BallBalanceEnv.observation_names)
+        _rewrite_header(
+            path,
+            observation_names=names,
+            observation_names_sha256=observation_names_sha256(names),
+        )
+        model = DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL)
+        model._ensure_demo_loaded()
+        assert model.demo_transitions == n_train
+        assert "fingerprint" not in capsys.readouterr().out
+
+    def test_layout_mismatch_is_refused_naming_the_index(self, venv, tmp_path):
+        path, _ = _synthetic_library(tmp_path / "lib.pkl", venv)
+        names = list(BallBalanceEnv.observation_names)
+        renamed = [*names[:5], "ball_vz_scaled", *names[6:]]
+        _rewrite_header(
+            path,
+            observation_names=renamed,
+            observation_names_sha256=observation_names_sha256(renamed),
+        )
+        model = DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL)
+        with pytest.raises(
+            ValueError,
+            match=r"observation index 5 is 'ball_vz_scaled' in the recorded "
+            r"layout but 'ball_vz' in this env",
+        ):
+            model.learn(total_timesteps=8)
+        # A digest-only header still refuses, naming both digests.
+        _rewrite_header(path, observation_names=None)
+        model = DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL)
+        with pytest.raises(ValueError, match="observation_names_sha256"):
+            model._ensure_demo_loaded()
+        _rewrite_header(path, observation_names_sha256=123)
+        model = DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL)
+        with pytest.raises(ValueError, match="malformed observation_names_sha256"):
+            model._ensure_demo_loaded()
+
+    def test_pre_fingerprint_library_still_loads_with_a_notice(
+        self, venv, tmp_path, capsys
+    ):
+        """The format every library harvested so far carries (schema +
+        trajectories, no fingerprint header) keeps loading on the shape
+        checks, with a one-line notice."""
+        path, n_train = _synthetic_library(tmp_path / "lib.pkl", venv)
+        model = DemoSAC("MlpPolicy", venv, demo_library=path, demo_fraction=0.25, **_SMALL)
+        model._ensure_demo_loaded()
+        assert model.demo_transitions == n_train
+        out = capsys.readouterr().out
+        assert "carries no observation fingerprint" in out
+        assert len(out.strip().splitlines()) == 1
+
+    def test_harvest_tool_writes_the_fingerprint_the_checks_read(
+        self, tmp_path, monkeypatch
+    ):
+        """New libraries carry the header DemoSAC checks, encoded exactly
+        as config.json's env probe encodes the recipe env's layout."""
+        import sys
+
+        from courtside_dynamics.envs import PaddleTennisEnv
+        from courtside_dynamics.training.artifacts import _probe_env_fn
+        from tools import paddle_tennis_k2_demo_harvest as harvest
+
+        layout = harvest._observation_layout()
+        assert layout == list(PaddleTennisEnv.observation_names)
+        probed = _probe_env_fn(lambda: PaddleTennisEnv(**harvest.ENV_KWARGS))
+        assert probed["observation_names_sha256"] == observation_names_sha256(
+            layout
+        )
+
+        # main() end to end, with the (drill-library-bound) harvest stubbed.
+        source = tmp_path / "k2_library.pkl"
+        source.write_bytes(b"stub drill library")
+        out = tmp_path / "demos.pkl"
+        monkeypatch.setattr(
+            harvest,
+            "harvest_library",
+            lambda path, **kwargs: ([], harvest._empty_counts()),
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["harvest", "--library", str(source), "--out", str(out)],
+        )
+        harvest.main()
+        with open(out, "rb") as f:
+            library = pickle.load(f)
+        assert library["schema"] == DEMO_LIBRARY_SCHEMA
+        assert library["observation_names"] == layout
+        assert library["observation_names_sha256"] == observation_names_sha256(
+            layout
+        )

@@ -324,6 +324,11 @@ class RallyTransition:
     confirmed_returns: tuple[CourtSide, ...]
     first_bounces: tuple[CourtSide, ...]
     step_contact_peaks: Mapping[RallyEventKind, float]
+    # The processed racket events that earned ``valid_racket_hits``,
+    # in the same order: a racket event the rules rejected (a fault
+    # touch) is processed but never listed here, so consumers that
+    # need a legal hit's contact position read it from this tuple.
+    valid_racket_hit_events: tuple[RallyEvent, ...] = ()
 
     @property
     def terminated_now(self) -> bool:
@@ -541,6 +546,7 @@ class RallyStateMachine:
         stale_events: list[RallyEvent] = []
         ignored: list[RallyEvent] = []
         valid_hits: list[CourtSide] = []
+        valid_hit_events: list[RallyEvent] = []
         confirmed_returns: list[CourtSide] = []
         first_bounces: list[CourtSide] = []
 
@@ -630,6 +636,7 @@ class RallyStateMachine:
                     hit, confirmed = self._handle_racket_contact(event)
                     if hit is not None:
                         valid_hits.append(hit)
+                        valid_hit_events.append(event)
                     if confirmed is not None:
                         confirmed_returns.append(confirmed)
 
@@ -648,6 +655,7 @@ class RallyStateMachine:
             confirmed_returns=tuple(confirmed_returns),
             first_bounces=tuple(first_bounces),
             step_contact_peaks=step_peaks,
+            valid_racket_hit_events=tuple(valid_hit_events),
         )
 
     def _record_observation(self, event: RallyEvent) -> None:
@@ -774,17 +782,37 @@ class RallyStateMachine:
                 and (self._pending_crossed_net or incoming_crossing)
             )
         )
+        projected_crossed = self._pending_crossed_net or incoming_crossing
         projected_bounces = self._bounce_count
         candidates: list[tuple[int, RallyEvent, TerminationReason]] = []
+        # The rally-state labels outrank the line call, exactly as in
+        # the per-event classification below (and in
+        # _handle_court_contact): the line call only ever judges a
+        # ball's first landing on the far side, so a group that also
+        # holds a second bounce or a never-crossed landing reports
+        # that instead.
         reason_priority = {
-            TerminationReason.OUT_OF_BOUNDS: 0,
-            TerminationReason.SECOND_BOUNCE: 1,
-            TerminationReason.FAILED_TO_CROSS: 2,
+            TerminationReason.SECOND_BOUNCE: 0,
+            TerminationReason.FAILED_TO_CROSS: 1,
+            TerminationReason.OUT_OF_BOUNDS: 2,
         }
         for event in court_events:
             assert event.position is not None  # validated before mutation
             side = _event_side(event.kind)
-            if not self.court.is_in_bounds(event.position[0], event.position[1]):
+            if (
+                self._phase is RallyPhase.RETURN_IN_FLIGHT
+                and side is self._pending_hitter
+                and not projected_crossed
+            ):
+                # A hit ball's first court contact on its hitter's own
+                # side, in or out of the lines: it never crossed.
+                reason = TerminationReason.FAILED_TO_CROSS
+            elif projected_bounces >= 1:
+                # The untouched ball already bounced in: any further
+                # court contact -- beyond the lines included -- is its
+                # second bounce, not a line call.
+                reason = TerminationReason.SECOND_BOUNCE
+            elif not self.court.is_in_bounds(event.position[0], event.position[1]):
                 reason = TerminationReason.OUT_OF_BOUNDS
             elif (
                 side is not self._expected_returner
@@ -792,8 +820,6 @@ class RallyStateMachine:
                 or projected_ball_side is not side
             ):
                 reason = TerminationReason.FAILED_TO_CROSS
-            elif projected_bounces >= 1:
-                reason = TerminationReason.SECOND_BOUNCE
             else:
                 projected_bounces += 1
                 continue
@@ -985,6 +1011,27 @@ class RallyStateMachine:
     def _handle_court_contact(self, event: RallyEvent) -> CourtSide | None:
         side = _event_side(event.kind)
         assert event.position is not None  # validated before mutation
+        # The two rally-state faults are decided before the line call,
+        # which judges only a ball's first landing on the far side:
+        # a hit ball that comes down on its hitter's own side never
+        # crossed, and an untouched ball that already bounced in has
+        # failed its receiver on any further court contact -- in or
+        # out of the lines either way (both were OUT_OF_BOUNDS when
+        # they landed out, which blamed the shot for the receiver's
+        # miss). Through advance() these two branches only ever see
+        # in-bounds contacts: _court_fault_candidate runs on every
+        # group with a court contact and claims every out-of-bounds
+        # one first. The order mirrors the pre-scan's defensively.
+        if (
+            self._phase is RallyPhase.RETURN_IN_FLIGHT
+            and side is self._pending_hitter
+            and not self._pending_crossed_net
+        ):
+            self._terminate(TerminationReason.FAILED_TO_CROSS)
+            return None
+        if self._bounce_count >= 1:
+            self._terminate(TerminationReason.SECOND_BOUNCE)
+            return None
         if not self.court.is_in_bounds(event.position[0], event.position[1]):
             self._terminate(TerminationReason.OUT_OF_BOUNDS)
             return None
@@ -1000,9 +1047,6 @@ class RallyStateMachine:
             return None
         if self._ball_side is not side:
             self._terminate(TerminationReason.FAILED_TO_CROSS)
-            return None
-        if self._bounce_count >= 1:
-            self._terminate(TerminationReason.SECOND_BOUNCE)
             return None
 
         confirmed = self._confirm_pending_return()

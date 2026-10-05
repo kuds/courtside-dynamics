@@ -561,12 +561,16 @@ def test_train_warm_starts_policy_only_and_records_provenance(tmp_path):
         assert initialization["source_artifacts"][filename]["sha256"] == expected
 
 
-def _make_sac_warm_start_source(tmp_path, *, log_ent_coef=-6.5):
+def _make_sac_warm_start_source(
+    tmp_path, *, log_ent_coef=-6.5, model_kwargs=None
+):
     """SAC sibling of the PPO helper: tiny model, marked policy weights,
     a deliberately collapsed entropy temperature, saved as a canonical
-    best-run directory."""
+    best-run directory. ``model_kwargs`` (e.g. ``use_sde=True``) shape
+    the source policy so a matching target can load its state dict."""
     source_dir = tmp_path / "sac_source"
     source_dir.mkdir()
+    extra_kwargs = dict(model_kwargs or {})
 
     def env_fn():
         return BallBalanceEnv(episode_len=12)
@@ -578,7 +582,11 @@ def _make_sac_warm_start_source(tmp_path, *, log_ent_coef=-6.5):
         n_envs=1,
         normalize_obs=True,
         normalize_obs_excluded_indices=(0,),
-        model_kwargs={"buffer_size": 64, "learning_starts": 1_000},
+        model_kwargs={
+            "buffer_size": 64,
+            "learning_starts": 1_000,
+            **extra_kwargs,
+        },
     )
     raw_env = make_vec_env(env_fn, n_envs=1, seed=7)
     normalizer = SelectiveVecNormalize(
@@ -594,6 +602,7 @@ def _make_sac_warm_start_source(tmp_path, *, log_ent_coef=-6.5):
         buffer_size=64,
         learning_starts=1_000,
         seed=7,
+        **extra_kwargs,
     )
     with torch.no_grad():
         first_parameter = next(model.policy.parameters())
@@ -687,6 +696,8 @@ def test_train_warm_starts_sac_policy_and_entropy(tmp_path):
     # The default pairing records that the temperature transfer was on.
     assert initialization["transfer_log_ent_coef"] is True
     assert "log_ent_coef" not in initialization["reset"]
+    # Both sides carry observation_names: the fingerprint was compared.
+    assert initialization["observation_fingerprint"] == "verified"
 
 
 def test_train_warm_starts_demosac_from_plain_sac_source(tmp_path):
@@ -1136,6 +1147,7 @@ def test_run_summary_reports_task_metric_selected_best_model(tmp_path):
         "timestep,metric,value\n"
         "50000,bounce_count_ep_mean,3.2\n"
         "50000,bounce_count_final,3.0\n"
+        "50000,episode_reward_mean,0.8\n"
         "50000,bounce_count_ep_ge_2_rate,0.8\n"
         "50000,bounce_count_ep_ge_3_rate,0.25\n"
         "50000,bounce_count_ep_ge_5_rate,0.0\n"
@@ -1162,10 +1174,16 @@ def test_run_summary_reports_task_metric_selected_best_model(tmp_path):
     assert "Best model" in text
     assert "step 50,000 (bounce_count_ep_mean 3.20)" in text
     assert "[task-metric selection]" in text
-    # The best-checkpoint section describes the *selected* step, with
-    # the reward looked up at that step (1.000), not the 75k argmax.
+    # The best-checkpoint section describes the *selected* step. This
+    # meta predates the ``metrics`` block, so the selecting batch is
+    # the selecting evaluator's own eval_info.csv row at that step --
+    # its reward (0.800), not the reward stream's 1.000 at 50k (other
+    # episodes) nor the 75k argmax.
     assert "Best Checkpoint Evaluation (step 50,000)" in text
-    assert "Reward:         1.000 +/- 0.000" in text
+    best_block = text.split("Best Checkpoint Evaluation", 1)[1]
+    assert "Reward:         0.800  [selecting batch]" in best_block
+    assert "1.000 +/- 0.000" not in best_block
+    assert "bounce_count: ep-mean 3.20  last-episode 3.00" in best_block
     assert "Return survival:" in text
     assert ">=2 80.0%" in text
     assert ">=3 25.0%" in text
@@ -1899,3 +1917,986 @@ def test_unreadable_best_model_meta_is_reported(tmp_path, capsys):
     assert _read_best_model_meta(str(tmp_path)) is None
     out = capsys.readouterr().out
     assert "[artifacts]" in out and str(meta) in out
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-05 fix batch (docs/repo_review_20261005.md §5b, §7.2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error", "message"),
+    [
+        (
+            {"best_metric_min_delta": {"success_rate": 0.05}},
+            ValueError,
+            "requires headline-metric selection",
+        ),
+        (
+            {
+                "headline_key": "steps_alive",
+                "best_metric_min_delta": {"crossings_ep_mean": 0.25},
+            },
+            ValueError,
+            r"\['crossings_ep_mean'\], which are not selection keys",
+        ),
+        (
+            {
+                "headline_key": "steps_alive",
+                "best_metric_min_delta": {"steps_alive_ep_mean": True},
+            },
+            TypeError,
+            "must be a number",
+        ),
+        (
+            {"headline_key": "steps_alive", "best_metric_min_delta": -0.5},
+            ValueError,
+            "finite and nonnegative",
+        ),
+        (
+            # No success_key: success_rate is not a resolved selection key.
+            {
+                "headline_key": "steps_alive",
+                "degenerate_flat_keys": ("success_rate",),
+            },
+            ValueError,
+            r"\['success_rate'\] are not selection keys",
+        ),
+        (
+            {"degenerate_flat_keys": ("episode_reward_mean",)},
+            ValueError,
+            "requires headline-metric selection",
+        ),
+        (
+            {
+                "headline_key": "steps_alive",
+                "degenerate_flat_keys": "episode_reward_mean",
+            },
+            TypeError,
+            "sequence of strings",
+        ),
+        (
+            {"headline_key": "steps_alive", "degenerate_flat_keys": ()},
+            ValueError,
+            "at least one",
+        ),
+        ({"eval_seed": True}, TypeError, "eval_seed must be an integer"),
+        ({"eval_seed": 2.0}, TypeError, "eval_seed must be an integer"),
+        ({"eval_seed": -3}, ValueError, "eval_seed must be nonnegative"),
+        (
+            # Unseeded and no eval_seed: nothing would apply the options.
+            {"eval_reset_options": ({"serve_side": "a"},)},
+            ValueError,
+            "requires paired evaluation",
+        ),
+        (
+            {"seed": 0, "eval_reset_options": {"serve_side": "a"}},
+            TypeError,
+            "sequence of option mappings",
+        ),
+        (
+            {
+                "seed": 0,
+                "info_dict_eval": False,
+                "eval_reset_options": ({"serve_side": "a"},),
+            },
+            ValueError,
+            "requires info_dict_eval",
+        ),
+        ({"monitor_info_keywords": "steps_alive"}, TypeError, "strings"),
+        ({"reuse_log_dir": 1}, TypeError, "reuse_log_dir must be a bool"),
+    ],
+)
+def test_train_rejects_bad_evaluation_settings_before_any_setup(
+    tmp_path, overrides, error, message
+):
+    """Contract C3 / T10: the new selection, pairing and monitor fields
+    fail loudly -- before any env is built or the run dir created."""
+    log_dir = tmp_path / "run"
+    cfg = TrainConfig(env_fn=_unbuildable_env, log_dir=str(log_dir), **overrides)
+    with pytest.raises(error, match=message):
+        train(cfg)
+    assert not log_dir.exists()
+
+
+def test_train_wires_selection_and_paired_evaluation(tmp_path, monkeypatch):
+    """The per-key delta, the flatness subset and the paired seeds reach
+    the evaluators train() builds, and config.json records them: the
+    configured values in ``train_config``, the resolved seeds in
+    ``evaluation_seeding``."""
+    from courtside_dynamics.callbacks.info_dict_eval import (
+        CONFIRMATION_SEED_OFFSET,
+        InfoDictEvalCallback,
+    )
+
+    # The package re-exports the train() function under the module's
+    # name, so resolve the module itself.
+    train_module = importlib.import_module("courtside_dynamics.training.train")
+    built: list[InfoDictEvalCallback] = []
+
+    class _Recording(InfoDictEvalCallback):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            built.append(self)
+
+    monkeypatch.setattr(train_module, "InfoDictEvalCallback", _Recording)
+    delta = {"steps_alive_ep_mean": 0.5, "episode_reward_mean": 0.25}
+    options = ({"probe": "a"}, {"probe": "b"})
+    cfg = _merged_eval_cfg(
+        tmp_path,
+        total_timesteps=200,
+        # The real eval wrapper stack: the paired seeds and options pass
+        # through SelectiveVecNormalize(training=False).
+        normalize_obs=True,
+        best_metric_min_delta=delta,
+        degenerate_flat_keys=("steps_alive_ep_mean",),
+        eval_reset_options=options,
+    )
+    train(cfg)
+
+    selection, final = built
+    assert selection.best_metric_keys == (
+        "steps_alive_ep_mean",
+        "episode_reward_mean",
+    )
+    assert selection._min_deltas == (0.5, 0.25)
+    assert selection.degenerate_flat_keys == ("steps_alive_ep_mean",)
+    # seed=0, eval_seed=None and reset options set: the derived block,
+    # seed + EVAL_SEED_OFFSET. Literal values throughout, so a changed
+    # offset constant cannot pass by construction.
+    assert selection.eval_seed == 1_000_000
+    assert selection.eval_reset_options == options
+    # The final-config stream stays fresh-random: no seed block, and so
+    # no reset options either (they only ride on paired resets).
+    assert final.eval_seed is None
+    assert final.eval_reset_options is None
+    # The selection batch and its confirmation batch own disjoint seed
+    # ranges.
+    selection_block = set(
+        range(selection.eval_seed, selection.eval_seed + selection.n_eval_episodes)
+    )
+    confirmation_start = selection.eval_seed + CONFIRMATION_SEED_OFFSET
+    assert not selection_block & set(
+        range(confirmation_start, confirmation_start + selection.n_eval_episodes)
+    )
+
+    config = json.loads((tmp_path / "config.json").read_text())
+    recorded = config["train_config"]
+    assert recorded["best_metric_min_delta"] == delta
+    assert recorded["degenerate_flat_keys"] == ["steps_alive_ep_mean"]
+    assert recorded["eval_seed"] is None
+    assert recorded["eval_reset_options"] == [dict(o) for o in options]
+    # Exactly the streams that ran: confirm_best is off (no confirmation
+    # block) and the reward stream was merged into the final stream.
+    assert config["evaluation_seeding"] == {
+        "paired": True,
+        "eval_seed": 1_000_000,
+        "derived_from_seed": True,
+        "selection_batch_seed_start": 1_000_000,
+        "streams": {
+            "eval_info": "paired",
+            "eval_info_final": "unpaired",
+            "closing_eval": "unpaired",
+        },
+    }
+    assert selection.confirm_best is False
+    meta = json.loads((tmp_path / "model" / "best_model_meta.json").read_text())
+    assert meta["eval_seed"] == 1_000_000
+
+
+def test_seeded_run_without_reset_options_stays_unpaired(tmp_path, monkeypatch):
+    """Pairing is opt-in: a seeded run that sets neither eval_seed nor
+    eval_reset_options hands both info-dict streams eval_seed=None (the
+    de02d13 unpaired stream). Deriving for every seeded run made every
+    paired episode of the humanoid curricula serve from side A (a
+    seeded reset restarts the serve alternation) and replayed the
+    WallBall long-horizon audit's held-out seeds."""
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    train_module = importlib.import_module("courtside_dynamics.training.train")
+    built: list[InfoDictEvalCallback] = []
+
+    class _Recording(InfoDictEvalCallback):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            built.append(self)
+
+    monkeypatch.setattr(train_module, "InfoDictEvalCallback", _Recording)
+    train(_merged_eval_cfg(tmp_path, total_timesteps=200))
+
+    assert len(built) == 2
+    assert [callback.eval_seed for callback in built] == [None, None]
+    config = json.loads((tmp_path / "config.json").read_text())
+    assert config["evaluation_seeding"] == {
+        "paired": False,
+        "eval_seed": None,
+        "streams": {
+            "eval_info": "unpaired",
+            "eval_info_final": "unpaired",
+            "closing_eval": "unpaired",
+        },
+    }
+
+
+class _InitEcho(_StepsAlive):
+    """``_StepsAlive`` echoing the episode's noisy reset state as
+    ``init_x``, so an eval row shows whether its episodes were replayed
+    (paired) or freshly drawn (unpaired)."""
+
+    def reset(self, **kwargs):
+        obs, info = super().reset(**kwargs)
+        self._init_x = float(obs[0])
+        return obs, {**info, "init_x": self._init_x}
+
+    def step(self, action):
+        *head, info = super().step(action)
+        return (*head, {**info, "init_x": self._init_x})
+
+
+def _eval_rows_by_step(path) -> dict[str, dict[str, str]]:
+    import csv
+
+    by_step: dict[str, dict[str, str]] = {}
+    with open(path) as stream:
+        for row in csv.DictReader(stream):
+            by_step.setdefault(row["timestep"], {})[row["metric"]] = row["value"]
+    return by_step
+
+
+def test_paired_evaluation_repeats_identical_metrics_end_to_end(tmp_path):
+    """A policy that never updates (learning_starts beyond the budget),
+    evaluated twice by a seeded run: paired evaluation replays the same
+    feeds, so both eval_info.csv rows are identical metric for metric --
+    including ``init_x``, the episode's noisy reset state, which the
+    legacy unpaired stream re-draws at every evaluation."""
+    cfg = _merged_eval_cfg(
+        tmp_path,
+        env_fn=lambda: _InitEcho(BallBalanceEnv(episode_len=12)),
+        final_info_eval=False,
+        total_timesteps=400,
+        n_eval_episodes=3,
+        model_kwargs={"learning_starts": 10_000, "buffer_size": 500},
+        # Pairing is opt-in (an explicit seed, or reset options to
+        # derive one for); this env takes no reset options.
+        eval_seed=4_321,
+    )
+    train(cfg)
+    by_step = _eval_rows_by_step(tmp_path / "metrics" / "eval_info.csv")
+    assert sorted(by_step, key=int) == ["200", "400"]
+    assert "init_x_ep_mean" in by_step["200"]
+    assert by_step["200"] == by_step["400"]
+
+
+def test_final_info_eval_stream_stays_fresh_random_under_pairing(tmp_path):
+    """docs/DECISIONS.md ("Unpaired evaluation is the root of the gate
+    noise") and review 20260828 section 2.8 pair the *matched* stream and
+    keep the final-config stream fresh-random, the unbiased estimate.
+    A paired run of a never-updating policy therefore replays its
+    selection rows exactly while every final-stream evaluation draws new
+    episodes (a different mean reset state). The final stream used to
+    be paired on its own fixed block, replaying identical rows too."""
+    cfg = _merged_eval_cfg(
+        tmp_path,
+        env_fn=lambda: _InitEcho(BallBalanceEnv(episode_len=12)),
+        total_timesteps=400,
+        n_eval_episodes=3,
+        model_kwargs={"learning_starts": 10_000, "buffer_size": 500},
+        eval_seed=4_321,
+    )
+    train(cfg)
+    selection = _eval_rows_by_step(tmp_path / "metrics" / "eval_info.csv")
+    final = _eval_rows_by_step(tmp_path / "metrics" / "eval_info_final.csv")
+    assert sorted(selection, key=int) == sorted(final, key=int) == ["200", "400"]
+    assert selection["200"] == selection["400"]
+    assert final["200"]["init_x_ep_mean"] != final["400"]["init_x_ep_mean"]
+
+
+def test_resolve_eval_seed_derivation():
+    """Explicit wins; a seeded run with reset options derives
+    seed + 1_000_000; a seeded run without them, and an unseeded run,
+    stay unpaired (the legacy stream)."""
+    from courtside_dynamics.training.artifacts import _evaluation_seeding
+    from courtside_dynamics.training.train import resolve_eval_seed
+
+    options = ({"serve_side": "a"}, {"serve_side": "b"})
+
+    def cfg(**kwargs):
+        return TrainConfig(env_fn=_unbuildable_env, **kwargs)
+
+    assert resolve_eval_seed(cfg(seed=3, eval_reset_options=options)) == 1_000_003
+    assert resolve_eval_seed(cfg(seed=3)) is None
+    assert resolve_eval_seed(cfg(seed=3, eval_seed=5)) == 5
+    assert resolve_eval_seed(cfg(eval_seed=5)) == 5
+    assert resolve_eval_seed(cfg(eval_seed=5, eval_reset_options=options)) == 5
+    assert resolve_eval_seed(cfg(eval_reset_options=options)) is None
+    assert resolve_eval_seed(cfg()) is None
+    for unpaired in (cfg(), cfg(seed=3)):
+        seeding = _evaluation_seeding(unpaired)
+        assert (seeding["paired"], seeding["eval_seed"]) == (False, None)
+    assert _evaluation_seeding(cfg(eval_seed=5))["derived_from_seed"] is False
+
+
+_ALL_UNPAIRED_SB3 = {"reward_eval": "unpaired", "closing_eval": "unpaired"}
+
+
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        (
+            # An eval_seed no stream applies: no info-dict evaluator runs.
+            {"info_dict_eval": False, "eval_seed": 7},
+            {"paired": False, "eval_seed": None, "streams": _ALL_UNPAIRED_SB3},
+        ),
+        (
+            # confirm_best is only wired under headline selection.
+            {"eval_seed": 7, "confirm_best_eval": True},
+            {
+                "paired": True,
+                "eval_seed": 7,
+                "derived_from_seed": False,
+                "selection_batch_seed_start": 7,
+                "streams": {"eval_info": "paired", **_ALL_UNPAIRED_SB3},
+            },
+        ),
+        (
+            # Headline selection without confirm_best: no confirmation.
+            {"eval_seed": 7, "headline_key": "steps_alive"},
+            {
+                "paired": True,
+                "eval_seed": 7,
+                "derived_from_seed": False,
+                "selection_batch_seed_start": 7,
+                "streams": {"eval_info": "paired", **_ALL_UNPAIRED_SB3},
+            },
+        ),
+        (
+            # Every info-dict stream on; the reward stream merged away.
+            {
+                "seed": 3,
+                "eval_reset_options": ({"serve_side": "a"},),
+                "headline_key": "steps_alive",
+                "confirm_best_eval": True,
+                "final_info_eval": True,
+            },
+            {
+                "paired": True,
+                "eval_seed": 1_000_003,
+                "derived_from_seed": True,
+                "selection_batch_seed_start": 1_000_003,
+                "confirmation_batch_seed_start": 1_100_003,
+                "streams": {
+                    "eval_info": "paired",
+                    "eval_info_confirmation": "paired",
+                    "eval_info_final": "unpaired",
+                    "closing_eval": "unpaired",
+                },
+            },
+        ),
+        (
+            # Unpaired run: the confirmation stream runs, unpaired.
+            {
+                "headline_key": "steps_alive",
+                "confirm_best_eval": True,
+                "final_info_eval": True,
+            },
+            {
+                "paired": False,
+                "eval_seed": None,
+                "streams": {
+                    "eval_info": "unpaired",
+                    "eval_info_confirmation": "unpaired",
+                    "eval_info_final": "unpaired",
+                    "closing_eval": "unpaired",
+                },
+            },
+        ),
+    ],
+)
+def test_evaluation_seeding_records_only_the_streams_that_run(overrides, expected):
+    """config.json's evaluation_seeding used to claim the selection,
+    confirmation and final-stream seed blocks for every paired config,
+    including streams train() never wires (info_dict_eval off, no
+    headline selection or confirm_best, final_info_eval off). It now
+    lists exactly the streams that run, and a seed block only for a
+    paired stream among them."""
+    from courtside_dynamics.training.artifacts import _evaluation_seeding
+
+    cfg = TrainConfig(env_fn=_unbuildable_env, **overrides)
+    assert _evaluation_seeding(cfg) == expected
+
+
+def test_monitor_info_keywords_reach_the_training_monitor(tmp_path):
+    """Contract C3: the training workers' Monitor appends the named info
+    keys to every episode row, and every monitor reader (stage summary,
+    learning plots) tolerates the extra column."""
+    from courtside_dynamics.training import load_monitor_episodes
+    from courtside_dynamics.training.monitor_log import (
+        read_monitor_rewards_lengths,
+    )
+
+    cfg = _salvage_cfg(
+        tmp_path,
+        env_fn=_steps_alive_env,
+        total_timesteps=60,
+        monitor_info_keywords=("steps_alive",),
+    )
+    train(cfg)
+
+    monitor_dir = tmp_path / "metrics" / "monitor"
+    (monitor_csv,) = monitor_dir.glob("*.monitor.csv")
+    assert monitor_csv.read_text().splitlines()[1].split(",") == [
+        "r",
+        "l",
+        "t",
+        "steps_alive",
+    ]
+    episodes = load_monitor_episodes(str(monitor_dir)).episodes
+    assert len(episodes) >= 5
+    # Read at each episode's final step: the counter equals the length.
+    assert list(episodes["steps_alive"]) == list(episodes["l"])
+    rewards, lengths = read_monitor_rewards_lengths(str(monitor_dir))
+    assert lengths == list(episodes["l"]) and len(rewards) == len(lengths)
+    assert "[train monitor logs]" in (tmp_path / "stage_summary.txt").read_text()
+    config = json.loads((tmp_path / "config.json").read_text())
+    assert config["train_config"]["monitor_info_keywords"] == ["steps_alive"]
+
+
+def test_monitor_info_keywords_must_be_keys_the_env_emits(tmp_path):
+    """Monitor raises KeyError at the first episode end for a key the env
+    does not emit; train() probes the env and refuses it up front."""
+    log_dir = tmp_path / "run"
+    cfg = _salvage_cfg(
+        log_dir, env_fn=_steps_alive_env, monitor_info_keywords=("steps_alvie",)
+    )
+    with pytest.raises(
+        ValueError, match=r"'steps_alvie' \(did you mean 'steps_alive'\?\)"
+    ):
+        train(cfg)
+    assert not log_dir.exists()
+
+
+def test_config_json_records_the_observation_fingerprint(tmp_path):
+    """Contract C3: the env probe banks the observation layout by name,
+    also through a Gymnasium wrapper (read via get_wrapper_attr)."""
+    from courtside_dynamics.training.artifacts import observation_names_sha256
+
+    cfg = TrainConfig(env_fn=_steps_alive_env, log_dir=str(tmp_path))
+    write_run_config(cfg, str(tmp_path))
+    env_block = json.loads((tmp_path / "config.json").read_text())["env"]
+    names = list(BallBalanceEnv.observation_names)
+    assert env_block["observation_names"] == names
+    assert env_block["observation_names_sha256"] == observation_names_sha256(
+        names
+    )
+
+
+def _rewrite_source_observation_names(source_dir, names, *, keep_names=True):
+    from courtside_dynamics.training.artifacts import observation_names_sha256
+
+    config_path = source_dir / "config.json"
+    config = json.loads(config_path.read_text())
+    if names is None:
+        config["env"].pop("observation_names", None)
+        config["env"].pop("observation_names_sha256", None)
+    else:
+        config["env"]["observation_names_sha256"] = observation_names_sha256(
+            names
+        )
+        if keep_names:
+            config["env"]["observation_names"] = list(names)
+        else:
+            config["env"].pop("observation_names", None)
+    config_path.write_text(json.dumps(config))
+
+
+def _sac_warm_start_target(
+    env_fn, source_dir, log_dir, *, algo="SAC", extra_callbacks=(), **model_kwargs
+):
+    """The SAC warm-start tests' 8-step target leg (warmup never ends)."""
+    return TrainConfig(
+        env_fn=env_fn,
+        algo=algo,
+        total_timesteps=8,
+        log_dir=str(log_dir),
+        n_envs=1,
+        seed=13,
+        eval_freq=10_000,
+        checkpoint_freq=0,
+        video_freq=0,
+        record_video=False,
+        info_dict_eval=False,
+        n_eval_episodes=1,
+        normalize_obs=True,
+        normalize_obs_excluded_indices=(0,),
+        warm_start=WarmStartConfig(source_dir),
+        model_kwargs={"buffer_size": 64, "learning_starts": 1_000, **model_kwargs},
+        extra_callbacks=extra_callbacks,
+    )
+
+
+def test_warm_start_refuses_a_same_shape_observation_layout_change(tmp_path):
+    """Review §7.2 (*new*): warm start compared shapes only, so a
+    same-width meaning change (world-frame spin, scaled counters) would
+    load every old checkpoint onto a different task. The recorded layout
+    is now compared by name, naming the first differing index."""
+    source_dir, env_fn, _ = _make_sac_warm_start_source(tmp_path)
+    names = list(BallBalanceEnv.observation_names)
+    renamed = [*names[:3], "ball_vx_world_frame", *names[4:]]
+    _rewrite_source_observation_names(source_dir, renamed)
+    cfg = _sac_warm_start_target(env_fn, source_dir, tmp_path / "target")
+    with pytest.raises(
+        ValueError,
+        match=r"observation index 3 is 'ball_vx_world_frame' in the "
+        r"recorded layout but 'ball_vx' in this env",
+    ):
+        _prepare_warm_start(cfg)
+
+    # Only the digest survives: still refused, naming both digests.
+    _rewrite_source_observation_names(source_dir, renamed, keep_names=False)
+    with pytest.raises(ValueError, match="observation_names_sha256"):
+        _prepare_warm_start(cfg)
+
+
+def test_warm_start_from_a_pre_fingerprint_source_keeps_the_shape_check(
+    tmp_path, capsys
+):
+    """Every run directory written before the fingerprint existed lacks
+    it; those still warm-start on the shape check, with a notice."""
+    source_dir, env_fn, _ = _make_sac_warm_start_source(tmp_path)
+    _rewrite_source_observation_names(source_dir, None)
+    target_dir = tmp_path / "target"
+    train(_sac_warm_start_target(env_fn, source_dir, target_dir))
+    assert "predates the observation fingerprint" in capsys.readouterr().out
+    config = json.loads((target_dir / "config.json").read_text())
+    initialization = config["initialization"]
+    assert initialization["observation_fingerprint"] == "source_lacks_fingerprint"
+
+
+class _CaptureWarmup(BaseCallback):
+    """Record the warmup mode and count uniform-random action draws."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.use_sde_at_warmup: bool | None = None
+        self.uniform_samples = 0
+
+    def _on_training_start(self) -> None:
+        self.use_sde_at_warmup = bool(self.model.use_sde_at_warmup)
+        sample = self.model.action_space.sample
+
+        def counting_sample(*args, **kwargs):
+            self.uniform_samples += 1
+            return sample(*args, **kwargs)
+
+        self.model.action_space.sample = counting_sample
+
+    def _on_training_end(self) -> None:
+        # Drop the instance override (the closure holds this callback,
+        # which SB3 cannot pickle into final_model.zip).
+        del self.model.action_space.sample
+
+    def _on_step(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize("algo", ["SAC", "DEMOSAC"])
+def test_gsde_warm_start_refills_with_the_transferred_policy(tmp_path, algo):
+    """Review §5b #7 (*confirmed*): a warm start's learning_starts refill
+    sampled uniform-random actions (use_sde_at_warmup=False), so every
+    warm-started leg spent its warmup on noise instead of the transferred
+    policy. Under gSDE, train() now defaults use_sde_at_warmup=True."""
+    source_dir, env_fn, _ = _make_sac_warm_start_source(
+        tmp_path, model_kwargs={"use_sde": True}
+    )
+    capture = _CaptureWarmup()
+    target_dir = tmp_path / "target"
+    train(
+        _sac_warm_start_target(
+            env_fn,
+            source_dir,
+            target_dir,
+            algo=algo,
+            use_sde=True,
+            extra_callbacks=(capture,),
+        )
+    )
+    assert capture.use_sde_at_warmup is True
+    assert capture.uniform_samples == 0
+    config = json.loads((target_dir / "config.json").read_text())
+    assert config["initialization"]["warmup"] == {
+        "learning_starts": 1_000,
+        "use_sde": True,
+        "use_sde_at_warmup": True,
+        "use_sde_at_warmup_source": "warm_start_default",
+        "warmup_actions": "policy_with_gsde_noise",
+    }
+    assert config["resolved_model"]["hyperparameters"]["use_sde_at_warmup"] is True
+    # The caller's model_kwargs are recorded as given, not rewritten.
+    assert "use_sde_at_warmup" not in config["train_config"]["model_kwargs"]
+
+
+def test_warm_start_respects_an_explicit_use_sde_at_warmup(tmp_path, capsys):
+    source_dir, env_fn, _ = _make_sac_warm_start_source(
+        tmp_path, model_kwargs={"use_sde": True}
+    )
+    capture = _CaptureWarmup()
+    target_dir = tmp_path / "target"
+    train(
+        _sac_warm_start_target(
+            env_fn,
+            source_dir,
+            target_dir,
+            use_sde=True,
+            use_sde_at_warmup=False,
+            extra_callbacks=(capture,),
+        )
+    )
+    assert capture.use_sde_at_warmup is False
+    assert capture.uniform_samples == 8
+    warmup = json.loads((target_dir / "config.json").read_text())[
+        "initialization"
+    ]["warmup"]
+    assert warmup["use_sde_at_warmup_source"] == "model_kwargs"
+    assert warmup["warmup_actions"] == "uniform_random"
+    assert "take uniform-random actions" in capsys.readouterr().out
+
+
+def test_warm_start_without_gsde_warns_that_warmup_is_uniform(tmp_path, capsys):
+    """Without gSDE SB3 cannot act with the policy during warmup at all;
+    the run must say so instead of implying the policy refills."""
+    source_dir, env_fn, _ = _make_sac_warm_start_source(tmp_path)
+    target_dir = tmp_path / "target"
+    train(_sac_warm_start_target(env_fn, source_dir, target_dir))
+    out = capsys.readouterr().out
+    assert "first 1,000 steps (learning_starts) take uniform-random" in out
+    warmup = json.loads((target_dir / "config.json").read_text())[
+        "initialization"
+    ]["warmup"]
+    assert warmup["use_sde"] is False
+    assert warmup["warmup_actions"] == "uniform_random"
+    assert warmup["use_sde_at_warmup_source"] == "sb3_default"
+
+
+def test_run_summary_reports_the_selecting_batch_from_best_model_meta(
+    tmp_path,
+):
+    """Under headline selection the best-checkpoint block used to read
+    its reward from evaluations.npz (another stream's episodes) and its
+    counters from ``*_final`` (one episode). It now reports the batch
+    that won selection, from best_model_meta.json's ``metrics``."""
+    import json
+
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    np.savez(
+        tmp_path / "evaluations.npz",
+        timesteps=np.array([25_000, 50_000]),
+        results=np.array([[0.5, 0.5], [1.0, 1.0]]),
+        ep_lengths=np.array([[30, 30], [30, 30]]),
+    )
+    (tmp_path / "best_model_meta.json").write_text(
+        json.dumps(
+            {
+                "timestep": 50_000,
+                "selection_keys": ["bounce_count_ep_mean", "success_rate"],
+                "selection_values": {
+                    "bounce_count_ep_mean": 3.4,
+                    "success_rate": 0.6,
+                },
+                "metrics": {
+                    "episode_reward_mean": 4.25,
+                    "episode_length": 812.0,
+                    "success_rate": 0.6,
+                    "bounce_count_ep_mean": 3.4,
+                    "bounce_count_final": 1.0,
+                    "bounce_count_max": 5.0,
+                },
+            }
+        )
+    )
+    # A stale/mixed CSV row at the same step must not leak in.
+    (tmp_path / "eval_info.csv").write_text(
+        "timestep,metric,value\n"
+        "50000,episode_reward_mean,9.9\n"
+        "50000,bounce_count_ep_mean,9.9\n"
+        "50000,bounce_count_final,9.0\n"
+    )
+
+    def env_fn():
+        raise RuntimeError("no env needed; probe degrades gracefully")
+
+    cfg = TrainConfig(env_fn=env_fn, log_dir=str(tmp_path), headline_key="bounce_count")
+    write_run_summary(
+        cfg,
+        str(tmp_path),
+        final_mean_reward=1.0,
+        final_std_reward=0.5,
+        duration_seconds=10.0,
+    )
+    text = (tmp_path / "stage_summary.txt").read_text()
+    best_block = text.split("Best Checkpoint Evaluation (step 50,000)", 1)[1]
+    assert "Reward:         4.250  [selecting batch]" in best_block
+    assert "1.000 +/- 0.000" not in best_block
+    assert "Episode length: 812.0" in best_block
+    assert "Success rate:   60.0%" in best_block
+    assert "bounce_count: ep-mean 3.40  last-episode 1.00  max 5.00" in best_block
+    assert "9.9" not in best_block
+
+
+def test_run_summary_labels_final_counters_as_last_episode(tmp_path):
+    """Reward-selected runs keep the reward stream's numbers, but a
+    ``*_final`` counter is still one episode and is labeled so."""
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    np.savez(
+        tmp_path / "evaluations.npz",
+        timesteps=np.array([25_000]),
+        results=np.array([[0.5, 1.5]]),
+        ep_lengths=np.array([[30, 30]]),
+    )
+    (tmp_path / "eval_info.csv").write_text(
+        "timestep,metric,value\n"
+        "25000,rally_count_final,2.0\n"
+        "25000,rally_count_max,3.0\n"
+    )
+
+    def env_fn():
+        raise RuntimeError("no env needed; probe degrades gracefully")
+
+    write_run_summary(
+        TrainConfig(env_fn=env_fn, log_dir=str(tmp_path)),
+        str(tmp_path),
+        final_mean_reward=1.0,
+        final_std_reward=0.5,
+        duration_seconds=10.0,
+    )
+    best_block = (tmp_path / "stage_summary.txt").read_text().split(
+        "Best Checkpoint Evaluation (step 25,000)", 1
+    )[1]
+    assert "Reward:         1.000 +/- 0.500" in best_block
+    assert "rally_count: last-episode 2.00  max 3.00" in best_block
+    assert " final " not in best_block
+
+
+def test_train_refuses_a_log_dir_holding_a_previous_attempts_eval_rows(
+    tmp_path,
+):
+    """A second attempt in the same log_dir used to append its rows to
+    the first attempt's eval_info.csv (and leave that attempt's best
+    triple beside the new config.json). Refused before any output."""
+    previous_config = '{"previous": "attempt"}\n'
+    (tmp_path / "config.json").write_text(previous_config)
+    csv_path = tmp_path / "metrics" / "eval_info.csv"
+    csv_path.parent.mkdir()
+    rows = "timestep,metric,value\n25000,steps_alive_ep_mean,3.0\n"
+    csv_path.write_text(rows)
+    cfg = TrainConfig(env_fn=_unbuildable_env, log_dir=str(tmp_path))
+    with pytest.raises(ValueError, match="previous training attempt"):
+        train(cfg)
+    assert (tmp_path / "config.json").read_text() == previous_config
+    assert csv_path.read_text() == rows
+
+
+def test_reuse_log_dir_rotates_the_previous_attempts_eval_logs(
+    tmp_path, capsys
+):
+    """``reuse_log_dir=True`` is the explicit opt-in: the old evaluation
+    CSV moves aside, and the new one holds this attempt's rows only."""
+    import csv
+
+    def eval_rows(path):
+        with open(path) as stream:
+            return [
+                (row["timestep"], row["metric"]) for row in csv.DictReader(stream)
+            ]
+
+    first = _merged_eval_cfg(tmp_path, final_info_eval=False, total_timesteps=400)
+    train(first)
+    csv_path = tmp_path / "metrics" / "eval_info.csv"
+    first_rows = eval_rows(csv_path)
+    assert first_rows
+
+    second = _merged_eval_cfg(
+        tmp_path, final_info_eval=False, total_timesteps=400, reuse_log_dir=True
+    )
+    train(second)
+    out = capsys.readouterr().out
+    assert "reuse_log_dir=True: rotated the previous attempt's" in out
+    (rotated,) = (tmp_path / "metrics").glob("eval_info.attempt_*.csv")
+    assert eval_rows(rotated) == first_rows
+    second_rows = eval_rows(csv_path)
+    # One row per (timestep, metric): no second attempt appended.
+    assert len(second_rows) == len(set(second_rows)) == len(first_rows)
+
+
+_GATE = {
+    "stages": [{"x": 1.0}],
+    "metric_key": "steps_alive_ep_mean",
+    "threshold": 1.0,
+    "sustain_evals": 1,
+}
+
+
+@pytest.mark.parametrize(
+    "overrides, error, message",
+    [
+        ({"reward_eval_episodes": 0}, ValueError, "reward_eval_episodes must be"),
+        ({"reward_eval_episodes": 5}, ValueError, "requires headline-metric"),
+        (
+            {"headline_key": "steps_alive", "final_eval_episodes": 0},
+            ValueError,
+            "final_eval_episodes must be",
+        ),
+        ({"final_eval_episodes": 4}, ValueError, "requires info_dict_eval and"),
+        (
+            {"checkpoint_diagnosis": {"episodez": 3}},
+            ValueError,
+            r"checkpoint_diagnosis has unknown keys \['episodez'\]",
+        ),
+        (
+            {"checkpoint_diagnosis": {"episodes": 3}, "checkpoint_freq": 0},
+            ValueError,
+            "requires checkpoint_freq > 0",
+        ),
+        (
+            {"checkpoint_diagnosis": {"episodes": 0}},
+            ValueError,
+            "episodes must be positive",
+        ),
+        ({"checkpoint_diagnosis": ("episodes",)}, TypeError, "must be a mapping"),
+        (
+            {"info_dict_eval": False, "final_info_eval": True},
+            ValueError,
+            "require info_dict_eval",
+        ),
+        (
+            {"info_dict_eval": False, "performance_gate": _GATE},
+            ValueError,
+            "require info_dict_eval",
+        ),
+        (
+            {"performance_gate": {**_GATE, "sustain_evalz": 2}},
+            ValueError,
+            r"unknown performance_gate key\(s\) \['sustain_evalz'\]",
+        ),
+        (
+            {
+                "performance_gate": {
+                    key: value for key, value in _GATE.items() if key != "threshold"
+                }
+            },
+            ValueError,
+            r"performance_gate must set \['threshold'\]",
+        ),
+    ],
+)
+def test_misconfigured_reuse_retry_leaves_the_previous_attempt_untouched(
+    tmp_path, overrides, error, message
+):
+    """The eval-stream, diagnosis and gate checks used to run inside the
+    callback wiring -- after reuse_log_dir=True had already rotated the
+    previous attempt's eval CSVs aside and overwritten its config.json.
+    They are pre-flight checks now: the retry fails before any env is
+    built and the earlier attempt's artifacts stay exactly where they
+    were."""
+    previous_config = '{"previous": "attempt"}\n'
+    (tmp_path / "config.json").write_text(previous_config)
+    metrics = tmp_path / "metrics"
+    metrics.mkdir()
+    rows = "timestep,metric,value\n25000,steps_alive_ep_mean,3.0\n"
+    for name in ("eval_info.csv", "eval_info_final.csv"):
+        (metrics / name).write_text(rows)
+    cfg = TrainConfig(
+        env_fn=_unbuildable_env,
+        log_dir=str(tmp_path),
+        reuse_log_dir=True,
+        **overrides,
+    )
+    with pytest.raises(error, match=message):
+        train(cfg)
+    assert (tmp_path / "config.json").read_text() == previous_config
+    assert sorted(path.name for path in metrics.iterdir()) == [
+        "eval_info.csv",
+        "eval_info_final.csv",
+    ]
+    for name in ("eval_info.csv", "eval_info_final.csv"):
+        assert (metrics / name).read_text() == rows
+
+
+@pytest.mark.parametrize(
+    "bad_entry, message",
+    [
+        ({"serve_side": "c"}, "serve_side must be 'a', 'b'"),
+        ({"serve_sdie": "b"}, r"unsupported reset options: \['serve_sdie'\]"),
+    ],
+)
+def test_invalid_eval_reset_options_fail_before_any_output(
+    tmp_path, bad_entry, message
+):
+    """eval_reset_options were only shape-checked up front, so an option
+    the env's reset rejects passed pre-flight, wrote config.json and
+    crashed model.learn() at the first paired evaluation. A throwaway
+    evaluation env now replays the paired reset for every distinct
+    entry before any output is written."""
+    from courtside_dynamics.envs import PaddleTennisEnv
+
+    log_dir = tmp_path / "run"
+    cfg = TrainConfig(
+        env_fn=PaddleTennisEnv,
+        algo="SAC",
+        total_timesteps=16,
+        log_dir=str(log_dir),
+        n_envs=1,
+        seed=0,
+        eval_freq=8,
+        checkpoint_freq=0,
+        record_video=False,
+        n_eval_episodes=1,
+        # First, so the unprobed run reached it at its first evaluation
+        # (episode i uses entry i % len); later entries are probed too.
+        eval_reset_options=(bad_entry, {"serve_side": "a"}),
+    )
+    with pytest.raises(ValueError, match="eval_reset_options entry") as raised:
+        train(cfg)
+    assert raised.match(message)
+    assert not log_dir.exists()
+
+
+def test_eval_reset_option_probe_resets_once_per_distinct_mapping():
+    """The pre-flight probe uses the evaluation factory (not the training
+    one), resets one throwaway instance once per distinct mapping with the
+    resolved eval seed, and closes it."""
+    from courtside_dynamics.training.train import _validate_eval_reset_options
+
+    resets: list[tuple[int | None, dict[str, Any] | None]] = []
+    closed: list[bool] = []
+
+    class _Recorder(gym.Wrapper):
+        def reset(self, *, seed=None, options=None):
+            resets.append((seed, options))
+            return self.env.reset(seed=seed, options=options)
+
+        def close(self):
+            closed.append(True)
+            super().close()
+
+    cfg = TrainConfig(
+        env_fn=_unbuildable_env,
+        eval_env_fn=lambda: _Recorder(BallBalanceEnv(episode_len=12)),
+        seed=4,
+        eval_reset_options=(
+            {"serve_side": "a"},
+            {"serve_side": "b"},
+            {"serve_side": "a"},
+        ),
+    )
+    _validate_eval_reset_options(cfg, 1_000_004)
+    assert resets == [
+        (1_000_004, {"serve_side": "a"}),
+        (1_000_004, {"serve_side": "b"}),
+    ]
+    assert closed == [True]
+    # Unpaired (no options): nothing to probe, no env built.
+    _validate_eval_reset_options(
+        TrainConfig(env_fn=_unbuildable_env, seed=4), None
+    )

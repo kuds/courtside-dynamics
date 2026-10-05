@@ -21,7 +21,6 @@ import json
 import math
 import pickle
 import platform
-import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +33,7 @@ from courtside_dynamics.envs.tennis_curriculum import (
     CurriculumStage,
 )
 from courtside_dynamics.envs.tennis_rules import CourtSide
+from courtside_dynamics.training.artifacts import _git_sha
 
 
 @dataclass(frozen=True, slots=True)
@@ -876,21 +876,6 @@ def _runtime_versions() -> tuple[tuple[str, str], ...]:
         except importlib.metadata.PackageNotFoundError:
             versions[label] = "not-installed"
     return tuple(sorted(versions.items()))
-
-
-def _git_sha() -> str | None:
-    package_path = Path(__file__).resolve().parent
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(package_path), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def _metadata_fingerprint(metadata: Mapping[str, Any]) -> str:

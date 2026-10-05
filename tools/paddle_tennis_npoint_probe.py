@@ -4,7 +4,8 @@ The pre-registered battery from
 ``docs/design_paddle_tennis_npoint.md`` §4, run on the fresh
 calibration block **5400–5499** (the reserved blocks 4100–4199 and
 4300–4399 are never touched; the CLI refuses seed ranges that
-intersect them).
+intersect them or any other block in ``tools/_seed_ledger.py``, and
+exits non-zero on an NP1 or NP3 FAIL).
 
 **NP1 — mechanics witnesses** (scripted, PASS/FAIL rows):
 
@@ -82,6 +83,11 @@ from courtside_dynamics.envs._paddle_court import (
 from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
 from courtside_dynamics.envs.tennis_rules import CourtSide
 
+try:
+    from tools._seed_ledger import refuse_reserved
+except ModuleNotFoundError:  # run as a script: tools/ itself is on sys.path
+    from _seed_ledger import refuse_reserved  # type: ignore[no-redef]
+
 #: Fresh calibration block frozen in the design doc §3.
 PROBE_SEED_START = 5400
 NP1_EPISODES = 12
@@ -91,9 +97,10 @@ NP1_EPISODES = 12
 PARKER_EPISODES = 16
 NP2_EPISODES = 100
 SHAPING = 0.25
-
-#: Reserved held-out blocks (design doc §3) this probe must refuse.
-RESERVED_BLOCKS = ((4100, 4199), (4300, 4399))
+#: The NP1/NP2 calibration block this probe burned: re-running on it
+#: reproduces the booked band. Every other ledger block (the shared
+#: tools/_seed_ledger.py) is refused.
+_OWN_BLOCK = (5400, 5499)
 
 #: NP3 held-out certification (design doc §4a): floors pre-registered
 #: from NP2's band (11.40 crossings/episode, 113 completed points, 0%
@@ -104,6 +111,8 @@ NP3_CERT_EPISODES = 100
 NP3_MEAN_CROSSINGS_FLOOR = 9.0
 NP3_COMPLETED_POINTS_FLOOR = 50
 NP3_NUDGE_RATE_CEILING = 0.02
+#: The ledger block ``--certify`` is sanctioned to open.
+_NP3_CERT_BLOCK = (4300, 4399)
 
 _IDENTITY_TOL = 1e-9
 #: Serve draws are 9 +/- 1 m/s; anything materially faster right at
@@ -181,7 +190,9 @@ def run_battery_episode(
     seed: int,
 ) -> EpisodeRow:
     """Walk one n-point episode recording every NP1 observable."""
-    observation, _ = env.reset(seed=seed)
+    observation, _ = env.reset(
+        seed=seed, options={"serve_side": env._next_serving_side}
+    )
     servers = [env._serving_side.name]
     steps = confirms = 0
     total = paid = claw = point_reward = 0.0
@@ -661,22 +672,17 @@ def run_np2(
     )
 
 
-def _refuse_reserved(seed_start: int, episodes: int) -> None:
-    last = seed_start + episodes - 1
-    for low, high in RESERVED_BLOCKS:
-        if seed_start <= high and last >= low:
-            raise SystemExit(
-                f"seed range {seed_start}-{last} intersects the"
-                f" reserved held-out block {low}-{high}"
-            )
-
-
 def certify() -> int:
     """NP3: the reserved block's single sanctioned opening.
 
     Runs the band measurement on held-out seeds 4300–4399 and holds
     it to the floors pre-registered from NP2 (design doc §4a).
     """
+    # The opening is sanctioned for the NP3 block alone: the ledger
+    # still refuses the certification range spilling into any other.
+    refuse_reserved(
+        NP3_CERT_SEED_START, NP3_CERT_EPISODES, allow=(_NP3_CERT_BLOCK,)
+    )
     print(
         "NP3 held-out certification (reserved seeds "
         f"{NP3_CERT_SEED_START}-"
@@ -719,7 +725,12 @@ def certify() -> int:
     return 0 if verdict else 1
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
+    """Run NP1 (and NP2 unless skipped); non-zero exit on an NP1 FAIL.
+
+    NP2 is a recorded band with no verdict, so it still runs after an
+    NP1 FAIL (the record is the evidence) and never moves the status.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--np1-episodes", type=int, default=NP1_EPISODES)
     parser.add_argument("--parker-episodes", type=int, default=PARKER_EPISODES)
@@ -733,15 +744,15 @@ def main() -> None:
         "4300-4399 against the pre-registered floors (the block's "
         "single sanctioned opening; ignores the other flags)",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.certify:
-        raise SystemExit(certify())
+        return certify()
     episodes_max = max(
         args.np1_episodes,
         args.parker_episodes,
         0 if args.skip_np2 else args.np2_episodes,
     )
-    _refuse_reserved(args.seed_start, episodes_max)
+    refuse_reserved(args.seed_start, episodes_max, allow=(_OWN_BLOCK,))
 
     passes: dict[str, list[EpisodeRow]] = {}
     for name, policy, shaping, episodes in (
@@ -803,7 +814,8 @@ def main() -> None:
         print("\n".join(band))
         print()
         print(instrument_report)
+    return 0 if verdict else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

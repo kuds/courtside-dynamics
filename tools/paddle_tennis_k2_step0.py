@@ -132,6 +132,12 @@ def _launch_full(env: PaddleTennisEnv, entry: dict) -> np.ndarray:
     env.step_number = entry["step_number"]
     env._crossings = entry["crossings"]
     env._crossings_base = entry["crossings_base"]
+    # The step-time crossings formula adds this continuity offset, not
+    # _crossings_base; left at reset's 0 the first replayed step drops
+    # the counter by the snapshot's offset. Libraries harvested before
+    # the snapshot recorded it come from a drill-off env, where the
+    # offset equals crossings_base by construction.
+    env._crossings_offset = entry.get("crossings_offset", entry["crossings_base"])
     env._points_played = entry["points_played"]
     env._pending_shaping = entry["pending_shaping"]
     env._pending_reach = entry["pending_reach"]
@@ -159,7 +165,11 @@ def run_arm(arm: str, library: dict, policy, max_steps: int, reset_seed: int) ->
     rows: list[dict] = []
     try:
         for entry in library["entries"]:
-            env.reset(seed=reset_seed)  # draw discarded by the launch below
+            # draw discarded by the launch below
+            env.reset(
+                seed=reset_seed,
+                options={"serve_side": env._next_serving_side},
+            )
             if arm == "feed":
                 obs = _launch_feed(env, entry)
             else:

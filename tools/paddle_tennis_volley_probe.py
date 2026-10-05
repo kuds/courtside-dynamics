@@ -68,8 +68,17 @@ from courtside_dynamics.envs._paddle_court import (
 )
 from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
 
+try:
+    from tools._seed_ledger import refuse_reserved
+except ModuleNotFoundError:  # run as a script: tools/ itself is on sys.path
+    from _seed_ledger import refuse_reserved  # type: ignore[no-redef]
+
 PROBE_SEED_START = 5100
 PROBE_EPISODES = 100
+#: The ground-rules calibration block this probe burned: re-running on
+#: it reproduces the booked matrix. Every other ledger block (the
+#: shared tools/_seed_ledger.py) is refused.
+_OWN_BLOCK = (5100, 5199)
 
 PLAYERS: dict[str, Callable[[np.ndarray], np.ndarray]] = {
     "ground": scripted_ground_opponent,
@@ -132,7 +141,9 @@ def run_cell(
     terminations: Counter = Counter()
     try:
         for seed in range(seed_start, seed_start + episodes):
-            observation, _ = env.reset(seed=seed)
+            observation, _ = env.reset(
+                seed=seed, options={"serve_side": env._next_serving_side}
+            )
             step_count = 0
             while True:
                 observation, _, terminated, truncated, info = env.step(
@@ -176,6 +187,13 @@ def run_cell(
 
 def evaluate_criteria(cells: dict[tuple[str, str], CellResult]) -> list[str]:
     """Apply the pre-registered adoption criteria; return verdict lines."""
+    return adoption_verdict(cells)[0]
+
+
+def adoption_verdict(
+    cells: dict[tuple[str, str], CellResult],
+) -> tuple[list[str], bool]:
+    """The verdict lines plus the overall ADOPT (True) / DO NOT ADOPT."""
     lines = []
     kill_ok = True
     for player in ("volley", "patting"):
@@ -234,7 +252,7 @@ def evaluate_criteria(cells: dict[tuple[str, str], CellResult]) -> list[str]:
             else "DO NOT ADOPT -- record and diagnose"
         )
     )
-    return lines
+    return lines, bool(verdict)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -253,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     episodes = 4 if args.quick else args.episodes
+    refuse_reserved(args.seed_start, episodes, allow=(_OWN_BLOCK,))
 
     cells: dict[tuple[str, str], CellResult] = {}
     for player in PLAYERS:
@@ -278,9 +297,12 @@ def main(argv: list[str] | None = None) -> int:
     for key in sorted(cells):
         print(cells[key].row())
     print()
-    for line in evaluate_criteria(cells):
+    lines, verdict = adoption_verdict(cells)
+    for line in lines:
         print(line)
-    return 0
+    # DO NOT ADOPT is the battery's FAIL: automation gating on the exit
+    # status must not read it as a pass.
+    return 0 if verdict else 1
 
 
 if __name__ == "__main__":

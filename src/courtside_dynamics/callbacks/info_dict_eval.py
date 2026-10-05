@@ -35,6 +35,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import numbers
 import os
 import shutil
 from collections import defaultdict, deque
@@ -47,6 +48,13 @@ from stable_baselines3.common.vec_env import VecEnv
 
 from courtside_dynamics.callbacks._info import _scalar_info_keys
 
+#: Offset between a paired evaluation's standard batch and its
+#: ``confirm_best`` batch: standard episode ``i`` resets with seed
+#: ``eval_seed + i``, the confirmation batch's episode ``i`` with
+#: ``eval_seed + CONFIRMATION_SEED_OFFSET + i``. Far past any
+#: ``n_eval_episodes`` so the two batches never share a feed.
+CONFIRMATION_SEED_OFFSET = 100_000
+
 
 def _sha256_file(path: str) -> str:
     digest = hashlib.sha256()
@@ -54,6 +62,87 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _string_keys(value: Any, name: str) -> tuple[str, ...]:
+    """A de-duplicated tuple of non-empty strings, refusing a bare string.
+
+    A ``str`` is itself a ``Sequence[str]``: ``"crossings_ep_mean"``
+    would otherwise iterate into one-letter "keys".
+    """
+    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
+        raise TypeError(f"{name} must be a sequence of strings, got {value!r}")
+    keys = tuple(dict.fromkeys(value))
+    if any(not isinstance(key, str) or not key for key in keys):
+        raise TypeError(f"{name} must contain non-empty strings")
+    return keys
+
+
+def _reset_options_tuple(value: Any) -> tuple[dict[str, Any], ...]:
+    """Validate ``eval_reset_options``: a non-empty sequence of mappings."""
+    if isinstance(value, (str, bytes, Mapping)) or not isinstance(
+        value, Sequence
+    ):
+        raise TypeError(
+            f"eval_reset_options must be a sequence of option mappings, "
+            f"got {value!r}"
+        )
+    options: list[dict[str, Any]] = []
+    for option in value:
+        if not isinstance(option, Mapping) or any(
+            not isinstance(key, str) for key in option
+        ):
+            raise TypeError(
+                f"eval_reset_options entries must be mappings with string "
+                f"keys, got {option!r}"
+            )
+        options.append(dict(option))
+    if not options:
+        raise ValueError(
+            "eval_reset_options must hold at least one options mapping "
+            "(None disables reset options)"
+        )
+    return tuple(options)
+
+
+def _resolve_min_deltas(
+    value: float | Mapping[str, float], keys: Sequence[str]
+) -> tuple[float | dict[str, float], tuple[float, ...]]:
+    """Validate ``best_metric_min_delta``; return it plus per-key deltas.
+
+    A scalar applies to every selection key (the historical form); a
+    mapping names a delta per key, missing keys meaning ``0.0``. The
+    mapping exists because one delta cannot fit keys of very different
+    scale: PaddleTennis' 0.25 sits above the ~0.2 opponent-crossings
+    noise, but applied to ``success_rate`` it demands a +25 pp swing
+    before the tie-break can register (docs/repo_review_20261005.md
+    §5b #8).
+    """
+
+    def _delta(raw: Any, label: str) -> float:
+        if isinstance(raw, bool):
+            raise TypeError(f"{label} must be a number, got {raw!r}")
+        if isinstance(value, Mapping) and not isinstance(raw, numbers.Real):
+            raise TypeError(f"{label} must be a number, got {raw!r}")
+        resolved = float(raw)
+        if not np.isfinite(resolved) or resolved < 0.0:
+            raise ValueError(f"{label} must be finite and nonnegative")
+        return resolved
+
+    if isinstance(value, Mapping):
+        unknown = [key for key in value if key not in keys]
+        if unknown:
+            raise ValueError(
+                f"best_metric_min_delta names {unknown}, which are not "
+                f"selection keys; best_metric_keys are {list(keys)}"
+            )
+        per_key = {
+            key: _delta(raw, f"best_metric_min_delta[{key!r}]")
+            for key, raw in value.items()
+        }
+        return per_key, tuple(per_key.get(key, 0.0) for key in keys)
+    scalar = _delta(value, "best_metric_min_delta")
+    return scalar, tuple(scalar for _ in keys)
 
 
 class InfoDictEvalCallback(BaseCallback):
@@ -161,7 +250,13 @@ class InfoDictEvalCallback(BaseCallback):
         dead run by 225k steps) on a ~1e-8 reward difference; a delta
         of half the metric's granularity (``0.5 / n_eval_episodes`` for
         episode means and rates) makes a real one-episode change
-        register while float noise never does.
+        register while float noise never does. A scalar applies to
+        every key; a mapping sets one delta per key (keys must be a
+        subset of ``best_metric_keys``; a missing key means ``0.0``),
+        for key sets whose scales differ -- one 0.25 delta sized for a
+        crossings count makes a ``success_rate`` tie-break need a
+        +25 pp swing. The same per-key deltas define flatness for the
+        degenerate-signal guard.
     confirm_best:
         When ``True``, a candidate improvement over an existing best is
         re-evaluated on a second, independent ``n_eval_episodes`` batch
@@ -170,11 +265,15 @@ class InfoDictEvalCallback(BaseCallback):
         one lucky 2-bounce episode in 30; confirmation makes a
         single-batch fluke twice as unlikely at the cost of one extra
         eval pass per candidate best. The first evaluation is always
-        accepted unconfirmed (there is no best to defend yet).
+        accepted unconfirmed (there is no best to defend yet). Unpaired,
+        the stored best is the weaker of the two samples; paired (see
+        ``eval_seed``), the best keeps one score per seed block and each
+        batch is compared only with its own block's score.
     degenerate_stop_evals:
         When ``> 0``, stop training once this many *consecutive*
-        evaluations produced a flat selection score (every key within
-        ``best_metric_min_delta`` of the window's first sample) while
+        evaluations produced a flat selection score (every
+        ``degenerate_flat_keys`` key within its ``best_metric_min_delta``
+        of the window's first sample) while
         every ``degenerate_guard_keys`` metric was exactly zero -- the
         signature of a run whose eval signal is dead (run
         20260714_211111 was flat at reward -1.0 with zero paddle
@@ -189,6 +288,15 @@ class InfoDictEvalCallback(BaseCallback):
         WallBall: no contact at all means nothing can improve). A key
         missing from an evaluation blocks the guard -- absence of
         evidence is not a dead run.
+    degenerate_flat_keys:
+        The selection keys that must be flat for the degenerate-signal
+        stop to fire; a subset of ``best_metric_keys``. ``None``
+        (default) requires every selection key to be flat -- the
+        historical guard. A reward tie-break wandering ~0.3 per eval
+        on a zero-contact "statue" policy keeps that guard disarmed
+        (a dead PaddleTennis run stopped at eval 9-26 instead of the
+        designed 5), so a recipe can exclude the continuous reward
+        and judge flatness on its count/rate keys alone.
     degenerate_min_evals:
         Warm-up for the degenerate-signal stop: evaluations up to this
         count never enter the guard window, so the stop cannot fire
@@ -202,7 +310,8 @@ class InfoDictEvalCallback(BaseCallback):
         Directory that receives ``best_model.zip``, the paired
         ``best_vec_normalize.pkl`` (when the model trains under
         ``VecNormalize``), and ``best_model_meta.json`` (the selection
-        step, keys, and values — so "which checkpoint is this and why"
+        step, keys, and values, plus the selecting batch's full metrics
+        under ``metrics`` — so "which checkpoint is this and why"
         survives on disk) every time ``best_metric_keys`` improves.
     early_stop_patience:
         When set to N, stop training after N consecutive evaluations
@@ -217,6 +326,20 @@ class InfoDictEvalCallback(BaseCallback):
         early_stop_patience``. (Run 20260714_211111 predates this
         contract: its counter accrued during warm-up, allowing a stop
         at evaluation ``min_evals + 1``.)
+    eval_seed / eval_reset_options:
+        Paired evaluation. When ``eval_seed`` is set, standard-batch
+        episode ``i`` of *every* evaluation resets with seed
+        ``eval_seed + i`` (and, when ``eval_reset_options`` is given,
+        reset options ``eval_reset_options[i % len]``, e.g. alternating
+        ``{"serve_side": "a"}`` / ``{"serve_side": "b"}``), and the
+        ``confirm_best`` batch uses ``eval_seed +
+        CONFIRMATION_SEED_OFFSET + i``. Every evaluation then replays
+        identical feeds, so a change between two evaluations is the
+        policy's, not the draw's. ``None`` (default) keeps the legacy
+        unpaired stream: the eval env's reset RNG simply continues
+        across evaluations. Options without a seed are refused -- they
+        are only applied by the paired resets, so they would be a
+        silent no-op.
     """
 
     def __init__(
@@ -241,12 +364,15 @@ class InfoDictEvalCallback(BaseCallback):
         early_stop_min_evals: int = 0,
         verbose: int = 0,
         episode_survival_thresholds: Mapping[str, Sequence[int]] | None = None,
-        best_metric_min_delta: float = 0.0,
+        best_metric_min_delta: float | Mapping[str, float] = 0.0,
         confirm_best: bool = False,
         degenerate_stop_evals: int = 0,
         degenerate_guard_keys: Sequence[str] = (),
         degenerate_min_evals: int = 0,
         episode_sum_keys: Sequence[str] | None = None,
+        degenerate_flat_keys: Sequence[str] | None = None,
+        eval_seed: int | None = None,
+        eval_reset_options: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         super().__init__(verbose)
         # The rollout loop reads infos[0]/rewards[0] and counts episodes
@@ -334,12 +460,11 @@ class InfoDictEvalCallback(BaseCallback):
         self.best_model_save_path = best_model_save_path
         self.early_stop_patience = early_stop_patience
         self.early_stop_min_evals = int(early_stop_min_evals)
-        min_delta = float(best_metric_min_delta)
-        if not np.isfinite(min_delta) or min_delta < 0.0:
-            raise ValueError(
-                "best_metric_min_delta must be finite and nonnegative"
-            )
-        self.best_metric_min_delta = min_delta
+        # The configured form (scalar or per-key dict) stays inspectable;
+        # selection and the flatness test read the aligned per-key tuple.
+        self.best_metric_min_delta, self._min_deltas = _resolve_min_deltas(
+            best_metric_min_delta, self.best_metric_keys
+        )
         self.confirm_best = bool(confirm_best)
         if isinstance(degenerate_stop_evals, bool) or not isinstance(
             degenerate_stop_evals, int
@@ -362,7 +487,62 @@ class InfoDictEvalCallback(BaseCallback):
             raise ValueError(
                 "degenerate_stop_evals requires degenerate_guard_keys"
             )
+        if degenerate_flat_keys is None:
+            self.degenerate_flat_keys: tuple[str, ...] | None = None
+        else:
+            flat_keys = _string_keys(
+                degenerate_flat_keys, "degenerate_flat_keys"
+            )
+            if not flat_keys:
+                # An empty set would drop the flatness half of the guard
+                # entirely; None is the spelling for "every key".
+                raise ValueError(
+                    "degenerate_flat_keys must name at least one selection "
+                    "key (None requires every best_metric_keys key to be "
+                    "flat)"
+                )
+            unknown = [
+                key for key in flat_keys if key not in self.best_metric_keys
+            ]
+            if unknown:
+                raise ValueError(
+                    f"degenerate_flat_keys {unknown} are not selection "
+                    f"keys; best_metric_keys are "
+                    f"{list(self.best_metric_keys)}"
+                )
+            self.degenerate_flat_keys = flat_keys
+        # Score indices the flatness test reads (every key by default).
+        self._flat_indices = tuple(
+            index
+            for index, key in enumerate(self.best_metric_keys)
+            if self.degenerate_flat_keys is None
+            or key in self.degenerate_flat_keys
+        )
+        if eval_seed is not None and (
+            isinstance(eval_seed, bool)
+            or not isinstance(eval_seed, (int, np.integer))
+        ):
+            raise TypeError(f"eval_seed must be an integer, got {eval_seed!r}")
+        if eval_seed is not None and eval_seed < 0:
+            raise ValueError("eval_seed must be nonnegative")
+        self.eval_seed = None if eval_seed is None else int(eval_seed)
+        self.eval_reset_options: tuple[dict[str, Any], ...] | None = None
+        if eval_reset_options is not None:
+            self.eval_reset_options = _reset_options_tuple(eval_reset_options)
+            if self.eval_seed is None:
+                raise ValueError(
+                    "eval_reset_options requires eval_seed: options are "
+                    "only applied by the paired-evaluation resets, so "
+                    "without a seed they would be a silent no-op"
+                )
+        # True while the confirm_best batch rolls, which selects the
+        # confirmation seed block (see _rollout_seed_base).
+        self._confirmation_pass = False
         self._best_score: tuple[float, ...] | None = None
+        # Paired evaluation only: the confirmation-block score of the
+        # stored best (None until a best was accepted on a
+        # confirmation), so each seed block is compared with itself.
+        self._best_confirm_score: tuple[float, ...] | None = None
         self._evals_since_best = 0
         self._eval_count = 0
         # Caller-owned scalars merged into every evaluation's metrics
@@ -551,7 +731,11 @@ class InfoDictEvalCallback(BaseCallback):
         total_steps = 0
         total_episodes = 0
 
-        obs = self.eval_env.reset()
+        # Paired mode pins every episode's reset (see eval_seed); None
+        # keeps the legacy stream, where one reset opens the batch and
+        # the VecEnv's own auto-resets continue its RNG.
+        seed_base = self._rollout_seed_base()
+        obs = self._reset_for_episode(seed_base, 0)
         assert not isinstance(obs, tuple)
         last_info: dict | None = None
 
@@ -631,6 +815,16 @@ class InfoDictEvalCallback(BaseCallback):
                 current_ep_reward = 0.0
                 current_ep_length = 0
                 total_episodes += 1
+                if (
+                    seed_base is not None
+                    and total_episodes < self.n_eval_episodes
+                ):
+                    # The terminal info above is already captured (the
+                    # VecEnv hands out a copy), so the auto-reset's
+                    # unseeded episode can be replaced by this
+                    # episode's pinned one.
+                    obs = self._reset_for_episode(seed_base, total_episodes)
+                    assert not isinstance(obs, tuple)
 
         # Fall back to the last seen step if a rollout hit video_length
         # without termination and ``finals`` is empty.
@@ -775,6 +969,49 @@ class InfoDictEvalCallback(BaseCallback):
             print(f"[{self.log_prefix}] " + " ".join(fields))
 
         return metrics
+
+    def _rollout_seed_base(self) -> int | None:
+        """First reset seed of the batch about to roll, or None (unpaired).
+
+        The standard batch starts at ``eval_seed``; the ``confirm_best``
+        batch at ``eval_seed + CONFIRMATION_SEED_OFFSET``, so a
+        confirmation is an independent sample yet itself replays the
+        same feeds at every evaluation.
+        """
+        if self.eval_seed is None:
+            return None
+        if self._confirmation_pass:
+            return self.eval_seed + CONFIRMATION_SEED_OFFSET
+        return self.eval_seed
+
+    def _reset_for_episode(self, seed_base: int | None, episode: int) -> Any:
+        """Reset the eval env for batch episode ``episode``.
+
+        Paired mode stages the episode's seed (and options) on the
+        VecEnv, which applies them at this reset only; both calls pass
+        through wrappers such as the ``VecNormalize(training=False)``
+        that ``train()`` puts around the eval env.
+        """
+        if seed_base is None:
+            return self.eval_env.reset()
+        self.eval_env.seed(seed_base + episode)
+        if self.eval_reset_options is not None:
+            self.eval_env.set_options(
+                dict(
+                    self.eval_reset_options[
+                        episode % len(self.eval_reset_options)
+                    ]
+                )
+            )
+        return self.eval_env.reset()
+
+    def _collect_confirmation_metrics(self) -> dict[str, float]:
+        """Roll the ``confirm_best`` batch (its own paired seed block)."""
+        self._confirmation_pass = True
+        try:
+            return self._collect_metrics()
+        finally:
+            self._confirmation_pass = False
 
     def _is_episode_sum_key(self, key: str) -> bool:
         """Whether a collected step key is summed per episode.
@@ -925,6 +1162,7 @@ class InfoDictEvalCallback(BaseCallback):
         evaluation produces a new best and overwrites them.
         """
         self._best_score = None
+        self._best_confirm_score = None
         self._evals_since_best = 0
         self._recent_signal.clear()
 
@@ -976,15 +1214,14 @@ class InfoDictEvalCallback(BaseCallback):
         """Lexicographic improvement with a per-key noise threshold.
 
         A key only decides the comparison when it differs from the best
-        by more than ``best_metric_min_delta``; within the threshold the
-        comparison falls through to the next key, and a full tie is not
-        an improvement. With the default delta of 0.0 this is exactly
-        the historical strict-``>`` tuple comparison.
+        by more than its ``best_metric_min_delta``; within the threshold
+        the comparison falls through to the next key, and a full tie is
+        not an improvement. With the default delta of 0.0 this is
+        exactly the historical strict-``>`` tuple comparison.
         """
         if best is None:
             return True
-        delta = self.best_metric_min_delta
-        for new, old in zip(score, best, strict=True):
+        for new, old, delta in zip(score, best, self._min_deltas, strict=True):
             if new > old + delta:
                 return True
             if new < old - delta:
@@ -1009,11 +1246,12 @@ class InfoDictEvalCallback(BaseCallback):
         score = self._score_of(metrics)
         improved = self._improves(score, self._best_score)
         confirmation: Mapping[str, float] | None = None
+        confirm_score: tuple[float, ...] | None = None
         if improved and self.confirm_best and self._best_score is not None:
             # One independent second sample before dethroning the best:
             # with 30-episode evals a single lucky episode moves an
             # episode-mean by 1/30, enough to win a strict comparison.
-            confirmation = self._collect_metrics()
+            confirmation = self._collect_confirmation_metrics()
             self._merge_context(confirmation)
             # Published whether or not the candidate survives: as
             # evidence about the *policy's* current performance the batch
@@ -1021,8 +1259,29 @@ class InfoDictEvalCallback(BaseCallback):
             # sample set that depends on the selection outcome.
             self.last_confirmation_metrics = dict(confirmation)
             confirm_score = self._score_of(confirmation)
-            if self._improves(confirm_score, self._best_score):
-                # Bank the weaker of the two samples -- under the same
+            if self.eval_seed is not None:
+                # Paired: the standard and confirmation batches each
+                # replay their own fixed seed block, so each is compared
+                # only with the stored best's score on the same block
+                # (the standard test above already is). Banking the
+                # weaker sample would store a confirmation-block score
+                # that every later standard batch is then measured
+                # against: a policy reading higher on the standard block
+                # would pass the first test and re-roll a confirmation
+                # at every evaluation, unchanged. Until a best was
+                # accepted on a confirmation (the first best is banked
+                # unconfirmed), the gate falls back to its standard
+                # score.
+                reference = (
+                    self._best_score
+                    if self._best_confirm_score is None
+                    else self._best_confirm_score
+                )
+                if not self._improves(confirm_score, reference):
+                    improved = False
+            elif self._improves(confirm_score, self._best_score):
+                # Unpaired: both batches are draws from one stream. Bank
+                # the weaker of the two samples -- under the same
                 # delta-tolerant ordering used everywhere else, not raw
                 # tuple order -- so the stored best stays an estimate a
                 # future genuine improvement can beat, not a lucky
@@ -1034,6 +1293,8 @@ class InfoDictEvalCallback(BaseCallback):
 
         if improved:
             self._best_score = score
+            if self.eval_seed is not None:
+                self._best_confirm_score = confirm_score
             self._evals_since_best = 0
             self._save_best(metrics, confirmation=confirmation)
         elif self._eval_count > self.early_stop_min_evals:
@@ -1044,13 +1305,16 @@ class InfoDictEvalCallback(BaseCallback):
             self._evals_since_best += 1
 
         if self._degenerate_signal(score, metrics):
+            flat_keys = "/".join(
+                self.best_metric_keys[index] for index in self._flat_indices
+            )
             self.stop_reason = (
-                f"degenerate_signal: {'/'.join(self.best_metric_keys)} "
+                f"degenerate_signal: {flat_keys} "
                 f"flat and {'/'.join(self.degenerate_guard_keys)} zero "
                 f"for the last {self.degenerate_stop_evals} evaluations"
             )
             print(
-                f"Stopping training: {'/'.join(self.best_metric_keys)} "
+                f"Stopping training: {flat_keys} "
                 f"flat and {'/'.join(self.degenerate_guard_keys)} zero "
                 f"for the last {self.degenerate_stop_evals} evaluations "
                 f"-- the evaluation signal is dead."
@@ -1082,16 +1346,17 @@ class InfoDictEvalCallback(BaseCallback):
     ) -> bool:
         """True when the eval signal has been provably dead for the window.
 
-        Dead means: the selection score is flat (every key within
-        ``best_metric_min_delta`` of the window's first sample -- so a
-        float-noise key like ``episode_reward_mean`` cannot silently
-        disarm the guard) across the last ``degenerate_stop_evals``
-        evaluations AND every guard key (the lowest rung of the
-        competence ladder) is exactly zero in all of them. Evaluations
-        during the ``degenerate_min_evals`` warm-up never enter the
-        window, so a curriculum run cannot be killed while its schedule
-        still holds the start distribution. A guard key missing from
-        ``metrics`` blocks the guard for that window.
+        Dead means: the selection score is flat (every
+        ``degenerate_flat_keys`` key -- by default every selection key --
+        within its ``best_metric_min_delta`` of the window's first
+        sample, so a float-noise key like ``episode_reward_mean`` cannot
+        silently disarm the guard) across the last
+        ``degenerate_stop_evals`` evaluations AND every guard key (the
+        lowest rung of the competence ladder) is exactly zero in all of
+        them. Evaluations during the ``degenerate_min_evals`` warm-up
+        never enter the window, so a curriculum run cannot be killed
+        while its schedule still holds the start distribution. A guard
+        key missing from ``metrics`` blocks the guard for that window.
         """
         if self.degenerate_stop_evals <= 0:
             return False
@@ -1106,10 +1371,11 @@ class InfoDictEvalCallback(BaseCallback):
             return False
         first, _ = self._recent_signal[0]
         for recorded, _ in self._recent_signal:
-            for value, reference in zip(recorded, first, strict=True):
+            for index in self._flat_indices:
+                value, reference = recorded[index], first[index]
                 if value == reference:
                     continue
-                if abs(value - reference) > self.best_metric_min_delta:
+                if abs(value - reference) > self._min_deltas[index]:
                     return False
         return all(
             all(value == 0.0 for value in recorded_guard)
@@ -1147,6 +1413,20 @@ class InfoDictEvalCallback(BaseCallback):
                 for key in self.best_metric_keys
                 if key in metrics
             },
+            # The selecting batch's full aggregate (reward, *_ep_mean
+            # counters, rates, ...). stage_summary's best-checkpoint
+            # block reports these: under headline selection the reward
+            # series in evaluations.npz is a different stream's episodes,
+            # and the *_final values in eval_info.csv are one (last)
+            # episode, not the batch that won.
+            "metrics": {key: float(value) for key, value in metrics.items()},
+            # Paired evaluation: the seed block the selecting batch rolled
+            # (episode i reset with eval_seed + i), so it can be replayed.
+            **(
+                {"eval_seed": self.eval_seed}
+                if self.eval_seed is not None
+                else {}
+            ),
             # Present only when confirm_best re-sampled the candidate:
             # the independent second batch that the improvement also won.
             **(

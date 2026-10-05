@@ -71,30 +71,17 @@ from courtside_dynamics.training.paddle_diagnosis import (
     native_checkpoint_policy,
 )
 
+try:
+    from tools._seed_ledger import refuse_reserved
+except ModuleNotFoundError:  # run as a script: tools/ itself is on sys.path
+    from _seed_ledger import refuse_reserved  # type: ignore[no-redef]
+
 PROBE_SEED_START = 5200
 PROBE_EPISODES = 30
 WINDOW_CAP_STEPS = 300
-
-_RESERVED_BLOCKS = (
-    (4100, 4199),
-    (4300, 4399),
-    (5300, 5399),
-    (5400, 5499),
-    (5500, 5599),
-    (5600, 6199),
-    (6200, 6299),
-    (6300, 6399),
-)
-
-
-def _refuse_reserved(seed_start: int, episodes: int) -> None:
-    span = range(seed_start, seed_start + episodes)
-    for low, high in _RESERVED_BLOCKS:
-        if any(low <= seed <= high for seed in span):
-            raise SystemExit(
-                f"seed range [{seed_start}, {seed_start + episodes}) intersects "
-                f"reserved/burned block {low}-{high}; refuse to run"
-            )
+#: Diagnosis-side tools read the shared diagnosis calibration block;
+#: every other ledger block (tools/_seed_ledger.py) is refused.
+_DIAGNOSIS_BLOCK = (5200, 5299)
 
 
 @dataclasses.dataclass(slots=True)
@@ -235,7 +222,9 @@ def run_probe(
     windows: list[WindowRecord] = []
     try:
         for seed in range(seed_start, seed_start + episodes):
-            obs, _ = env.reset(seed=seed)
+            obs, _ = env.reset(
+                seed=seed, options={"serve_side": env._next_serving_side}
+            )
             frames = _SideAFrames(env)
             open_window: dict | None = None
             last_points = 0
@@ -339,7 +328,7 @@ def main() -> None:
         raise SystemExit("pass exactly one of --oracle or --model/--vec-normalize")
     if args.model is not None and args.vec_normalize is None:
         raise SystemExit("--model requires --vec-normalize")
-    _refuse_reserved(args.seed_start, args.episodes)
+    refuse_reserved(args.seed_start, args.episodes, allow=(_DIAGNOSIS_BLOCK,))
 
     windows = run_probe(
         args.model,

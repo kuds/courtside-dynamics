@@ -63,6 +63,16 @@ from courtside_dynamics.training.paddle_diagnosis import (
     run_player,
 )
 
+try:
+    from tools._seed_ledger import refuse_reserved
+except ModuleNotFoundError:  # run as a script: tools/ itself is on sys.path
+    from _seed_ledger import refuse_reserved  # type: ignore[no-redef]
+
+#: The shared diagnosis calibration block (diagnosis-side tools only).
+#: Every other ledger block (the shared tools/_seed_ledger.py) is
+#: refused.
+_DIAGNOSIS_BLOCK = (5200, 5299)
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -86,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.model and not args.vec_normalize:
         parser.error("--model requires --vec-normalize")
+    refuse_reserved(args.seed_start, args.episodes, allow=(_DIAGNOSIS_BLOCK,))
 
     if args.model:
         policy = native_checkpoint_policy(

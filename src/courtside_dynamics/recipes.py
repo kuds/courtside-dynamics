@@ -14,6 +14,7 @@ new env is one entry in :data:`RECIPES`; the notebook needs no edits.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -253,6 +254,21 @@ _PADDLE_TENNIS_CSV_KEYS = (
     "points_played",
     "completed_point_crossings",
     "point_serve_nudged",
+    # Episode-cumulative side-A counters and the contact-depth
+    # instrument (2026-10-05 review §4.1/§7.2): the per-point counters
+    # above reset at every n-point boundary, so these are the policy's
+    # own whole-episode record; contact_depth_a is per step (|x| of a
+    # side-A legal hit's contact, 0.0 on other steps).
+    # episode_mean_contact_depth_a reads a 0.0 sentinel until the
+    # episode's first legal hit; episode_contact_depth_sum_a is the
+    # undiluted running sum behind it.
+    "episode_legal_hit_count_a",
+    "episode_valid_return_count_a",
+    "episode_rally_returns_a",
+    "contact_depth_a",
+    "episode_contact_depth_sum_a",
+    "episode_mean_contact_depth_a",
+    "episode_deep_returns_a",
 )
 _PADDLE_TENNIS_CSV_HEADER = [
     *_PADDLE_TENNIS_CSV_KEYS,
@@ -305,6 +321,22 @@ _PADDLE_TENNIS_TERMINAL_EVAL_KEYS = (
     "point_end_illegal_hit",
     "point_end_net_touch",
     "point_end_volley",
+    # Episode-cumulative side-A counters (2026-10-05 review §7.2): the
+    # terminal read is the episode total across every point, unlike
+    # the per-point legal_hit_count_a, which reads only the last,
+    # truncation-cut point (the oracle made 7 hits in each of 3
+    # episodes while that key read 7/7/3).
+    "episode_legal_hit_count_a",
+    "episode_valid_return_count_a",
+    "episode_rally_returns_a",
+    "episode_deep_returns_a",
+    # The batch's hit-weighted mean contact depth is
+    # episode_contact_depth_sum_a_ep_mean /
+    # episode_legal_hit_count_a_ep_mean. episode_mean_contact_depth_a
+    # reads its 0.0 sentinel on every hitless episode, so its _ep_mean
+    # is diluted by them (it stays as the per-episode view).
+    "episode_contact_depth_sum_a",
+    "episode_mean_contact_depth_a",
 )
 
 # The env's nine-component reward decomposition: per-step increments
@@ -1196,41 +1228,112 @@ RECIPES: dict[str, Recipe] = {
             "normalize_obs_excluded_indices": (_PADDLE_TENNIS_NORMALIZATION_EXCLUSIONS),
             "csv_header": _PADDLE_TENNIS_CSV_HEADER,
             "info_row_fn": _paddle_tennis_info_row,
-            # Headline selection stays on crossings (the era's bridge
-            # metric), but success moves to the side-A-only hit count:
-            # under continuous play the opponent's serve-returns alone
-            # clear any crossings threshold (success_rate read 1.000
-            # at all 80 evals of the failed L2 pilot), and the plain
-            # legal_hit_count counts both sides (~0.37 nonzero mean on
-            # a zero-contact run). legal_hit_count_a is the policy's
-            # own final-point hit count — exactly zero for a dead
-            # policy, which is also what arms the degenerate guard
-            # below (review doc §4c; the L2W-hardened guard set).
-            "success_key": "legal_hit_count_a",
+            # Selection and success follow the policy's own k>=2
+            # conversions (2026-10-05 review §4.1/§7.2). crossings
+            # counts both sides' returns, so the opponent's
+            # serve-returns dominate it, and the per-point
+            # legal_hit_count_a read only the last, truncation-cut
+            # point of an n-point episode (the oracle made 7 hits in
+            # each of 3 episodes; the terminal key read 7/7/3).
+            # episode_rally_returns_a counts side-A confirmed returns
+            # that were not side A's first of their point, over the
+            # whole episode (k counts from each point's launch, so a
+            # drilled point starts at k=0 under either drill arm), so
+            # it is the k=2 target itself; success =
+            # the fraction of eval episodes with at least one such
+            # conversion. crossings stays logged as a diagnostic.
+            "success_key": "episode_rally_returns_a",
             "success_threshold": 1.0,
-            "headline_key": "crossings",
+            "headline_key": "episode_rally_returns_a",
             "info_eval_keys": (
                 "crossings",
                 "rally_count",
                 "legal_hit_count",
                 "legal_hit_count_a",
                 "bounce_count",
+                # Episode-cumulative side-A counters and the
+                # contact-depth instrument (C1; see the CSV keys).
+                # contact_depth_a is per step and 0.0 off a hit, so
+                # its _mean is diluted; read its _max here. The
+                # hit-weighted mean depth over an eval batch is
+                # episode_contact_depth_sum_a_ep_mean /
+                # episode_legal_hit_count_a_ep_mean (terminal keys):
+                # episode_mean_contact_depth_a reads a 0.0 sentinel
+                # before an episode's first legal hit, so its _mean
+                # and _ep_mean are diluted too.
+                "episode_legal_hit_count_a",
+                "episode_valid_return_count_a",
+                "episode_rally_returns_a",
+                "contact_depth_a",
+                "episode_mean_contact_depth_a",
+                "episode_deep_returns_a",
                 # Reward decomposition -> per-episode dose audit in
                 # eval_info.csv (see the constant's comment).
                 *_PADDLE_TENNIS_REWARD_COMPONENT_KEYS,
             ),
-            # Selection/stop hygiene, measured in on the pilots: the
-            # min-delta sits above the ±0.2 opponent-crossings noise
-            # that re-crowned best_model for 80 straight evals on the
-            # L2 run; confirm_best_eval is the WallBall precedent; the
-            # degenerate guard kills a zero-contact run in ~5 evals
-            # (~125k steps) instead of a full budget.
-            "best_metric_min_delta": 0.25,
+            # Selection/stop hygiene. One scalar delta applied across
+            # keys of different scale meant a +20 pp success_rate gain
+            # at a tied headline did not count (review §7.2), so the
+            # deltas are per key. The two episode aggregates take half
+            # their 1/30 per-episode granularity (n_eval_episodes is
+            # the default 30), per best_metric_min_delta's docs: one
+            # extra conversion (+1/30 on the headline, and on
+            # success_rate when it is the episode's first) registers,
+            # where 0.05 needed two and let a converting best be
+            # replaced through the reward tie-break by one that never
+            # converts. 0.25 stays on the continuous reward tie-break.
+            # confirm_best_eval is the WallBall precedent. The
+            # degenerate guard arms on a policy that never makes a
+            # legal hit in the whole episode and needs only the
+            # headline flat: requiring the wandering
+            # episode_reward_mean to be flat too stopped a dead statue
+            # run at eval 9-26 instead of the designed eval 5.
+            "best_metric_min_delta": {
+                "episode_rally_returns_a_ep_mean": 0.5 / 30,
+                "success_rate": 0.5 / 30,
+                "episode_reward_mean": 0.25,
+            },
             "confirm_best_eval": True,
             "early_stop_degenerate_evals": 5,
-            "degenerate_guard_keys": ("legal_hit_count_a_ep_mean",),
+            "degenerate_guard_keys": ("episode_legal_hit_count_a_ep_mean",),
+            "degenerate_flat_keys": ("episode_rally_returns_a_ep_mean",),
             "info_eval_terminal_keys": _PADDLE_TENNIS_TERMINAL_EVAL_KEYS,
-            "info_eval_distribution_keys": ("crossings",),
+            "info_eval_distribution_keys": (
+                "crossings",
+                "episode_rally_returns_a",
+                "episode_legal_hit_count_a",
+            ),
+            # The reward EvalCallback stream is reporting-only under
+            # headline selection, yet rolled the full 30 episodes on
+            # the same distribution as the selection stream: 60 x 1500
+            # eval steps per 25k training steps before confirm_best
+            # (review §4.3/§7.2; WallBall precedent). 5 episodes keep
+            # evaluations.npz alive.
+            "reward_eval_episodes": 5,
+            # Paired evaluation (review §4.1): setting reset options
+            # opts the recipe in, so a seeded run derives eval_seed =
+            # seed + EVAL_SEED_OFFSET (train.resolve_eval_seed) and
+            # every evaluation replays the same feeds. A seeded reset
+            # always serves side A, so the options alternate the first
+            # serve to keep the batch half policy-serving, half
+            # policy-receiving. An unseeded build (seed=None, no
+            # eval_seed) drops these recipe options with a warning and
+            # evaluates unpaired, where the unseeded resets alternate
+            # the serve on their own; "none" in a run file opts a
+            # seeded run out of pairing the same way.
+            "eval_reset_options": (
+                {"serve_side": "a"},
+                {"serve_side": "b"},
+            ),
+            # Episode totals in every training-worker monitor row, so
+            # the learning curve carries the policy's own counters
+            # next to the reward.
+            "monitor_info_keywords": (
+                "episode_legal_hit_count_a",
+                "episode_valid_return_count_a",
+                "episode_rally_returns_a",
+                "crossings",
+            ),
             # Behavioral diagnosis at every checkpoint save: the
             # exchange/positioning instrument that separated the
             # ground-era pilot's plateau (one memorized serve-return
@@ -1625,6 +1728,13 @@ _QUICK_TEST_OVERRIDES: dict[str, Any] = {
     "video_length": 750,
 }
 
+#: Episode cap for a recipe's ``checkpoint_diagnosis`` under
+#: ``quick_test``. The recipe's 30-episode diagnosis at every
+#: checkpoint dominated the smoke test's wall clock (~135k serial env
+#: steps against a 25k-step budget; 2026-08-28 review §3). Only a
+#: recipe that already runs the diagnosis is scaled; none gains one.
+_QUICK_TEST_DIAGNOSIS_EPISODES = 3
+
 
 def make_env_fn(
     env_name: str,
@@ -1685,6 +1795,45 @@ def make_eval_env_fn(
     return _factory
 
 
+def _drop_unpairable_recipe_reset_options(
+    env_name: str,
+    cfg_kwargs: dict[str, Any],
+    recipe: Recipe,
+    file_config: Any,
+    overrides: Mapping[str, Any],
+) -> None:
+    """Drop a recipe's own ``eval_reset_options`` from an unseeded build.
+
+    Reset options are applied only by paired evaluation, which needs a
+    seed (``eval_seed``, or ``seed`` to derive one from), and
+    ``train()`` refuses options it could not apply. A recipe that opts
+    into pairing through its options would otherwise turn the
+    documented "``seed=None`` for a nondeterministic run" into a
+    ``train()``-time ValueError. Only options the recipe itself
+    supplied are dropped (with a warning): options a run file or an
+    explicit override set are the caller's choice, and ``train()``
+    still refuses those loudly.
+    """
+    if cfg_kwargs.get("eval_reset_options") is None:
+        return
+    if cfg_kwargs.get("seed") is not None or cfg_kwargs.get("eval_seed") is not None:
+        return
+    if "eval_reset_options" not in recipe.extra_cfg:
+        return
+    if "eval_reset_options" in overrides:
+        return
+    if file_config is not None and "eval_reset_options" in file_config.train:
+        return
+    cfg_kwargs["eval_reset_options"] = None
+    warnings.warn(
+        f"{env_name}: unseeded run (seed=None, no eval_seed), so evaluation "
+        f"is unpaired and the recipe's eval_reset_options are dropped; the "
+        f"unpaired stream's unseeded resets alternate the serve on their "
+        f"own. Seed the run (or set eval_seed) for paired evaluation.",
+        stacklevel=3,
+    )
+
+
 def build_train_config(
     env_name: str,
     *,
@@ -1713,7 +1862,8 @@ def build_train_config(
     quick_test:
         Apply :data:`_QUICK_TEST_OVERRIDES` so the whole pipeline runs
         end-to-end in a couple of minutes -- handy for smoke-testing on
-        a new Colab runtime.
+        a new Colab runtime. A recipe's ``checkpoint_diagnosis`` is
+        capped at :data:`_QUICK_TEST_DIAGNOSIS_EPISODES` episodes too.
     config_file:
         Optional path to a TOML run-configuration file
         (docs/run_config_file_spec.md). Its ``[train]`` table sits
@@ -1779,7 +1929,12 @@ def build_train_config(
         "name_prefix": f"{recipe.name_prefix}_{resolved_algo.lower()}",
         "total_timesteps": recipe.default_total_timesteps,
     }
-    cfg_kwargs.update(recipe.extra_cfg)
+    # Deep-copied: TrainConfig keeps the dicts it is given, so a shallow
+    # update would alias the recipe's own model_kwargs/checkpoint_diagnosis
+    # into every config -- one notebook leg mutating its
+    # cfg.model_kwargs would silently retune every later build of the
+    # same recipe in that process.
+    cfg_kwargs.update(deepcopy(recipe.extra_cfg))
 
     if file_config is not None:
         from courtside_dynamics.run_config import merge_train_overrides
@@ -1789,6 +1944,15 @@ def build_train_config(
 
     if quick_test:
         cfg_kwargs.update(_QUICK_TEST_OVERRIDES)
+        diagnosis = cfg_kwargs.get("checkpoint_diagnosis")
+        if isinstance(diagnosis, Mapping):
+            cfg_kwargs["checkpoint_diagnosis"] = {
+                **diagnosis,
+                "episodes": min(
+                    int(diagnosis.get("episodes", 30)),
+                    _QUICK_TEST_DIAGNOSIS_EPISODES,
+                ),
+            }
 
     # Explicit caller choices are applied last so they always win --
     # including over the quick-test presets and a config file.
@@ -1798,6 +1962,10 @@ def build_train_config(
     if total_timesteps is not None:
         cfg_kwargs["total_timesteps"] = total_timesteps
     cfg_kwargs.update(overrides)
+
+    _drop_unpairable_recipe_reset_options(
+        env_name, cfg_kwargs, recipe, file_config, overrides
+    )
 
     # Validate the merged model_kwargs (recipe extra_cfg, TOML deep-merge,
     # and explicit overrides alike) against the resolved algorithm's

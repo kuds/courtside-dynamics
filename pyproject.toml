@@ -24,7 +24,9 @@ classifiers = [
 
 dependencies = [
     "mujoco>=3.3",
-    "gymnasium>=1.0",
+    # 1.1: the gate/schedule callbacks call set_wrapper_attr(..., force=False)
+    # and read its bool result; 1.0.0 has neither the keyword nor the return.
+    "gymnasium>=1.1",
     "numpy>=1.26",
     # Gymnasium imports these from its MuJoCo rendering module when the env
     # classes are imported, but does not declare them as core dependencies.

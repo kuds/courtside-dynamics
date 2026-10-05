@@ -731,6 +731,130 @@ class TestBuildTrainConfig:
             2.0,
         ]
 
+    def test_per_key_min_delta_table_replaces_the_recipe_mapping(
+        self, tmp_path
+    ):
+        """Contract C3: a ``[train.best_metric_min_delta]`` table reaches
+        TrainConfig as the per-key mapping, replacing the recipe's
+        value wholesale (no element-wise merge of scalar and table, nor
+        of two tables: the recipe's own mapping names a third key)."""
+        assert "episode_reward_mean" in (
+            RECIPES["PaddleTennis"].extra_cfg["best_metric_min_delta"]
+        )
+        path = _write(
+            tmp_path,
+            "[train.best_metric_min_delta]\n"
+            "episode_rally_returns_a_ep_mean = 0.1\n"
+            "success_rate = 0.05\n",
+        )
+        cfg = build_train_config(
+            "PaddleTennis", log_dir=str(tmp_path), config_file=path
+        )
+        assert cfg.best_metric_min_delta == {
+            "episode_rally_returns_a_ep_mean": 0.1,
+            "success_rate": 0.05,
+        }
+
+
+class TestEvaluationFields:
+    """Contract C3's new TrainConfig fields load from TOML and fail at load
+    on the wrong shape (train() re-checks the semantics)."""
+
+    def test_fields_load(self, tmp_path):
+        path = _write(
+            tmp_path,
+            "[train]\n"
+            'degenerate_flat_keys = ["crossings_ep_mean", "success_rate"]\n'
+            "eval_seed = 7\n"
+            'eval_reset_options = [{serve_side = "a"}, {serve_side = "b"}]\n'
+            'monitor_info_keywords = ["episode_legal_hit_count_a"]\n'
+            "[train.best_metric_min_delta]\n"
+            "crossings_ep_mean = 0.25\n"
+            "success_rate = 0.05\n",
+        )
+        train = load_run_config(path).train
+        assert train["best_metric_min_delta"] == {
+            "crossings_ep_mean": 0.25,
+            "success_rate": 0.05,
+        }
+        assert train["degenerate_flat_keys"] == [
+            "crossings_ep_mean",
+            "success_rate",
+        ]
+        assert train["eval_seed"] == 7
+        assert train["eval_reset_options"] == [
+            {"serve_side": "a"},
+            {"serve_side": "b"},
+        ]
+        assert train["monitor_info_keywords"] == ["episode_legal_hit_count_a"]
+        # Scalars and the Optional fields' sentinel still load.
+        path = _write(
+            tmp_path,
+            "[train]\n"
+            "best_metric_min_delta = 0.1\n"
+            'eval_seed = "none"\n'
+            'degenerate_flat_keys = "none"\n'
+            'eval_reset_options = "none"\n',
+            "scalars.toml",
+        )
+        train = load_run_config(path).train
+        assert train["best_metric_min_delta"] == 0.1
+        assert train["eval_seed"] is None
+        assert train["degenerate_flat_keys"] is None
+        assert train["eval_reset_options"] is None
+
+    @pytest.mark.parametrize(
+        ("text", "message"),
+        [
+            (
+                "[train.best_metric_min_delta]\nsuccess_rate = true\n",
+                "success_rate must be a number",
+            ),
+            (
+                '[train.best_metric_min_delta]\nsuccess_rate = "none"\n',
+                "success_rate must be a number",
+            ),
+            (
+                '[train]\nbest_metric_min_delta = "0.25"\n',
+                "number or a table",
+            ),
+            (
+                '[train]\nbest_metric_min_delta = "none"\n',
+                "best_metric_min_delta.*not supported",
+            ),
+            (
+                '[train]\ndegenerate_flat_keys = "success_rate"\n',
+                "degenerate_flat_keys must be an array of strings",
+            ),
+            (
+                "[train]\nmonitor_info_keywords = [1]\n",
+                "monitor_info_keywords must be an array of strings",
+            ),
+            (
+                '[train]\nmonitor_info_keywords = "none"\n',
+                "monitor_info_keywords.*not supported",
+            ),
+            ("[train]\neval_seed = 1.5\n", "eval_seed must be an integer"),
+            ("[train]\neval_seed = true\n", "eval_seed must be an integer"),
+            (
+                '[train]\neval_reset_options = ["a"]\n',
+                "eval_reset_options must be an array of tables",
+            ),
+            (
+                '[train.eval_reset_options]\nserve_side = "a"\n',
+                "eval_reset_options must be an array of tables",
+            ),
+            (
+                "[train]\nreuse_log_dir = true\n",
+                "reuse_log_dir.*not file-configurable",
+            ),
+        ],
+    )
+    def test_bad_shapes_fail_at_load(self, tmp_path, text, message):
+        path = _write(tmp_path, text)
+        with pytest.raises(ValueError, match=message):
+            load_run_config(path)
+
 
 class TestArtifacts:
     def test_run_dir_gets_copy_and_provenance_block(self, tmp_path):

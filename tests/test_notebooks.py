@@ -413,8 +413,24 @@ def test_campaign_notebook_resumes_and_branches_via_helpers() -> None:
     )
     assert "load_campaign_manifest" in source
     assert "write_campaign_manifest" in source
-    assert "require_campaign_fingerprint(manifest, FINGERPRINT)" in source
+    assert (
+        "require_campaign_fingerprint(\n"
+        "        manifest, FINGERPRINT, late_keys=LATE_FINGERPRINT_KEYS\n"
+        "    )"
+    ) in source
     assert "next_stage_attempt_dir(CAMPAIGN_ROOT, stage_name)" in source
+    # Each leg re-enters through the tested resume helper: a validated,
+    # finished attempt that was never scored is re-scored, not retrained.
+    assert "campaign_leg_resume_point(" in source
+    assert 'if gate_resume == "train":' in source
+    assert 'if main_resume == "train":' in source
+    # A warm-start source must be a verified best-model/normalizer pair.
+    assert (
+        "pair = verify_best_checkpoint_pair(warm_start.source_run_dir)"
+        in source
+    )
+    # The branch decision records the middle-verdict rule it ran under.
+    assert '"middle_action": GATE_MIDDLE_ACTION,' in source
     # The gate and final report use the shared scorer.
     assert "score_paddle_stage(" in source
     assert "bars=GATE_BARS" in source
@@ -596,6 +612,10 @@ _PRE_ALGO_FINGERPRINT_KEYS = {
     "gate_bars",
     "fallback_warm_start_run_dir",
 }
+# Decision-shaping settings fingerprinted after campaigns were in flight
+# (2026-08-28 review section 3): every new manifest records them, and a
+# manifest recorded before them adopts them on its first resume.
+_LATE_FINGERPRINT_KEYS = {"gate_middle_action", "final_report_bars"}
 
 _DEMO_LEG_KWARGS = {
     "demo_library": "/content/drive/MyDrive/k2_demo_library.pkl",
@@ -639,13 +659,27 @@ def test_campaign_default_plan_is_unchanged_by_the_algo_knobs(tmp_path) -> None:
     """With the knobs at their defaults the notebook builds exactly the
     historical legs: the recipe's SAC, the recipe bundle (plus
     learning_starts on a warm-started leg), no model-kwargs pins, and
-    the pre-knob fingerprint key set -- so a campaign already in flight
-    still resumes."""
+    the pre-knob fingerprint key set plus the late-joining keys -- which
+    a campaign already in flight adopts, so it still resumes."""
+    from courtside_dynamics.notebook_utils import require_campaign_fingerprint
     from courtside_dynamics.recipes import RECIPES
     from courtside_dynamics.training import WarmStartConfig
 
     ns = _exec_campaign_plan()
-    assert set(ns["FINGERPRINT"]) == _PRE_ALGO_FINGERPRINT_KEYS
+    fingerprint = ns["FINGERPRINT"]
+    assert set(fingerprint) == _PRE_ALGO_FINGERPRINT_KEYS | _LATE_FINGERPRINT_KEYS
+    assert set(ns["LATE_FINGERPRINT_KEYS"]) == _LATE_FINGERPRINT_KEYS
+    pre_key_manifest = {
+        "fingerprint": {
+            key: value
+            for key, value in fingerprint.items()
+            if key in _PRE_ALGO_FINGERPRINT_KEYS
+        }
+    }
+    adopted = require_campaign_fingerprint(
+        pre_key_manifest, fingerprint, late_keys=ns["LATE_FINGERPRINT_KEYS"]
+    )
+    assert set(adopted) == _LATE_FINGERPRINT_KEYS
     assert ns["RESOLVED_ALGO"] == "SAC"
     recipe_bundle = RECIPES["PaddleTennis"].extra_cfg["model_kwargs"]
 
@@ -797,3 +831,189 @@ def test_campaign_settings_refuse_misconfigured_algo_knobs() -> None:
     _exec_campaign_plan(
         (("LEG1_MODEL_KWARGS = {}", 'LEG1_MODEL_KWARGS = {"learning_starts": 1}'),)
     )
+
+
+def test_campaign_fingerprint_freezes_middle_action_and_final_bars() -> None:
+    """2026-08-28 review section 3: GATE_MIDDLE_ACTION shapes the branch
+    decision and FINAL_REPORT_BARS defines the final reading, yet
+    neither was fingerprinted -- a resume could silently flip either."""
+    import pytest
+
+    from courtside_dynamics.notebook_utils import require_campaign_fingerprint
+
+    created = _exec_campaign_plan()
+    manifest = {"fingerprint": created["FINGERPRINT"]}
+    assert manifest["fingerprint"]["gate_middle_action"] == "stop"
+    assert (
+        manifest["fingerprint"]["final_report_bars"]
+        == created["FINAL_REPORT_BARS"]
+    )
+
+    flipped = _exec_campaign_plan(
+        (('GATE_MIDDLE_ACTION = "stop"', 'GATE_MIDDLE_ACTION = "continue"'),)
+    )
+    with pytest.raises(ValueError, match="gate_middle_action"):
+        require_campaign_fingerprint(
+            manifest,
+            flipped["FINGERPRINT"],
+            late_keys=flipped["LATE_FINGERPRINT_KEYS"],
+        )
+    rebarred = _exec_campaign_plan()
+    rebarred["FINAL_REPORT_BARS"]["RK1"]["pass_at"] = 0.5
+    with pytest.raises(ValueError, match="final_report_bars"):
+        require_campaign_fingerprint(
+            manifest,
+            rebarred["FINGERPRINT"],
+            late_keys=rebarred["LATE_FINGERPRINT_KEYS"],
+        )
+    # Adoption covers only a manifest that never recorded the key: one
+    # that recorded a different value is refused like any other key.
+    with pytest.raises(ValueError, match="gate_middle_action"):
+        require_campaign_fingerprint(
+            {"fingerprint": flipped["FINGERPRINT"]},
+            created["FINGERPRINT"],
+            late_keys=created["LATE_FINGERPRINT_KEYS"],
+        )
+
+
+def test_campaign_warm_start_comment_states_the_policy_warmup() -> None:
+    """train() samples the pretrained gSDE policy during a warm start's
+    learning_starts refill (use_sde_at_warmup); the frozen knob's
+    comment must not describe the old uniform-random warmup as current."""
+    settings = next(
+        _source(cell)
+        for cell in _load_campaign_notebook()["cells"]
+        if cell["cell_type"] == "code" and 'CAMPAIGN_ID = "' in _source(cell)
+    )
+    comment = settings[: settings.index("WARM_START_LEARNING_STARTS = 25_000")]
+    comment = comment[comment.rindex("# Warm-started legs only") :]
+    assert "use_sde_at_warmup=True" in comment
+    assert "sample the pretrained\n# policy" in comment
+
+
+def _make_finished_attempt(attempt_dir: Path, status: str) -> Path:
+    """A leg attempt as train() leaves it: the protected best pair, the
+    selection record binding its digests, config.json, and the summary
+    -- everything score_paddle_stage checks before a policy load (the
+    resume point runs the same check)."""
+    import hashlib
+
+    (attempt_dir / "model").mkdir(parents=True)
+    (attempt_dir / "model" / "best_model.zip").write_bytes(b"zip")
+    (attempt_dir / "model" / "best_vec_normalize.pkl").write_bytes(b"pkl")
+    digests = {
+        name: {"sha256": hashlib.sha256(payload).hexdigest()}
+        for name, payload in (
+            ("best_model.zip", b"zip"),
+            ("best_vec_normalize.pkl", b"pkl"),
+        )
+    }
+    (attempt_dir / "model" / "best_model_meta.json").write_text(
+        json.dumps({"timestep": 1, "artifacts": digests})
+    )
+    (attempt_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "evaluation_env": {
+                    "class": "PaddleTennisEnv",
+                    "constructor_kwargs": {},
+                }
+            }
+        )
+    )
+    (attempt_dir / "stage_summary.txt").write_text(
+        f"Algorithm:      SAC\nStatus:         {status}\n"
+    )
+    return attempt_dir
+
+
+def _run_campaign_loop(tmp_path: Path, gate_record: dict[str, Any]):
+    """Execute the campaign's loop cell against a manifest holding
+    ``gate_record``, with training and scoring stubbed out; the gate
+    scores MIDDLE so the default "stop" rule ends the execution."""
+    from courtside_dynamics.notebook_utils import write_campaign_manifest
+
+    ns = _exec_campaign_plan()
+    loop = next(
+        _source(cell)
+        for cell in _load_campaign_notebook()["cells"]
+        if cell["cell_type"] == "code" and "# --- Leg 1:" in _source(cell)
+    )
+    manifest = {
+        "campaign_id": "campaign_test",
+        "status": "running",
+        "fingerprint": ns["FINGERPRINT"],
+        "stages": {ns["GATE_STAGE"]: gate_record},
+    }
+    trained: list[str] = []
+    scored: list[str] = []
+    fresh_dir = _make_finished_attempt(tmp_path / "fresh_attempt", "completed")
+
+    def run_leg(stage_name, **kwargs):
+        trained.append(stage_name)
+        return str(fresh_dir)
+
+    def score_paddle_stage(run_dir, **kwargs):
+        scored.append(str(run_dir))
+        return {"verdict": "MIDDLE", "bars": {"LS-C": {"verdict": "MIDDLE"}}}
+
+    ns.update(
+        manifest=manifest,
+        CAMPAIGN_ROOT=tmp_path,
+        Path=Path,
+        write_campaign_manifest=write_campaign_manifest,
+        run_leg=run_leg,
+        score_paddle_stage=score_paddle_stage,
+    )
+    exec(compile(loop, f"{CAMPAIGN_NOTEBOOK}:loop", "exec"), ns)
+    return ns, manifest, trained, scored, str(fresh_dir)
+
+
+def test_campaign_resume_rescores_a_trained_leg_instead_of_retraining(
+    tmp_path,
+) -> None:
+    """2026-08-28 review section 3: a disconnect between a leg's training
+    and its scoring retrained the whole leg on resume (1M-3M steps),
+    because only 'complete' counted as done. A validated, finished
+    'trained' attempt now re-enters at scoring; nothing retrains."""
+    gate_dir = _make_finished_attempt(tmp_path / "attempt_01", "completed")
+    ns, manifest, trained, scored, _ = _run_campaign_loop(
+        tmp_path,
+        {
+            "status": "trained",
+            "run_dir": str(gate_dir),
+            "config_validation": {"verdict": "ok"},
+        },
+    )
+    assert trained == []
+    assert scored == [str(gate_dir)]
+    record = manifest["stages"][ns["GATE_STAGE"]]
+    assert record["status"] == "complete"
+    assert record["run_dir"] == str(gate_dir)
+    assert record["config_validation"] == {"verdict": "ok"}
+    # The decision records the middle-verdict rule that routed it.
+    assert manifest["branch"] == {
+        "branch": "stop",
+        "warm_start_source": None,
+        "forced": False,
+        "middle_action": "stop",
+    }
+    assert manifest["status"] == "stopped_at_gate"
+
+
+def test_campaign_resume_retrains_an_interrupted_leg(tmp_path) -> None:
+    """The pre-fix notebook booked an interrupted leg 'trained' before its
+    interruption check; such an attempt can never be gated, so the
+    resume trains a fresh attempt instead of scoring it."""
+    gate_dir = _make_finished_attempt(tmp_path / "attempt_01", "interrupted")
+    ns, manifest, trained, scored, fresh_dir = _run_campaign_loop(
+        tmp_path,
+        {
+            "status": "trained",
+            "run_dir": str(gate_dir),
+            "config_validation": {"verdict": "ok"},
+        },
+    )
+    assert trained == [ns["GATE_STAGE"]]
+    assert scored == [fresh_dir]
+    assert manifest["stages"][ns["GATE_STAGE"]]["run_dir"] == fresh_dir

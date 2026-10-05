@@ -231,6 +231,120 @@ def test_plot_learning_curve_marks_best_checkpoint(tmp_path):
         plt.close(fig)
 
 
+def _best_marker_lines(fig):
+    """``(label, x)`` of every best-checkpoint marker on both eval panels."""
+    return [
+        (line.get_label(), line.get_xdata()[0])
+        for ax in fig.axes[2:]
+        for line in ax.get_lines()
+        if str(line.get_label()).startswith("best checkpoint")
+    ]
+
+
+def test_plot_learning_curve_marks_the_headline_selected_checkpoint(tmp_path):
+    """Under headline selection best_model.zip is the task-metric best
+    (best_model_meta.json's timestep), not the reward argmax -- the
+    2026-10-05 review's 5b #9: the marker pointed at a model nobody
+    saved."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from courtside_dynamics.notebook_utils import plot_learning_curve
+
+    reward_best = _write_synthetic_evaluations(tmp_path)
+    (tmp_path / "best_model_meta.json").write_text(
+        json.dumps(
+            {"timestep": 900_000, "selection_keys": ["bounce_count_ep_mean"]}
+        )
+    )
+    fig = plot_learning_curve(tmp_path, show=False)
+    try:
+        markers = _best_marker_lines(fig)
+        assert markers == [
+            ("best checkpoint (bounce_count_ep_mean)", 900_000),
+        ] * 2
+        assert all(x != reward_best for _, x in markers)
+    finally:
+        plt.close(fig)
+
+    # A record without a usable timestep marks nothing rather than fall
+    # back to the reward argmax it is known not to be.
+    (tmp_path / "best_model_meta.json").write_text(json.dumps({"timestep": -1}))
+    fig = plot_learning_curve(tmp_path, show=False)
+    try:
+        assert _best_marker_lines(fig) == []
+    finally:
+        plt.close(fig)
+
+
+def test_check_run_artifacts_explains_a_missing_selection_record(
+    tmp_path, capsys
+):
+    check_run_artifacts(tmp_path)
+    out = capsys.readouterr().out
+    meta_line = next(
+        line for line in out.splitlines() if line.startswith("best_model_meta:")
+    )
+    assert "reward-selected recipes" in meta_line
+    best_line = next(
+        line for line in out.splitlines() if line.startswith("best_model:")
+    )
+    assert "InfoDictEvalCallback" in best_line
+    assert "headline metric" in best_line
+
+
+def test_learning_curve_reads_monitor_csvs_with_info_columns(tmp_path):
+    """Training-worker Monitors may record ``info_keywords``
+    (``TrainConfig.monitor_info_keywords``): extra per-episode columns
+    after ``r,l,t``, numeric or string. The readers select columns by
+    name, so the series and the plot are unchanged by them. Files are
+    written by SB3's own ``ResultsWriter`` to pin the real format."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from stable_baselines3.common.monitor import ResultsWriter
+
+    from courtside_dynamics.notebook_utils import (
+        _read_monitor_logs,
+        plot_learning_curve,
+    )
+
+    monitor_dir = tmp_path / RUN_LAYOUT["monitor_dir"]
+    monitor_dir.mkdir(parents=True)
+    keys = ("episode_legal_hit_count_a", "termination_reason_name")
+    episodes_by_worker = {
+        0: [(1.0, 10, 1.0, 2, "out_of_bounds"), (3.0, 30, 5.0, 4, "none")],
+        1: [(2.0, 20, 2.0, 0, "ball_net")],
+    }
+    for worker, episodes in episodes_by_worker.items():
+        writer = ResultsWriter(
+            str(monitor_dir / str(worker)),
+            header={"t_start": 100.0, "env_id": "PaddleTennis"},
+            extra_keys=keys,
+        )
+        for reward, length, elapsed, hits, reason in episodes:
+            writer.write_row(
+                {"r": reward, "l": length, "t": elapsed, keys[0]: hits, keys[1]: reason}
+            )
+        writer.close()
+    header = (monitor_dir / "0.monitor.csv").read_text().splitlines()[1]
+    assert header == "r,l,t," + ",".join(keys)
+
+    rewards, lengths = _read_monitor_logs(str(monitor_dir))
+    # Wall-clock order across workers, reward/length columns only.
+    assert rewards.tolist() == [1.0, 2.0, 3.0]
+    assert lengths.tolist() == [10, 20, 30]
+    fig = plot_learning_curve(tmp_path, show=False, smoothing=1)
+    try:
+        reward_line = fig.axes[0].get_lines()[0]
+        assert reward_line.get_ydata().tolist() == [1.0, 2.0, 3.0]
+    finally:
+        plt.close(fig)
+
+
 def test_write_run_summary_lists_artifacts_from_shared_registry(tmp_path):
     """The report's Artifacts section iterates ``EXPECTED_ARTIFACTS`` (minus
     the report itself), so it and ``check_run_artifacts`` can't drift."""
@@ -800,6 +914,48 @@ def test_evaluate_best_wall_ball_rejects_hash_mismatched_pair(tmp_path):
         raise AssertionError("hash-mismatched model/normalizer pair did not fail")
 
 
+def test_evaluate_best_wall_ball_refuses_seeds_the_paired_selection_replayed(
+    tmp_path,
+):
+    """A paired run resets selection episode i with <block start> + i at
+    every evaluation (likewise its confirmation and final-info-eval
+    blocks). A seed-0 run that derived eval_seed = 10_000 rolled its
+    60-episode selection batch on 10,000-10,059, so the default "held-out"
+    long-horizon seeds 10,000-10,049 replayed the selection episodes.
+    The audit now refuses seeds inside any recorded block, before any
+    policy loads."""
+    from courtside_dynamics.notebook_utils import (
+        _paired_evaluation_seed_overlap,
+    )
+
+    _write_wall_ball_best_artifacts(tmp_path)
+    config = json.loads((tmp_path / "config.json").read_text())
+    config["train_config"]["n_eval_episodes"] = 60
+    config["evaluation_seeding"] = {
+        "paired": True,
+        "eval_seed": 10_000,
+        "derived_from_seed": True,
+        "selection_batch_seed_start": 10_000,
+        "confirmation_batch_seed_start": 110_000,
+        "final_info_eval_seed_start": 210_000,
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+
+    with pytest.raises(ValueError, match="not held out"):
+        evaluate_best_wall_ball(tmp_path, lambda: None, episode_len=3)
+    with pytest.raises(ValueError, match="confirmation_batch_seed_start"):
+        evaluate_best_wall_ball(
+            tmp_path, lambda: None, episode_len=3, seeds=(110_059,)
+        )
+    # Seeds past every block, and any unpaired run, pass the guard.
+    assert _paired_evaluation_seed_overlap(config, range(20_000, 20_050)) == []
+    assert _paired_evaluation_seed_overlap(config, (10_060, 110_060)) == []
+    unpaired = {**config, "evaluation_seeding": {"paired": False}}
+    assert _paired_evaluation_seed_overlap(unpaired, range(10_000, 10_050)) == []
+    legacy = {key: value for key, value in config.items() if key != "evaluation_seeding"}
+    assert _paired_evaluation_seed_overlap(legacy, range(10_000, 10_050)) == []
+
+
 class TestResolveRunConfigFile:
     def test_creates_from_starter_then_reuses_edits(self, tmp_path, capsys):
         from courtside_dynamics.notebook_utils import resolve_run_config_file
@@ -823,6 +979,70 @@ class TestResolveRunConfigFile:
         out = capsys.readouterr().out
         assert "reusing existing copy" in out
         assert "sha256" in out
+
+    def test_reused_copy_identical_to_the_starter_says_so(self, tmp_path, capsys):
+        from courtside_dynamics.notebook_utils import resolve_run_config_file
+
+        root = tmp_path / "configs"
+        resolve_run_config_file("PaddleTennis", local_root=str(root))
+        capsys.readouterr()
+        resolve_run_config_file("PaddleTennis", local_root=str(root))
+        out = capsys.readouterr().out
+        assert "matches the packaged starter byte-for-byte" in out
+        assert "WARNING" not in out
+
+    def test_reused_copy_with_drifted_settings_warns_loudly(
+        self, tmp_path, capsys
+    ):
+        """2026-08-28 review section 3: a stale Drive copy pinning an
+        old era's budget was reused with the same quiet "reusing
+        existing copy" line as a fresh one, and silently beat the
+        recipe. Drift from the packaged starter is now named setting
+        by setting -- and the user's file is still never touched."""
+        import re
+
+        from courtside_dynamics.notebook_utils import resolve_run_config_file
+
+        root = tmp_path / "configs"
+        path = resolve_run_config_file("PaddleTennis", local_root=str(root))
+        text = path.read_text(encoding="utf-8")
+        stale = re.sub(
+            r"(?m)^total_timesteps = .*$",
+            "total_timesteps = 123_456",
+            text,
+            count=1,
+        )
+        assert stale != text
+        path.write_text(stale, encoding="utf-8")
+        capsys.readouterr()
+
+        again = resolve_run_config_file("PaddleTennis", local_root=str(root))
+        out = capsys.readouterr().out
+        assert again == path
+        assert path.read_text(encoding="utf-8") == stale
+        assert "reusing existing copy" in out
+        assert "WARNING" in out and "DIFFERS from the packaged starter" in out
+        assert "train.total_timesteps: copy 123456, starter" in out
+        assert "1 setting(s)" in out
+
+        # A comment-only edit is drift too, but says it changes nothing.
+        path.write_text(text + "# my note\n", encoding="utf-8")
+        resolve_run_config_file("PaddleTennis", local_root=str(root))
+        out = capsys.readouterr().out
+        assert "DIFFERS" in out
+        assert "comments/layout only" in out
+
+    def test_reused_copy_that_does_not_parse_still_warns(self, tmp_path, capsys):
+        from courtside_dynamics.notebook_utils import resolve_run_config_file
+
+        root = tmp_path / "configs"
+        path = resolve_run_config_file("PaddleTennis", local_root=str(root))
+        path.write_text("[train\n", encoding="utf-8")
+        capsys.readouterr()
+        resolve_run_config_file("PaddleTennis", local_root=str(root))
+        out = capsys.readouterr().out
+        assert "DIFFERS" in out
+        assert "does not parse as TOML" in out
 
     def test_unknown_recipe_returns_none_with_reason(self, tmp_path, capsys):
         from courtside_dynamics.notebook_utils import resolve_run_config_file
@@ -1310,6 +1530,245 @@ def test_campaign_manifest_roundtrip_and_fingerprint(tmp_path):
         require_campaign_fingerprint({"status": "running"}, fingerprint)
 
 
+def test_campaign_fingerprint_adopts_late_keys_only_where_unrecorded():
+    """Settings fingerprinted after campaigns were in flight: a manifest
+    that never recorded one adopts the current value (returned for the
+    caller to persist); once recorded, a change is refused."""
+    recorded = {"seed": 0}
+    current = {"seed": 0, "gate_middle_action": "stop"}
+    late = ("gate_middle_action",)
+    adopted = require_campaign_fingerprint(
+        {"fingerprint": recorded}, current, late_keys=late
+    )
+    assert adopted == {"gate_middle_action": "stop"}
+    # Without the late-key declaration the grown fingerprint refuses.
+    with pytest.raises(ValueError, match="gate_middle_action"):
+        require_campaign_fingerprint({"fingerprint": recorded}, current)
+    # Recorded (adopted or born with it): a flip is refused.
+    with pytest.raises(ValueError, match="gate_middle_action"):
+        require_campaign_fingerprint(
+            {"fingerprint": {**recorded, **adopted}},
+            {**current, "gate_middle_action": "continue"},
+            late_keys=late,
+        )
+    # A late key never excuses a change to any other setting.
+    with pytest.raises(ValueError, match="seed"):
+        require_campaign_fingerprint(
+            {"fingerprint": recorded}, {**current, "seed": 1}, late_keys=late
+        )
+    assert (
+        require_campaign_fingerprint(
+            {"fingerprint": current}, current, late_keys=late
+        )
+        == {}
+    )
+
+
+def _finished_leg(run_dir, *, status="completed", pair=True):
+    """A leg attempt dir as train() leaves it: with ``pair``, the
+    protected best pair, the selection record binding it, and
+    config.json -- everything score_paddle_stage checks before a load."""
+    if pair:
+        _write_paddle_best_pair(run_dir)
+    else:
+        (run_dir / "model").mkdir(parents=True)
+    if status is not None:
+        (run_dir / "stage_summary.txt").write_text(
+            f"Algorithm:      SAC\nStatus:         {status}\nGit SHA:        x\n"
+        )
+    return str(run_dir)
+
+
+def test_stage_summary_status_reads_the_status_line(tmp_path):
+    from courtside_dynamics.notebook_utils import stage_summary_status
+
+    assert stage_summary_status(tmp_path) is None
+    _finished_leg(tmp_path / "a", status="interrupted")
+    assert stage_summary_status(tmp_path / "a") == "interrupted"
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "stage_summary.txt").write_text("no status here\n")
+    assert stage_summary_status(tmp_path / "b") is None
+
+
+def test_campaign_leg_resume_point(tmp_path, capsys):
+    """The 2026-08-28 review's resume finding: a 'trained' leg was
+    retrained (1M-3M steps) when re-scoring takes minutes. A validated,
+    finished attempt re-enters at scoring; anything less retrains."""
+    from courtside_dynamics.notebook_utils import campaign_leg_resume_point
+
+    ok = {"verdict": "ok"}
+    finished = _finished_leg(tmp_path / "finished")
+    assert campaign_leg_resume_point(None) == ("train", None)
+    assert campaign_leg_resume_point(
+        {"status": "complete", "run_dir": finished}
+    ) == ("done", finished)
+    assert campaign_leg_resume_point(
+        {"status": "trained", "run_dir": finished, "config_validation": ok}
+    ) == ("score", finished)
+    assert "re-entering at scoring" in capsys.readouterr().out
+
+    retrain_cases = {
+        "config mismatch": {
+            "status": "config_mismatch",
+            "run_dir": finished,
+            "config_validation": {"verdict": "mismatch", "error": "x"},
+        },
+        "interrupted (booked honestly)": {
+            "status": "interrupted",
+            "run_dir": finished,
+            "config_validation": ok,
+        },
+        # Notebooks before the helper booked 'trained' ahead of their
+        # interruption check.
+        "interrupted (booked trained)": {
+            "status": "trained",
+            "run_dir": _finished_leg(tmp_path / "cut", status="interrupted"),
+            "config_validation": ok,
+        },
+        "no summary": {
+            "status": "trained",
+            "run_dir": _finished_leg(tmp_path / "hard_death", status=None),
+            "config_validation": ok,
+        },
+        "no best pair": {
+            "status": "trained",
+            "run_dir": _finished_leg(tmp_path / "no_pair", pair=False),
+            "config_validation": ok,
+        },
+        "no validation verdict": {"status": "trained", "run_dir": finished},
+        "vanished run dir": {
+            "status": "trained",
+            "run_dir": str(tmp_path / "gone"),
+            "config_validation": ok,
+        },
+    }
+    for name, record in retrain_cases.items():
+        assert campaign_leg_resume_point(record) == ("train", None), name
+    assert "training a fresh attempt" in capsys.readouterr().out
+
+
+class _ReachedPolicyLoader(Exception):
+    """score_paddle_stage got past every precondition to the load."""
+
+
+def test_campaign_leg_resume_point_scores_only_what_the_scorer_accepts(
+    tmp_path, capsys, monkeypatch
+):
+    """The 2026-10-05 follow-up review's ops F2: the resume point sent a
+    'trained' leg to scoring on the pair's presence alone, but
+    score_paddle_stage also requires best_model_meta.json and a pair it
+    verifies -- a leg failing either stayed 'trained' and every resume
+    re-raised, wedging the campaign. Resume now runs the scorer's own
+    precondition check: it re-enters at scoring exactly when the scorer
+    reaches the policy load, and otherwise retrains with the reason
+    printed, leaving the unscoreable attempt on disk as evidence."""
+    from courtside_dynamics.notebook_utils import campaign_leg_resume_point
+    from courtside_dynamics.training import paddle_diagnosis
+
+    def reached_loader(*args, **kwargs):
+        raise _ReachedPolicyLoader
+
+    monkeypatch.setattr(
+        paddle_diagnosis, "native_checkpoint_policy", reached_loader
+    )
+
+    def leg(name, *, normalizer_bytes=b"pkl", meta=True, meta_text=None, config=None):
+        """A finished, validated leg, then one artifact broken."""
+        run_dir = tmp_path / name
+        _finished_leg(run_dir)
+        model_dir = run_dir / "model"
+        (model_dir / "best_vec_normalize.pkl").write_bytes(normalizer_bytes)
+        if not meta:
+            (model_dir / "best_model_meta.json").unlink()
+        if meta_text is not None:
+            (model_dir / "best_model_meta.json").write_text(meta_text)
+        if config == "missing":
+            (run_dir / "config.json").unlink()
+        elif config is not None:
+            (run_dir / "config.json").write_text(json.dumps(config))
+        return run_dir
+
+    cases = {
+        # (run dir, expected action, reason the retrain prints)
+        "verified": (leg("verified"), "score", None),
+        # A meta from before the digests were bound: the scorer accepts it.
+        "legacy meta": (
+            leg("legacy", meta_text=json.dumps({"timestep": 1})),
+            "score",
+            None,
+        ),
+        "no meta": (leg("no_meta", meta=False), "train", "best_model_meta.json"),
+        "swapped normalizer": (
+            leg("swapped", normalizer_bytes=b"stale-normalizer"),
+            "train",
+            "best_vec_normalize.pkl does not match",
+        ),
+        "malformed meta": (leg("malformed", meta_text="[]"), "train", "JSON object"),
+        "unparseable meta": (leg("truncated", meta_text="{"), "train", "Expecting"),
+        "wrong env": (
+            leg("wrong_env", config={"evaluation_env": {"class": "WallBallEnv"}}),
+            "train",
+            "PaddleTennisEnv",
+        ),
+        "no config": (leg("no_config", config="missing"), "train", "config.json"),
+        "config not an object": (
+            leg("list_config", config=[]),
+            "train",
+            "config.json must be a JSON object",
+        ),
+    }
+    for name, (run_dir, action, reason) in cases.items():
+        before = {
+            path: path.read_bytes() for path in run_dir.rglob("*") if path.is_file()
+        }
+        record = {
+            "status": "trained",
+            "run_dir": str(run_dir),
+            "config_validation": {"verdict": "ok"},
+        }
+        result = campaign_leg_resume_point(record)
+        out = capsys.readouterr().out
+        # The attempt is evidence: resume never touches it.
+        after = {
+            path: path.read_bytes() for path in run_dir.rglob("*") if path.is_file()
+        }
+        assert after == before, name
+        if action == "score":
+            assert result == ("score", str(run_dir)), name
+            assert "re-entering at scoring" in out, name
+            with pytest.raises(_ReachedPolicyLoader):
+                score_paddle_stage(run_dir, bars=_LS_C_BARS, episodes=1)
+        else:
+            assert result == ("train", None), name
+            assert "cannot be scored" in out, name
+            assert reason in out, (name, out)
+            with pytest.raises((FileNotFoundError, ValueError)):
+                score_paddle_stage(run_dir, bars=_LS_C_BARS, episodes=1)
+        assert not (run_dir / "reports").exists(), name
+
+
+def test_campaign_leg_resume_point_propagates_other_io_errors(
+    tmp_path, monkeypatch
+):
+    """Only the scorer's refusals (FileNotFoundError, ValueError) send a
+    leg back to training; any other I/O failure -- a flaky Drive mount
+    -- propagates instead of silently costing a 1M-3M-step retrain."""
+    import courtside_dynamics.notebook_utils as notebook_utils
+
+    def flaky_mount(run_dir):
+        raise PermissionError("transport endpoint is not connected")
+
+    monkeypatch.setattr(notebook_utils, "verify_best_checkpoint_pair", flaky_mount)
+    run_dir = _finished_leg(tmp_path / "leg")
+    record = {
+        "status": "trained",
+        "run_dir": run_dir,
+        "config_validation": {"verdict": "ok"},
+    }
+    with pytest.raises(PermissionError):
+        notebook_utils.campaign_leg_resume_point(record)
+
+
 def test_next_stage_attempt_dir_numbers_attempts(tmp_path):
     first = next_stage_attempt_dir(tmp_path, "leg1_scratch_gate")
     assert first == str(tmp_path / "leg1_scratch_gate" / "attempt_01")
@@ -1341,6 +1800,11 @@ def test_score_paddle_stage_requires_finished_paddle_run(tmp_path):
     (tmp_path / "config.json").write_text(
         json.dumps({"evaluation_env": {"class": "WallBallEnv"}})
     )
+    # The selection record is part of the protected checkpoint: without
+    # it nothing vouches that the model and normalizer are one pair.
+    with pytest.raises(FileNotFoundError, match="best_model_meta.json"):
+        score_paddle_stage(tmp_path, bars=bars)
+    (tmp_path / "best_model_meta.json").write_text(json.dumps({"timestep": 1}))
     with pytest.raises(ValueError, match="PaddleTennisEnv"):
         score_paddle_stage(tmp_path, bars=bars)
 
@@ -1352,6 +1816,145 @@ def test_score_paddle_stage_requires_finished_paddle_run(tmp_path):
 
     with pytest.raises(ValueError, match="episodes"):
         score_paddle_stage(tmp_path, bars=bars, episodes=0)
+
+
+_LS_C_BARS = {
+    "LS-C": {
+        "metric": "touched_after_bounce_rate",
+        "pass_at": 0.10,
+        "fail_at": 0.05,
+        "higher_is_better": True,
+        "gating": True,
+    }
+}
+
+
+def _write_paddle_best_pair(run_dir, *, normalizer_bytes=b"pkl", meta=True):
+    """A PaddleTennis run's protected best checkpoint: the pair as saved,
+    and a selection record binding the as-saved digests. A different
+    ``normalizer_bytes`` models a normalizer swapped in after the save."""
+    model_dir = run_dir / "model"
+    model_dir.mkdir(parents=True)
+    (model_dir / "best_model.zip").write_bytes(b"zip")
+    (model_dir / "best_vec_normalize.pkl").write_bytes(normalizer_bytes)
+    if meta:
+        (model_dir / "best_model_meta.json").write_text(
+            json.dumps(
+                {
+                    "timestep": 750_000,
+                    "selection_keys": ["crossings_ep_mean"],
+                    "artifacts": {
+                        "best_model.zip": {
+                            "sha256": hashlib.sha256(b"zip").hexdigest()
+                        },
+                        "best_vec_normalize.pkl": {
+                            "sha256": hashlib.sha256(b"pkl").hexdigest()
+                        },
+                    },
+                }
+            )
+        )
+    (run_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "evaluation_env": {
+                    "class": "PaddleTennisEnv",
+                    "constructor_kwargs": {"episode_len": 1500},
+                }
+            }
+        )
+    )
+
+
+def test_score_paddle_stage_refuses_a_mismatched_pair(tmp_path, monkeypatch):
+    """The 2026-10-05 review's 5b #10: the gate loaded model + normalizer
+    without the sha256 pairing check evaluate_best_wall_ball performs.
+    A normalizer the selection record does not vouch for is refused
+    before any policy loads or any report is written."""
+    from courtside_dynamics.training import paddle_diagnosis
+
+    def must_not_load(*args, **kwargs):
+        raise AssertionError("a mismatched pair reached the policy loader")
+
+    monkeypatch.setattr(paddle_diagnosis, "native_checkpoint_policy", must_not_load)
+    _write_paddle_best_pair(tmp_path, normalizer_bytes=b"stale-normalizer")
+    with pytest.raises(ValueError, match="best_vec_normalize.pkl does not match"):
+        score_paddle_stage(tmp_path, bars=_LS_C_BARS, episodes=1)
+    assert not (tmp_path / "reports").exists()
+
+
+def test_score_paddle_stage_records_the_verified_pair(tmp_path, monkeypatch):
+    from courtside_dynamics.training import paddle_diagnosis
+
+    loaded = []
+
+    def fake_policy(model_path, normalizer_path):
+        loaded.append((model_path, normalizer_path))
+        return "policy"
+
+    def fake_run_player(policy, *, episodes, seed_start, env_fn):
+        assert policy == "policy"
+        return [_trace(serving=False, hits=1, touched=[True])], [2.0]
+
+    monkeypatch.setattr(paddle_diagnosis, "native_checkpoint_policy", fake_policy)
+    monkeypatch.setattr(paddle_diagnosis, "run_player", fake_run_player)
+    _write_paddle_best_pair(tmp_path)
+    payload = score_paddle_stage(tmp_path, bars=_LS_C_BARS, episodes=1)
+    assert loaded == [
+        (
+            str(tmp_path / "model" / "best_model.zip"),
+            str(tmp_path / "model" / "best_vec_normalize.pkl"),
+        )
+    ]
+    assert payload["policy"]["pair_verification"] == (
+        "verified_by_best_model_meta_sha256"
+    )
+    assert payload["policy"]["selected_timestep"] == 750_000
+    assert payload["policy"]["sha256"] == hashlib.sha256(b"zip").hexdigest()
+    assert payload["normalization"]["sha256"] == hashlib.sha256(b"pkl").hexdigest()
+    assert payload["verdict"] == "PASS"
+    report = json.loads((tmp_path / "reports" / "campaign_gate.json").read_text())
+    assert report == payload
+
+
+def test_verify_best_checkpoint_pair_outcomes(tmp_path):
+    from courtside_dynamics.notebook_utils import verify_best_checkpoint_pair
+
+    verified = tmp_path / "verified"
+    _write_paddle_best_pair(verified)
+    assert verify_best_checkpoint_pair(verified)["pair_verification"] == (
+        "verified_by_best_model_meta_sha256"
+    )
+
+    # A selection record from before the digests were bound.
+    legacy = tmp_path / "legacy"
+    _write_paddle_best_pair(legacy)
+    (legacy / "model" / "best_model_meta.json").write_text(
+        json.dumps({"timestep": 1})
+    )
+    assert verify_best_checkpoint_pair(legacy)["pair_verification"] == (
+        "same_run_directory_legacy_metadata"
+    )
+
+    # Reward-selected runs write no record: reported, not refused.
+    unrecorded = tmp_path / "unrecorded"
+    _write_paddle_best_pair(unrecorded, meta=False)
+    result = verify_best_checkpoint_pair(unrecorded)
+    assert result["pair_verification"] == "unverified_no_best_model_meta"
+    assert result["best_model_meta"] is None
+
+    swapped = tmp_path / "swapped"
+    _write_paddle_best_pair(swapped, normalizer_bytes=b"other")
+    with pytest.raises(ValueError, match="SHA-256"):
+        verify_best_checkpoint_pair(swapped)
+
+    (verified / "model" / "best_model_meta.json").write_text("[]")
+    with pytest.raises(ValueError, match="JSON object"):
+        verify_best_checkpoint_pair(verified)
+
+    (unrecorded / "model" / "best_vec_normalize.pkl").unlink()
+    with pytest.raises(FileNotFoundError, match="best_vec_normalize.pkl"):
+        verify_best_checkpoint_pair(unrecorded)
 
 
 def _plan_run_config(*, transfer_log_ent_coef=False, algo="sac"):
@@ -1938,6 +2541,59 @@ def test_validate_run_config_against_plan_rejects_bad_plans(tmp_path):
     )
     (tmp_path / "list.json").write_text("[]")
     expect_bad_plan("JSON object", tmp_path / "list.json", {"seed": 0})
+
+
+def test_validate_run_config_against_plan_missing_train_config_is_not_drift(
+    tmp_path,
+):
+    """2026-08-28 review section 3: a config.json without a train_config
+    block was booked as drift against the run (every pinned key "records
+    nothing"). train() always writes the block, so its absence is an
+    instrument error -- plain ValueError, never RunConfigPlanMismatch."""
+    for index, config in enumerate(
+        (
+            {"env": {"class": "PaddleTennisEnv"}},
+            {"train_config": None},
+            {"train_config": [0]},
+        )
+    ):
+        path = tmp_path / f"config_{index}.json"
+        path.write_text(json.dumps(config))
+        for plan in ({"seed": 0}, {"env_class": "PaddleTennisEnv"}):
+            with pytest.raises(ValueError, match="no train_config block") as excinfo:
+                validate_run_config_against_plan(path, plan)
+            assert not isinstance(excinfo.value, RunConfigPlanMismatch)
+
+
+def test_validate_run_config_against_plan_validates_pin_names(tmp_path):
+    """2026-08-28 review section 3: a typo'd pin name ("best_model.pkl")
+    can never be recorded, so it booked drift against a healthy run.
+    Names outside WarmStartConfig's allowlist are a bad plan."""
+    from courtside_dynamics.notebook_utils import _PLAN_PINNABLE_ARTIFACTS
+    from courtside_dynamics.training import WarmStartConfig
+
+    path = _write_plan_config(tmp_path, _plan_run_config())
+    for name in ("best_model.pkl", "best_model_meta.json"):
+        with pytest.raises(ValueError, match="unknown artifacts") as excinfo:
+            validate_run_config_against_plan(
+                path,
+                {"warm_start": {"expected_artifact_sha256": {name: "838997fb"}}},
+            )
+        assert not isinstance(excinfo.value, RunConfigPlanMismatch)
+        # The mirrored allowlist agrees with WarmStartConfig's own.
+        with pytest.raises(ValueError, match="unknown artifact"):
+            WarmStartConfig(
+                source_run_dir="x", expected_artifact_sha256={name: "838997fb"}
+            )
+    pins = {name: "0" * 8 for name in _PLAN_PINNABLE_ARTIFACTS}
+    WarmStartConfig(source_run_dir="x", expected_artifact_sha256=pins)
+    # Every allowed name is compared (none is skipped as unknown).
+    with pytest.raises(RunConfigPlanMismatch) as excinfo:
+        validate_run_config_against_plan(
+            path, {"warm_start": {"expected_artifact_sha256": pins}}
+        )
+    for name in _PLAN_PINNABLE_ARTIFACTS:
+        assert f"source_artifacts[{name!r}]" in str(excinfo.value)
 
 
 # --- _load_obs_normalizer: no silent identity fallback (review §2.6) ------

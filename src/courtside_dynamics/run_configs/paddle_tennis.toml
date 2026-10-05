@@ -2,12 +2,23 @@
 # probe-frozen 13 m paddle court (half-length 6.5 m, regulation 0.914 m
 # net, wall-ball paddles verbatim) under ground rules (pre-bounce
 # returns fault; docs/paddle_tennis_ground_rules_20260803.md), against
-# the bounce-waiting ground oracle through the P4-verified mirror. One
-# point per episode with strict serve alternation; the serve is the
-# P3-measured band (origin 3.25 m, 9 m/s, 21° — 100% legal). Selection
-# and success follow crossings (cumulative return crossings per
-# point); the scripted ground pair's reference band is 7.78 (held-out
-# certification 7.68).
+# the bounce-waiting ground oracle through the P4-verified mirror. The
+# adopted era (LR1 ADOPT, docs/design_paddle_tennis_reach_shaping.md
+# §4a): continuous n-point play (1500-step episodes, alternating
+# serves, paddle positions carried over between points) with the
+# escrowed contact and reach shapings at 0.25 each; the serve is the
+# P3-measured band (origin 3.25 m, 9 m/s, 21° — 100% legal). These
+# [env] values live in the recipe, not here: see recipes.py's
+# PaddleTennis env_kwargs. Selection and success follow the policy's
+# own k>=2 conversions (docs/repo_review_20261005.md §7.2):
+# episode_rally_returns_a counts side-A confirmed returns that were not
+# side A's first of their point, over the whole episode; success is
+# >= 1 such conversion per episode. crossings (both sides' returns)
+# stays logged as a diagnostic. Evaluations are paired (the recipe's
+# eval_reset_options opt it in: a seeded run replays eval seeds
+# seed + 1_000_000 + i, alternating the first serve), so leave the run
+# seeded; an unseeded run evaluates unpaired, and
+# eval_reset_options = "none" opts a seeded run out of pairing.
 # Usage: build_train_config("PaddleTennis", log_dir=..., config_file=<this file>)
 # Everything here matches the recipe today; edit a value to diverge.
 # (docs/run_config_file_spec.md for merge semantics.)
@@ -16,7 +27,7 @@
 total_timesteps = 2_000_000
 n_envs = 8
 early_stop_patience = 20  # evals without a new best before stopping
-eval_freq = 25_000        # steps per env between eval batches
+eval_freq = 25_000        # env steps (summed across workers) between evals
 
 # The recipe pins the ground-era exploration package (gSDE with a
 # 64-step noise hold, auto-entropy from a raised -1.5 target;
@@ -27,6 +38,16 @@ eval_freq = 25_000        # steps per env between eval batches
 # [train.model_kwargs]
 # gamma = 0.99
 # learning_rate = 3e-4
+
+# The recipe's per-key selection deltas (a table here REPLACES the
+# recipe's whole mapping; keys must be selection keys, missing ones
+# mean 0.0). The episode aggregates sit at half their 1/30 granularity
+# (0.5 / 30 at 30 eval episodes) so one extra conversion registers;
+# rescale them with n_eval_episodes. Uncomment to retune:
+# [train.best_metric_min_delta]
+# episode_rally_returns_a_ep_mean = 0.016666666666666666
+# success_rate = 0.016666666666666666
+# episode_reward_mean = 0.25
 
 # [env]
 # court_style = "tennis"  # render-only presentation for videos

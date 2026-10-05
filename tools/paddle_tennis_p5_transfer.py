@@ -67,6 +67,11 @@ from courtside_dynamics.envs.paddle_tennis import (
 )
 from courtside_dynamics.training.ladder_certification import _oracle_action
 
+try:
+    from tools._seed_ledger import refuse_reserved
+except ModuleNotFoundError:  # run as a script: tools/ itself is on sys.path
+    from _seed_ledger import refuse_reserved  # type: ignore[no-redef]
+
 #: Index of every paddle-court observation, by its frozen name.
 _IDX = {
     name: index
@@ -109,6 +114,10 @@ WB_ORACLE_LEAD_CHARGE = 2.6
 #: ledger). Never the reserved held-out blocks.
 P5_SEED_START = 5000
 P5_EPISODES = 100
+#: The P5 transfer calibration block this probe burned: re-running on
+#: it reproduces the booked rows. Every other ledger block (the shared
+#: tools/_seed_ledger.py) is refused.
+_OWN_BLOCK = (5000, 5099)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -366,7 +375,9 @@ def run_transfer(
     terminations: Counter = Counter()
     try:
         for seed in range(seed_start, seed_start + episodes):
-            observation, _ = env.reset(seed=seed)
+            observation, _ = env.reset(
+                seed=seed, options={"serve_side": env._next_serving_side}
+            )
             info: dict = {}
             while True:
                 observation, _, terminated, truncated, info = env.step(
@@ -460,6 +471,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.model and not args.vec_normalize:
         parser.error("--model requires --vec-normalize")
+    refuse_reserved(args.seed_start, args.episodes, allow=(_OWN_BLOCK,))
 
     if args.model:
         policy = champion_policy(args.model, args.vec_normalize)

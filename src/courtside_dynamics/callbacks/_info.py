@@ -22,7 +22,8 @@ _WRAPPER_INFO_KEYS = frozenset({"terminal_observation", "episode"})
 def _scalar_info_keys(info: Mapping) -> list[str]:
     """Return the sorted env-authored scalar keys of ``info``.
 
-    Scalars are Python numbers/booleans or numpy scalar arrays (0-D). The
+    Scalars are Python numbers/booleans, numpy scalars (``np.integer``,
+    ``np.floating`` and ``np.bool_``), or numpy scalar arrays (0-D). The
     set excludes arrays/sequences so the auto-logger doesn't emit
     unbounded-width rows, and wrapper-injected keys (e.g.
     ``TimeLimit.truncated``) so the diagnostics only surface metrics the
@@ -34,7 +35,12 @@ def _scalar_info_keys(info: Mapping) -> list[str]:
         name = str(key)
         if name in _WRAPPER_INFO_KEYS or "." in name:
             continue
-        if isinstance(value, (bool, numbers.Number)):
+        # ``np.bool_`` is listed explicitly: numpy registers its integer
+        # and floating scalars with the ``numbers`` ABCs but not its
+        # bool, so a flag computed as ``np.abs(x) > y`` was silently
+        # dropped from every aggregate (and a terminal key or success
+        # key built on one vanished without a word).
+        if isinstance(value, (bool, np.bool_, numbers.Number)):
             keys.append(name)
         elif isinstance(value, np.ndarray) and value.ndim == 0:
             keys.append(name)

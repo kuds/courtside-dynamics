@@ -92,6 +92,80 @@ source docs' status lines).
 The P0–P2 court-scaling entry predates the campaign and stays in the
 WallBall section below.
 
+### The instrument batch: select on the policy's own k≥2 conversions, evaluate paired, keep the task bit-identical — *implemented (2026-10-05)*
+The 2026-10-05 review (`repo_review_20261005.md` §5b, §7) found the
+task sound but the instruments that judge, select and stop a run
+broken. Examples:
+- success and the dead-run guard read only the last, truncation-cut
+  point;
+- one 0.25 min-delta hid a +20 pp success gain;
+- selection keyed on opponent-dominated `crossings`;
+- `reset(seed)` was not reproducible;
+- warm starts checked only observation *shapes*.
+
+The batch was then put through an adversarial review: six lenses,
+each finding verified by execution, 25 fixes. The decisions worth
+remembering:
+
+- **The task stays bit-identical; only info and selection move.**
+  Per-step obs, reward, terminated and truncated digests match the
+  pre-batch env over random and oracle play, for the default and
+  recipe kwargs, seeded and unseeded resets, and drill arms. Old
+  checkpoints, normalizers and the LD1′ demo library stay loadable.
+  `best_model` picks and eval curves are not comparable across the
+  batch.
+- **Selection and success follow `episode_rally_returns_a`.** This
+  counts the policy's confirmed returns after its first in each point,
+  counted from the point's *launch*, so a full-context drill's restored
+  rules count cannot inflate it.
+  - The min-deltas are 0.5/30 on the headline and `success_rate`, so
+    one conversion in 30 episodes registers (0.05 could not), and
+    0.25 on reward.
+  - The guard reads legal hits and requires only the headline to be
+    flat, so a run learning k=1 is never killed.
+  - **LD1′ consequence:** its design's §6 claim that "selection keeps
+    its meaning" no longer holds. Its gate scores a checkpoint
+    selected on k≥2 conversions.
+- **Paired evaluation is opt-in.** Only recipes that set
+  `eval_reset_options` (PaddleTennis) derive a paired seed block at
+  `seed + 1_000_000`, with the confirmation batch at +100,000.
+  - Each block's best is compared only with its own block.
+  - Turning pairing on for every seeded run would have served every
+    humanoid evaluation from side A, and made the WallBall long-horizon
+    "held-out" audit replay its own selection seeds. That audit now
+    refuses overlapping seeds.
+  - The final-info-eval stream stays fresh-random, per "Unpaired
+    evaluation is the root of the gate noise" above.
+- **Truncation clawback is kept (decided, not fixed).** The escrows
+  claw back at time-limit truncation, and SB3 also bootstraps through
+  truncation, so the pending amount is counted twice.
+  - The effect is at most one event per 1500-step episode, about
+    1.7e-4 per step of expected bias.
+  - Removing it would break the escrow's undiscounted net-zero
+    identity, which the S2 tests pin.
+  - Revisit only if the clock leaves the observation and the clawback
+    shows up in value diagnostics.
+- **A net cord ends the rally (deliberate drill rule).**
+  `ball_net_is_fault=True` ends 86% of oracle one-point rallies; 20–34%
+  of those would be play-on in tennis. The rigid tape is unrealistic,
+  popping clipped balls up at 60–93°. The rule teaches net clearance,
+  so it stays until a compliant tape exists (baseline era).
+- **Spin frame and raw counters wait for the observation profile.**
+  Ball spin is body-frame and `rally_count`/`bounce_count` are raw.
+  Fixing either in place would silently re-mean every 48-dim
+  checkpoint. They ship with the context-blind
+  `observation_profile`, whose different shape and new
+  observation-name fingerprint refuse old checkpoints loudly.
+- **Seed blocks.** Paired evaluation seeds are ≥ 1,000,000, clear of
+  every ledger block. `tools/_seed_ledger.py` is the single ledger.
+  - It adds the consumed k=2 scratch blocks 9030–9099, 9148–9167 and
+    9168–9187.
+  - It keeps 6400–6499 reserved, because D-G re-booked it after its
+    08-30 release.
+  - `k2_harvest` keeps 9030–9099 reproducible via its allowance.
+  - Reproducing the LH1c cross-check library (9148–) now needs an
+    explicit allowance.
+
 ### The pure-drill pilot is retired before freeze on its own gates; the campaign routes injection-first — *booked (2026-09-02); LD1′*
 Three maintainer-blessed Phase 0 gates
 ([`paddle_tennis_ld1prime_freeze_brief_20260830.md`](paddle_tennis_ld1prime_freeze_brief_20260830.md),
