@@ -18,6 +18,82 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **PaddleTennis instrument and bug-fix batch (2026-10-05).** Fixes
+  the review findings in `docs/repo_review_20261005.md` §5b/§7.2 plus
+  their adversarial follow-ups.
+  - **Comparability.** Observations, rewards, `terminated` and
+    `truncated` are bit-identical to the pre-batch env for the default
+    and recipe kwargs, checked by per-step digests over random and
+    oracle play. Saved policies and `VecNormalize` statistics stay
+    valid. Eval *selection* and the info columns change, so learning
+    curves and `best_model.zip` picks are not comparable across this
+    batch.
+  - **New info keys.** `episode_legal_hit_count_a`,
+    `episode_valid_return_count_a`, `episode_rally_returns_a` (the
+    policy's confirmed returns after its first in each point, i.e. the
+    k≥2 conversions, counted from each point's launch),
+    `contact_depth_a`, `episode_mean_contact_depth_a` (0.0 until the
+    first hit), `episode_contact_depth_sum_a` and
+    `episode_deep_returns_a`, plus a `deep_contact_depth` kwarg
+    (default 5.5 m). The hit-weighted batch mean depth is
+    `episode_contact_depth_sum_a_ep_mean /
+    episode_legal_hit_count_a_ep_mean`.
+  - **Reset.** `reset(seed=...)` now restarts serve alternation at
+    side A, as the humanoid env does. `options={"serve_side": "a"|"b"}`
+    forces the first serve. Probe tools pass the old schedule
+    explicitly, so their outputs are unchanged.
+  - **Rules labels (reward-neutral).** An untouched ball's second
+    court contact is `second_bounce` even beyond the lines; before,
+    that was `out_of_bounds`, which accounted for about 89% of oracle
+    `out_of_bounds` endings. An un-crossed hit landing on the hitter's
+    own side is `failed_to_cross`. Per-reason `term_*` flags are
+    episode-scoped, and the non-finite guard reports `nonfinite_state`.
+    A non-finite opponent action ends the episode as unsafe instead of
+    raising. The serve-clearance nudge is clamped to the slide ranges
+    and re-verified. The diagnostic court lines are painted inside the
+    rules boundary.
+  - **PaddleTennis recipe.**
+    - Selection and success move from opponent-dominated `crossings`
+      to `episode_rally_returns_a`, with per-key min-deltas sized to
+      one conversion in 30 episodes (0.5/30) and 0.25 on reward.
+    - The degenerate guard reads `episode_legal_hit_count_a_ep_mean`,
+      and only the headline must be flat.
+    - Evaluation is paired: every evaluation replays seeds
+      `seed + 1_000_000 + i` with alternating serve sides, and the
+      confirmation batch uses its own block, +100,000.
+    - `reward_eval_episodes = 5`.
+    - Training monitors log the episode counters.
+    - An unseeded build warns and evaluates unpaired.
+  - **Training infrastructure.**
+    - New `TrainConfig` fields: `eval_seed`, `eval_reset_options`
+      (opt-in pairing; `"none"` opts out), `degenerate_flat_keys`,
+      `monitor_info_keywords` and `reuse_log_dir`.
+    - `best_metric_min_delta` accepts a per-key mapping.
+    - The final-info-eval stream stays fresh-random.
+    - `config.json` records the observation-name fingerprint and the
+      evaluation streams that actually run.
+    - Warm starts and DemoSAC demo libraries are refused when their
+      recorded observation names differ (legacy sources without a
+      fingerprint load with a notice).
+    - gSDE warm starts set `use_sde_at_warmup`, so warmup samples the
+      pretrained policy rather than uniform-random actions.
+    - Invalid eval reset options and misconfigured callbacks fail
+      before any output is written.
+    - A reused `log_dir` is refused unless `reuse_log_dir=True`.
+    - The stage summary reports the selecting batch's metrics.
+    - Checkpoint diagnosis skips a failing checkpoint and disables
+      only after 3 consecutive failures.
+  - **Notebooks and tools.**
+    - The campaign scoring and resume paths verify the best-model and
+      normalizer pair.
+    - A resume re-scores only an attempt the scorer will accept.
+    - The campaign fingerprint covers the gate settings.
+    - There is one shared seed ledger (`tools/_seed_ledger.py`) that
+      every probe consults.
+    - Probes exit non-zero on a FAIL verdict.
+    - `plot_learning_curve` marks the selected checkpoint.
+  - **Dependencies.** The `gymnasium` floor is raised to 1.1.
+
 - **PaddleTennis environment and recipe.** *(Partially superseded by
   the ground-rules bullet below: the default opponent, rally-rule
   profile, reference band, and certification described here are the

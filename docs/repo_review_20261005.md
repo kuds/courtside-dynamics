@@ -489,3 +489,27 @@ Recommended order:
    baseline era.
 
 LD1′ stays the fallback if the pilot leaves k=2 at or below 1%.
+
+## 8. Status: the bug-fix batch is landed (2026-10-05)
+
+The maintainer approved fixing every bug before the pilot.
+
+- **Scope.** Everything in §5b and §7.2, plus the label fixes from
+  §7.4. The exceptions are the baseline-era geometry gaps and the
+  items deferred to the observation profile (spin frame, counter
+  scaling).
+- **How it was built.** Three parallel implementers (env/rules,
+  training infrastructure, notebooks/tools) and an integrator, followed
+  by a six-lens adversarial review.
+  - 14 medium findings were verified by execution and fixed. The most
+    important: paired evaluation had been switched on for every seeded
+    run, the selection deltas were too coarse to see one conversion,
+    and confirmation compared different seed blocks.
+  - A follow-up round fixed 11 low findings, each re-checked by an
+    independent verifier against mutants.
+- **State at the end.** ruff and mypy are clean. The suite has 1278
+  passed and 1 skipped (no GL), in 145 s against 159 s before the
+  batch. The task observations, rewards and endings are bit-identical
+  to `de02d13`. The decisions are booked in `DECISIONS.md` ("The
+  instrument batch …"), the changes in `CHANGELOG.md`.
+- **Next:** the §4.2 context-blind observation-profile pilot.
