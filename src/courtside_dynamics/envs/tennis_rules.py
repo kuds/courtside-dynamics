@@ -1018,7 +1018,10 @@ class RallyStateMachine:
         # failed its receiver on any further court contact -- in or
         # out of the lines either way (both were OUT_OF_BOUNDS when
         # they landed out, which blamed the shot for the receiver's
-        # miss).
+        # miss). Through advance() these two branches only ever see
+        # in-bounds contacts: _court_fault_candidate runs on every
+        # group with a court contact and claims every out-of-bounds
+        # one first. The order mirrors the pre-scan's defensively.
         if (
             self._phase is RallyPhase.RETURN_IN_FLIGHT
             and side is self._pending_hitter

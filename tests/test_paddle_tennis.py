@@ -851,6 +851,40 @@ class TestEpisodePolicyCounters:
         finally:
             env.close()
 
+    def test_fault_touches_are_not_legal_hits(self):
+        """A side-A racket contact that faults is not a legal hit. The
+        recount above never sees one (the oracle never faults), so this
+        drives the lead-charge volleyer as side A under ground rules:
+        every pre-bounce touch is a volley fault. None may count in
+        episode_legal_hit_count_a (the recipe's degenerate-guard key: a
+        volley-faulting dead policy must still trip it), set
+        contact_depth_a, or enter the mean contact depth."""
+        env = PaddleTennisEnv(**_RECIPE_KWARGS)
+        try:
+            obs, _ = env.reset(seed=1003)
+            touches = 0
+            info: dict = {}
+            while True:
+                obs, _r, term, trunc, info = env.step(
+                    scripted_lead_charge_opponent(obs)
+                )
+                transition = env._last_transition
+                touches += sum(
+                    event.kind is RallyEventKind.BALL_RACKET_A
+                    for event in transition.processed_events
+                )
+                if not transition.valid_racket_hits.count(CourtSide.A):
+                    assert info["contact_depth_a"] == 0.0
+                if term or trunc:
+                    break
+            # Measured: 12 side-A racket contacts, none of them legal.
+            assert touches > 0
+            assert info["episode_legal_hit_count_a"] == 0.0
+            assert info["episode_valid_return_count_a"] == 0.0
+            assert info["episode_mean_contact_depth_a"] == 0.0
+        finally:
+            env.close()
+
     def test_deep_returns_respond_to_the_depth_threshold(self):
         totals = {}
         for depth in (1e-6, 5.5, 100.0):

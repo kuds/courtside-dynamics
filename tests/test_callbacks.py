@@ -2059,7 +2059,7 @@ def _statue_stream(evaluations: int):
         }
 
 
-def _run_guard(degenerate_flat_keys, evaluations: int = 12):
+def _run_guard(degenerate_flat_keys, evaluations: int = 12, stream=None):
     from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
 
     cb = InfoDictEvalCallback(
@@ -2075,7 +2075,9 @@ def _run_guard(degenerate_flat_keys, evaluations: int = 12):
         degenerate_flat_keys=degenerate_flat_keys,
     )
     cb.model = _FakeSavableModel(action_dim=3)
-    for step, metrics in enumerate(_statue_stream(evaluations), 1):
+    if stream is None:
+        stream = _statue_stream(evaluations)
+    for step, metrics in enumerate(stream, 1):
         cb.num_timesteps = step
         if not cb._update_best_and_maybe_stop(metrics):
             return step, cb.stop_reason
@@ -2098,6 +2100,38 @@ def test_degenerate_guard_fires_on_statue_when_flat_keys_exclude_reward():
     stopped_at, reason = _run_guard(None)
     assert stopped_at is None
     assert reason is None
+
+
+def _success_swing_stream(evaluations: int, swing: float):
+    """A no-contact stream whose crossings are constant and whose
+    success_rate alternates by ``swing`` -- between success_rate's own
+    0.05 delta and crossings' 0.25 when ``swing`` is 0.1."""
+    for index in range(evaluations):
+        yield {
+            "crossings_ep_mean": 3.0,
+            "success_rate": swing if index % 2 else 0.0,
+            "episode_reward_mean": -1.0,
+            "legal_hit_count_a_ep_mean": 0.0,
+        }
+
+
+def test_degenerate_guard_judges_each_flat_key_by_its_own_delta():
+    """The per-key deltas define flatness key by key. A success_rate
+    swinging by 0.1 is moving by its own 0.05 delta, so the signal is not
+    flat and the guard must not stop the run, even though 0.1 sits
+    inside the largest configured delta (0.25). A 0.04 swing is within
+    its delta: flat, and the guard fires at the designed window."""
+    flat_keys = ("crossings_ep_mean", "success_rate")
+    stopped_at, reason = _run_guard(
+        flat_keys, stream=_success_swing_stream(12, 0.1)
+    )
+    assert stopped_at is None
+    assert reason is None
+    stopped_at, reason = _run_guard(
+        flat_keys, stream=_success_swing_stream(12, 0.04)
+    )
+    assert stopped_at == 5
+    assert reason is not None and reason.startswith("degenerate_signal")
 
 
 def test_degenerate_flat_keys_validation():
