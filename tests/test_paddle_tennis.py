@@ -1843,19 +1843,27 @@ class TestHoldShaping:
 
     def test_recipe_adopts_reach_shaping_and_guards(self):
         """The LR1 ADOPT verdict (design doc §4a): reach escrow on at
-        0.25, and the L2W-hardened guard set rides with it."""
+        0.25, and a guard set rides with it -- since the 2026-10-05
+        instrument batch on the episode-cumulative side-A counters
+        (the per-point legal_hit_count_a stays logged)."""
         from courtside_dynamics.recipes import RECIPES
 
         recipe = RECIPES["PaddleTennis"]
         assert recipe.env_kwargs["reach_shaping"] == 0.25
         extra = recipe.extra_cfg
-        assert extra["success_key"] == "legal_hit_count_a"
+        assert extra["success_key"] == "episode_rally_returns_a"
         assert "legal_hit_count_a" in extra["info_eval_keys"]
-        assert extra["degenerate_guard_keys"] == ("legal_hit_count_a_ep_mean",)
+        assert extra["degenerate_guard_keys"] == (
+            "episode_legal_hit_count_a_ep_mean",
+        )
         assert extra["early_stop_degenerate_evals"] == 5
-        assert extra["best_metric_min_delta"] == 0.25
+        assert extra["best_metric_min_delta"] == {
+            "episode_rally_returns_a_ep_mean": 0.05,
+            "success_rate": 0.05,
+            "episode_reward_mean": 0.25,
+        }
         assert extra["confirm_best_eval"] is True
-        assert extra["headline_key"] == "crossings"
+        assert extra["headline_key"] == "episode_rally_returns_a"
 
 
 class TestNPointEpisodes:

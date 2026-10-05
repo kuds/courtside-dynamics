@@ -7,11 +7,16 @@
 # §4a): continuous n-point play (1500-step episodes, alternating
 # serves, paddle positions carried over between points) with the
 # escrowed contact and reach shapings at 0.25 each; the serve is the
-# P3-measured band (origin 3.25 m, 9 m/s, 21° — 100% legal). Selection
-# follows crossings (cumulative return crossings per episode, opponent
-# returns included); success is the policy's own legal-hit count
-# (legal_hit_count_a >= 1). These [env] values live in the recipe, not
-# here: see recipes.py's PaddleTennis env_kwargs.
+# P3-measured band (origin 3.25 m, 9 m/s, 21° — 100% legal). These
+# [env] values live in the recipe, not here: see recipes.py's
+# PaddleTennis env_kwargs. Selection and success follow the policy's
+# own k>=2 conversions (docs/repo_review_20261005.md §7.2):
+# episode_rally_returns_a counts side-A confirmed returns that were not
+# side A's first of their point, over the whole episode; success is
+# >= 1 such conversion per episode. crossings (both sides' returns)
+# stays logged as a diagnostic. Evaluations are paired (a seeded run
+# replays eval seeds seed + 10_000 + i, alternating the first serve),
+# so leave the run seeded.
 # Usage: build_train_config("PaddleTennis", log_dir=..., config_file=<this file>)
 # Everything here matches the recipe today; edit a value to diverge.
 # (docs/run_config_file_spec.md for merge semantics.)
@@ -31,6 +36,14 @@ eval_freq = 25_000        # env steps (summed across workers) between evals
 # [train.model_kwargs]
 # gamma = 0.99
 # learning_rate = 3e-4
+
+# The recipe's per-key selection deltas (a table here REPLACES the
+# recipe's whole mapping; keys must be selection keys, missing ones
+# mean 0.0). Uncomment to retune:
+# [train.best_metric_min_delta]
+# episode_rally_returns_a_ep_mean = 0.05
+# success_rate = 0.05
+# episode_reward_mean = 0.25
 
 # [env]
 # court_style = "tennis"  # render-only presentation for videos

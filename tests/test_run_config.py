@@ -731,24 +731,27 @@ class TestBuildTrainConfig:
             2.0,
         ]
 
-    def test_per_key_min_delta_table_replaces_the_recipe_scalar(
+    def test_per_key_min_delta_table_replaces_the_recipe_mapping(
         self, tmp_path
     ):
         """Contract C3: a ``[train.best_metric_min_delta]`` table reaches
         TrainConfig as the per-key mapping, replacing the recipe's
         value wholesale (no element-wise merge of scalar and table, nor
-        of two tables)."""
+        of two tables: the recipe's own mapping names a third key)."""
+        assert "episode_reward_mean" in (
+            RECIPES["PaddleTennis"].extra_cfg["best_metric_min_delta"]
+        )
         path = _write(
             tmp_path,
             "[train.best_metric_min_delta]\n"
-            "crossings_ep_mean = 0.25\n"
+            "episode_rally_returns_a_ep_mean = 0.1\n"
             "success_rate = 0.05\n",
         )
         cfg = build_train_config(
             "PaddleTennis", log_dir=str(tmp_path), config_file=path
         )
         assert cfg.best_metric_min_delta == {
-            "crossings_ep_mean": 0.25,
+            "episode_rally_returns_a_ep_mean": 0.1,
             "success_rate": 0.05,
         }
 

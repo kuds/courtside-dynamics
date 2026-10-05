@@ -285,6 +285,206 @@ def test_paddle_tennis_recipe_carries_reward_decomposition_at_eval(tmp_path):
         env.close()
 
 
+_PADDLE_TENNIS_C1_KEYS = (
+    "episode_legal_hit_count_a",
+    "episode_valid_return_count_a",
+    "episode_rally_returns_a",
+    "contact_depth_a",
+    "episode_mean_contact_depth_a",
+    "episode_deep_returns_a",
+)
+
+
+def test_paddle_tennis_recipe_selects_on_policy_rally_conversions(tmp_path):
+    """2026-10-05 review §4.1/§7.2: the recipe selects, succeeds, and
+    stops on the policy's own episode-cumulative counters, with
+    per-key deltas, a headline-only flatness test, the trimmed reward
+    stream, paired evaluation alternating the first serve, and the
+    episode counters in the training monitors. Every wired key must be
+    one the env actually emits, or selection silently falls through."""
+    from courtside_dynamics.recipes import (
+        _PADDLE_TENNIS_CSV_HEADER,
+        _PADDLE_TENNIS_TERMINAL_EVAL_KEYS,
+    )
+    from courtside_dynamics.training.train import (
+        _selection_metric_keys,
+        _validate_evaluation_config,
+        resolve_eval_seed,
+    )
+
+    cfg = build_train_config("PaddleTennis", log_dir=str(tmp_path), seed=0)
+    assert cfg.headline_key == "episode_rally_returns_a"
+    assert cfg.success_key == "episode_rally_returns_a"
+    assert cfg.success_threshold == 1.0
+    assert _selection_metric_keys(cfg) == (
+        "episode_rally_returns_a_ep_mean",
+        "success_rate",
+        "episode_reward_mean",
+    )
+    assert cfg.best_metric_min_delta == {
+        "episode_rally_returns_a_ep_mean": 0.05,
+        "success_rate": 0.05,
+        "episode_reward_mean": 0.25,
+    }
+    assert tuple(cfg.degenerate_guard_keys) == (
+        "episode_legal_hit_count_a_ep_mean",
+    )
+    assert tuple(cfg.degenerate_flat_keys) == (
+        "episode_rally_returns_a_ep_mean",
+    )
+    assert cfg.early_stop_degenerate_evals == 5
+    assert cfg.confirm_best_eval is True
+    assert cfg.reward_eval_episodes == 5
+    assert cfg.final_info_eval is False  # else reward_eval_episodes is moot
+    assert [dict(o) for o in cfg.eval_reset_options] == [
+        {"serve_side": "a"},
+        {"serve_side": "b"},
+    ]
+    assert cfg.eval_seed is None
+    assert resolve_eval_seed(cfg) == 10_000  # seed + EVAL_SEED_OFFSET
+    assert tuple(cfg.monitor_info_keywords) == (
+        "episode_legal_hit_count_a",
+        "episode_valid_return_count_a",
+        "episode_rally_returns_a",
+        "crossings",
+    )
+    assert cfg.info_eval_keys is not None
+    for key in _PADDLE_TENNIS_C1_KEYS:
+        assert key in cfg.info_eval_keys
+        assert key in _PADDLE_TENNIS_CSV_HEADER
+    assert "crossings" in cfg.info_eval_keys  # kept as a diagnostic
+    for key in (
+        "episode_legal_hit_count_a",
+        "episode_valid_return_count_a",
+        "episode_rally_returns_a",
+        "episode_deep_returns_a",
+        "episode_mean_contact_depth_a",
+    ):
+        assert key in _PADDLE_TENNIS_TERMINAL_EVAL_KEYS
+    assert "contact_depth_a" not in _PADDLE_TENNIS_TERMINAL_EVAL_KEYS
+    assert "episode_rally_returns_a" in cfg.info_eval_distribution_keys
+    _validate_evaluation_config(cfg)
+
+    # Paired reset options need a seed to apply them: an unseeded run
+    # is refused up front rather than silently unpaired.
+    unseeded = build_train_config("PaddleTennis", log_dir=str(tmp_path))
+    with pytest.raises(ValueError, match="requires paired evaluation"):
+        _validate_evaluation_config(unseeded)
+
+    env = cfg.env_fn()
+    try:
+        env.reset(seed=0)
+        _, reward, _, done, info = env.step(
+            np.zeros(env.action_space.shape, dtype=np.float32)
+        )
+        for key in (
+            *cfg.info_eval_keys,
+            *cfg.monitor_info_keywords,
+            *_PADDLE_TENNIS_TERMINAL_EVAL_KEYS,
+        ):
+            assert key in info, key
+        row = cfg.info_row_fn(info, float(reward), float(reward), bool(done))
+        assert len(row) == len(list(cfg.csv_header))
+    finally:
+        env.close()
+
+
+def test_paddle_tennis_paired_evaluation_replays_identical_metrics(tmp_path):
+    """End to end on the real env (C2 + C3 through the recipe's
+    wiring): two evaluations of a fixed policy under the recipe's
+    paired seeds and serve-side options produce identical metrics,
+    and the first two episodes open on opposite serves."""
+    from stable_baselines3.common.env_util import make_vec_env
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.envs._paddle_court import scripted_ground_opponent
+    from courtside_dynamics.training.train import resolve_eval_seed
+
+    cfg = build_train_config("PaddleTennis", log_dir=str(tmp_path), seed=0)
+    assert cfg.eval_env_fn is not None
+    eval_env = make_vec_env(cfg.eval_env_fn, n_envs=1, seed=123)
+    serve_sides: list[str] = []
+    base_env = eval_env.envs[0].unwrapped
+    original_reset = base_env.reset
+
+    def recording_reset(*args, **kwargs):
+        obs, info = original_reset(*args, **kwargs)
+        if kwargs.get("seed") is not None:  # the batch's pinned resets
+            serve_sides.append(str(info["serve_side"]))
+        return obs, info
+
+    base_env.reset = recording_reset
+
+    class _OraclePolicy:
+        """Deterministic stand-in model: the ground oracle as side A."""
+
+        logger = None
+
+        def predict(self, obs, deterministic=True):
+            del deterministic
+            return np.stack([scripted_ground_opponent(o) for o in obs]), None
+
+    cb = InfoDictEvalCallback(
+        eval_env=eval_env,
+        n_eval_episodes=2,
+        eval_freq=1,
+        success_key=cfg.success_key,
+        success_threshold=cfg.success_threshold,
+        info_keys=cfg.info_eval_keys,
+        terminal_info_keys=cfg.info_eval_terminal_keys,
+        eval_seed=resolve_eval_seed(cfg),
+        eval_reset_options=cfg.eval_reset_options,
+    )
+    cb.model = _OraclePolicy()
+    try:
+        first = cb._collect_metrics()
+        first_sides = list(serve_sides)
+        serve_sides.clear()
+        second = cb._collect_metrics()
+    finally:
+        eval_env.close()
+    assert second == first
+    # Episode i resets with seed eval_seed + i and the recipe's
+    # options[i % 2]: one policy-receiving and one policy-serving
+    # opening per pair, identically in every evaluation.
+    assert first_sides == ["a", "b"]
+    assert serve_sides == first_sides
+    assert first["episode_legal_hit_count_a_ep_mean"] > 0.0
+    assert "success_rate" in first
+    assert "episode_rally_returns_a_ep_mean" in first
+
+
+def test_quick_test_scales_paddle_checkpoint_diagnosis(tmp_path):
+    """2026-08-28 review §3: the 30-episode checkpoint diagnosis
+    dominated the quick test's wall clock. quick_test caps it, keeps
+    its seed block, leaves the recipe untouched, never adds a
+    diagnosis to a recipe without one, and an explicit override still
+    wins."""
+    quick = build_train_config(
+        "PaddleTennis", log_dir=str(tmp_path / "q"), quick_test=True
+    )
+    assert quick.checkpoint_diagnosis == {"episodes": 3, "seed_start": 5200}
+    assert RECIPES["PaddleTennis"].extra_cfg["checkpoint_diagnosis"] == {
+        "episodes": 30,
+        "seed_start": 5200,
+    }
+    full = build_train_config("PaddleTennis", log_dir=str(tmp_path / "f"))
+    assert full.checkpoint_diagnosis["episodes"] == 30
+
+    other = build_train_config(
+        "BallBalance", log_dir=str(tmp_path / "b"), quick_test=True
+    )
+    assert other.checkpoint_diagnosis is None
+
+    explicit = build_train_config(
+        "PaddleTennis",
+        log_dir=str(tmp_path / "e"),
+        quick_test=True,
+        checkpoint_diagnosis={"episodes": 7, "seed_start": 5200},
+    )
+    assert explicit.checkpoint_diagnosis == {"episodes": 7, "seed_start": 5200}
+
+
 def test_humanoid_tennis_smoke_recipe_has_compact_recording_schema(tmp_path):
     """Phase 3 records rally diagnostics without flattening every rule key."""
     import numpy as np
