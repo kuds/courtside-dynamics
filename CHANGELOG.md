@@ -23,10 +23,16 @@ supersedes it (see the ground-rules bullet).
   pilot (`docs/paddle_tennis_physical_pilot_20261005.md`).
   - **Comparability.** The new profile is opt-in. The default
     `observation_profile="full"` and the `PaddleTennis` recipe are
-    bit-identical to the instrument batch: per-step obs, reward,
-    `terminated`, `truncated` and info digests match for the default,
-    recipe and volley-legal kwargs, over random and oracle play,
-    seeded and unseeded resets. `config.json` records the new
+    bit-identical to the instrument batch (b9585e2): per-step obs,
+    reward, `terminated`, `truncated` and info digests match for the
+    default, recipe and volley-legal kwargs, over random and oracle
+    play, seeded and unseeded resets. The suite pins this against
+    b9585e2 itself: `tests/data/paddle_tennis_full_profile_b9585e2.json`
+    is recorded from b9585e2's source
+    (`tools/paddle_tennis_full_profile_reference.py`) and
+    `TestFullProfileReference` replays it on the default, explicit
+    `"full"` and (except the policy observation) `"physical"` envs; it
+    skips off the recording's MuJoCo build. `config.json` records the new
     `observation_profile` constructor kwarg (`"full"` for existing
     recipes). `PaddleTennisPhysical` runs are a new comparability
     family: their 35-value observation has its own observation-name

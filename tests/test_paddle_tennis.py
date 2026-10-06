@@ -14,6 +14,7 @@ from __future__ import annotations
 import inspect
 import json
 import pickle
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -997,7 +998,12 @@ class TestObservationProfile:
 
     def test_full_profile_is_bit_identical_to_default(self):
         """Explicit ``"full"`` and the default produce the same obs,
-        reward, terminated, truncated and info, bit for bit."""
+        reward, terminated, truncated and info, bit for bit.
+
+        Both envs run the same code, so this pins only the kwarg's
+        default. That the full layout itself still matches the
+        pre-profile env (b9585e2) is ``TestFullProfileReference``'s
+        job."""
         actions = np.random.default_rng(3).uniform(-1.0, 1.0, size=(1500, 3))
         for kwargs in ({}, _RECIPE_KWARGS):
             default = PaddleTennisEnv(**kwargs)
@@ -1128,6 +1134,121 @@ class TestObservationProfile:
                 assert controller(full).shape == (3,)
         finally:
             env.close()
+
+
+_FULL_PROFILE_REFERENCE = (
+    Path(__file__).parent / "data" / "paddle_tennis_full_profile_b9585e2.json"
+)
+
+
+class TestFullProfileReference:
+    """The default ``"full"`` profile against b9585e2 itself.
+
+    ``tests/data/paddle_tennis_full_profile_b9585e2.json`` holds
+    chained per-step digests of obs, reward, terminated, truncated,
+    info and both full side-local views, recorded from b9585e2's
+    source by ``tools/paddle_tennis_full_profile_reference.py``
+    (seeded and unseeded resets; random and oracle side-A play; the
+    one-point default, the recipe's n-point escrow task, volley-legal
+    rules, and a truncating hold-escrow variant). The default env and
+    an explicit ``"full"`` env must replay every stream; a
+    ``"physical"`` env must replay every stream except its own policy
+    observation. Physics bits are comparable only on the MuJoCo build
+    the file was recorded with, so the replay skips elsewhere (the
+    tool's docstring says how to re-record)."""
+
+    @staticmethod
+    def _load() -> dict:
+        return json.loads(_FULL_PROFILE_REFERENCE.read_text())
+
+    def test_reference_covers_the_recorded_cases(self):
+        """The fixture holds exactly the tool's cases, recorded from
+        b9585e2, and its streams are not vacuous: they include
+        unseeded resets, terminations and truncations."""
+        from tools.paddle_tennis_full_profile_reference import (
+            CASES,
+            CHECKPOINT_EVERY,
+            FIELDS,
+            SCHEMA,
+        )
+
+        reference = self._load()
+        assert reference["schema"] == SCHEMA
+        assert reference["recorded_from"] == "b9585e2"
+        assert reference["checkpoint_every"] == CHECKPOINT_EVERY
+        assert set(reference["cases"]) == set(CASES)
+        for name, (env_kwargs, player, seed, steps) in CASES.items():
+            case = reference["cases"][name]
+            assert (case["env_kwargs"], case["player"], case["seed"]) == (
+                env_kwargs,
+                player,
+                seed,
+            )
+            assert case["steps"] == steps
+            assert set(case["checkpoints"]) == set(FIELDS)
+            assert case["resets"] >= 2  # the seeded one plus unseeded
+        assert sum(c["terminations"] for c in reference["cases"].values()) > 0
+        assert sum(c["truncations"] for c in reference["cases"].values()) > 0
+
+    @pytest.mark.parametrize("profile", [None, "full", "physical"])
+    def test_replays_the_b9585e2_streams(self, profile):
+        import platform
+
+        import mujoco
+
+        from tools.paddle_tennis_full_profile_reference import (
+            FIELDS,
+            record_case,
+        )
+
+        reference = self._load()
+        recorded_on = (reference["mujoco"], reference["machine"])
+        if recorded_on != (mujoco.__version__, platform.machine()):
+            pytest.skip(
+                f"reference recorded under MuJoCo {reference['mujoco']} on "
+                f"{reference['machine']}; this is MuJoCo "
+                f"{mujoco.__version__} on {platform.machine()} (re-record "
+                "from b9585e2: tools/paddle_tennis_full_profile_reference.py)"
+            )
+        fields = tuple(
+            field for field in FIELDS if profile != "physical" or field != "obs"
+        )
+        every = reference["checkpoint_every"]
+        for name, case in reference["cases"].items():
+            kwargs = dict(case["env_kwargs"])
+            if profile is not None:
+                kwargs["observation_profile"] = profile
+            replay = record_case(
+                lambda kw: PaddleTennisEnv(**kw),
+                kwargs,
+                case["player"],
+                case["seed"],
+                case["steps"],
+                fields=fields,
+            )
+            assert (
+                replay["resets"],
+                replay["terminations"],
+                replay["truncations"],
+            ) == (case["resets"], case["terminations"], case["truncations"]), name
+            for field in fields:
+                expected = case["checkpoints"][field]
+                actual = replay["checkpoints"][field]
+                if actual != expected:
+                    window = next(
+                        index
+                        for index, (want, got) in enumerate(
+                            zip(expected, actual, strict=True)
+                        )
+                        if want != got
+                    )
+                    pytest.fail(
+                        f"{name} (profile={profile!r}): {field!r} diverges "
+                        f"from b9585e2 within steps "
+                        f"{window * every + 1}-{(window + 1) * every} "
+                        f"(recorded with numpy {reference['numpy']}, this "
+                        f"is numpy {np.__version__})"
+                    )
 
 
 class TestEpisodePolicyCounters:
