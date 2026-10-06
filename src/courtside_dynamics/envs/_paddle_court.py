@@ -443,10 +443,37 @@ def scripted_lead_charge_opponent(observation: np.ndarray) -> np.ndarray:
 #: observation (24 physical values, then the rally block: 4 phase
 #: one-hots and 5 flags precede it). Pinned against
 #: ``PADDLE_TENNIS_OBSERVATION_NAMES`` by the env tests; this module
-#: cannot import the env (the env imports this module).
+#: cannot import the env (the env imports this module). Every
+#: controller here reads the FULL layout -- feed it
+#: ``PaddleTennisEnv.observation_for_side(side)``, never the policy
+#: observation of an ``observation_profile="physical"`` env, whose
+#: 35-value layout puts contact-tail values at these indices.
 OBS_BOUNCE_COUNT_INDEX = 33
 #: Index of the own-relative ``ball_side_is_own`` flag, same layout.
 OBS_BALL_SIDE_INDEX = 30
+#: Length of that full layout (pinned against
+#: ``PADDLE_TENNIS_OBSERVATION_NAMES`` by the env tests).
+FULL_OBSERVATION_SIZE = 48
+
+
+def _require_full_observation(observation: np.ndarray, controller: str) -> None:
+    """Refuse anything but the full 48-value layout, loudly.
+
+    The 35-value ``observation_profile="physical"`` policy observation
+    has values at both rally indices above (contact-tail entries), so
+    a controller fed it would play on silently wrong numbers -- the
+    measured failure mode of the 2026-10-05 review §7.2 (the oracle's
+    rally count fell from 1-13 to 0-1). A wrong length is a wiring
+    bug, never a runtime state.
+    """
+    if np.shape(observation) != (FULL_OBSERVATION_SIZE,):
+        raise ValueError(
+            f"{controller} reads the full {FULL_OBSERVATION_SIZE}-value "
+            f"PaddleTennis observation by index, got shape "
+            f"{np.shape(observation)}: feed it "
+            f"PaddleTennisEnv.observation_for_side(side), never the policy "
+            f"observation of an observation_profile='physical' env"
+        )
 
 
 #: How far behind the predicted landing point the ground oracle waits
@@ -577,8 +604,11 @@ def scripted_ground_opponent(observation: np.ndarray) -> np.ndarray:
     Unlike :func:`scripted_lead_charge_opponent` (which reads only the
     24-value physical block and stays usable on the prototype scene),
     this opponent also needs the rules ``bounce_count`` from the env's
-    rally block, so it requires the full 48-value observation.
+    rally block, so it requires the full 48-value observation
+    (``PaddleTennisEnv.observation_for_side``, under any
+    ``observation_profile``).
     """
+    _require_full_observation(observation, "scripted_ground_opponent")
     return ground_lead_charge_local_action(
         observation[0:3],
         observation[3:6],
@@ -601,6 +631,7 @@ def scripted_hard_slam_witness(observation: np.ndarray) -> np.ndarray:
     touch/miss rates on the probe block are the S1 precondition, not
     an assumption.
     """
+    _require_full_observation(observation, "scripted_hard_slam_witness")
     return ground_lead_charge_local_action(
         observation[0:3],
         observation[3:6],

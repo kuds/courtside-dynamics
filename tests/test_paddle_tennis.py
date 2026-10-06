@@ -12,6 +12,7 @@ tables.
 from __future__ import annotations
 
 import inspect
+import json
 import pickle
 
 import numpy as np
@@ -20,9 +21,11 @@ import pytest
 import courtside_dynamics  # noqa: F401  (triggers registration)
 from courtside_dynamics.envs import PaddleCourtServe, PaddleTennisEnv
 from courtside_dynamics.envs._paddle_court import (
+    FULL_OBSERVATION_SIZE,
     OBS_BALL_SIDE_INDEX,
     OBS_BOUNCE_COUNT_INDEX,
     scripted_ground_opponent,
+    scripted_hard_slam_witness,
     scripted_lead_charge_opponent,
 )
 from courtside_dynamics.envs.paddle_tennis import (
@@ -30,6 +33,7 @@ from courtside_dynamics.envs.paddle_tennis import (
     PADDLE_TENNIS_ACTION_NAMES,
     PADDLE_TENNIS_NORMALIZED_SLICE,
     PADDLE_TENNIS_OBSERVATION_NAMES,
+    PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES,
 )
 from courtside_dynamics.envs.tennis_rules import (
     CourtSide,
@@ -777,6 +781,353 @@ _RECIPE_KWARGS = {
     "contact_shaping": 0.25,
     "reach_shaping": 0.25,
 }
+
+
+def _info_json(info: dict) -> str:
+    """One canonical encoding of an info dict (numpy scalars included)."""
+    return json.dumps(
+        info,
+        sort_keys=True,
+        default=lambda value: value.item() if hasattr(value, "item") else repr(value),
+    )
+
+
+def _world_spin(env: PaddleTennisEnv) -> np.ndarray:
+    """R(q) @ omega_body for the ball, by an independent route."""
+    import mujoco
+
+    quaternion = env.data.qpos[env._ball_qposadr + 3 : env._ball_qposadr + 7]
+    rotation = np.zeros(9)
+    mujoco.mju_quat2Mat(rotation, quaternion)
+    body = env.data.qvel[env._ball_dofadr + 3 : env._ball_dofadr + 6]
+    return rotation.reshape(3, 3) @ body
+
+
+class TestObservationProfile:
+    """``observation_profile``: the context-blind pilot's policy view
+    (2026-10-05 review §4.2). The profile changes the policy
+    observation and nothing else; ``observation_for_side`` and
+    everything read from it stay on the full layout."""
+
+    def test_physical_names_pin(self):
+        """The exact 35-value layout; any change is a new era."""
+        expected = (
+            *(f"ball_position_{axis}" for axis in "xyz"),
+            *(f"ball_linear_velocity_{axis}" for axis in "xyz"),
+            *(f"ball_angular_velocity_world_{axis}" for axis in "xyz"),
+            *(f"own_paddle_position_{axis}" for axis in "xyz"),
+            *(f"own_paddle_velocity_{axis}" for axis in "xyz"),
+            *(f"opponent_paddle_position_{axis}" for axis in "xyz"),
+            *(f"opponent_paddle_velocity_{axis}" for axis in "xyz"),
+            *(f"ball_minus_own_paddle_{axis}" for axis in "xyz"),
+            "expected_returner_is_own",
+            "ball_side_is_own",
+            "bounce_count_scaled",
+            "contact_latched_own_racket",
+            "contact_latched_opponent_racket",
+            "contact_latched_court",
+            "contact_latched_net",
+            "contact_release_progress_own_racket",
+            "contact_release_progress_opponent_racket",
+            "contact_release_progress_court",
+            "contact_release_progress_net",
+        )
+        assert PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES == expected
+        # The normalized slice is the physical block under both
+        # profiles; only the spin's names (and frame) differ there.
+        block = PADDLE_TENNIS_NORMALIZED_SLICE
+        full_block = PADDLE_TENNIS_OBSERVATION_NAMES[block]
+        physical_block = PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES[block]
+        differing = [
+            index
+            for index, (old, new) in enumerate(
+                zip(full_block, physical_block, strict=True)
+            )
+            if old != new
+        ]
+        assert differing == [6, 7, 8]
+        assert PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES[24] == (
+            "expected_returner_is_own"
+        )
+        from courtside_dynamics import envs
+
+        assert envs.PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES is (
+            PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES
+        )
+
+    def test_dropped_context_dims_are_absent(self):
+        dropped = (
+            *(f"rally_phase_{phase.name.lower()}" for phase in RallyPhase),
+            "own_is_serving",
+            "feed_crossed_net",
+            "pending_return_crossed_net",
+            "bounce_count",
+            "rally_count",
+            "episode_remaining_fraction",
+            "contact_latched_own_racket_net",
+            "contact_latched_opponent_racket_net",
+            "contact_release_progress_own_racket_net",
+            "contact_release_progress_opponent_racket_net",
+            *(f"ball_angular_velocity_{axis}" for axis in "xyz"),
+        )
+        for name in dropped:
+            assert name in PADDLE_TENNIS_OBSERVATION_NAMES
+            assert name not in PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES
+        assert len(set(PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES)) == 35
+
+    def test_validation_default_and_pickle(self):
+        env = PaddleTennisEnv()
+        try:
+            assert env.observation_profile == "full"
+            assert env.observation_names == PADDLE_TENNIS_OBSERVATION_NAMES
+            assert env.observation_space.shape == (48,)
+        finally:
+            env.close()
+        with pytest.raises(ValueError, match="observation_profile"):
+            PaddleTennisEnv(observation_profile="context_blind")
+        env = PaddleTennisEnv(observation_profile="physical")
+        try:
+            assert env.observation_names == PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES
+            assert env.observation_space.shape == (35,)
+            # The class-level default stays the full layout.
+            assert PaddleTennisEnv.observation_names == (
+                PADDLE_TENNIS_OBSERVATION_NAMES
+            )
+            assert env._ezpickle_kwargs["observation_profile"] == "physical"
+            clone = pickle.loads(pickle.dumps(env))
+            try:
+                assert clone.observation_profile == "physical"
+                assert clone.observation_space.shape == (35,)
+                obs, _ = clone.reset(seed=_SMOKE_SEEDS[0])
+                assert obs.shape == (35,)
+            finally:
+                clone.close()
+        finally:
+            env.close()
+
+    def test_physical_observation_shape_and_values(self):
+        """Reset and step return the 35 values; every kept value is
+        the full layout's own number (by name), the bounce count is
+        min(count, 2) / 2, and the physical block is the full one
+        except the spin."""
+        env = PaddleTennisEnv(observation_profile="physical", **_RECIPE_KWARGS)
+        full_index = {
+            name: index for index, name in enumerate(PADDLE_TENNIS_OBSERVATION_NAMES)
+        }
+        kept = [
+            (index, full_index[name])
+            for index, name in enumerate(PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES)
+            if name in full_index
+        ]
+        assert len(kept) == 35 - 3 - 1  # all but spin and the scaled count
+        bounce_values = set()
+        try:
+            obs, _ = env.reset(seed=_SMOKE_SEEDS[0])
+            for _ in range(600):
+                assert obs.shape == (35,)
+                assert obs.dtype == np.float64
+                full = env.observation_for_side(CourtSide.A)
+                for physical_at, full_at in kept:
+                    assert obs[physical_at] == full[full_at]
+                assert obs[26] == min(full[OBS_BOUNCE_COUNT_INDEX], 2.0) / 2.0
+                bounce_values.add(float(obs[26]))
+                obs, _, term, trunc, _ = env.step(
+                    scripted_ground_opponent(env.observation_for_side(CourtSide.A))
+                )
+                if term or trunc:
+                    break
+        finally:
+            env.close()
+        # The rules count at most one bounce on a live point.
+        assert bounce_values == {0.0, 0.5}
+
+    def test_world_frame_spin_matches_rotated_body_spin(self):
+        """``ball_angular_velocity_world`` = R(q) @ omega_body,
+        mirrored per side exactly like every other vector (side B: x
+        and y negate), and the world-frame angular velocity MuJoCo
+        itself reports for the ball body after a fresh forward pass."""
+        import mujoco
+
+        env = PaddleTennisEnv(observation_profile="physical", **_RECIPE_KWARGS)
+        scratch = mujoco.MjData(env.model)
+        ball_body = int(env.model.jnt_bodyid[env.model.joint("ball_free").id])
+        spinning_steps = 0
+        tumbling_steps = 0
+        try:
+            obs, _ = env.reset(seed=_SMOKE_SEEDS[1])
+            for _ in range(900):
+                obs, _, term, trunc, _ = env.step(
+                    scripted_ground_opponent(env.observation_for_side(CourtSide.A))
+                )
+                world = _world_spin(env)
+                np.testing.assert_allclose(obs[6:9], world, rtol=0.0, atol=1e-9)
+                side_b = env._physical_observation_for_side(CourtSide.B)
+                np.testing.assert_allclose(
+                    side_b[6:9],
+                    np.array([-world[0], -world[1], world[2]]),
+                    rtol=0.0,
+                    atol=1e-9,
+                )
+                scratch.qpos[:] = env.data.qpos
+                scratch.qvel[:] = env.data.qvel
+                mujoco.mj_forward(env.model, scratch)
+                velocity = np.zeros(6)
+                mujoco.mj_objectVelocity(
+                    env.model,
+                    scratch,
+                    mujoco.mjtObj.mjOBJ_BODY,
+                    ball_body,
+                    velocity,
+                    0,
+                )
+                np.testing.assert_allclose(obs[6:9], velocity[:3], atol=1e-9)
+                body = env.observation_for_side(CourtSide.A)[6:9]
+                if np.linalg.norm(world) > 1.0:
+                    spinning_steps += 1
+                    if not np.allclose(body, world, atol=1e-3):
+                        tumbling_steps += 1
+                if term or trunc:
+                    break
+        finally:
+            env.close()
+        # Non-vacuous: the ball spins, and its body frame has turned
+        # away from the world frame while it does.
+        assert spinning_steps > 50
+        assert tumbling_steps > 50
+
+    def test_full_profile_is_bit_identical_to_default(self):
+        """Explicit ``"full"`` and the default produce the same obs,
+        reward, terminated, truncated and info, bit for bit."""
+        actions = np.random.default_rng(3).uniform(-1.0, 1.0, size=(1500, 3))
+        for kwargs in ({}, _RECIPE_KWARGS):
+            default = PaddleTennisEnv(**kwargs)
+            explicit = PaddleTennisEnv(observation_profile="full", **kwargs)
+            try:
+                for seed in (_SMOKE_SEEDS[0], None):
+                    obs_d, info_d = default.reset(seed=seed)
+                    obs_e, info_e = explicit.reset(seed=seed)
+                    assert obs_d.tobytes() == obs_e.tobytes()
+                    assert _info_json(info_d) == _info_json(info_e)
+                    for action in actions:
+                        step_d = default.step(action)
+                        step_e = explicit.step(action)
+                        assert step_d[0].tobytes() == step_e[0].tobytes()
+                        assert step_d[1:4] == step_e[1:4]
+                        assert _info_json(step_d[4]) == _info_json(step_e[4])
+                        if step_d[2] or step_d[3]:
+                            break
+            finally:
+                default.close()
+                explicit.close()
+
+    @pytest.mark.parametrize("player", ["random", "oracle"])
+    @pytest.mark.parametrize(
+        "kwargs", [{}, _RECIPE_KWARGS], ids=["one_point", "recipe_npoint"]
+    )
+    def test_profile_changes_only_the_policy_observation(self, player, kwargs):
+        """Same seeds, same side-A actions: rewards, endings, reset
+        and step info are identical across profiles, as are the full
+        side-local views; the physical block differs only in the
+        spin. The oracle plays side A from the full layout."""
+        rng = np.random.default_rng(29)
+        full_env = PaddleTennisEnv(**kwargs)
+        physical_env = PaddleTennisEnv(observation_profile="physical", **kwargs)
+        steps = 0
+        try:
+            for seed in (_SMOKE_SEEDS[0], _SMOKE_SEEDS[2], None):
+                obs_f, info_f = full_env.reset(seed=seed)
+                obs_p, info_p = physical_env.reset(seed=seed)
+                assert _info_json(info_f) == _info_json(info_p)
+                while True:
+                    view_f = full_env.observation_for_side(CourtSide.A)
+                    view_p = physical_env.observation_for_side(CourtSide.A)
+                    assert view_f.tobytes() == view_p.tobytes()
+                    assert view_f.tobytes() == obs_f.tobytes()
+                    assert np.array_equal(obs_p[:6], obs_f[:6])
+                    assert np.array_equal(obs_p[9:24], obs_f[9:24])
+                    action = (
+                        rng.uniform(-1.0, 1.0, size=3)
+                        if player == "random"
+                        else scripted_ground_opponent(view_f)
+                    )
+                    obs_f, rew_f, term_f, trunc_f, info_f = full_env.step(action)
+                    obs_p, rew_p, term_p, trunc_p, info_p = physical_env.step(action)
+                    steps += 1
+                    assert obs_f.shape == (48,)
+                    assert obs_p.shape == (35,)
+                    assert (rew_f, term_f, trunc_f) == (rew_p, term_p, trunc_p)
+                    assert _info_json(info_f) == _info_json(info_p)
+                    if term_f or trunc_f:
+                        break
+        finally:
+            full_env.close()
+            physical_env.close()
+        assert steps > 100
+
+    def test_observation_for_side_stays_full_under_physical(self):
+        env = PaddleTennisEnv(observation_profile="physical")
+        try:
+            obs, _ = env.reset(seed=_SMOKE_SEEDS[0])
+            assert obs.shape == (35,)
+            for side in (CourtSide.A, CourtSide.B):
+                assert env.observation_for_side(side).shape == (
+                    FULL_OBSERVATION_SIZE,
+                )
+            env.step(_zero_action())
+            assert env.observation_for_side(CourtSide.B).shape == (
+                FULL_OBSERVATION_SIZE,
+            )
+        finally:
+            env.close()
+        assert FULL_OBSERVATION_SIZE == len(PADDLE_TENNIS_OBSERVATION_NAMES)
+
+    def test_opponent_reads_the_same_full_view_under_either_profile(self):
+        """The opponent controller's inputs and actions are identical
+        across profiles (it reads observation_for_side(B), never the
+        policy observation)."""
+
+        def recording(log: list):
+            def controller(observation: np.ndarray) -> np.ndarray:
+                action = scripted_ground_opponent(observation)
+                log.append((observation.tobytes(), action.tobytes()))
+                return action
+
+            return controller
+
+        logs: dict[str, list] = {"full": [], "physical": []}
+        actions = np.random.default_rng(5).uniform(-1.0, 1.0, size=(1500, 3))
+        for profile, log in logs.items():
+            env = PaddleTennisEnv(
+                observation_profile=profile,
+                opponent_controller=recording(log),
+                **_RECIPE_KWARGS,
+            )
+            try:
+                env.reset(seed=_SMOKE_SEEDS[1])
+                for action in actions:
+                    *_, term, trunc, _ = env.step(action)
+                    if term or trunc:
+                        break
+            finally:
+                env.close()
+        assert len(logs["full"]) > 100
+        assert all(len(obs) == 48 * 8 for obs, _ in logs["full"])
+        assert logs["full"] == logs["physical"]
+
+    def test_ground_controllers_refuse_the_physical_observation(self):
+        """A scripted controller fed the 35-value policy observation
+        would read contact-tail values at its rally indices; it must
+        refuse loudly instead."""
+        env = PaddleTennisEnv(observation_profile="physical")
+        try:
+            obs, _ = env.reset(seed=_SMOKE_SEEDS[0])
+            for controller in (scripted_ground_opponent, scripted_hard_slam_witness):
+                with pytest.raises(ValueError, match="observation_for_side"):
+                    controller(obs)
+                full = env.observation_for_side(CourtSide.A)
+                assert controller(full).shape == (3,)
+        finally:
+            env.close()
 
 
 class TestEpisodePolicyCounters:

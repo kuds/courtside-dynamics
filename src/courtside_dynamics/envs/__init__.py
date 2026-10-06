@@ -19,6 +19,7 @@ from courtside_dynamics.envs.paddle_tennis import (
     PADDLE_TENNIS_ACTION_NAMES,
     PADDLE_TENNIS_NORMALIZED_SLICE,
     PADDLE_TENNIS_OBSERVATION_NAMES,
+    PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES,
     PaddleCourtServe,
     PaddleTennisEnv,
 )
@@ -80,6 +81,7 @@ __all__ = [
     "PADDLE_TENNIS_ACTION_NAMES",
     "PADDLE_TENNIS_NORMALIZED_SLICE",
     "PADDLE_TENNIS_OBSERVATION_NAMES",
+    "PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES",
     "PaddleCourtServe",
     "PaddleTennisEnv",
     "PartnerMode",

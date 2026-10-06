@@ -56,6 +56,30 @@ mirroring identity of the physical block bit-for-bit):
 Recipes normalize the continuous physical block ``[0:24]`` and leave
 the bounded tail raw (the humanoid convention: freshly active flags
 must not inherit near-zero variance from a transferred normalizer).
+
+Observation profiles (``observation_profile``; the policy-facing
+observation only -- physics, reward, endings and info never depend on
+it):
+
+- ``"full"`` (default): the 48 values above, bit-identical to the
+  pre-profile env.
+- ``"physical"``: the context-blind 35-value policy observation
+  (``PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES``; the 2026-10-05
+  review §4.2 pilot). ``[0:24]`` is the physical block with the ball
+  spin in the world frame (side-mirrored like every other vector);
+  ``[24:27]`` keeps the three flags the scripted oracle reads
+  (expected returner, ball side, ``min(bounce_count, 2) / 2``);
+  ``[27:35]`` keeps the four ball contact channels' latch and
+  release-progress state. Dropped: the rally-phase one-hot, the
+  serving flag, both crossing flags, ``rally_count`` and the episode
+  clock -- the bookkeeping context the learned policy was measured to
+  gate on (``docs/paddle_tennis_prefreeze_diagnostics_20260830.md``
+  §4) -- and the two racket–net channels, which the court's collision
+  filters never generate (constant zero).
+
+:meth:`PaddleTennisEnv.observation_for_side` always returns the full
+48-value layout, under either profile: the opponent controller, the
+scripted oracles and the diagnosis instruments read it by index.
 """
 
 from __future__ import annotations
@@ -210,9 +234,74 @@ _CONTACT_NAMES = tuple(
 
 PADDLE_TENNIS_OBSERVATION_NAMES = _PHYSICAL_NAMES + _RALLY_NAMES + _CONTACT_NAMES
 
+#: Where the ball spin sits in the physical block (both profiles).
+_BALL_SPIN_SLICE = slice(6, 9)
+
+# The "physical" profile's physical block: the legacy names and order,
+# except the spin reads the world frame (the legacy entries are the
+# free joint's body-frame qvel, whose meaning tumbles with the ball's
+# orientation; review §5b).
+_PHYSICAL_NAMES_WORLD_SPIN = (
+    *_PHYSICAL_NAMES[: _BALL_SPIN_SLICE.start],
+    *(f"ball_angular_velocity_world_{axis}" for axis in "xyz"),
+    *_PHYSICAL_NAMES[_BALL_SPIN_SLICE.stop :],
+)
+
+# The rally state the scripted oracle reads and that read identically
+# whether a k=2 ball arrives as a fresh feed or in its real mid-rally
+# context (prefreeze diagnostics §4). The bounce count is clipped and
+# scaled into [0, 1], like every value of the un-normalized tail
+# (review §4.2: scaled counters land with the profile).
+_CONTEXT_BLIND_RALLY_NAMES = (
+    "expected_returner_is_own",
+    "ball_side_is_own",
+    "bounce_count_scaled",
+)
+
+#: Ball contact channels kept by the "physical" profile: the leading
+#: four of ``_CONTACT_CHANNEL_LABELS``. The two racket–net channels are
+#: dropped -- the paddle-court collision filters never generate a
+#: racket–net contact, so their four dims are constant zero (review
+#: §7.4).
+_PHYSICAL_PROFILE_CHANNEL_COUNT = 4
+_PHYSICAL_PROFILE_CONTACT_NAMES = tuple(
+    f"contact_latched_{label}"
+    for label in _CONTACT_CHANNEL_LABELS[:_PHYSICAL_PROFILE_CHANNEL_COUNT]
+) + tuple(
+    f"contact_release_progress_{label}"
+    for label in _CONTACT_CHANNEL_LABELS[:_PHYSICAL_PROFILE_CHANNEL_COUNT]
+)
+
+#: The context-blind policy observation (``observation_profile=
+#: "physical"``; module docstring).
+PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES = (
+    _PHYSICAL_NAMES_WORLD_SPIN
+    + _CONTEXT_BLIND_RALLY_NAMES
+    + _PHYSICAL_PROFILE_CONTACT_NAMES
+)
+
+# Where the "physical" profile's tail values live in the full layout,
+# looked up by name so the two layouts cannot drift apart silently.
+_FULL_INDEX = {
+    name: index for index, name in enumerate(PADDLE_TENNIS_OBSERVATION_NAMES)
+}
+_FULL_EXPECTED_RETURNER_INDEX = _FULL_INDEX["expected_returner_is_own"]
+_FULL_BALL_SIDE_INDEX = _FULL_INDEX["ball_side_is_own"]
+_FULL_BOUNCE_COUNT_INDEX = _FULL_INDEX["bounce_count"]
+_FULL_KEPT_CONTACT_INDICES = [
+    _FULL_INDEX[name] for name in _PHYSICAL_PROFILE_CONTACT_NAMES
+]
+
 #: Slice of the observation the recipes normalize (the continuous
-#: physical block); the bounded rally/contact tail stays raw.
+#: physical block); the bounded rally/contact tail stays raw. The same
+#: slice under both observation profiles.
 PADDLE_TENNIS_NORMALIZED_SLICE = slice(0, len(_PHYSICAL_NAMES))
+
+#: ``bounce_count_scaled = min(bounce_count, 2) / 2``. The rules machine
+#: never counts past one bounce (a second bounce ends the point without
+#: incrementing), so the feature reads 0.0 or 0.5 today; the clip only
+#: bounds it in [0, 1] whatever a future rule profile counts.
+_BOUNCE_COUNT_CLIP = 2.0
 
 PADDLE_TENNIS_ACTION_NAMES = ("target_x", "target_y", "target_z")
 
@@ -220,7 +309,30 @@ OpponentController = Callable[[np.ndarray], np.ndarray]
 
 
 class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
-    """Cooperative 1v1 paddle rally on the probe-frozen court."""
+    """Cooperative 1v1 paddle rally on the probe-frozen court.
+
+    Two observation surfaces, deliberately split:
+
+    - the **policy observation** -- what :meth:`reset` and :meth:`step`
+      return (and what the non-finite guard echoes) -- follows
+      ``observation_profile``: the full 48-value layout (``"full"``,
+      the default) or the context-blind 35-value one (``"physical"``).
+      ``observation_space`` and ``observation_names`` describe it, so
+      the training fingerprint names the active profile;
+    - :meth:`observation_for_side` always returns the full 48-value
+      layout for either side. The opponent controller, the scripted
+      oracles and witnesses, the diagnosis instrument, the probe tools
+      and frozen-policy opponents read it, and none of them may see
+      the profile.
+
+    The profile changes nothing else: under the same seed and actions,
+    rewards, endings and info are identical across profiles.
+    """
+
+    #: Policy-observation profiles (module docstring): "full" (the
+    #: legacy 48-value layout, default) and "physical" (the
+    #: context-blind 35-value layout of the review §4.2 pilot).
+    _OBSERVATION_PROFILES = ("full", "physical")
 
     #: Rally-rule profiles: "fault" (the ground-rules era default;
     #: striking the incoming ball pre-bounce is a VOLLEY_RETURN fault)
@@ -259,6 +371,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         drill_fraction: float = 0.0,
         drill_context: str = "feed",
         deep_contact_depth: float = 5.5,
+        observation_profile: str = "full",
         **kwargs: Any,
     ) -> None:
         utils.EzPickle.__init__(
@@ -281,7 +394,23 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             drill_fraction=drill_fraction,
             drill_context=drill_context,
             deep_contact_depth=deep_contact_depth,
+            observation_profile=observation_profile,
             **kwargs,
+        )
+        if observation_profile not in self._OBSERVATION_PROFILES:
+            raise ValueError(
+                f"observation_profile must be one of "
+                f"{self._OBSERVATION_PROFILES}, got {observation_profile!r}"
+            )
+        self.observation_profile = observation_profile
+        # Per instance: the training fingerprint (config.json's
+        # observation_names / observation_names_sha256) must name the
+        # active profile's layout, so a warm start or demo library
+        # recorded under the other profile is refused by name.
+        self.observation_names = (
+            PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES
+            if observation_profile == "physical"
+            else PADDLE_TENNIS_OBSERVATION_NAMES
         )
         if volley_rule not in self._VOLLEY_RULES:
             raise ValueError(
@@ -454,7 +583,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             self,
             asset_path("paddle_court.xml"),
             episode_len=episode_len,
-            obs_dim=len(PADDLE_TENNIS_OBSERVATION_NAMES),
+            obs_dim=len(self.observation_names),
             **kwargs,
         )
 
@@ -622,6 +751,20 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
     def _ball_angular_velocity(self) -> np.ndarray:
         return self.data.qvel[self._ball_dofadr + 3 : self._ball_dofadr + 6].copy()
 
+    def _ball_angular_velocity_world(self) -> np.ndarray:
+        """The ball spin in the world frame.
+
+        A free joint's ``qvel[3:6]`` is the angular velocity in the
+        body's own frame, so its components tumble with the ball's
+        orientation; rotating it by the orientation quaternion
+        (``qpos[3:7]``, read from the state itself rather than a
+        derived ``xmat``) gives the world-frame spin.
+        """
+        quaternion = self.data.qpos[self._ball_qposadr + 3 : self._ball_qposadr + 7]
+        world = np.zeros(3, dtype=np.float64)
+        mujoco.mju_rotVecQuat(world, self._ball_angular_velocity(), quaternion)
+        return world
+
     def _paddle_position(self, side: CourtSide) -> np.ndarray:
         head = "player_a_head" if side is CourtSide.A else "player_b_head"
         return np.asarray(self.data.body(head).xpos, dtype=np.float64).copy()
@@ -645,7 +788,16 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         )
 
     def observation_for_side(self, side: CourtSide) -> np.ndarray:
-        """The full side-local observation (the policy reads side A)."""
+        """The FULL 48-value side-local observation, under any profile.
+
+        This is the side-local contract every non-policy reader shares:
+        the opponent controller (side B), the scripted oracles and
+        witnesses (which read ``bounce_count`` and ``ball_side_is_own``
+        by index), the diagnosis instrument, the probe tools and
+        frozen-policy opponents. It never follows
+        ``observation_profile``; only the policy observation that
+        :meth:`reset` / :meth:`step` return does (class docstring).
+        """
         side = CourtSide(side)
         opponent = side.opponent
         snapshot = self._rules.snapshot()
@@ -699,8 +851,56 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         )
         return np.concatenate((physical, rally, contact))
 
+    def _physical_observation_for_side(
+        self, side: CourtSide, full: np.ndarray | None = None
+    ) -> np.ndarray:
+        """The context-blind 35-value ``"physical"`` profile layout.
+
+        Built from ``full`` (the same side's :meth:`observation_for_side`
+        vector, computed here when not supplied) so every kept value is
+        the full layout's own number, looked up by name; only the spin
+        is recomputed, in the world frame and side-mirrored like every
+        other vector, and the bounce count is clipped and scaled.
+        """
+        side = CourtSide(side)
+        if full is None:
+            full = self.observation_for_side(side)
+        physical = full[PADDLE_TENNIS_NORMALIZED_SLICE].copy()
+        physical[_BALL_SPIN_SLICE] = mirror_for_side(
+            self._ball_angular_velocity_world(), side
+        )
+        rally = np.array(
+            [
+                full[_FULL_EXPECTED_RETURNER_INDEX],
+                full[_FULL_BALL_SIDE_INDEX],
+                min(float(full[_FULL_BOUNCE_COUNT_INDEX]), _BOUNCE_COUNT_CLIP)
+                / _BOUNCE_COUNT_CLIP,
+            ],
+            dtype=np.float64,
+        )
+        return np.concatenate((physical, rally, full[_FULL_KEPT_CONTACT_INDICES]))
+
     def _get_obs(self) -> np.ndarray:
-        return self.observation_for_side(CourtSide.A)
+        """The policy observation (side A) under the active profile.
+
+        Every policy-facing path -- reset, step, the n-point relaunch,
+        the non-finite echo -- reads this, and the step's non-finite
+        guard tests it, so the full profile keeps the legacy rule
+        bit-for-bit. The physical profile's test is a superset: every
+        dim it drops is finite by construction (flags, counters, the
+        clock, latch state) except the body-frame spin, and a
+        non-finite body spin makes the world-frame spin non-finite
+        too. Its world-frame spin also reads the ball's orientation,
+        which the full layout does not carry -- the one state (a
+        non-finite orientation with everything else finite) on which
+        the profiles could part, by a single step: the physical
+        profile ends there, the full profile on its next step's
+        pre-physics state check.
+        """
+        full = self.observation_for_side(CourtSide.A)
+        if self.observation_profile == "physical":
+            return self._physical_observation_for_side(CourtSide.A, full)
+        return full
 
     # -- stepping ----------------------------------------------------------
 
@@ -1767,7 +1967,9 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             "drill_entry_index": float(self._drill_entry_index),
         }
 
-    #: Human-readable labels matching the observation vector.
+    #: Human-readable labels matching the policy observation: the
+    #: class default is the full layout; ``__init__`` sets the active
+    #: profile's names per instance.
     observation_names: tuple[str, ...] = PADDLE_TENNIS_OBSERVATION_NAMES
     action_names: tuple[str, ...] = PADDLE_TENNIS_ACTION_NAMES
 
@@ -1776,6 +1978,7 @@ __all__ = [
     "PADDLE_TENNIS_ACTION_NAMES",
     "PADDLE_TENNIS_NORMALIZED_SLICE",
     "PADDLE_TENNIS_OBSERVATION_NAMES",
+    "PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES",
     "PaddleCourtServe",
     "PaddleTennisEnv",
 ]
