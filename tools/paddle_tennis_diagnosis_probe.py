@@ -107,8 +107,16 @@ def main(argv: list[str] | None = None) -> int:
         policy = scripted_ground_opponent
         label = "ground oracle (reference)"
 
+    # The stock env (default observation_profile "full"): a checkpoint
+    # from an observation_profile="physical" run is refused by its
+    # loader -- score it with notebook_utils.score_paddle_stage, which
+    # rebuilds the run's own recorded env. The scripted oracle reads
+    # the full layout under any profile.
     traces, travels = run_player(
-        policy, episodes=args.episodes, seed_start=args.seed_start
+        policy,
+        episodes=args.episodes,
+        seed_start=args.seed_start,
+        full_observation=not args.model,
     )
     print(report(traces, label, interpoint_travels=travels))
     return 0

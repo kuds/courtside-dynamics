@@ -8,7 +8,10 @@ the instrumented observations.
 """
 from __future__ import annotations
 
+import pickle
+
 import numpy as np
+import pytest
 
 from courtside_dynamics.envs._paddle_court import (
     GROUND_WAIT_MARGIN,
@@ -19,6 +22,29 @@ from tools.paddle_tennis_diagnosis_probe import (
     report,
     run_player,
 )
+
+#: The PaddleTennis recipe's n-point + escrow kwargs (the in-run
+#: diagnosis plays the recipe's evaluation env).
+_RECIPE_KWARGS = {
+    "points_per_episode": None,
+    "contact_shaping": 0.25,
+    "reach_shaping": 0.25,
+}
+
+
+def _profile_env_fn(profile: str):
+    from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
+
+    return lambda: PaddleTennisEnv(observation_profile=profile, **_RECIPE_KWARGS)
+
+
+class _IdentityNormalizer:
+    """Picklable stand-in for a saved SelectiveVecNormalize."""
+
+    training = True
+
+    def normalize_obs(self, observation):
+        return observation
 
 
 class TestDiagnosisInstrument:
@@ -141,6 +167,144 @@ class TestDiagnosisInstrument:
         assert "exchange survival" in text
         assert "ready position" in text
         assert "recovery hold" in text
+
+
+class TestObservationProfiles:
+    """Scripted players read the full layout under any
+    ``observation_profile``; a learned policy reads the policy
+    observation it was trained on (2026-10-05 review §7.2: the oracle
+    reads two rally fields by literal index)."""
+
+    def test_oracle_reference_rows_identical_across_profiles(self):
+        rows = {}
+        for profile in ("full", "physical"):
+            traces, travels = run_player(
+                scripted_ground_opponent,
+                episodes=2,
+                seed_start=1000,
+                env_fn=_profile_env_fn(profile),
+                full_observation=True,
+            )
+            rows[profile] = (
+                traces,
+                travels,
+                report(traces, "oracle", interpoint_travels=travels),
+            )
+        # The rows are real rallies, not empty walks.
+        assert len(rows["full"][0]) >= 2
+        assert sum(t.policy_hits for t in rows["full"][0]) > 4
+        assert rows["full"] == rows["physical"]
+        # Under the default profile the flag changes nothing: the
+        # full view IS the policy observation.
+        legacy_traces, legacy_travels = run_player(
+            scripted_ground_opponent,
+            episodes=2,
+            seed_start=1000,
+            env_fn=_profile_env_fn("full"),
+        )
+        assert (legacy_traces, legacy_travels) == rows["full"][:2]
+
+    def test_scripted_player_without_the_flag_fails_loudly(self):
+        """Fed the 35-value policy observation, the oracle would read
+        contact-tail values at its rally indices; it refuses."""
+        with pytest.raises(ValueError, match="observation_for_side"):
+            run_player(
+                scripted_ground_opponent,
+                episodes=1,
+                seed_start=1000,
+                env_fn=_profile_env_fn("physical"),
+            )
+
+    @pytest.mark.parametrize(
+        ("profile", "full_observation", "width"),
+        [
+            ("physical", False, 35),
+            ("physical", True, 48),
+            ("full", False, 48),
+            ("full", True, 48),
+        ],
+    )
+    def test_player_reads_the_requested_view(
+        self, profile, full_observation, width
+    ):
+        seen = set()
+
+        def statue(observation):
+            seen.add(np.shape(observation))
+            return np.zeros(3)
+
+        run_player(
+            statue,
+            episodes=1,
+            seed_start=1000,
+            env_fn=_profile_env_fn(profile),
+            full_observation=full_observation,
+        )
+        assert seen == {(width,)}
+
+    def test_callback_rows_under_the_physical_profile(self, tmp_path):
+        """The in-run diagnosis on a physical-profile run: the oracle
+        row matches the full-profile run's byte for byte, and the
+        checkpoint reads the 35-value policy observation."""
+        from courtside_dynamics.training.paddle_diagnosis import (
+            DiagnosisProbeCallback,
+        )
+
+        widths = set()
+
+        class _Stub:
+            def get_vec_normalize_env(self):
+                return None
+
+            def predict(self, observation, deterministic=True):
+                widths.add(np.shape(observation))
+                return np.zeros(3), None
+
+        texts = {}
+        for profile in ("full", "physical"):
+            save_dir = tmp_path / profile
+            callback = DiagnosisProbeCallback(
+                save_dir=str(save_dir),
+                save_freq=1,
+                episodes=1,
+                seed_start=1000,
+                env_fn=_profile_env_fn(profile),
+            )
+            callback.model = _Stub()
+            callback.n_calls = 1
+            callback.num_timesteps = 100
+            assert callback._on_step() is True
+            assert not (save_dir / "diagnosis_probe_failures.txt").exists()
+            assert (save_dir / "diagnosis_probe_100.txt").exists()
+            texts[profile] = (save_dir / "diagnosis_probe_oracle.txt").read_text()
+        assert texts["full"] == texts["physical"]
+        assert widths == {(48,), (35,)}
+
+    def test_checkpoint_policy_refuses_another_width(self, tmp_path):
+        """A physical-profile checkpoint replayed on a full-profile env
+        (or the reverse) fails with a message naming the fix, not a
+        broadcasting error deep in the normalizer."""
+        from stable_baselines3 import SAC
+
+        from courtside_dynamics.training.paddle_diagnosis import (
+            native_checkpoint_policy,
+        )
+
+        env = _profile_env_fn("physical")()
+        try:
+            model = SAC("MlpPolicy", env, buffer_size=100, device="cpu")
+            model_path = str(tmp_path / "model.zip")
+            model.save(model_path)
+            observation, _ = env.reset(seed=1000)
+            full = env.observation_for_side(CourtSide.A)
+        finally:
+            env.close()
+        normalizer_path = tmp_path / "vec_normalize.pkl"
+        normalizer_path.write_bytes(pickle.dumps(_IdentityNormalizer()))
+        policy = native_checkpoint_policy(model_path, str(normalizer_path))
+        assert policy(observation).shape == (3,)
+        with pytest.raises(ValueError, match="observation_profile"):
+            policy(full)
 
 
 class TestDiagnosisProbeCallback:

@@ -615,7 +615,9 @@ def run_np2(
     all_travels: list[float] = []
     try:
         for seed in range(seed_start, seed_start + episodes):
-            traces, travels = diag_run_episode(env, scripted_ground_opponent, seed)
+            traces, travels = diag_run_episode(
+                env, scripted_ground_opponent, seed, full_observation=True
+            )
             crossings.append(int(env._crossings))
             points.append(int(env._points_played))
             nudges.append(int(env._point_serve_nudged))

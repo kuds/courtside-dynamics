@@ -58,10 +58,15 @@ def native_checkpoint_policy(
     """A saved PaddleTennis SB3 SAC checkpoint behind its normalizer.
 
     Unlike the P5 tool's champion loader there is no shim: the
-    checkpoint was trained on this env's own 48-value observation.
-    The saved ``SelectiveVecNormalize`` carries the recipe's excluded
-    tail (indices 24-47), so ``normalize_obs`` reproduces training
-    normalization exactly.
+    checkpoint was trained on this env's own policy observation (the
+    48-value full layout, or the 35-value one of an
+    ``observation_profile="physical"`` run). The saved
+    ``SelectiveVecNormalize`` carries the recipe's excluded tail
+    (indices 24 onward), so ``normalize_obs`` reproduces training
+    normalization exactly. The returned policy refuses an observation
+    of any other width, loudly: replay it on an env built with the
+    run's own ``observation_profile`` (its recorded constructor
+    kwargs), and as a learned player (``full_observation=False``).
     """
     import pickle
 
@@ -71,8 +76,15 @@ def native_checkpoint_policy(
     with open(vec_normalize_path, "rb") as handle:
         normalizer = pickle.load(handle)
     normalizer.training = False
+    expected_shape = tuple(model.observation_space.shape or ())
 
     def act(observation: np.ndarray) -> np.ndarray:
+        if np.shape(observation) != expected_shape:
+            raise ValueError(
+                f"checkpoint {model_path} reads observations of shape "
+                f"{expected_shape}, got {np.shape(observation)}: build the "
+                f"env with the run's own observation_profile"
+            )
         normalized = normalizer.normalize_obs(observation[None, :].astype(np.float64))[
             0
         ]
@@ -153,6 +165,8 @@ def run_episode(
     env: PaddleTennisEnv,
     policy: Callable[[np.ndarray], np.ndarray],
     seed: int,
+    *,
+    full_observation: bool = False,
 ) -> tuple[list[EpisodeTrace], list[float]]:
     """Walk an episode's event stream into per-POINT traces.
 
@@ -180,6 +194,16 @@ def run_episode(
     reproducible-reset contract), so the walk forces the side the
     alternation would serve next -- consecutive episodes on one env
     keep alternating exactly as the instrument always measured them.
+
+    ``full_observation`` says what ``policy`` reads. ``False`` (a
+    learned policy) passes the env's policy observation -- the
+    profile-dependent vector the checkpoint was trained on. ``True``
+    (every scripted player: the oracle reference row, any witness)
+    passes ``env.observation_for_side(CourtSide.A)``, the full 48-value
+    layout the scripted controllers index into, whatever the env's
+    ``observation_profile`` -- so a reference row reads identically
+    under either profile. Under the default ``"full"`` profile the two
+    are the same vector.
     """
     observation, reset_info = env.reset(
         seed=seed, options={"serve_side": env._next_serving_side}
@@ -212,7 +236,8 @@ def run_episode(
     window_active = False
     window_travel = 0.0
     awaiting_touch = False
-    previous_paddle = observation[9:12].copy()
+    # Positions come from the full layout, under any profile.
+    previous_paddle = env.observation_for_side(CourtSide.A)[9:12].copy()
 
     def close_window() -> None:
         nonlocal window_active, window_countdown, window_travel
@@ -225,7 +250,12 @@ def run_episode(
     info: dict = {}
     last_nudges = 0
     while True:
-        observation, _, terminated, truncated, info = env.step(policy(observation))
+        # Both views describe the same pre-step state; only what the
+        # player reads differs (see full_observation above).
+        player_view = (
+            env.observation_for_side(CourtSide.A) if full_observation else observation
+        )
+        observation, _, terminated, truncated, info = env.step(policy(player_view))
         raw = env.observation_for_side(CourtSide.A)
         paddle = raw[9:12]
         # A sanctioned relaunch nudge is a referee teleport, not
@@ -516,18 +546,24 @@ def run_player(
     episodes: int,
     seed_start: int,
     env_fn: Callable[[], PaddleTennisEnv] = PaddleTennisEnv,
+    full_observation: bool = False,
 ) -> tuple[list[EpisodeTrace], list[float]]:
     """All point traces plus inter-point recovery travels.
 
     One trace per point (== one per episode under the frozen
     one-point default, where the travel list is always empty).
+    ``full_observation`` is :func:`run_episode`'s: ``True`` for a
+    scripted player (it reads the full 48-value layout under any
+    ``observation_profile``), ``False`` for a learned policy.
     """
     env = env_fn()
     traces: list[EpisodeTrace] = []
     travels: list[float] = []
     try:
         for seed in range(seed_start, seed_start + episodes):
-            episode_traces, episode_travels = run_episode(env, policy, seed)
+            episode_traces, episode_travels = run_episode(
+                env, policy, seed, full_observation=full_observation
+            )
             traces.extend(episode_traces)
             travels.extend(episode_travels)
         return traces, travels
@@ -541,7 +577,10 @@ class DiagnosisProbeCallback(BaseCallback):
     ``save_freq`` uses callback-call units (the caller converts env
     steps, matching ``CheckpointCallback``). The oracle reference row
     is measured once, lazily, at the first trigger (it is
-    policy-independent). Reports land in ``save_dir`` as
+    policy-independent, and profile-independent too: the scripted
+    oracle reads the full layout under any ``observation_profile``,
+    while the checkpoint reads the policy observation it was trained
+    on). Reports land in ``save_dir`` as
     ``diagnosis_probe_<num_timesteps>.txt`` plus
     ``diagnosis_probe_oracle.txt``.
 
@@ -613,11 +652,15 @@ class DiagnosisProbeCallback(BaseCallback):
 
     def _run_probe(self) -> None:
         if not self._oracle_written:
+            # The scripted reference reads the full layout whatever
+            # the run's observation_profile; the checkpoint below reads
+            # the policy observation it was trained on.
             traces, travels = run_player(
                 scripted_ground_opponent,
                 episodes=self.episodes,
                 seed_start=self.seed_start,
                 env_fn=self.env_fn,
+                full_observation=True,
             )
             self._write(
                 "diagnosis_probe_oracle.txt",

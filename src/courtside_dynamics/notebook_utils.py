@@ -2582,11 +2582,15 @@ def score_paddle_stage(
     model_path = pair["model_path"]
     normalizer_path = pair["normalizer_path"]
     policy = native_checkpoint_policy(model_path, normalizer_path)
+    # A learned player reads the env's policy observation; the
+    # recorded kwargs carry the run's observation_profile, so the
+    # checkpoint sees the layout it was trained on.
     traces, travels = run_player(
         policy,
         episodes=episodes,
         seed_start=seed_start,
         env_fn=lambda: PaddleTennisEnv(**env_kwargs),
+        full_observation=False,
     )
     metrics = paddle_campaign_metrics(traces, travels)
     scored = score_campaign_bars(metrics, bars)

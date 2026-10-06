@@ -1892,8 +1892,12 @@ def test_score_paddle_stage_records_the_verified_pair(tmp_path, monkeypatch):
         loaded.append((model_path, normalizer_path))
         return "policy"
 
-    def fake_run_player(policy, *, episodes, seed_start, env_fn):
+    def fake_run_player(policy, *, episodes, seed_start, env_fn, full_observation):
         assert policy == "policy"
+        # The checkpoint is a learned player: it reads the env's policy
+        # observation (the run's own observation_profile), never the
+        # scripted controllers' full view.
+        assert full_observation is False
         return [_trace(serving=False, hits=1, touched=[True])], [2.0]
 
     monkeypatch.setattr(paddle_diagnosis, "native_checkpoint_policy", fake_policy)
