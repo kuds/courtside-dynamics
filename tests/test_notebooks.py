@@ -280,6 +280,52 @@ def test_sb3_notebook_lists_every_recipe() -> None:
     )
 
 
+def test_sb3_notebook_runs_the_context_blind_pilot_seeded(tmp_path) -> None:
+    """The PaddleTennisPhysical pilot launches from this notebook
+    (docs/paddle_tennis_physical_pilot_20261005.md): ENV menu entry,
+    the SEED note, and the section-3/5 flow -- CONFIG_FILE="auto"
+    materializes its packaged starter, and build_train_config with
+    SEED set (the pilot runs SEED=0 and SEED=1) yields the declared
+    bundle on paired evaluation."""
+    from courtside_dynamics.notebook_utils import resolve_run_config_file
+    from courtside_dynamics.recipes import build_train_config
+    from courtside_dynamics.training.train import resolve_eval_seed
+
+    cells = _load_sb3_notebook()["cells"]
+    settings = next(
+        _source(cell) for cell in cells if _source(cell).startswith("ENV = ")
+    )
+    assert "| PaddleTennis | PaddleTennisPhysical |" in settings
+    assert "SEED = 0 and SEED = 1" in settings
+    assert 'CONFIG_FILE = "auto"' in settings
+    assert "`PaddleTennisPhysical`" in _source(cells[1])
+
+    config_file = resolve_run_config_file(
+        "PaddleTennisPhysical", local_root=str(tmp_path / "configs")
+    )
+    assert config_file is not None
+    assert config_file.name == "paddle_tennis_physical.toml"
+    for seed in (0, 1):
+        cfg = build_train_config(
+            "PaddleTennisPhysical",
+            algo="SAC",
+            log_dir=str(tmp_path / f"run_{seed}"),
+            total_timesteps=None,
+            quick_test=False,
+            seed=seed,
+            config_file=config_file,
+        )
+        assert cfg.total_timesteps == 3_000_000
+        assert cfg.model_kwargs["gamma"] == 0.995
+        assert cfg.eval_reset_options is not None
+        assert resolve_eval_seed(cfg) == seed + 1_000_000
+        probe_env = cfg.env_fn()
+        try:
+            assert probe_env.observation_space.shape == (35,)
+        finally:
+            probe_env.close()
+
+
 def _load_campaign_notebook() -> dict[str, Any]:
     return json.loads(CAMPAIGN_NOTEBOOK.read_text())
 
