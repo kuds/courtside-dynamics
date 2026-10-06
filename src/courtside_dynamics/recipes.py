@@ -25,6 +25,7 @@ from courtside_dynamics.envs import (
     HUMANOID_TENNIS_OBSERVATION_LAYOUT,
     PADDLE_TENNIS_NORMALIZED_SLICE,
     PADDLE_TENNIS_OBSERVATION_NAMES,
+    PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES,
     BallBalanceEnv,
     BallBounceEnv,
     HumanoidTennisCoopEnv,
@@ -365,6 +366,14 @@ _PADDLE_TENNIS_NORMALIZATION_EXCLUSIONS = tuple(
     range(
         PADDLE_TENNIS_NORMALIZED_SLICE.stop,
         len(PADDLE_TENNIS_OBSERVATION_NAMES),
+    )
+)
+# The context-blind profile's raw tail (24..34): the same normalized
+# physical block, a shorter bounded tail.
+_PADDLE_TENNIS_PHYSICAL_NORMALIZATION_EXCLUSIONS = tuple(
+    range(
+        PADDLE_TENNIS_NORMALIZED_SLICE.stop,
+        len(PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES),
     )
 )
 
@@ -1714,6 +1723,76 @@ def _make_true_baseline(base: Recipe) -> Recipe:
 
 
 RECIPES["WallBallTrueBaseline"] = _make_true_baseline(RECIPES["WallBallGoalRally"])
+
+
+#: The context-blind pilot's discount (docs/repo_review_20261005.md
+#: §2.3): at 100 Hz control, SB3's default 0.99 is a ~100-step horizon,
+#: against ~210 steps between consecutive policy hits (0.99^210 ≈
+#: 0.12); 0.995 is the WallBall precedent (DECISIONS, 0.13.0).
+_PADDLE_TENNIS_PHYSICAL_GAMMA = 0.995
+
+
+def _make_paddle_tennis_physical(base: Recipe) -> Recipe:
+    """Build the context-blind pilot recipe from the adopted PaddleTennis one.
+
+    The review's §4.2 pilot (docs/paddle_tennis_physical_pilot_20261005.md):
+    the policy returns the serve (k=1) 90-95% of the time but converts
+    the second ball (k=2) at most 1%, and the pre-freeze diagnostics
+    (§4) measured it gating on the rally-bookkeeping block -- identical
+    physics converts 6.9% presented as a fresh feed, 1.3-2.0% in its
+    real mid-rally context -- while the context-blind scripted oracle
+    plays both presentations alike. The pilot removes that context from
+    the policy's observation.
+
+    The bundle, declared together (so the pilot cannot attribute a
+    result to either half alone):
+
+    - ``observation_profile="physical"``: the 35-value context-blind
+      policy observation (world-frame spin, scaled bounce count, no
+      phase/serving/crossing/rally-count/clock dims); the normalizer's
+      raw tail shrinks to match (24..34);
+    - ``gamma=0.995`` (``_PADDLE_TENNIS_PHYSICAL_GAMMA``).
+
+    Everything else is the base recipe's, unchanged: the task (n-point
+    play, both escrowed shapings, the ground oracle), selection on
+    ``episode_rally_returns_a``, paired evaluation, the degenerate
+    guard, the monitor keys and the checkpoint diagnosis (whose oracle
+    reference row reads the full layout under either profile). The
+    budget is the pilot's 3M per seed.
+    """
+    env_kwargs = deepcopy(base.env_kwargs)
+    env_kwargs["observation_profile"] = "physical"
+    extra_cfg = deepcopy(base.extra_cfg)
+    extra_cfg["normalize_obs_excluded_indices"] = (
+        _PADDLE_TENNIS_PHYSICAL_NORMALIZATION_EXCLUSIONS
+    )
+    extra_cfg["model_kwargs"] = {
+        **extra_cfg["model_kwargs"],
+        "gamma": _PADDLE_TENNIS_PHYSICAL_GAMMA,
+    }
+    return replace(
+        base,
+        env_kwargs=env_kwargs,
+        eval_env_overrides=deepcopy(base.eval_env_overrides),
+        default_total_timesteps=3_000_000,
+        name_prefix="paddle_tennis_physical",
+        extra_cfg=extra_cfg,
+        description=(
+            "PILOT (docs/paddle_tennis_physical_pilot_20261005.md): the "
+            "context-blind PaddleTennis arm. Same task, selection and "
+            "instruments as PaddleTennis; the declared bundle changes "
+            "two things together -- the policy observation drops the "
+            "rally-bookkeeping context the learned policy gates on "
+            "(observation_profile='physical': 35 values, world-frame "
+            "spin, no phase/serving/crossing/rally-count/clock dims) "
+            "and gamma rises to 0.995 for the ~210-step hit-to-hit "
+            "credit span. 3M steps per seed; the bar is k=2 receiving "
+            "survival >= 5% at best_model on both seeds."
+        ),
+    )
+
+
+RECIPES["PaddleTennisPhysical"] = _make_paddle_tennis_physical(RECIPES["PaddleTennis"])
 
 
 # Quick-test overrides applied on top of the recipe defaults so a notebook

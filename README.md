@@ -122,6 +122,12 @@ available recipe keys are:
   in continuous n-point play with the escrowed contact and reach
   shapings; selection and success follow the policy's own k≥2 rally
   returns, `episode_rally_returns_a`, on paired, seeded evaluation)
+- `PaddleTennisPhysical` (unreleased — the context-blind pilot arm of
+  `PaddleTennis`: the same task, selection and instruments, with the
+  declared bundle of a 35-value policy observation that drops the
+  rally-bookkeeping context (`observation_profile="physical"`) and
+  γ = 0.995; 3M steps per seed; see
+  [`docs/paddle_tennis_physical_pilot_20261005.md`](docs/paddle_tennis_physical_pilot_20261005.md))
 - `HumanoidTennisStage0Intercept`
 - `HumanoidTennisStage1AnchoredReturn`
 - `HumanoidTennisStage2RandomizedReturn`

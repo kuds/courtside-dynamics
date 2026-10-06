@@ -438,7 +438,11 @@ def test_only_recipes_with_reset_options_derive_a_paired_eval_seed(tmp_path):
             assert resolved is None, name
         else:
             paired[name] = resolved
-    assert paired == {"PaddleTennis": 1_000_000}
+    # PaddleTennisPhysical inherits PaddleTennis' paired evaluation.
+    assert paired == {
+        "PaddleTennis": 1_000_000,
+        "PaddleTennisPhysical": 1_000_000,
+    }
     for name in RECIPES:
         if name.startswith(("HumanoidTennis", "WallBall")):
             assert name not in paired
@@ -603,6 +607,151 @@ def test_quick_test_scales_paddle_checkpoint_diagnosis(tmp_path):
         checkpoint_diagnosis={"episodes": 7, "seed_start": 5200},
     )
     assert explicit.checkpoint_diagnosis == {"episodes": 7, "seed_start": 5200}
+
+
+def test_paddle_tennis_physical_recipe_is_the_declared_bundle():
+    """The context-blind pilot recipe is PaddleTennis plus exactly the
+    declared bundle (observation_profile="physical" with its shorter raw
+    tail, gamma 0.995), a 3M budget and its own prefix; every other
+    setting is inherited, and the base recipe is left untouched."""
+    from dataclasses import fields
+
+    base = RECIPES["PaddleTennis"]
+    pilot = RECIPES["PaddleTennisPhysical"]
+    assert pilot.env_cls is base.env_cls
+    assert pilot.env_kwargs == {**base.env_kwargs, "observation_profile": "physical"}
+    assert pilot.eval_env_overrides == base.eval_env_overrides
+    assert pilot.eval_env_overrides is not base.eval_env_overrides
+    assert pilot.default_total_timesteps == 3_000_000
+    assert pilot.default_algo == base.default_algo == "SAC"
+    assert pilot.name_prefix == "paddle_tennis_physical"
+    assert "context-blind" in pilot.description
+    assert "gamma" in pilot.description
+
+    changed = {"normalize_obs_excluded_indices", "model_kwargs"}
+    assert set(pilot.extra_cfg) == set(base.extra_cfg)
+    for key in set(base.extra_cfg) - changed:
+        assert pilot.extra_cfg[key] == base.extra_cfg[key], key
+    assert pilot.extra_cfg["normalize_obs_excluded_indices"] == tuple(range(24, 35))
+    assert base.extra_cfg["normalize_obs_excluded_indices"] == tuple(range(24, 48))
+    assert pilot.extra_cfg["model_kwargs"] == {
+        **base.extra_cfg["model_kwargs"],
+        "gamma": 0.995,
+    }
+    assert "gamma" not in base.extra_cfg["model_kwargs"]
+    assert "observation_profile" not in base.env_kwargs
+    # Nothing nested is shared with the base recipe.
+    for key, value in pilot.extra_cfg.items():
+        if isinstance(value, (dict, list)):
+            assert value is not base.extra_cfg[key], key
+    assert {f.name for f in fields(pilot)} == {f.name for f in fields(base)}
+
+
+def test_paddle_tennis_physical_builds_the_context_blind_run(tmp_path):
+    from courtside_dynamics.envs import PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES
+
+    cfg = build_train_config(
+        "PaddleTennisPhysical", algo="SAC", log_dir=str(tmp_path), seed=0
+    )
+    assert cfg.name_prefix == "paddle_tennis_physical_sac"
+    assert cfg.total_timesteps == 3_000_000
+    assert cfg.model_kwargs["gamma"] == 0.995
+    assert cfg.normalize_obs_excluded_indices == tuple(range(24, 35))
+    assert cfg.success_key == "episode_rally_returns_a"
+    assert cfg.checkpoint_diagnosis == {"episodes": 30, "seed_start": 5200}
+    for factory in (cfg.env_fn, cfg.eval_env_fn):
+        env = factory()
+        try:
+            assert env.observation_profile == "physical"
+            assert env.observation_space.shape == (35,)
+            assert env.observation_names == PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES
+            assert env.points_per_episode is None
+            obs, _ = env.reset(seed=0)
+            assert obs.shape == (35,)
+        finally:
+            env.close()
+
+
+def test_paddle_tennis_physical_config_json_fingerprint(tmp_path):
+    """config.json names the context-blind layout: a different
+    observation fingerprint from PaddleTennis, the profile in the
+    recorded constructor kwargs (training and evaluation), the bundle's
+    gamma and exclusions in the train config."""
+    import json
+
+    from courtside_dynamics.envs import PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES
+    from courtside_dynamics.training.artifacts import (
+        observation_names_sha256,
+        write_run_config,
+    )
+
+    payloads = {}
+    for name in ("PaddleTennis", "PaddleTennisPhysical"):
+        log_dir = tmp_path / name
+        log_dir.mkdir()
+        cfg = build_train_config(name, log_dir=str(log_dir), seed=0)
+        with open(write_run_config(cfg, str(log_dir))) as handle:
+            payloads[name] = json.load(handle)
+    full, physical = payloads["PaddleTennis"], payloads["PaddleTennisPhysical"]
+    assert physical["env"]["observation_names"] == list(
+        PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES
+    )
+    assert physical["env"]["observation_names_sha256"] == observation_names_sha256(
+        PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES
+    )
+    assert (
+        physical["env"]["observation_names_sha256"]
+        != full["env"]["observation_names_sha256"]
+    )
+    assert physical["env"]["observation_shape"] == [35]
+    assert full["env"]["observation_shape"] == [48]
+    for block in ("env", "evaluation_env"):
+        assert physical[block]["constructor_kwargs"]["observation_profile"] == (
+            "physical"
+        )
+        assert full[block]["constructor_kwargs"]["observation_profile"] == "full"
+    assert physical["train_config"]["model_kwargs"]["gamma"] == 0.995
+    assert physical["train_config"]["normalize_obs_excluded_indices"] == list(
+        range(24, 35)
+    )
+
+
+def test_paddle_tennis_physical_refuses_a_full_profile_warm_start(tmp_path):
+    """A PaddleTennis (full-profile) best checkpoint cannot seed the
+    context-blind pilot: the source's raw tail, observation shape and
+    observation fingerprint all differ, and the refusal comes before
+    any artifact is loaded or written."""
+    import json
+
+    from courtside_dynamics.training import WarmStartConfig
+    from courtside_dynamics.training.artifacts import write_run_config
+    from courtside_dynamics.training.train import _prepare_warm_start
+
+    source_dir = tmp_path / "paddle_tennis_source"
+    (source_dir / "model").mkdir(parents=True)
+    source_cfg = build_train_config("PaddleTennis", log_dir=str(source_dir), seed=0)
+    config_path = write_run_config(source_cfg, str(source_dir))
+    (source_dir / "model" / "best_model.zip").write_bytes(b"zip")
+    (source_dir / "model" / "best_vec_normalize.pkl").write_bytes(b"pkl")
+
+    target = build_train_config(
+        "PaddleTennisPhysical",
+        log_dir=str(tmp_path / "pilot"),
+        seed=0,
+        warm_start=WarmStartConfig(str(source_dir)),
+    )
+    with pytest.raises(ValueError, match="normalize_obs_excluded_indices differ"):
+        _prepare_warm_start(target)
+
+    # Even with the raw tails forced to agree, the layouts refuse.
+    with open(config_path) as handle:
+        config = json.load(handle)
+    config["train_config"]["normalize_obs_excluded_indices"] = list(range(24, 35))
+    with open(config_path, "w") as handle:
+        json.dump(config, handle)
+    with pytest.raises(ValueError, match="observation spaces differ"):
+        _prepare_warm_start(target)
+    assert not (tmp_path / "pilot").exists()
 
 
 def test_humanoid_tennis_smoke_recipe_has_compact_recording_schema(tmp_path):
