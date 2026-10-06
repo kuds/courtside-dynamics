@@ -18,6 +18,49 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **PaddleTennis context-blind observation profile and the
+  `PaddleTennisPhysical` pilot recipe (2026-10-05).** The review's §4.2
+  pilot (`docs/paddle_tennis_physical_pilot_20261005.md`).
+  - **Comparability.** The new profile is opt-in. The default
+    `observation_profile="full"` and the `PaddleTennis` recipe are
+    bit-identical to the instrument batch: per-step obs, reward,
+    `terminated`, `truncated` and info digests match for the default,
+    recipe and volley-legal kwargs, over random and oracle play,
+    seeded and unseeded resets. `config.json` records the new
+    `observation_profile` constructor kwarg (`"full"` for existing
+    recipes). `PaddleTennisPhysical` runs are a new comparability
+    family: their 35-value observation has its own observation-name
+    fingerprint, so a `PaddleTennis` checkpoint, normalizer or demo
+    library is refused as a warm start or demo source.
+  - **`PaddleTennisEnv(observation_profile="full" | "physical")`.**
+    `"physical"` is a 35-value policy observation: the physical block
+    with world-frame ball spin (`ball_angular_velocity_world_*`),
+    `expected_returner_is_own`, `ball_side_is_own`,
+    `bounce_count_scaled` (min(count, 2) / 2), and the four ball
+    contact channels' latch and release state
+    (`PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES`). It drops the
+    rally-phase one-hot, the serving and crossing flags,
+    `rally_count`, the episode clock and the constant-zero
+    racket–net dims. Only the policy observation follows the profile:
+    `observation_for_side` keeps the full 48-value layout for either
+    side, and rewards, endings and info are identical across
+    profiles. `observation_names` and `observation_space` are per
+    instance.
+  - **Scripted readers.** `scripted_ground_opponent` and
+    `scripted_hard_slam_witness` refuse anything but the full 48-value
+    layout. The diagnosis instrument's `run_episode`/`run_player` take
+    `full_observation`: scripted players (the oracle reference row,
+    the diagnosis and n-point probe tools) read
+    `observation_for_side(A)`, learned checkpoints the policy
+    observation. The reference row is identical under both profiles.
+    `native_checkpoint_policy` refuses an observation of the wrong
+    width with a message naming the profile.
+  - **`PaddleTennisPhysical` recipe.** Derived from `PaddleTennis`.
+    It adds `observation_profile="physical"`, the raw tail 24..34 and
+    `gamma=0.995`, with a 3M budget and the `paddle_tennis_physical`
+    prefix; everything else is inherited. A starter
+    `run_configs/paddle_tennis_physical.toml` ships with it, and the
+    sb3 notebook lists it.
 - **PaddleTennis instrument and bug-fix batch (2026-10-05).** Fixes
   the review findings in `docs/repo_review_20261005.md` §5b/§7.2 plus
   their adversarial follow-ups.
