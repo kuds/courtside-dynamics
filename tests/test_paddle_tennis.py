@@ -996,6 +996,82 @@ class TestObservationProfile:
         assert spinning_steps > 50
         assert tumbling_steps > 50
 
+    def test_kept_contact_dims_follow_their_channels_by_name(self, monkeypatch):
+        """Each kept contact dim reads its own sampler channel, for
+        either side. Every latch and release slot carries a distinct
+        value, so a dim wired to any other slot -- the dropped,
+        constant-zero racket–net channels included -- reads the
+        wrong number (an oracle trajectory leaves the net dims zero
+        on every step, so the by-value test above cannot tell)."""
+        from courtside_dynamics.envs._tennis_events import TENNIS_CONTACT_CHANNELS
+
+        count = len(TENNIS_CONTACT_CHANNELS)
+        values = tuple((slot + 1) / (2 * count + 1) for slot in range(2 * count))
+        names = PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES
+        env = PaddleTennisEnv(observation_profile="physical")
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            monkeypatch.setattr(env._event_sampler, "markov_state", lambda: values)
+            for side, own, opponent in (
+                (CourtSide.A, "ball_racket_a", "ball_racket_b"),
+                (CourtSide.B, "ball_racket_b", "ball_racket_a"),
+            ):
+                obs = env._physical_observation_for_side(side)
+                for label, channel in (
+                    ("own_racket", own),
+                    ("opponent_racket", opponent),
+                    ("court", "ball_court"),
+                    ("net", "ball_net"),
+                ):
+                    slot = TENNIS_CONTACT_CHANNELS.index(channel)
+                    assert obs[names.index(f"contact_latched_{label}")] == (
+                        values[slot]
+                    ), (side, label)
+                    assert obs[names.index(f"contact_release_progress_{label}")] == (
+                        values[count + slot]
+                    ), (side, label)
+            assert env._get_obs().tobytes() == (
+                env._physical_observation_for_side(CourtSide.A).tobytes()
+            )
+        finally:
+            env.close()
+
+    @pytest.mark.parametrize("label", ["net", "own_racket"])
+    def test_kept_contact_dims_read_a_live_contact(self, label):
+        """A real strike latches the channel with half its release
+        hysteresis run: the physical observation's latch and
+        release-progress dims for that channel read 1.0 and 0.5, the
+        full layout's own numbers for the same names."""
+        from tests._helpers import set_ball_state
+
+        names = PADDLE_TENNIS_PHYSICAL_OBSERVATION_NAMES
+        full_index = {
+            name: index for index, name in enumerate(PADDLE_TENNIS_OBSERVATION_NAMES)
+        }
+        env = PaddleTennisEnv(observation_profile="physical")
+        try:
+            env.reset(seed=_SMOKE_SEEDS[0])
+            if label == "net":
+                position = np.array([-0.4, 0.0, 0.5])
+                velocity = (20.0, 0.0, 0.0)
+            else:
+                position = env._paddle_position(CourtSide.A) + np.array(
+                    [0.15, 0.0, -0.05]
+                )
+                velocity = (-10.0, 0.0, 0.0)
+            set_ball_state(env.model, env.data, position=position, velocity=velocity)
+            for _ in range(4):
+                obs, _, term, trunc, _ = env.step(_zero_action())
+                if term or trunc:
+                    break
+            full = env.observation_for_side(CourtSide.A)
+            for name in (f"contact_latched_{label}", f"contact_release_progress_{label}"):
+                assert obs[names.index(name)] == full[full_index[name]], name
+            assert obs[names.index(f"contact_latched_{label}")] == 1.0
+            assert obs[names.index(f"contact_release_progress_{label}")] == 0.5
+        finally:
+            env.close()
+
     def test_full_profile_is_bit_identical_to_default(self):
         """Explicit ``"full"`` and the default produce the same obs,
         reward, terminated, truncated and info, bit for bit.
