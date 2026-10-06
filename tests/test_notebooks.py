@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
+import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
@@ -328,6 +332,108 @@ def test_sb3_notebook_runs_the_context_blind_pilot_seeded(tmp_path) -> None:
             assert probe_env.observation_space.shape == (35,)
         finally:
             probe_env.close()
+
+
+PILOT_CARD = REPOSITORY_ROOT / "docs" / "paddle_tennis_physical_pilot_20261005.md"
+
+
+def _pilot_card_reading_cell() -> str:
+    blocks = re.findall(r"```python\n(.*?)```", PILOT_CARD.read_text(), re.S)
+    cells = [block for block in blocks if "score_paddle_stage(" in block]
+    assert len(cells) == 1, "the pilot card has one reading cell"
+    return cells[0]
+
+
+def test_pilot_card_bar_scores_the_decision_rule_bands(monkeypatch, capsys) -> None:
+    """The pilot card's thresholds (ADOPT >= 5%, FALSIFIED <= 1%) are
+    read in the whole percents the diagnosis report prints
+    (``f"{p:.0%}"``), the unit the reference's "k=2 <= 1%" was booked
+    in. Its reading cell's bar must score exactly those bands for any
+    realistic receiving-point count: one conversion in ~85 points
+    (1.2%, printed "1%") is FALSIFIED, not MIDDLE, and four (4.7%,
+    printed "5%") is ADOPT. The cell must run against the real
+    scorer's signature and print the conversion count."""
+    from courtside_dynamics import notebook_utils
+    from courtside_dynamics.notebook_utils import (
+        paddle_campaign_metrics,
+        score_campaign_bars,
+    )
+
+    cell = _pilot_card_reading_cell()
+    call = next(
+        node
+        for node in ast.walk(ast.parse(cell))
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "score_paddle_stage"
+    )
+    bars = ast.literal_eval(
+        next(keyword.value for keyword in call.keywords if keyword.arg == "bars")
+    )
+    band = {"PASS": "ADOPT", "MIDDLE": "between", "FAIL": "FALSIFIED"}
+    for points in range(60, 160):
+        for conversions in range(points // 6):
+            value = conversions / points
+            printed = int(f"{value:.0%}".rstrip("%"))
+            expected = (
+                "ADOPT" if printed >= 5 else "FALSIFIED" if printed <= 1 else "between"
+            )
+            verdict = score_campaign_bars(
+                {"k2_receiving_survival": value}, bars
+            )["bars"]["k2_receiving"]["verdict"]
+            assert band[verdict] == expected, (conversions, points, printed)
+
+    def trace(policy_hits: int, receiving: bool) -> SimpleNamespace:
+        return SimpleNamespace(
+            serve_side_is_policy=not receiving,
+            policy_hits=policy_hits,
+            touched_after_bounce=(),
+            ready_errors=(),
+            recovery_travel=(),
+            crossings=policy_hits,
+            termination="point_over",
+        )
+
+    traces = [trace(2, True)] + [trace(1, True)] * 84 + [trace(0, False)] * 40
+    real = notebook_utils.score_paddle_stage
+
+    def fake_score(run_dir, **kwargs):
+        inspect.signature(real).bind(run_dir, **kwargs)
+        metrics = paddle_campaign_metrics(traces)
+        scored = score_campaign_bars(metrics, kwargs["bars"])
+        return {"metrics": metrics, **scored}
+
+    monkeypatch.setattr(notebook_utils, "score_paddle_stage", fake_score)
+    exec(compile(cell, str(PILOT_CARD), "exec"), {"LOG_DIR": "/runs/pilot"})
+    printed = capsys.readouterr().out
+    assert "receiving points 85" in printed
+    assert "k=2 1 of 85 = 1.18% (prints 1%) -> FALSIFIED band" in printed
+
+
+def test_pilot_card_places_its_reading_cell_before_the_disconnect() -> None:
+    """Run all ends in section 10's disconnect_runtime call, so the
+    card's reading cell must go above that section, and the card must
+    name it as the notebook titles it. Re-running section 3 creates a
+    fresh, empty run directory (resolve_run_dir), so the card's
+    fresh-runtime recipe sets LOG_DIR by hand instead."""
+    cells = _load_sb3_notebook()["cells"]
+    code_indices = [
+        index for index, cell in enumerate(cells) if cell["cell_type"] == "code"
+    ]
+    last_code = code_indices[-1]
+    assert "disconnect_runtime(" in _source(cells[last_code])
+    heading = _source(cells[last_code - 1]).splitlines()[0]
+    match = re.fullmatch(r"## (\d+)\. (.+)", heading)
+    assert match, heading
+    card = PILOT_CARD.read_text()
+    assert f'section {match.group(1)}, "{match.group(2)}"' in card
+    section_3 = next(
+        _source(cell)
+        for cell in cells
+        if cell["cell_type"] == "code" and "LOG_DIR = resolve_run_dir(" in _source(cell)
+    )
+    assert "resolve_run_dir" in section_3
+    assert "Do not re-run section 3" in card
+    assert "MyDrive/Finding Theta/courtside-dynamics/training_runs/" in card
 
 
 def _load_campaign_notebook() -> dict[str, Any]:

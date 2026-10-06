@@ -126,7 +126,8 @@ available recipe keys are:
   `PaddleTennis`: the same task, selection and instruments, with the
   declared bundle of a 35-value policy observation that drops the
   rally-bookkeeping context (`observation_profile="physical"`) and
-  γ = 0.995; 3M steps per seed; see
+  γ = 0.995; 3M steps per seed, run to the end with early-stop
+  patience off; see
   [`docs/paddle_tennis_physical_pilot_20261005.md`](docs/paddle_tennis_physical_pilot_20261005.md))
 - `HumanoidTennisStage0Intercept`
 - `HumanoidTennisStage1AnchoredReturn`
