@@ -64,7 +64,10 @@ supersedes it (see the ground-rules bullet).
   - **`PaddleTennisPhysical` recipe.** Derived from `PaddleTennis`.
     It adds `observation_profile="physical"`, the raw tail 24..34 and
     `gamma=0.995`, with a 3M budget and the `paddle_tennis_physical`
-    prefix; everything else is inherited. A starter
+    prefix. Early-stop patience is off, so each seed runs its full 3M
+    (the base's 20 evaluations can stop a run at 1M steps under k≥2
+    selection); the degenerate guard stays. Everything else is
+    inherited. A starter
     `run_configs/paddle_tennis_physical.toml` ships with it, and the
     sb3 notebook lists it.
 - **PaddleTennis instrument and bug-fix batch (2026-10-05).** Fixes

@@ -316,6 +316,10 @@ def test_sb3_notebook_runs_the_context_blind_pilot_seeded(tmp_path) -> None:
             config_file=config_file,
         )
         assert cfg.total_timesteps == 3_000_000
+        # The full budget: patience off (the starter's "none"), the
+        # degenerate guard kept.
+        assert cfg.early_stop_patience is None
+        assert cfg.early_stop_degenerate_evals == 5
         assert cfg.model_kwargs["gamma"] == 0.995
         assert cfg.eval_reset_options is not None
         assert resolve_eval_seed(cfg) == seed + 1_000_000

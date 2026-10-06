@@ -612,8 +612,9 @@ def test_quick_test_scales_paddle_checkpoint_diagnosis(tmp_path):
 def test_paddle_tennis_physical_recipe_is_the_declared_bundle():
     """The context-blind pilot recipe is PaddleTennis plus exactly the
     declared bundle (observation_profile="physical" with its shorter raw
-    tail, gamma 0.995), a 3M budget and its own prefix; every other
-    setting is inherited, and the base recipe is left untouched."""
+    tail, gamma 0.995), a full 3M budget (early-stop patience off, the
+    degenerate guard kept) and its own prefix; every other setting is
+    inherited, and the base recipe is left untouched."""
     from dataclasses import fields
 
     base = RECIPES["PaddleTennis"]
@@ -628,8 +629,17 @@ def test_paddle_tennis_physical_recipe_is_the_declared_bundle():
     assert "context-blind" in pilot.description
     assert "gamma" in pilot.description
 
-    changed = {"normalize_obs_excluded_indices", "model_kwargs"}
+    changed = {
+        "normalize_obs_excluded_indices",
+        "model_kwargs",
+        "early_stop_patience",
+    }
     assert set(pilot.extra_cfg) == set(base.extra_cfg)
+    # The base's patience of 20 can end a run at eval 40 (1M steps);
+    # the pilot runs its whole budget. The degenerate guard stays.
+    assert base.extra_cfg["early_stop_patience"] == 20
+    assert pilot.extra_cfg["early_stop_patience"] is None
+    assert pilot.extra_cfg["early_stop_degenerate_evals"] == 5
     for key in set(base.extra_cfg) - changed:
         assert pilot.extra_cfg[key] == base.extra_cfg[key], key
     assert pilot.extra_cfg["normalize_obs_excluded_indices"] == tuple(range(24, 35))
@@ -659,6 +669,19 @@ def test_paddle_tennis_physical_builds_the_context_blind_run(tmp_path):
     assert cfg.normalize_obs_excluded_indices == tuple(range(24, 35))
     assert cfg.success_key == "episode_rally_returns_a"
     assert cfg.checkpoint_diagnosis == {"episodes": 30, "seed_start": 5200}
+    assert cfg.early_stop_patience is None
+    assert cfg.early_stop_degenerate_evals == 5
+    # The card's INCONCLUSIVE branch is a new from-scratch 5M run; it
+    # runs to its end too.
+    longer = build_train_config(
+        "PaddleTennisPhysical",
+        algo="SAC",
+        log_dir=str(tmp_path / "5m"),
+        seed=0,
+        total_timesteps=5_000_000,
+    )
+    assert longer.total_timesteps == 5_000_000
+    assert longer.early_stop_patience is None
     for factory in (cfg.env_fn, cfg.eval_env_fn):
         env = factory()
         try:

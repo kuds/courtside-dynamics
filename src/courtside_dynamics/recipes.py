@@ -1757,8 +1757,17 @@ def _make_paddle_tennis_physical(base: Recipe) -> Recipe:
     play, both escrowed shapings, the ground oracle), selection on
     ``episode_rally_returns_a``, paired evaluation, the degenerate
     guard, the monitor keys and the checkpoint diagnosis (whose oracle
-    reference row reads the full layout under either profile). The
-    budget is the pilot's 3M per seed.
+    reference row reads the full layout under either profile).
+
+    The budget is the pilot's full 3M per seed, so early-stop patience
+    is off (``early_stop_patience=None``). The base recipe's patience
+    of 20 evaluations can end a run at eval 40 (1M steps): selection
+    now reads k>=2 conversions, which sit near zero for most of a run,
+    so new bests are rare. A pilot seed stopped there would be read
+    against a reference that ran its full 3M, and its k=2 peak may
+    come late (the reference's k=1 peak was near 2.4M). The degenerate
+    guard stays: a run that makes no legal hit for 5 consecutive
+    flat evaluations still ends early.
     """
     env_kwargs = deepcopy(base.env_kwargs)
     env_kwargs["observation_profile"] = "physical"
@@ -1770,6 +1779,9 @@ def _make_paddle_tennis_physical(base: Recipe) -> Recipe:
         **extra_cfg["model_kwargs"],
         "gamma": _PADDLE_TENNIS_PHYSICAL_GAMMA,
     }
+    # The full budget is the pilot's (docstring); the degenerate guard
+    # (early_stop_degenerate_evals) is inherited.
+    extra_cfg["early_stop_patience"] = None
     return replace(
         base,
         env_kwargs=env_kwargs,
@@ -1786,8 +1798,10 @@ def _make_paddle_tennis_physical(base: Recipe) -> Recipe:
             "(observation_profile='physical': 35 values, world-frame "
             "spin, no phase/serving/crossing/rally-count/clock dims) "
             "and gamma rises to 0.995 for the ~210-step hit-to-hit "
-            "credit span. 3M steps per seed; the bar is k=2 receiving "
-            "survival >= 5% at best_model on both seeds."
+            "credit span. 3M steps per seed, run to the end (early-stop "
+            "patience off; the degenerate guard stays). The card's "
+            "decision rule reads k=2 receiving survival at best_model on "
+            "both seeds."
         ),
     )
 

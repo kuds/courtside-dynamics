@@ -33,7 +33,8 @@ changes, declared together:
 | `observation_profile` | `"full"` (48 values) | `"physical"` (35 values) |
 | Normalizer raw tail | indices 24..47 | indices 24..34 |
 | `gamma` | 0.99 (SB3 default) | **0.995** |
-| Budget | 2M | 3M per seed |
+| Budget | 2M | 3M per seed, run to the end |
+| Early-stop patience | 20 evaluations | off |
 | `name_prefix` | `paddle_tennis` | `paddle_tennis_physical` |
 
 The `"physical"` policy observation:
@@ -56,6 +57,14 @@ a 100-step horizon, and consecutive policy hits are about 210 steps
 apart (0.99^210 ≈ 0.12). WallBall made the same move (DECISIONS,
 0.13.0).
 
+Patience is off so that each seed gets the full 3M, as the reference
+did. It changes how long a run lasts, not what it learns by a given
+step. With the base recipe's patience of 20 evaluations, a run can
+stop at eval 40 (1M steps at `eval_freq` 25k). Selection now reads
+k≥2 conversions, which sit near zero for most of a run, so new bests
+are rare and that stop is likely. The reference selected on crossings,
+ran its full 3M, and peaked on k=1 near 2.4M.
+
 ## Held fixed
 
 Everything else is inherited from `PaddleTennis` unchanged:
@@ -68,7 +77,8 @@ Everything else is inherited from `PaddleTennis` unchanged:
 - selection and success on `episode_rally_returns_a`, with the 0.5/30
   min-deltas and `confirm_best_eval`;
 - paired evaluation (seed + 1,000,000, alternating serves), the
-  degenerate guard, early-stop patience 20, the monitor keys;
+  monitor keys, and the degenerate guard: a run that makes no legal
+  hit over 5 consecutive flat evaluations still ends early;
 - the checkpoint diagnosis: 30 episodes on seeds 5200+, every
   250k steps. Its oracle reference row reads the full layout under
   either profile, so it is identical to a `PaddleTennis` run's.
@@ -86,7 +96,9 @@ Two runs, one per seed, from `notebooks/sb3_training.ipynb`:
 2. Section 2: `ENV = "PaddleTennisPhysical"`, `ALGO = "SAC"`,
    `SEED = 0`, `QUICK_TEST = False`. Leave `TOTAL_TIMESTEPS`,
    `N_ENVS`, `EARLY_STOP_PATIENCE` and `MODEL_KWARGS` at `None`: the
-   3M budget and the inherited settings are the recipe's.
+   3M budget, patience off and the inherited settings are the
+   recipe's. Section 5 should print `total_timesteps=3,000,000` and
+   `early_stop_patience=None`.
    `CONFIG_FILE = "auto"` copies `paddle_tennis_physical.toml` into
    the Drive `configs/` folder. Leave that copy unedited.
 3. Run all cells.
@@ -147,9 +159,16 @@ Read `k2_receiving_survival` at `best_model` on both seeds:
   binding constraint. Route to LD1′ demo injection, the fallback
   ([`design_paddle_tennis_demo_injection.md`](design_paddle_tennis_demo_injection.md)).
 - **INCONCLUSIVE** otherwise (the seeds split, or either lands between
-  1% and 5%). Either extend the better seed to 5M
-  (`TOTAL_TIMESTEPS = 5_000_000`) or add a third seed (`SEED = 2`) at
-  3M; the maintainer chooses.
+  1% and 5%). Either run the better seed again at 5M or add a third
+  seed (`SEED = 2`) at 3M; the maintainer chooses. The 5M run is a new
+  from-scratch run (`TOTAL_TIMESTEPS = 5_000_000`, the same `SEED`) in
+  its own run directory. Training has no resume, so it repeats the
+  first 3M (not bit for bit on a GPU), and patience is off for it too.
+
+Only the degenerate guard can end a pilot run before its budget.
+`stage_summary.txt` records the stop and the steps used. Read such a
+seed at its `best_model` like any other, and give the stop step in the
+write-up.
 
 ## What the pilot cannot attribute
 
