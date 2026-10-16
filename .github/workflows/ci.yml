@@ -50,6 +50,10 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: python -m pip install --upgrade pip
+      # CPU torch first. PyPI's default torch wheel is the CUDA build,
+      # about 2.7 GB of nvidia-* wheels that a CPU runner never uses.
+      # With torch already satisfied, the editable install keeps it.
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e ".[train,dev]"
       - run: mypy
 
@@ -97,6 +101,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: python -m pip install --upgrade pip
+      # CPU torch first, as in the typecheck job.
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e ".[train,dev]"
       # -n 2 with the thread pools pinned. Measured on 4 cores: 209s
       # serial -> 88-133s. The pinning is not optional -- the same -n with

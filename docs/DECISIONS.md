@@ -965,6 +965,38 @@ scripted oracles); **learning feasibility was blocked as configured**. Statuses
 below were last updated at 0.16.0; items still marked open were spot-checked as
 still present in the current tree.
 
+### MuJoCo is capped below 3.16: its bounds refresh moves the Stage-1 oracle — *implemented (unreleased, 2026-10-16)*
+MuJoCo 3.16.0 (2026-10-14; changelog item 7, commit `d823f9212`) made
+`mj_setConst` compute the bounding volumes of bodies as well as geoms. The
+env enlarges each racket stringbed 1.5× at construction and refreshes the
+geom's own bounds (entry below). Through 3.15, though, the racket *body's*
+BVH (`bvh_aabb`) kept the nominal stringbed: in the racket frame its root
+box spans |y| ≤ 0.152 m and z ≤ 0.322 m, against the scaled stringbed's
+0.195 m and 0.385 m. Contacts in that outer strip are still culled on
+≤3.15, so the 0.16.0 forgiveness fix is only partial there. The Stage-1
+oracle (129 steps, landed target) was calibrated on those stale bounds.
+On 3.16 it takes 138 steps and misses the target, which also aborts the
+humanoid notebook's Stage-1 preflight.
+- **Evidence.** Installing only the other version's `bvh_aabb` makes the
+  3.15 and 3.16 oracle streams bit-identical in both directions (obs and
+  reward sha256, both serve sides). No other compiled array the two
+  versions share differs, except the declarative `actuator_ctrlspec`.
+  PaddleTennis, WallBall and BallBounce per-step digests are identical
+  from 3.12 through 3.16 (`repo_review_20261016.md` §1).
+- **Decision.** Cap `mujoco>=3.3,<3.16`. The oracle really misses on 3.16,
+  so this is not a test-expectation artifact, and the test is not
+  loosened. Refreshing the body BVH in the env would change the humanoid
+  stream on every supported version and still need a recalibrated oracle:
+  a declared task change, not hygiene. The review (§2.1) advised against a
+  global cap. On this evidence it costs the paddle work nothing, and
+  3.15.0 ships wheels for cp310–cp315.
+- **Lift when** the humanoid code is archived (design M8), or the env
+  refreshes the racket body's bounds itself and the oracle is
+  recalibrated on them. The golden digests (M1) then prove the paddle
+  streams unchanged under the new MuJoCo. Notebooks pinned to
+  `REPO_REF` = `b9585e2` still resolve 3.16 until that pin moves past
+  this change.
+
 ### Update `geom_rbound`/AABB when resizing a MuJoCo geom at runtime — *implemented (0.16.0)*
 The stringbed enlargement for "early contact forgiveness" writes `geom_size` and
 calls `mj_setConst`, which does **not** recompute the broadphase bounding sphere
@@ -978,7 +1010,8 @@ enlarged-only zone. *(0.16.0 recomputes both bounds from the scaled semi-axes
 when scaling — `mj_setConst` does not refresh them;
 `test_racket_forgiveness_band_generates_contacts` pins a ball contact in the
 enlarged-only annulus, and the stage-1 oracle was recalibrated for the
-corrected contact timing.)*
+corrected contact timing. Still partial on MuJoCo ≤3.15, where the racket
+body's BVH keeps the nominal size; see the entry above.)*
 
 ### Sparse reward + iid per-step Gaussian exploration at 100 Hz = zero gradient — *partially implemented (0.16.0)*
 0 valid hits / 0 nonzero rewards in 264 random episodes; the end-to-end 25k run

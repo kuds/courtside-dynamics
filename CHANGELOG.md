@@ -18,6 +18,17 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **Dependency hygiene (2026-10-16).** No code or env stream changes
+  on the supported range. `mujoco` is capped `<3.16`: 3.16.0's
+  `mj_setConst` refreshes body bounding volumes, which knocks the
+  humanoid Stage-1 oracle off its calibration (138 steps, target
+  missed), while the PaddleTennis, WallBall and BallBounce streams are
+  identical from 3.12 through 3.16 (see DECISIONS). The `gymnasium`
+  floor rises to 1.1.1, since 1.1.0 cannot construct any courtside
+  env. The license is now the SPDX string `MIT` with no License
+  classifier, built with `setuptools>=77`. CI's typecheck and test
+  jobs install CPU torch instead of the CUDA build.
+  `tests/test_packaging.py` pins all three bounds.
 - **PaddleTennis instrument and bug-fix batch (2026-10-05).** Fixes
   the review findings in `docs/repo_review_20261005.md` §5b/§7.2 plus
   their adversarial follow-ups.

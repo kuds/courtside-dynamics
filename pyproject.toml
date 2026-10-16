@@ -1,5 +1,9 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# >=77: the first setuptools that accepts the SPDX string form of
+# `project.license` below (PEP 639). The TOML-table form plus a License
+# classifier that it replaces is slated for removal by 2027-02-18, which
+# would break every `pip install git+...` on Colab.
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,13 +12,12 @@ dynamic = ["version"]
 description = "Courtside Dynamics: a progression of MuJoCo environments toward humanoid tennis, trained with deep RL."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Courtside Dynamics contributors" }]
 keywords = ["reinforcement-learning", "mujoco", "tennis", "robotics", "gymnasium"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -23,10 +26,25 @@ classifiers = [
 ]
 
 dependencies = [
-    "mujoco>=3.3",
-    # 1.1: the gate/schedule callbacks call set_wrapper_attr(..., force=False)
+    # <3.16: MuJoCo 3.16.0 (2026-10-14) made mj_setConst refresh body
+    # bounding volumes. The humanoid env enlarges the racket stringbed at
+    # construction; through 3.15 the racket body's BVH kept the nominal
+    # size and culled part of that band, and the Stage-1 oracle was
+    # calibrated there. On 3.16 it takes 138 steps and misses the target
+    # (the test pins 129 and a landed target); swapping only bvh_aabb
+    # makes the 3.15 and 3.16 streams bit-identical. The PaddleTennis,
+    # WallBall and BallBounce per-step digests are identical from 3.12
+    # through 3.16, so the cap costs the paddle work nothing. Lift it
+    # once the humanoid code is archived (design M8) or its oracle is
+    # recalibrated on refreshed bounds; the golden digests then prove the
+    # paddle streams unchanged. See docs/DECISIONS.md, "Humanoid tennis
+    # environment".
+    "mujoco>=3.3,<3.16",
+    # 1.1.1: the gate/schedule callbacks call set_wrapper_attr(..., force=False)
     # and read its bool result; 1.0.0 has neither the keyword nor the return.
-    "gymnasium>=1.1",
+    # 1.1.0 has both, but its MujocoEnv asserts a four-mode render_modes
+    # list ("rgbd_tuple" included), so every courtside env fails to construct.
+    "gymnasium>=1.1.1",
     "numpy>=1.26",
     # Gymnasium imports these from its MuJoCo rendering module when the env
     # classes are imported, but does not declare them as core dependencies.
