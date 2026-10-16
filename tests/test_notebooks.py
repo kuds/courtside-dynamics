@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,11 @@ CAMPAIGN_NOTEBOOK = (
 def _source(cell: dict[str, Any]) -> str:
     source = cell.get("source", "")
     return "".join(source) if isinstance(source, list) else str(source)
+
+
+#: A full commit SHA or a dated tag (``name-YYYYMMDD``) -- never a branch.
+_IMMUTABLE_REF = re.compile(r"[0-9a-f]{40}|[a-z0-9][a-z0-9.-]*-20[0-9]{6}")
+_PACKAGE_URL = "git+https://github.com/kuds/courtside-dynamics"
 
 
 def _load_humanoid_notebook() -> dict[str, Any]:
@@ -1017,3 +1023,34 @@ def test_campaign_resume_retrains_an_interrupted_leg(tmp_path) -> None:
     assert trained == [ns["GATE_STAGE"]]
     assert scored == [fresh_dir]
     assert manifest["stages"][ns["GATE_STAGE"]]["run_dir"] == fresh_dir
+
+
+def test_every_notebook_installs_a_pinned_immutable_ref() -> None:
+    """A merge to ``main`` must never change what a Colab session trains.
+
+    Each notebook installs the package from ``REPO_REF``, which must be a
+    full commit SHA or a dated tag. Every install line goes through it.
+    """
+    for path in (SB3_NOTEBOOK, CAMPAIGN_NOTEBOOK, HUMANOID_NOTEBOOK):
+        notebook = json.loads(path.read_text())
+        install_cells = [
+            _source(cell)
+            for cell in notebook["cells"]
+            if cell["cell_type"] == "code" and _PACKAGE_URL in _source(cell)
+        ]
+        assert len(install_cells) == 1, path.name
+        source = install_cells[0]
+        refs = re.findall(r'^REPO_REF = "([^"]*)"$', source, flags=re.MULTILINE)
+        assert len(refs) == 1, path.name
+        assert _IMMUTABLE_REF.fullmatch(refs[0]), (path.name, refs[0])
+        installs = [
+            line
+            for line in source.splitlines()
+            if line.lstrip().startswith("!pip install") and _PACKAGE_URL in line
+        ]
+        assert installs, path.name
+        for line in installs:
+            assert line.rstrip().endswith(f'{_PACKAGE_URL}@{{REPO_REF}}"'), (
+                path.name,
+                line,
+            )
