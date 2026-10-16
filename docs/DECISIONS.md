@@ -723,20 +723,51 @@ Week 1 restructures the env and training code by extraction (design
 M1 + L0, PPO plan Step 0). The rule is that nothing on the campaign path
 moves unless the change is declared, and three gates make that checkable:
 - **Env streams.** `courtside_dynamics.digests` hashes obs (float64),
-  reward, terminated, truncated, qpos and qvel at every reset and step,
-  plus a separate digest of the scalar info items. All nine `rew_*` keys
-  are required at every PaddleTennis step. `tools/golden_digest.py`
-  checks against `tests/golden/env_digests.json`, and
-  `tests/test_golden_digests.py` gates CI. The 15 CI cases take about
-  30 s serial: the recipe × {zero, random, oracle, camper}, one-point
-  with alternating serves, the +hold arm, two NaN witnesses, WallBall
+  reward, terminated, truncated, qpos and qvel at every reset and step.
+  Separate digests cover every info item (non-scalars recursively, by
+  type, dtype and shape) and the interface the float64 hash erases:
+  the spaces' dtype, shape and bounds, and the concrete obs, reward and
+  flag types. All nine `rew_*` keys are required at every PaddleTennis
+  step. `tools/golden_digest.py` checks against
+  `tests/golden/env_digests.json`, and `tests/test_golden_digests.py`
+  gates CI. The 19 CI cases take about 40 s serial: the recipe ×
+  {zero, random, oracle, camper}, one-point with alternating serves,
+  the +hold arm, `volley_rule="legal"` with the lead-charge oracle, the
+  k=2 drill in both launch arms, three NaN witnesses, WallBall
   TrueBaseline, BallBounce, BallBalance and 300 humanoid steps.
-  `--full` runs five spaced seeds per case.
+  `--full` runs five spaced seeds per case (two for the humanoid case;
+  the NaN witnesses stay on the one seed each is calibrated on).
 - **NaN witnesses.** These sit on pending escrows, and a test re-proves
   them from the stream's own info. A NaN action at step 250 of the
   seed-0 recipe oracle stream claws back the contact escrow (−0.25). At
   step 430 on the hold arm it claws back reach (−0.1753) and hold
-  (−0.0099) at once.
+  (−0.0099) at once. At step 443 of the seed-1 hold-arm stream it claws
+  back reach (−0.17532) and hold (−0.01969), and that reward's bits
+  depend on the summation order.
+- **Reward summation order.** Float addition is not associative, and
+  L6 (TermStack) and M11 (`step()` split into terms) must re-associate
+  the PaddleTennis reward under a "digests identical" gate. Before this
+  fix no digested step was order-sensitive (the count is 0 for every
+  format-1 case in both sets), so swapping two terms passed the gate.
+  Three checks now hold the order:
+  - every digested PaddleTennis reward must equal the left-to-right sum
+    of its nine `rew_*` info terms, bit for bit;
+  - `reward_order_sensitive_steps` is a gated field, and the seed-1
+    witness keeps it at 1 in CI;
+  - two tests force every term of `step()` (nine) and of the nonfinite
+    guard (four) nonzero at once, with magnitudes searched so that any
+    exchange of two terms moves the bits. Only the first pair is
+    exempt, since float addition commutes. `math.fsum`, and `sum()`
+    from Python 3.12 on (compensated), fail those tests too.
+- **Drill cases.** The drill library is harvested in-process from
+  seed 1000 (two k=2 entries plus one clearance-violating copy), so no
+  pickle is committed. At `drill_fraction=0.5` both arms record
+  drilled points, undrilled policy-receiving points and the clearance
+  fallback, and the counts are gated fields. Two drill mutants stay
+  invisible. A `<` → `<=` eligibility test differs only when a uniform
+  draw equals 0.5 exactly. Dropping the full arm's solver warm-start
+  restore changes nothing at these two launch states, which hold a
+  single active constraint.
 - **Recipe snapshot** (`tools/recipe_snapshot.py`,
   `tests/golden/recipe_snapshot.json`). It records 70 resolutions: every
   recipe × {default algo, SAC, DEMOSAC} × quick_test, plus the seeded
@@ -749,13 +780,28 @@ moves unless the change is declared, and three gates make that checkable:
   and on a temporary worktree of the ref. It compares policy weights,
   `log_ent_coef`, normalizer stats, monitor, evaluations,
   `eval_info.csv`, selection meta, diagnosis reports, RNG states and
-  `resolved_model`. Both sides take about 100 s together.
+  `resolved_model`. Both sides take about 100 s together, under
+  different hash seeds (`PYTHONHASHSEED` 1 and 0), so a str-hash-order
+  dependence shows up as a mismatch.
+- **Names.** The PPO design's Step 0 names `tests/test_sac_freeze.py`
+  and `tools/sac_freeze_digest.py`. Part 1 shipped as
+  `tools/recipe_snapshot.py` plus `tests/test_recipe_snapshot.py`, and
+  part 2 as `tools/trainer_digest.py` plus `tests/test_trainer_digest.py`.
+  A later step's "must pass Step 0" means those four files.
 - **Evidence.** Every paddle, WallBall, BallBounce and BallBalance
   digest in both sets is bit-identical across MuJoCo 3.15.0/3.16.0,
   Python 3.11/3.13 and numpy 2.4.6/2.5.x. The humanoid random stream
   diverges at step 49 under 3.16, which is the body-BVH refresh behind
   the `<3.16` cap (Humanoid section). Against `4e2e019`, every trainer
   component matches, and DemoSAC-off equals SAC hash for hash.
+  Format 2 (all info items, the interface digest, four new cases)
+  re-recorded every entry, primaries under MuJoCo 3.15. All 30 format-1
+  entries kept their `stream_sha256`, step, episode, ending and
+  reward-sum values, so the re-record changed no stream. The format-2
+  CI set matches 19/19 under MuJoCo 3.12.0, 3.15.0 and 3.16.0, Python
+  3.11 and 3.13, numpy 1.26.4, 2.4.6 and 2.5.x, and gymnasium 1.1.1 and
+  1.4.0; the full set matches under 3.16. With HEAD and the base on
+  different hash seeds, every trainer component still matches.
 - **Decisions.**
   - Primary digests are recorded under the supported MuJoCo (what CI
     resolves). A version-specific difference lives only in a
@@ -767,10 +813,20 @@ moves unless the change is declared, and three gates make that checkable:
   - `recipes.py` imports the training stack inside
     `build_train_config`, so the registry, and therefore the digests,
     load without SB3 or torch. All 70 resolutions are identical to
-    HEAD's.
+    those of `4e2e019`, the commit before the import move.
   - `--write` leaves every reproduced entry untouched, versions
     included, and prints each change. The mismatch text says to
     declare, never to re-record.
+  - Info values with no canonical form raise instead of being skipped.
+    Every info key counts in the census, so adding, renaming or
+    removing an array- or tuple-valued item is visible.
+  - The digest and snapshot tools, and the test suite (in
+    `tests/conftest.py`), stop when `courtside_dynamics` imports from
+    outside this checkout's `src/`. In a git worktree the editable
+    install resolves to the main checkout, and a mutant there used to
+    pass the worktree's gates. Run them with `PYTHONPATH=src`.
+  - The recipe snapshot compares canonical JSON text, so a type-only
+    change (`8` to `8.0`, `True` to `1`, `0.0` to `0`) is a diff.
 - **Lesson: perturb in the precision the computation runs in.** The
   self-test's one-ULP learning-rate bump (float64) on the PaddleTennis
   recipe left every trained output bit-identical: 3e-4 and its float64
@@ -778,10 +834,16 @@ moves unless the change is declared, and three gates make that checkable:
   caught it, which is why that component exists. A float32 ULP moves
   the policy, `log_ent_coef`, normalizer, evaluations, selection and
   diagnosis.
-- **Not covered.** The trainer digest is a manual pre-merge gate, not
-  CI, because it takes minutes. Monitor columns can stay equal under a
-  real change when the tiny budget's episodes end before learning
-  matters; the weight and RNG hashes carry those cases.
+- **Not covered.**
+  - The trainer digest is a manual pre-merge gate, not CI, because it
+    takes minutes. It does not exercise warm start or resume, DemoSAC
+    with demos on, or the TOML run-config path.
+  - Monitor columns can stay equal under a real change when the tiny
+    budget's episodes end before learning matters; the weight and RNG
+    hashes carry those cases.
+  - Colab digests are not yet recorded (M1 asks for Colab vs local).
+    Run `python tools/golden_digest.py --full` in a Colab runtime and
+    record the result.
 
 ### The 2026-08-28 review's after-LT1 robustness findings are closed — *implemented (unreleased, commit `0cdd79f`)*
 Commit `0cdd79f` closes these findings from
@@ -1048,7 +1110,18 @@ humanoid notebook's Stage-1 preflight.
   versions share differs, except the declarative `actuator_ctrlspec`.
   PaddleTennis, WallBall and BallBounce per-step digests are identical
   from 3.12 through 3.16 (`repo_review_20261016.md` §1).
-- **Decision.** Cap `mujoco>=3.3,<3.16`. The oracle really misses on 3.16,
+- **Floor evidence.** The format-2 golden CI set (19 cases) matches 19/19
+  on 3.12.0 and 18/19 on 3.11.0, where the humanoid random stream
+  moves. The gates' review measured the format-1 set at 1/15 on
+  3.10.0, where every PaddleTennis, WallBall, BallBounce and
+  BallBalance case moves, and at 0/15 on 3.3.0, where the Stage-1
+  oracle takes 127 steps instead of 129.
+- **Decision.** Bound `mujoco>=3.12,<3.16`: the supported range is
+  exactly the range that reproduces the golden digests, so "every other
+  version must reproduce the primary" holds on all of it. 3.12 is also
+  the August training stack (`repo_review_20261016.md` §2.1). The floor was `>=3.3` until the gates'
+  review, which found it admitted versions the goldens fail on.
+  `tests/test_packaging.py` pins both ends. The oracle really misses on 3.16,
   so this is not a test-expectation artifact, and the test is not
   loosened. Refreshing the body BVH in the env would change the humanoid
   stream on every supported version and still need a recalibrated oracle:

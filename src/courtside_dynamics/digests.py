@@ -12,14 +12,32 @@ the physics under it) can see.
   observation (as float64 bytes), the reward (float64), ``terminated``
   and ``truncated``, and the raw MuJoCo ``qpos``/``qvel``. This is the
   design's ``dyn_fp``.
-- ``info_sha256`` covers the info dicts separately (sorted scalar
-  numeric/bool/str items), so a pure instrument change reads as an info
-  change and never as physics drift. The PaddleTennis cases require all
-  nine ``rew_*`` decomposition keys at every step.
+- ``info_sha256`` covers the info dicts separately: every item, with
+  tuples, lists, arrays and mappings hashed recursively by type, dtype
+  and shape (:func:`info_value_bytes`), so a pure instrument change
+  reads as an info change and never as physics drift. An info value
+  of a type with no canonical form raises instead of being skipped.
+  The PaddleTennis cases require all nine ``rew_*`` decomposition keys
+  at every step.
+- ``interface_sha256`` covers what the float64 stream hash erases: the
+  observation and action spaces (dtype, shape, bounds) and, at every
+  record, the observation's dtype and shape and the concrete types of
+  reward, ``terminated`` and ``truncated``.
+- ``reward_terms`` (PaddleTennis: the nine ``rew_*`` keys) must
+  reproduce every step's reward bit for bit as a left-to-right float
+  sum in the listed order, or the digest raises. Float addition is not
+  associative, so this pins the order a refactor must keep; the record
+  counts the steps whose value actually depends on it
+  (``reward_order_sensitive_steps``), and the witness cases keep that
+  count above zero. ``tests/test_golden_digests.py`` pins the
+  association of both reward sums on forced adversarial terms as well,
+  since the natural streams rarely put three terms on one step.
 
 Episodes reset with ``seed = stream seed + episode index`` until the
 step budget is spent; each seed's stream rolls on a freshly constructed
 env, so a multi-seed digest is the concatenation of independent streams.
+A ``drill_library`` case plays the k=2 drill from a tiny library that
+:func:`build_drill_library` harvests deterministically in-process.
 
 The golden values live in ``tests/golden/env_digests.json``;
 ``tools/golden_digest.py`` writes and checks them and
@@ -34,11 +52,17 @@ digest reads the raw env, with no wrapper or normalizer in between.
 
 from __future__ import annotations
 
+import copy
+import functools
 import hashlib
+import itertools
+import pickle
 import platform
 import struct
-from collections.abc import Callable, Iterator, Mapping
+import tempfile
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import gymnasium
@@ -47,6 +71,7 @@ import numpy as np
 
 from courtside_dynamics.envs import (
     BallBounceEnv,
+    CourtSide,
     PaddleTennisEnv,
     WallBallEnv,
 )
@@ -93,7 +118,8 @@ PADDLE_TENNIS_REWARD_INFO_KEYS = (
 MISMATCH_EXPLANATION = (
     "A golden digest mismatch is an era break or physics drift, never "
     "noise: the env stream (obs, reward, terminated, truncated, qpos, "
-    "qvel) or its info dicts changed for a seeded scripted rollout. If "
+    "qvel), its info dicts or its interface (spaces, value types) "
+    "changed for a seeded scripted rollout. If "
     "the recorded and live versions differ, suspect dependency drift "
     "(MuJoCo, numpy) and prove it before anything else. If the change "
     "is intended, it must be DECLARED -- a new task version, or a "
@@ -123,8 +149,19 @@ class StreamCase:
     witness.
 
     ``info_keys`` selects the info items to digest; ``None`` digests
-    every scalar numeric/bool/str item. ``required_info_keys`` must be
-    present (and scalar) in every step's info, or the digest raises.
+    every item. ``required_info_keys`` must be present (and scalar) in
+    every step's info, or the digest raises.
+
+    ``reward_terms`` names info items whose left-to-right float sum, in
+    that order, must equal every step's reward bit for bit (see the
+    module doc); they must also be required keys.
+
+    ``drill_library`` builds the digests' own k=2 drill library
+    (:func:`build_drill_library`) and passes its path as the env's
+    ``drill_library`` kwarg; ``env_kwargs`` set the fraction and arm.
+    The digest then also counts drilled steps, undrilled steps of
+    policy-receiving points, and clearance fallbacks, so a re-record
+    that stops exercising one of the three launch outcomes is visible.
     """
 
     name: str
@@ -138,11 +175,23 @@ class StreamCase:
     nan_action_step: int | None = None
     info_keys: tuple[str, ...] | None = None
     required_info_keys: tuple[str, ...] = ()
+    reward_terms: tuple[str, ...] = ()
+    drill_library: bool = False
 
     def __post_init__(self) -> None:
         if (self.recipe is None) == (self.env_cls is None):
             raise ValueError(
                 f"{self.name}: exactly one of recipe and env_cls must be set"
+            )
+        unrequired = sorted(set(self.reward_terms) - set(self.required_info_keys))
+        if unrequired:
+            raise ValueError(
+                f"{self.name}: reward_terms {unrequired} must be required info keys"
+            )
+        if self.drill_library and "drill_library" in self.env_kwargs:
+            raise ValueError(
+                f"{self.name}: drill_library=True builds the library itself; "
+                f"drop the env_kwargs path"
             )
         if self.recipe is not None and self.recipe not in RECIPES:
             raise ValueError(f"{self.name}: unknown recipe {self.recipe!r}")
@@ -164,17 +213,25 @@ class StreamCase:
 
     def make_env(self) -> gymnasium.Env:
         """Construct a fresh env for one seed's stream."""
+        overrides = dict(self.env_kwargs)
+        if self.drill_library:
+            overrides["drill_library"] = drill_library_path()
         if self.recipe is not None:
             recipe = RECIPES[self.recipe]
-            kwargs = {**recipe.env_kwargs, **self.env_kwargs}
+            kwargs = {**recipe.env_kwargs, **overrides}
             return recipe.env_cls(**kwargs)
         assert self.env_cls is not None  # __post_init__ guarantees it
-        return self.env_cls(**self.env_kwargs)
+        return self.env_cls(**overrides)
 
 
 @dataclass(frozen=True)
 class StreamStep:
-    """One record of a case's stream: a reset (``step`` is None) or a step."""
+    """One record of a case's stream: a reset (``step`` is None) or a step.
+
+    ``reward``, ``terminated`` and ``truncated`` are cast to float and
+    bool; ``interface`` keeps what the casts (and the float64 stream
+    hash) erase -- see :func:`_interface_bytes`.
+    """
 
     seed: int
     episode: int
@@ -187,6 +244,7 @@ class StreamStep:
     info: Mapping[str, Any]
     qpos: np.ndarray
     qvel: np.ndarray
+    interface: bytes = b""
 
 
 # -- policies ---------------------------------------------------------------
@@ -304,6 +362,130 @@ def _make_policy(case: StreamCase, env: gymnasium.Env, seed: int) -> Policy:
     return _camper_policy(env)
 
 
+# -- the drill library ---------------------------------------------------------
+
+#: The library schema PaddleTennisEnv consumes
+#: (``tools/paddle_tennis_k2_harvest.py`` writes the registered one).
+_DRILL_LIBRARY_SCHEMA = "k2-drill-library-v0"
+#: The harvest walks the test suite's burned bring-up block
+#: (1000-1119), never a ledger block; two entries fill on seed 1000.
+_DRILL_HARVEST_SEEDS = range(1000, 1120)
+_DRILL_HARVEST_ENTRIES = 2
+
+
+def _drill_snapshot(env: PaddleTennisEnv, obs: np.ndarray) -> dict[str, Any]:
+    """Everything either launch arm reads, as the harvest tool records it."""
+    sampler = env._event_sampler
+    return {
+        "qpos": env.data.qpos.copy(),
+        "qvel": env.data.qvel.copy(),
+        "qacc_warmstart": env.data.qacc_warmstart.copy(),
+        "obs": np.asarray(obs, dtype=np.float64).copy(),
+        "rules": copy.deepcopy(env._rules),
+        # The compiled model is shared, never copied: the launching env
+        # attaches its own.
+        "sampler": copy.deepcopy(sampler, memo={id(sampler.model): None}),
+        "serving_side": env._serving_side,
+        "head_a": env._paddle_position(CourtSide.A),
+        "head_b": env._paddle_position(CourtSide.B),
+    }
+
+
+def _drill_entry_is_clear(env: PaddleTennisEnv, entry: Mapping[str, Any]) -> bool:
+    """The launch-clearance test ``PaddleTennisEnv._launch_point`` applies."""
+    ball = entry["qpos"][env._ball_qposadr : env._ball_qposadr + 3]
+    return all(
+        float(np.linalg.norm(entry[key] - ball)) >= env._SERVE_CLEARANCE
+        for key in ("head_a", "head_b")
+    )
+
+
+def build_drill_library() -> dict[str, Any]:
+    """A tiny k=2 drill library, harvested deterministically in-process.
+
+    The ground oracle drives side A through default-kwarg continuous
+    play on points side B serves, and the state is recorded at the k=2
+    instant: after A's legal hit and B's legal return, with the ball
+    back over the net heading for A (the criterion of
+    ``tools/paddle_tennis_k2_harvest.py`` and of the test suite's drill
+    fixture). Entries carry what both launch arms read, so one library
+    serves the ``"feed"`` and ``"full"`` cases. A third entry copies
+    the first with the ball on side A's paddle head: it fails the
+    launch clearance, so the drill's loud fallback (a drawn serve,
+    counted in ``drill_fallback_count``) is digested too.
+
+    Nothing here is written to the repository: the library is a pure
+    function of the env code, rebuilt in every process that digests a
+    drill case, so a change to the harvested states is a digest change
+    like any other.
+    """
+    env = PaddleTennisEnv(points_per_episode=None)
+    entries: list[dict[str, Any]] = []
+    try:
+        for seed in _DRILL_HARVEST_SEEDS:
+            obs, _info = env.reset(seed=seed, options={"serve_side": "b"})
+            hit_a = struck_b = False
+            points = 0
+            for _ in range(env.episode_len):
+                obs, _reward, terminated, truncated, info = env.step(
+                    scripted_ground_opponent(obs)
+                )
+                if terminated or truncated:
+                    break
+                if int(info["points_played"]) != points:
+                    points = int(info["points_played"])
+                    hit_a = struck_b = False
+                if info["event_valid_racket_hit_a"]:
+                    hit_a, struck_b = True, False
+                if info["event_valid_racket_hit_b"] and hit_a:
+                    struck_b = True
+                ball_x = float(env.data.qpos[env._ball_qposadr])
+                ball_vx = float(env.data.qvel[env._ball_dofadr])
+                if not (
+                    struck_b
+                    and env._serving_side is CourtSide.B
+                    and ball_x > 0.05
+                    and ball_vx < -1.0
+                ):
+                    continue
+                entry = _drill_snapshot(env, obs)
+                if _drill_entry_is_clear(env, entry):
+                    entries.append(entry)
+                    hit_a = struck_b = False
+                    if len(entries) == _DRILL_HARVEST_ENTRIES:
+                        break
+            if len(entries) == _DRILL_HARVEST_ENTRIES:
+                break
+        else:
+            raise RuntimeError(
+                f"the digest drill harvest exhausted seeds "
+                f"{_DRILL_HARVEST_SEEDS.start}-{_DRILL_HARVEST_SEEDS.stop - 1} "
+                f"with {len(entries)} of {_DRILL_HARVEST_ENTRIES} entries"
+            )
+        blocked = copy.deepcopy(entries[0])
+        blocked["qpos"][env._ball_qposadr : env._ball_qposadr + 3] = blocked["head_a"]
+        assert not _drill_entry_is_clear(env, blocked)
+        entries.append(blocked)
+    finally:
+        env.close()
+    return {"schema": _DRILL_LIBRARY_SCHEMA, "entries": entries}
+
+
+@functools.cache
+def _drill_library_directory() -> tempfile.TemporaryDirectory[str]:
+    # Cached, so the directory lives until interpreter exit, when its
+    # finalizer removes it.
+    directory = tempfile.TemporaryDirectory(prefix="courtside_digest_drill_")
+    path = Path(directory.name) / "digest_drill_library.pkl"
+    path.write_bytes(pickle.dumps(build_drill_library()))
+    return directory
+
+
+def drill_library_path() -> str:
+    """The file of :func:`build_drill_library`, harvested once per process."""
+    return str(Path(_drill_library_directory().name) / "digest_drill_library.pkl")
+
+
 # -- streams ----------------------------------------------------------------
 
 
@@ -344,6 +526,10 @@ def iter_stream(case: StreamCase) -> Iterator[StreamStep]:
                     info=info,
                     qpos=qpos,
                     qvel=qvel,
+                    interface=_interface_bytes(
+                        obs,
+                        spaces=(env.observation_space, env.action_space),
+                    ),
                 )
                 done = False
                 while not done and step < case.steps:
@@ -366,6 +552,9 @@ def iter_stream(case: StreamCase) -> Iterator[StreamStep]:
                         info=info,
                         qpos=qpos,
                         qvel=qvel,
+                        interface=_interface_bytes(
+                            obs, values=(reward, terminated, truncated)
+                        ),
                     )
                     step += 1
                     done = bool(terminated or truncated)
@@ -378,13 +567,71 @@ def _f64(value: Any) -> bytes:
     return np.ascontiguousarray(value, dtype=np.float64).tobytes()
 
 
+def _type_name(value: Any) -> bytes:
+    """A version-stable name for a value's concrete type.
+
+    A numpy scalar names its dtype (numpy 2 renamed ``np.bool_``'s class
+    to ``numpy.bool``); anything else its module and qualified name.
+    """
+    if isinstance(value, np.generic):
+        return f"numpy:{value.dtype.str}".encode()
+    kind = type(value)
+    return f"{kind.__module__}.{kind.__qualname__}".encode()
+
+
+def _array_bytes(array: np.ndarray) -> bytes:
+    """An array's dtype, shape and raw bytes; object arrays refuse."""
+    if array.dtype.hasobject:
+        raise TypeError("an object-dtype array has no canonical bytes")
+    header = f"{array.dtype.str}{array.shape}".encode()
+    return header + b"\x00" + np.ascontiguousarray(array).tobytes()
+
+
+def _space_bytes(space: gymnasium.Space[Any]) -> bytes:
+    """A Box space's dtype, shape and bounds; other spaces refuse loudly."""
+    if not isinstance(space, gymnasium.spaces.Box):
+        raise TypeError(f"no canonical form for a {type(space).__name__} space")
+    return b"Box" + _array_bytes(space.low) + _array_bytes(space.high)
+
+
+def _interface_bytes(
+    obs: Any,
+    *,
+    spaces: tuple[gymnasium.Space[Any], gymnasium.Space[Any]] | None = None,
+    values: tuple[Any, Any, Any] | None = None,
+) -> bytes:
+    """What the float64 stream hash erases, for one record.
+
+    The raw observation's type, dtype and shape at every record; at a
+    reset, the observation and action spaces; at a step, the concrete
+    types of reward, ``terminated`` and ``truncated`` before the casts
+    (``np.float32(1.0)`` and ``1.0`` hash the same stream bytes).
+    """
+    raw = np.asarray(obs)
+    chunks = [_type_name(obs), f"{raw.dtype.str}{raw.shape}".encode()]
+    if spaces is not None:
+        chunks += [_space_bytes(space) for space in spaces]
+    if values is not None:
+        chunks += [_type_name(value) for value in values]
+    return _framed(chunks)
+
+
+def _framed(chunks: Iterable[bytes]) -> bytes:
+    """Count- and length-prefixed concatenation: unambiguous nesting."""
+    items = list(chunks)
+    return struct.pack("<q", len(items)) + b"".join(
+        struct.pack("<q", len(item)) + item for item in items
+    )
+
+
 def _scalar_bytes(value: Any) -> bytes | None:
     """Canonical tagged bytes for a scalar info value; None if not scalar.
 
     Numeric values hash by class (bool / int / float), not by their
     concrete Python or numpy type: ``np.float64(x)`` and ``float(x)``
     are the same stream, while ``1`` and ``1.0`` are not (CSV writers
-    and aggregators see the difference).
+    and aggregators see the difference). A ``str`` subclass (a
+    ``StrEnum`` member) hashes as its string value.
     """
     if isinstance(value, (bool, np.bool_)):
         return b"?" + (b"\x01" if value else b"\x00")
@@ -398,6 +645,93 @@ def _scalar_bytes(value: Any) -> bytes | None:
     if value is None:
         return b"n"
     return None
+
+
+def info_value_bytes(value: Any) -> bytes:
+    """Canonical tagged bytes for any info value; unknown types raise.
+
+    Scalars hash as :func:`_scalar_bytes` does. Containers hash
+    recursively, every element length-prefixed: tuples and lists under
+    distinct tags, numpy arrays with their dtype and shape, mappings by
+    sorted string key, sets in sorted element order. Anything else
+    raises ``TypeError``, so a new kind of info value fails loudly
+    instead of dropping out of the digest.
+    """
+    scalar = _scalar_bytes(value)
+    if scalar is not None:
+        return scalar
+    if isinstance(value, np.ndarray):
+        return b"a" + _array_bytes(value)
+    if isinstance(value, (tuple, list)):
+        tag = b"t" if isinstance(value, tuple) else b"l"
+        return tag + _framed(info_value_bytes(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return b"e" + _framed(sorted(info_value_bytes(item) for item in value))
+    if isinstance(value, Mapping):
+        keys = list(value)
+        if not all(isinstance(key, str) for key in keys):
+            raise TypeError(f"a mapping info value needs str keys, got {keys!r}")
+        return b"m" + _framed(
+            key.encode() + b"\x00" + info_value_bytes(value[key])
+            for key in sorted(keys)
+        )
+    raise TypeError(
+        f"no canonical form for an info value of type {type(value).__name__}; "
+        f"teach digests.info_value_bytes about it"
+    )
+
+
+def left_to_right_sum(terms: Sequence[float]) -> float:
+    """``((t0 + t1) + t2) + ...``: the association the reward sums use.
+
+    Deliberately neither ``sum()`` (compensated since Python 3.12) nor
+    ``math.fsum``: either can differ from the env's own expression in
+    the last bit.
+    """
+    total = terms[0]
+    for term in terms[1:]:
+        total = total + term
+    return total
+
+
+def _float_bits(value: float) -> bytes:
+    return struct.pack("<d", value)
+
+
+def order_sensitive_swaps(terms: Sequence[float]) -> list[tuple[int, int]]:
+    """Every transposition ``(i, j)`` of ``terms`` that moves the sum's bits.
+
+    :func:`left_to_right_sum` of ``terms`` with positions ``i`` and
+    ``j`` exchanged differs from the canonical sum exactly for the
+    returned pairs. ``(0, 1)`` never does (float addition commutes), and
+    with fewer than three nonzero terms no pair does.
+    """
+    canonical = _float_bits(left_to_right_sum(terms))
+    swaps = []
+    for i, j in itertools.combinations(range(len(terms)), 2):
+        swapped = list(terms)
+        swapped[i], swapped[j] = swapped[j], swapped[i]
+        if _float_bits(left_to_right_sum(swapped)) != canonical:
+            swaps.append((i, j))
+    return swaps
+
+
+def _reward_is_order_sensitive(case: StreamCase, record: StreamStep) -> bool:
+    """Check a step's reward against its canonical term sum (raises).
+
+    Returns whether that sum's value depends on the summation order.
+    """
+    terms = [record.info[key] for key in case.reward_terms]
+    canonical = left_to_right_sum(terms)
+    if _float_bits(float(canonical)) != _float_bits(record.reward):
+        raise ValueError(
+            f"{case.name}: step {record.step} (seed {record.seed}) reward "
+            f"{record.reward!r} is not the left-to-right sum {canonical!r} of "
+            f"{dict(zip(case.reward_terms, terms, strict=True))}: the reward "
+            f"decomposition or its summation order changed"
+        )
+    nonzero = sum(1 for term in terms if term != 0.0)
+    return nonzero >= 3 and bool(order_sensitive_swaps(terms))
 
 
 def _info_bytes(
@@ -424,14 +758,16 @@ def _info_bytes(
         keys = sorted(key for key in case.info_keys if key in info)
     chunks = [b"r" if record.step is None else b"s"]
     for key in keys:
-        encoded = _scalar_bytes(info[key])
-        if encoded is None:
-            if key in case.required_info_keys or case.info_keys is not None:
-                raise TypeError(
-                    f"{case.name}: info[{key!r}] is not a scalar: "
-                    f"{type(info[key]).__name__}"
-                )
-            continue
+        value = info[key]
+        if key in case.required_info_keys and _scalar_bytes(value) is None:
+            raise TypeError(
+                f"{case.name}: info[{key!r}] is not a scalar: "
+                f"{type(value).__name__}"
+            )
+        try:
+            encoded = info_value_bytes(value)
+        except TypeError as error:
+            raise TypeError(f"{case.name}: info[{key!r}]: {error}") from None
         keys_seen.add(key)
         chunks.append(key.encode() + b"\x00" + encoded)
     return b"\x1e".join(chunks) + b"\n"
@@ -440,17 +776,35 @@ def _info_bytes(
 def stream_digest(case: StreamCase) -> dict[str, Any]:
     """Roll ``case`` and return its digest record (JSON-serializable).
 
-    ``stream_sha256`` and ``info_sha256`` are the gated values; the
-    counts, ``reward_sum`` and the info key census exist to make a
-    mismatch readable (did the episode structure move? the reward? the
-    info schema?).
+    ``stream_sha256``, ``info_sha256`` and ``interface_sha256`` are the
+    gated values; the counts, ``reward_sum``, the info key census (every
+    key seen at any reset or step), ``reward_order_sensitive_steps``
+    for a case with ``reward_terms`` and the ``drill_*`` counts for a
+    drill case exist to make a mismatch readable (did the episode
+    structure move? the reward? the info schema?) and are gated too.
     """
     stream = hashlib.sha256()
     info_hash = hashlib.sha256()
+    interface = hashlib.sha256()
     keys_seen: set[str] = set()
-    steps = episodes = terminations = truncations = 0
+    steps = episodes = terminations = truncations = order_sensitive = 0
+    drilled = undrilled_receiving = 0
+    fallbacks: dict[tuple[int, int], float] = {}
     reward_sum = 0.0
     for record in iter_stream(case):
+        # Info first: it raises the readable error for a missing key.
+        info_hash.update(_info_bytes(case, record, keys_seen))
+        interface.update(record.interface)
+        if case.reward_terms and record.step is not None:
+            order_sensitive += _reward_is_order_sensitive(case, record)
+        if case.drill_library and record.step is not None:
+            info = record.info
+            drilled += info["drill_point"] == 1.0
+            undrilled_receiving += (
+                info["drill_point"] == 0.0 and info["serve_side_is_policy"] == 0.0
+            )
+            # An episode counter: its last value is the episode's total.
+            fallbacks[(record.seed, record.episode)] = info["drill_fallback_count"]
         if record.step is None:
             episodes += 1
             stream.update(b"R" + struct.pack("<qq", record.seed, record.episode))
@@ -466,13 +820,13 @@ def stream_digest(case: StreamCase) -> dict[str, Any]:
             stream.update(bytes((record.terminated, record.truncated)))
         stream.update(_f64(record.qpos))
         stream.update(_f64(record.qvel))
-        info_hash.update(_info_bytes(case, record, keys_seen))
     missing = sorted(set(case.required_info_keys) - keys_seen)
     if missing:
         raise KeyError(f"{case.name}: required info keys never digested: {missing}")
-    return {
+    digest: dict[str, Any] = {
         "stream_sha256": stream.hexdigest(),
         "info_sha256": info_hash.hexdigest(),
+        "interface_sha256": interface.hexdigest(),
         "info_keys_sha256": hashlib.sha256(
             "\n".join(sorted(keys_seen)).encode()
         ).hexdigest(),
@@ -483,6 +837,13 @@ def stream_digest(case: StreamCase) -> dict[str, Any]:
         "truncations": truncations,
         "reward_sum": reward_sum,
     }
+    if case.reward_terms:
+        digest["reward_order_sensitive_steps"] = order_sensitive
+    if case.drill_library:
+        digest["drill_drilled_steps"] = drilled
+        digest["drill_undrilled_receiving_steps"] = undrilled_receiving
+        digest["drill_fallbacks"] = int(sum(fallbacks.values()))
+    return digest
 
 
 def version_info() -> dict[str, str]:
@@ -592,6 +953,17 @@ _HOLD_ARM = {"hold_shaping": 0.25}
 #: like the recipe's paired evaluation.
 _ONE_POINT = {"points_per_episode": 1}
 _ALTERNATE_SERVE = ({"serve_side": "a"}, {"serve_side": "b"})
+#: The original freeze's rally rules (volleys confirm returns); the
+#: oracle is then the lead-charge port the env gives side B.
+_LEGAL_VOLLEY = {"volley_rule": "legal"}
+#: The k=2 drill on half the policy-receiving launches, per arm. Under
+#: random play the seed-0 stream holds drilled, undrilled-eligible and
+#: fallback launches in both arms; tests/test_golden_digests.py asserts
+#: that coverage from the stream.
+_DRILL_ARMS = {
+    context: {"drill_fraction": 0.5, "drill_context": context}
+    for context in ("feed", "full")
+}
 
 # NaN-with-pending-escrow witnesses (campaign design L0). The steps were
 # chosen from the seed-0 oracle stream's own info, and the witness test
@@ -606,8 +978,17 @@ _ALTERNATE_SERVE = ({"serve_side": "a"}, {"serve_side": "b"})
 #   first bounce at 427 pays rew_reach = +0.17534702856592194 into the
 #   reach escrow; side A's next legal hit (which would keep both) lands
 #   only at 435. A NaN action at 430 must claw back both at once.
+# - Hold arm, seed 1 (an order-sensitive ending): the opponent's strike
+#   at index 342 pays rew_hold = +0.019691534990717713 and the live first
+#   bounce at 442 pays rew_reach = +0.17532310086941538; side A's next
+#   legal hit lands at 449. The NaN action at 443 claws back both, and
+#   its reward -2.0 - 0.17532... - 0.01969... rounds differently when
+#   the hold clawback moves ahead of the unsafe penalty or the reach
+#   clawback: no other digested step depends on the summation order.
 _NAN_CONTACT_ESCROW_STEP = 250
 _NAN_REACH_HOLD_ESCROW_STEP = 430
+_NAN_ORDER_SENSITIVE_SEED = 1
+_NAN_ORDER_SENSITIVE_STEP = 443
 
 
 def _paddle_case(name: str, **kwargs: Any) -> StreamCase:
@@ -615,6 +996,7 @@ def _paddle_case(name: str, **kwargs: Any) -> StreamCase:
         name=name,
         recipe="PaddleTennis",
         required_info_keys=PADDLE_TENNIS_REWARD_INFO_KEYS,
+        reward_terms=PADDLE_TENNIS_REWARD_INFO_KEYS,
         **kwargs,
     )
 
@@ -649,7 +1031,25 @@ def _cases(*, seeds: tuple[int, ...], steps: int, humanoid_steps: int) -> tuple[
             steps=steps,
             env_kwargs=_HOLD_ARM,
         ),
-        # The witnesses' NaN steps are calibrated on seed 0 only.
+        _paddle_case(
+            "paddle_tennis/legal_volley/oracle",
+            policy="oracle",
+            seeds=seeds,
+            steps=steps,
+            env_kwargs=_LEGAL_VOLLEY,
+        ),
+        *(
+            _paddle_case(
+                f"paddle_tennis/drill_{context}/random",
+                policy="random",
+                seeds=seeds,
+                steps=steps,
+                env_kwargs=kwargs,
+                drill_library=True,
+            )
+            for context, kwargs in _DRILL_ARMS.items()
+        ),
+        # The witnesses' NaN steps are calibrated on one seed only.
         _paddle_case(
             "paddle_tennis/recipe/oracle_nan_contact_escrow",
             policy="oracle",
@@ -664,6 +1064,14 @@ def _cases(*, seeds: tuple[int, ...], steps: int, humanoid_steps: int) -> tuple[
             steps=witness_steps,
             env_kwargs=_HOLD_ARM,
             nan_action_step=_NAN_REACH_HOLD_ESCROW_STEP,
+        ),
+        _paddle_case(
+            "paddle_tennis/hold/oracle_nan_order_sensitive",
+            policy="oracle",
+            seeds=(_NAN_ORDER_SENSITIVE_SEED,),
+            steps=witness_steps,
+            env_kwargs=_HOLD_ARM,
+            nan_action_step=_NAN_ORDER_SENSITIVE_STEP,
         ),
         *(
             StreamCase(
@@ -709,7 +1117,9 @@ def _cases(*, seeds: tuple[int, ...], steps: int, humanoid_steps: int) -> tuple[
 CI_CASES = _cases(seeds=(0,), steps=3_000, humanoid_steps=300)
 
 #: The local refactor gate: five spaced seeds (spaced so no two streams
-#: share an episode reset seed) at the design's 3,000 steps per seed.
+#: share an episode reset seed) at the design's 3,000 steps per seed;
+#: the humanoid case takes the first two at 600 steps, and the NaN
+#: witnesses stay on the one seed each is calibrated on.
 FULL_CASES = _cases(
     seeds=(0, 100, 200, 300, 400), steps=3_000, humanoid_steps=600
 )
@@ -730,11 +1140,16 @@ __all__ = [
     "POLICIES",
     "StreamCase",
     "StreamStep",
+    "build_drill_library",
     "digest_mismatches",
     "drift_label",
+    "drill_library_path",
     "expected_digest",
     "format_mismatch",
+    "info_value_bytes",
     "iter_stream",
+    "left_to_right_sum",
+    "order_sensitive_swaps",
     "stream_digest",
     "version_info",
 ]

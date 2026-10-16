@@ -18,6 +18,27 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **Refactor-gate hardening (2026-10-16).** No env stream or training
+  path changes: every recorded `stream_sha256` reproduces unchanged.
+  Fixes from the gates' review (see DECISIONS):
+  - The golden file moves to format `courtside-env-digests/2`. The info
+    digest hashes every item, tuples and arrays included (they used to
+    be skipped), and raises on a type it cannot hash. A new
+    `interface_sha256` covers the spaces and the concrete obs, reward
+    and flag types. Every PaddleTennis reward must equal the
+    left-to-right sum of its nine `rew_*` terms, bit for bit.
+  - Tests pin the summation order of both PaddleTennis reward sums on
+    forced adversarial terms, and a third NaN witness keeps an
+    order-sensitive reward in the CI streams.
+  - New cases: `volley_rule="legal"` with the lead-charge oracle, and
+    the k=2 drill in both launch arms from a library harvested
+    in-process. CI now runs 19 cases in about 40 s.
+  - The digest and snapshot tools and the test suite refuse to run
+    when `courtside_dynamics` imports from another checkout (a git
+    worktree's editable install).
+  - The recipe snapshot compares canonical JSON text, so `8` versus
+    `8.0` is a diff. The trainer digest runs the two sides under
+    different hash seeds.
 - **Golden digests and the SAC freeze harness (2026-10-16).** No env
   stream or training path changes. Three refactor gates (see DECISIONS):
   - `courtside_dynamics.digests` plus `tools/golden_digest.py`
@@ -35,19 +56,21 @@ supersedes it (see the ground-rules bullet).
   `courtside_dynamics.recipes` now imports SB3 and torch inside
   `build_train_config` instead of at module import, so the recipe
   registry and env factories load without the training stack. Every
-  resolution is unchanged: the snapshot built from HEAD's source is
-  identical.
+  resolution is unchanged: the snapshot rebuilt from `4e2e019`'s source
+  (before the import move) is identical.
 - **Dependency hygiene (2026-10-16).** No code or env stream changes
-  on the supported range. `mujoco` is capped `<3.16`: 3.16.0's
+  on the supported range, which is now exactly the range that
+  reproduces the golden digests: `mujoco>=3.12,<3.16`. 3.16.0's
   `mj_setConst` refreshes body bounding volumes, which knocks the
   humanoid Stage-1 oracle off its calibration (138 steps, target
   missed), while the PaddleTennis, WallBall and BallBounce streams are
-  identical from 3.12 through 3.16 (see DECISIONS). The `gymnasium`
-  floor rises to 1.1.1, since 1.1.0 cannot construct any courtside
-  env. The license is now the SPDX string `MIT` with no License
+  identical from 3.12 through 3.16. Below 3.12 the streams move: 3.11
+  changes the humanoid stream, 3.10 every other env's (see DECISIONS).
+  The `gymnasium` floor rises to 1.1.1, since 1.1.0 cannot construct
+  any courtside env. The license is now the SPDX string `MIT` with no License
   classifier, built with `setuptools>=77`. CI's typecheck and test
   jobs install CPU torch instead of the CUDA build.
-  `tests/test_packaging.py` pins all three bounds.
+  `tests/test_packaging.py` pins the bounds and the CPU-torch order.
 - **PaddleTennis instrument and bug-fix batch (2026-10-05).** Fixes
   the review findings in `docs/repo_review_20261005.md` §5b/§7.2 plus
   their adversarial follow-ups.

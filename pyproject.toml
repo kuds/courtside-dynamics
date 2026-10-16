@@ -39,7 +39,12 @@ dependencies = [
     # recalibrated on refreshed bounds; the golden digests then prove the
     # paddle streams unchanged. See docs/DECISIONS.md, "Humanoid tennis
     # environment".
-    "mujoco>=3.3,<3.16",
+    # >=3.12: the supported range is exactly the range that reproduces
+    # the golden digests (tests/golden/env_digests.json). 3.12 through
+    # 3.15 reproduce every case and the oracle's 129 steps; 3.11 moves
+    # the humanoid stream, 3.10 every paddle, WallBall, BallBounce and
+    # BallBalance stream, and on 3.3 the oracle takes 127 steps.
+    "mujoco>=3.12,<3.16",
     # 1.1.1: the gate/schedule callbacks call set_wrapper_attr(..., force=False)
     # and read its bool result; 1.0.0 has neither the keyword nor the return.
     # 1.1.0 has both, but its MujocoEnv asserts a four-mode render_modes

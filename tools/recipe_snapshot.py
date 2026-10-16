@@ -27,6 +27,12 @@ with its warnings recorded; where a seeded build (``seed=0``) resolves
 differently beyond the seed itself (paired evaluation keeps the recipe's
 ``eval_reset_options``), that build is recorded too under ``|seed=0``.
 
+The check compares the canonical JSON text of each entry, so a
+type-only change (``8`` to ``8.0``, ``True`` to ``1``) is a diff even
+though Python's ``==`` would call the values equal. Like the golden
+digests, the tool refuses to run when ``courtside_dynamics`` imports
+from anywhere but this checkout's ``src/``.
+
 Usage::
 
     python tools/recipe_snapshot.py            # check (exit 1 on any diff)
@@ -48,10 +54,16 @@ from typing import Any
 
 import numpy as np
 
+try:
+    from tools._checkout import checkout_package_mismatch
+except ModuleNotFoundError:  # run as a script: tools/ itself is on sys.path
+    from _checkout import checkout_package_mismatch  # type: ignore[no-redef]
+
+#: The checkout this tool belongs to.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 #: The committed snapshot.
-SNAPSHOT_PATH = (
-    Path(__file__).resolve().parent.parent / "tests" / "golden" / "recipe_snapshot.json"
-)
+SNAPSHOT_PATH = REPO_ROOT / "tests" / "golden" / "recipe_snapshot.json"
 
 #: Format tag of the snapshot file; bump it with any canonical-form change.
 SNAPSHOT_FORMAT = "courtside-recipe-snapshot/1"
@@ -218,10 +230,15 @@ def build_snapshot() -> dict[str, Any]:
     return entries
 
 
+def _same(expected: Any, actual: Any) -> bool:
+    """Equal as canonical JSON text: ``8`` is not ``8.0``, ``True`` not ``1``."""
+    return json.dumps(expected, sort_keys=True) == json.dumps(actual, sort_keys=True)
+
+
 def _first_differences(
     expected: Any, actual: Any, path: str = "$", limit: int = 8
 ) -> list[str]:
-    if expected == actual:
+    if _same(expected, actual):
         return []
     if isinstance(expected, dict) and isinstance(actual, dict):
         out: list[str] = []
@@ -248,7 +265,7 @@ def compare(recorded: Mapping[str, Any], live: Mapping[str, Any]) -> list[str]:
             problems.append(f"{key}: recorded but no longer resolved")
         elif key not in recorded:
             problems.append(f"{key}: resolved but never recorded")
-        elif recorded[key] != live[key]:
+        elif not _same(recorded[key], live[key]):
             lines = _first_differences(recorded[key], live[key])
             problems.append("\n".join([f"{key}:", *(f"  {line}" for line in lines)]))
     return problems
@@ -281,6 +298,9 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--write", action="store_true", help="re-record")
     parser.add_argument("--snapshot", type=Path, default=SNAPSHOT_PATH)
     args = parser.parse_args(argv)
+    problem = checkout_package_mismatch(REPO_ROOT)
+    if problem is not None:
+        raise SystemExit(f"recipe_snapshot: {problem}")
     live = build_snapshot()
     if args.write:
         old = (

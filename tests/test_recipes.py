@@ -837,7 +837,8 @@ def test_training_notebook_preserves_curriculum_recipe_defaults():
 
     assert 'ALGO = None' in source
     assert 'TOTAL_TIMESTEPS = None' in source
-    assert 'REPO_REF = "main"' in source
+    # REPO_REF's immutable pin (a commit SHA or tag, never a branch) is
+    # tests/test_notebooks.py's contract.
     assert "github.com/kuds/courtside-dynamics@{REPO_REF}" in source
     assert 'ALGO = ALGO or RECIPES[ENV].default_algo' in source
     # 0.12.0 moved worker-count resolution into the recipes: the

@@ -125,3 +125,26 @@ def test_check_reports_a_diff_loudly(tmp_path, capsys):
     err = capsys.readouterr().err
     assert f"{key}:\n  $.train_config.n_envs: expected 99, got 8" in err
     assert recipe_snapshot.DIFF_EXPLANATION in err
+
+
+@pytest.mark.parametrize(
+    "recorded, live",
+    [(8, 8.0), (True, 1), (0.0, 0), (0.0, -0.0), ([64, "step"], [64.0, "step"])],
+)
+def test_compare_keeps_types_apart(recorded, live):
+    """Python's == calls these equal; the canonical JSON text does not."""
+    key = "BallBalance|SAC|quick_test=False"
+    problems = recipe_snapshot.compare(
+        {key: {"train_config": {"n_envs": recorded}}},
+        {key: {"train_config": {"n_envs": live}}},
+    )
+    assert problems == [
+        f"{key}:\n  $.train_config.n_envs: expected {recorded!r}, got {live!r}"
+    ]
+
+
+def test_check_refuses_another_checkouts_package(tmp_path, monkeypatch):
+    """In a worktree the editable install imports the main checkout's code."""
+    monkeypatch.setattr(recipe_snapshot, "REPO_ROOT", tmp_path)
+    with pytest.raises(SystemExit, match="another checkout's code"):
+        recipe_snapshot.main([])

@@ -13,8 +13,14 @@ digests compared with ``tests/golden/env_digests.json``.
   A case with a declared drift slot for the running MuJoCo
   (``digests.DECLARED_DRIFT``) is written into that slot; its primary
   digest must be recorded under a MuJoCo without declared drift.
-- ``--full`` selects the larger local set (five seeds per case) instead
-  of the CI subset; ``--case NAME`` (repeatable) narrows either.
+- ``--full`` selects the larger local set (five spaced seeds per case;
+  two for the humanoid case, and the NaN witnesses keep their one
+  calibrated seed) instead of the CI subset; ``--case NAME``
+  (repeatable) narrows either.
+
+The tool refuses to run when ``courtside_dynamics`` imports from
+anywhere but this checkout's ``src/`` (a git worktree shares the main
+checkout's editable install): set ``PYTHONPATH=src`` there.
 
 Usage::
 
@@ -31,6 +37,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from tools._checkout import checkout_package_mismatch
+except ModuleNotFoundError:  # run as a script: tools/ itself is on sys.path
+    from _checkout import checkout_package_mismatch  # type: ignore[no-redef]
+
 from courtside_dynamics.digests import (
     CASE_SETS,
     DECLARED_DRIFT,
@@ -44,13 +55,17 @@ from courtside_dynamics.digests import (
     version_info,
 )
 
-#: The committed golden file.
-GOLDEN_PATH = (
-    Path(__file__).resolve().parent.parent / "tests" / "golden" / "env_digests.json"
-)
+#: The checkout this tool belongs to.
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: Format tag of the golden file; bump it with any layout change.
-GOLDEN_FORMAT = "courtside-env-digests/1"
+#: The committed golden file.
+GOLDEN_PATH = REPO_ROOT / "tests" / "golden" / "env_digests.json"
+
+#: Format tag of the golden file; bump it with any layout or hashing
+#: change. /2: every info value hashed (non-scalars recursively), every
+#: info key in the census, plus interface_sha256 and, for PaddleTennis,
+#: reward_order_sensitive_steps. stream_sha256 is unchanged from /1.
+GOLDEN_FORMAT = "courtside-env-digests/2"
 
 
 def load_golden(path: Path) -> dict[str, Any]:
@@ -209,6 +224,9 @@ def main(argv: list[str] | None = None) -> int:
         "--golden", type=Path, default=GOLDEN_PATH, help="golden file to use"
     )
     args = parser.parse_args(argv)
+    problem = checkout_package_mismatch(REPO_ROOT)
+    if problem is not None:
+        raise SystemExit(f"golden_digest: {problem}")
     set_name = "full" if args.full else "ci"
     cases = _select(set_name, args.cases)
     if args.write:

@@ -350,15 +350,21 @@ training paths bit-identical unless the change is declared. Three gates
 check it, and a mismatch means "declare it", never "re-record it":
 
 ```bash
-OMP_NUM_THREADS=1 python tools/golden_digest.py           # env streams, CI set (~30 s)
-OMP_NUM_THREADS=1 python tools/golden_digest.py --full    # five seeds per case (~2 min)
+OMP_NUM_THREADS=1 python tools/golden_digest.py           # env streams, CI set (~40 s)
+OMP_NUM_THREADS=1 python tools/golden_digest.py --full    # five spaced seeds per case (~3 min)
 python tools/recipe_snapshot.py                            # every resolved TrainConfig
 python tools/trainer_digest.py --base main                 # seeded train() jobs vs a ref (~2 min)
 ```
 
-The first two also run in CI (`tests/test_golden_digests.py`,
-`tests/test_recipe_snapshot.py`); the trainer digest runs by hand
-before a merge that touches training. See
+`--full` runs five spaced seeds per case, except the humanoid case (two)
+and the NaN witnesses (the one seed each is calibrated on).
+`tests/test_golden_digests.py` and `tests/test_recipe_snapshot.py` run
+the first and third gates in CI; the full digest set and the trainer
+digest run by hand before a merge that touches the envs or training.
+In a git worktree, run the gates with
+`PYTHONPATH=src`: the editable install imports the main checkout's
+package there, and the tools and the test suite refuse to run against
+it. See
 [`docs/DECISIONS.md`](docs/DECISIONS.md), "Golden digests and the freeze
 harness gate every refactor".
 

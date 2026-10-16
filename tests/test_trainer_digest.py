@@ -8,6 +8,7 @@ loud about failures, and that every job still resolves its config.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -98,3 +99,14 @@ def test_every_job_resolves_its_config(job, tmp_path):
         assert cfg.normalize_obs_excluded_indices
         assert cfg.headline_key == "episode_rally_returns_a"
         assert cfg.checkpoint_diagnosis == {"episodes": 1, "seed_start": 5200}
+
+
+def test_sides_run_under_different_hash_seeds(tmp_path):
+    """Real runs draw a random hash seed; a str-hash-order dependence in
+    training must show up as a mismatch, not match under a shared seed."""
+    head = trainer_digest._job_env("head", tmp_path / "head" / "src")
+    base = trainer_digest._job_env("base", tmp_path / "base" / "src")
+    assert head["PYTHONHASHSEED"] != base["PYTHONHASHSEED"]
+    for side, env in (("head", head), ("base", base)):
+        assert env["PYTHONPATH"].split(os.pathsep)[0] == str(tmp_path / side / "src")
+        assert env["OMP_NUM_THREADS"] == env["MKL_NUM_THREADS"] == "1"

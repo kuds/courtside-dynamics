@@ -1,6 +1,9 @@
 """SAC freeze, part 2: tiny seeded train() jobs on HEAD vs a base ref.
 
-docs/design_ppo_first_class_20261016.md, Step 0. Every PR that touches
+docs/design_ppo_first_class_20261016.md, Step 0 (the design's
+``tools/sac_freeze_digest.py``; its ``tests/test_sac_freeze.py`` is
+part 1, shipped as ``tools/recipe_snapshot.py`` plus
+``tests/test_recipe_snapshot.py``). Every PR that touches
 the training stack must leave the SAC paths bit-identical unless it
 declares the change, and the recipe snapshot alone cannot prove that:
 it freezes the *configuration*, not what ``train()`` does with it. This
@@ -23,10 +26,14 @@ each run produced:
 - the global numpy, torch and Python RNG states after ``train()``.
 
 Both sides run on this machine, each job in its own subprocess with one
-OpenMP/MKL thread and ``PYTHONHASHSEED=0``, so no cross-platform float
-drift can enter the comparison. The worktree lives in a fresh temporary
-directory (``--tmp-root`` or the system default) and is removed
-afterwards, together with the run directories, unless ``--keep``.
+OpenMP/MKL thread, so no cross-platform float drift can enter the
+comparison. The sides run under different hash seeds (``PYTHONHASHSEED``
+1 for HEAD, 0 for the base): real runs draw a random one, so a training
+path that comes to depend on str-hash order (iterating a set of names)
+shows up as a mismatch instead of matching under a shared seed. The
+worktree lives in a fresh temporary directory (``--tmp-root`` or the
+system default) and is removed afterwards, together with the run
+directories, unless ``--keep``.
 
 ``--base-patch FILE`` applies a patch inside the temporary worktree
 only, never to this checkout: the self-test that a deliberate
@@ -382,18 +389,27 @@ def _git(*args: str, cwd: Path = REPO_ROOT) -> str:
     ).stdout.strip()
 
 
-def _launch(job: str, side: str, src: Path, scratch: Path) -> dict[str, Any]:
-    out = scratch / f"{side}_{job}.json"
-    log_dir = scratch / "runs" / side / job
-    env = {
+#: ``PYTHONHASHSEED`` per side: different on purpose (module doc).
+_HASH_SEEDS = {"head": "1", "base": "0"}
+
+
+def _job_env(side: str, src: Path) -> dict[str, str]:
+    """A job subprocess's environment: ``src`` first, one thread, its hash seed."""
+    return {
         **os.environ,
         "PYTHONPATH": os.pathsep.join(
             [str(src), *filter(None, [os.environ.get("PYTHONPATH")])]
         ),
         "OMP_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
-        "PYTHONHASHSEED": "0",
+        "PYTHONHASHSEED": _HASH_SEEDS[side],
     }
+
+
+def _launch(job: str, side: str, src: Path, scratch: Path) -> dict[str, Any]:
+    out = scratch / f"{side}_{job}.json"
+    log_dir = scratch / "runs" / side / job
+    env = _job_env(side, src)
     result = subprocess.run(
         [
             sys.executable,
