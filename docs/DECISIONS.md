@@ -718,6 +718,71 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### Golden digests and the freeze harness gate every refactor — *implemented (unreleased, 2026-10-16)*
+Week 1 restructures the env and training code by extraction (design
+M1 + L0, PPO plan Step 0). The rule is that nothing on the campaign path
+moves unless the change is declared, and three gates make that checkable:
+- **Env streams.** `courtside_dynamics.digests` hashes obs (float64),
+  reward, terminated, truncated, qpos and qvel at every reset and step,
+  plus a separate digest of the scalar info items. All nine `rew_*` keys
+  are required at every PaddleTennis step. `tools/golden_digest.py`
+  checks against `tests/golden/env_digests.json`, and
+  `tests/test_golden_digests.py` gates CI. The 15 CI cases take about
+  30 s serial: the recipe × {zero, random, oracle, camper}, one-point
+  with alternating serves, the +hold arm, two NaN witnesses, WallBall
+  TrueBaseline, BallBounce, BallBalance and 300 humanoid steps.
+  `--full` runs five spaced seeds per case.
+- **NaN witnesses.** These sit on pending escrows, and a test re-proves
+  them from the stream's own info. A NaN action at step 250 of the
+  seed-0 recipe oracle stream claws back the contact escrow (−0.25). At
+  step 430 on the hold arm it claws back reach (−0.1753) and hold
+  (−0.0099) at once.
+- **Recipe snapshot** (`tools/recipe_snapshot.py`,
+  `tests/golden/recipe_snapshot.json`). It records 70 resolutions: every
+  recipe × {default algo, SAC, DEMOSAC} × quick_test, plus the seeded
+  PaddleTennis builds that keep paired evaluation. Env kwargs are
+  recovered from the factory closures; no env is built, and it runs in
+  0.05 s after import.
+- **Trainer digest** (`tools/trainer_digest.py --base <ref>`). It runs
+  four seeded `train()` jobs (SAC BallBalance, DemoSAC with demos off,
+  the PaddleTennis SAC quick path, PPO BallBalance) on this checkout
+  and on a temporary worktree of the ref. It compares policy weights,
+  `log_ent_coef`, normalizer stats, monitor, evaluations,
+  `eval_info.csv`, selection meta, diagnosis reports, RNG states and
+  `resolved_model`. Both sides take about 100 s together.
+- **Evidence.** Every paddle, WallBall, BallBounce and BallBalance
+  digest in both sets is bit-identical across MuJoCo 3.15.0/3.16.0,
+  Python 3.11/3.13 and numpy 2.4.6/2.5.x. The humanoid random stream
+  diverges at step 49 under 3.16, which is the body-BVH refresh behind
+  the `<3.16` cap (Humanoid section). Against `4e2e019`, every trainer
+  component matches, and DemoSAC-off equals SAC hash for hash.
+- **Decisions.**
+  - Primary digests are recorded under the supported MuJoCo (what CI
+    resolves). A version-specific difference lives only in a
+    declared-drift slot whose reason is in code (`DECLARED_DRIFT`), and
+    every other version must reproduce the primary.
+  - The PaddleTennis camper is the frozen reach-camper witness. A
+    camper "at the home target" is the zero action exactly (zero maps
+    to the pivot), so it would only duplicate the zero digest.
+  - `recipes.py` imports the training stack inside
+    `build_train_config`, so the registry, and therefore the digests,
+    load without SB3 or torch. All 70 resolutions are identical to
+    HEAD's.
+  - `--write` leaves every reproduced entry untouched, versions
+    included, and prints each change. The mismatch text says to
+    declare, never to re-record.
+- **Lesson: perturb in the precision the computation runs in.** The
+  self-test's one-ULP learning-rate bump (float64) on the PaddleTennis
+  recipe left every trained output bit-identical: 3e-4 and its float64
+  neighbour round to the same float32 step size. Only `resolved_model`
+  caught it, which is why that component exists. A float32 ULP moves
+  the policy, `log_ent_coef`, normalizer, evaluations, selection and
+  diagnosis.
+- **Not covered.** The trainer digest is a manual pre-merge gate, not
+  CI, because it takes minutes. Monitor columns can stay equal under a
+  real change when the tiny budget's episodes end before learning
+  matters; the weight and RNG hashes carry those cases.
+
 ### The 2026-08-28 review's after-LT1 robustness findings are closed — *implemented (unreleased, commit `0cdd79f`)*
 Commit `0cdd79f` closes these findings from
 [`rl_pipeline_review_20260828.md`](rl_pipeline_review_20260828.md) (the

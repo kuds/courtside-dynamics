@@ -18,6 +18,25 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **Golden digests and the SAC freeze harness (2026-10-16).** No env
+  stream or training path changes. Three refactor gates (see DECISIONS):
+  - `courtside_dynamics.digests` plus `tools/golden_digest.py`
+    (`--check`, `--write`, `--full`) check per-step env-stream and info
+    digests against `tests/golden/env_digests.json`. CI runs 15 cases in
+    about 30 s through `tests/test_golden_digests.py`, including the
+    NaN-with-pending-escrow witnesses. The humanoid case has a declared
+    MuJoCo 3.16 drift slot.
+  - `tools/recipe_snapshot.py` freezes every recipe's resolved
+    `TrainConfig` in `tests/golden/recipe_snapshot.json`.
+  - `tools/trainer_digest.py --base <ref>` compares tiny seeded `train()`
+    jobs (SAC, DemoSAC with demos off, the PaddleTennis SAC quick path,
+    PPO) against a temporary worktree of `<ref>`.
+
+  `courtside_dynamics.recipes` now imports SB3 and torch inside
+  `build_train_config` instead of at module import, so the recipe
+  registry and env factories load without the training stack. Every
+  resolution is unchanged: the snapshot built from HEAD's source is
+  identical.
 - **Dependency hygiene (2026-10-16).** No code or env stream changes
   on the supported range. `mujoco` is capped `<3.16`: 3.16.0's
   `mj_setConst` refreshes body bounding volumes, which knocks the

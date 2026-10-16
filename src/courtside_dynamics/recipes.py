@@ -19,7 +19,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from courtside_dynamics.envs import (
     HUMANOID_TENNIS_OBSERVATION_LAYOUT,
@@ -32,8 +32,14 @@ from courtside_dynamics.envs import (
     TennisRewardConfig,
     WallBallEnv,
 )
-from courtside_dynamics.training import TrainConfig
-from courtside_dynamics.training.algos import resolve_algo, validate_model_kwargs
+
+# The training stack (SB3 + torch) is imported by build_train_config
+# itself, not here: the registry and the env factories are read by
+# torch-free code too -- the golden env digests
+# (courtside_dynamics.digests) build every recipe env without SB3, and
+# a recipe-level import would drag torch into each of them.
+if TYPE_CHECKING:
+    from courtside_dynamics.training import TrainConfig
 
 
 @dataclass(frozen=True)
@@ -1883,6 +1889,12 @@ def build_train_config(
         ``model_kwargs``, ...). Explicit overrides replace wholesale
         and win over every other layer.
     """
+    from courtside_dynamics.training import TrainConfig
+    from courtside_dynamics.training.algos import (
+        resolve_algo,
+        validate_model_kwargs,
+    )
+
     if env_name not in RECIPES:
         raise KeyError(f"Unknown env '{env_name}'. Choose one of {sorted(RECIPES)}.")
     if "run_config_file" in overrides:

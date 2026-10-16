@@ -343,6 +343,25 @@ meshes, starter TOMLs) sit beside the code in a source tree whether or not
 they are packaged, so the test suite passes either way while wheel users
 fail at environment construction. CI runs it on every build.
 
+### Refactor gates
+
+Env and training refactors must leave the task's streams and the SAC
+training paths bit-identical unless the change is declared. Three gates
+check it, and a mismatch means "declare it", never "re-record it":
+
+```bash
+OMP_NUM_THREADS=1 python tools/golden_digest.py           # env streams, CI set (~30 s)
+OMP_NUM_THREADS=1 python tools/golden_digest.py --full    # five seeds per case (~2 min)
+python tools/recipe_snapshot.py                            # every resolved TrainConfig
+python tools/trainer_digest.py --base main                 # seeded train() jobs vs a ref (~2 min)
+```
+
+The first two also run in CI (`tests/test_golden_digests.py`,
+`tests/test_recipe_snapshot.py`); the trainer digest runs by hand
+before a merge that touches training. See
+[`docs/DECISIONS.md`](docs/DECISIONS.md), "Golden digests and the freeze
+harness gate every refactor".
+
 The suite covers Gymnasium registration and API invariants, MuJoCo physics and
 contact semantics, rally rules, fixed-stage curriculum and promotion metrics,
 SB3 training and callbacks, run artifacts, and notebook helpers. Rendering is
@@ -362,13 +381,14 @@ courtside-dynamics/
 │   ├── callbacks/               # Evaluation and video recording
 │   ├── training/                # SAC/PPO training, artifacts, and promotion
 │   ├── run_configs/             # Packaged starter TOMLs, one per recipe
+│   ├── digests.py               # Golden env-stream digests (the refactor gate)
 │   ├── recipes.py               # Curated environment/training presets
 │   ├── run_config.py            # TOML run-config loading, merge, provenance
 │   ├── notebook_utils.py        # Colab setup, plots, replay, and audits
 │   └── scripted_policies.py     # Deterministic validation oracles
-├── tools/                       # Calibration sweeps and packaging checks
+├── tools/                       # Calibration sweeps, packaging checks, refactor gates
 ├── notebooks/
-└── tests/
+└── tests/                       # golden/: the recorded digests and snapshot
 ```
 
 For the engineering rationale behind the current design — the bugs, dead ends,
