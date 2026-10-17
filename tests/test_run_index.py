@@ -553,9 +553,39 @@ def test_an_unbound_selection_in_a_run_record_is_a_row_problem(tmp_path):
     assert row["index"]["verification"]["complete"] is True
     (problem,) = row["index"]["problems"]
     assert problem.startswith(
-        "the best model is unbound (best_model_meta.json does not bind the "
-        "files beside it: best_model.zip (sha256 differs)"
+        "the run record marks the best model unbound (best_model_meta.json "
+        "does not bind the files beside it: best_model.zip (sha256 differs)"
     )
+    assert problem.endswith("do not deploy best_model.zip")
+
+
+def test_unindexed_snapshot_files_in_a_run_record_are_a_row_problem(tmp_path):
+    """Verifier r3: snapshot files the index does not bind (a snapshot
+    interrupted between its renames) are named in the record, and the
+    index row says so."""
+    run = tmp_path / "Env" / "sac" / "20260101_000001"
+    run.mkdir(parents=True)
+    record = build_run_record(
+        {},
+        run_id=run.name,
+        created_at="t",
+        status=records.INTERRUPTED,
+        snapshots={
+            "index": "snapshots/index.json",
+            "count": 1,
+            "timesteps": [768],
+            "failures": [],
+            "unindexed": ["snapshot_1536_steps.zip"],
+        },
+    )
+    write_run_record(run, record)
+    write_sync_manifest(run)
+    (row,) = build_index(tmp_path, legacy_levers={}).rows
+    assert row["index"]["problems"] == [
+        "1 snapshot file(s) that snapshots/index.json does not bind (a "
+        "snapshot interrupted between its renames; never scored): "
+        "snapshot_1536_steps.zip"
+    ]
 
 
 def test_a_bom_or_an_integral_float_budget_is_a_courtside_config(tmp_path):

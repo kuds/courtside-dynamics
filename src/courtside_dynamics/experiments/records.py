@@ -20,9 +20,12 @@ a partial one (``repo_review_20261016.md`` R3). Two files close that:
 
 Both are written atomically: a temporary file in the same directory is
 renamed over the target, so a reader never sees half of one. The
-best-model triple is written the same way (:class:`ReplaceTogether`),
-and the record's ``selection`` says whether ``best_model_meta.json``'s
-sha256s bind the files beside it (:func:`best_model_meta_unbound`).
+best-model files are written the same way (:class:`ReplaceTogether`),
+and the record's ``selection`` says whether they are one save: whether
+``best_model_meta.json``'s sha256s bind the files beside it
+(:func:`best_model_meta_unbound`), and whether the files on disk are
+a save ``train()`` committed (:class:`BestSaveLedger`, which covers the
+reward path, whose saves write no meta).
 
 A run directory is **complete** when its manifest verifies, the run
 record it lists carries a terminal status, every file it does not list
@@ -171,6 +174,86 @@ def write_json_atomic(path: str | os.PathLike[str], payload: Any) -> Path:
     return target
 
 
+class BestSaveLedger:
+    """The best-model saves one ``train()`` call made, by sha256, in memory.
+
+    Both best-model savers (the headline evaluator's and the reward
+    path's new-best callback) hand it to :class:`ReplaceTogether`, which
+    notes the staged files' digests before its renames (``pending``) and
+    makes them the ``committed`` save after the last one. Each rename
+    is atomic, the set is not: an interrupt between two renames leaves
+    a model of one save beside a normalizer (or meta) of another, and a
+    first save interrupted after its model's rename leaves a model with
+    neither. A reward-path save writes no meta, so nothing on disk can
+    tell such a pair from a healthy one; :meth:`unbound` tells it from
+    what this run committed, when the run seals its record.
+
+    ``directory`` holds the best-model files, ``names`` every file a
+    save may write there (absent from a save means absent from disk).
+    """
+
+    def __init__(self, directory: str | os.PathLike[str], names: Sequence[str]) -> None:
+        self.directory = Path(directory)
+        self.names = tuple(names)
+        self.committed: dict[str, str] | None = None
+        self.pending: dict[str, str] | None = None
+
+    def stage(self, digests: Mapping[str, str]) -> None:
+        """Note a save about to be renamed into place (name -> sha256)."""
+        unknown = sorted(set(digests) - set(self.names))
+        if unknown:
+            raise ValueError(f"a best-model save names no best-model file: {unknown}")
+        self.pending = dict(digests)
+
+    def commit(self) -> None:
+        """The pending save is renamed into place whole."""
+        self.committed, self.pending = self.pending, None
+
+    def unbound(self) -> str | None:
+        """Why the best-model files on disk are not one save, or ``None``.
+
+        ``None`` when every file is as the last committed save left it
+        (none on disk when nothing was committed), or as the pending one
+        would (an interrupt after its last rename). Otherwise the
+        reason, naming which save each file is from; a file that cannot
+        be read is unbound too. Never raises.
+        """
+        on_disk: dict[str, str | None] = {}
+        for name in self.names:
+            path = self.directory / name
+            try:
+                on_disk[name] = sha256_file(path) if path.is_file() else None
+            except OSError as error:
+                return f"{name} could not be hashed ({describe_read_error(error)})"
+        committed = self.committed or {}
+        candidates = [committed] + ([self.pending] if self.pending is not None else [])
+        if any(
+            all(on_disk[name] == save.get(name) for name in self.names)
+            for save in candidates
+        ):
+            return None
+        pending = self.pending or {}
+        parts: list[str] = []
+        for name in self.names:
+            digest = on_disk[name]
+            if digest == committed.get(name) and digest == pending.get(name, digest):
+                continue
+            if digest is None:
+                origin = "missing"
+            elif digest == pending.get(name) and digest != committed.get(name):
+                origin = "from the interrupted save"
+            elif digest == committed.get(name):
+                origin = "from the last committed save"
+            else:
+                origin = "written by no save of this run"
+            parts.append(f"{name} {origin}")
+        return (
+            "the best-model files are not one save of this run: "
+            + ", ".join(parts)
+            + " (a best-model save interrupted between its renames)"
+        )
+
+
 class ReplaceTogether:
     """Write files under temporary names, then rename them all into place.
 
@@ -184,11 +267,15 @@ class ReplaceTogether:
     not: an interrupt between two renames leaves the earlier targets new
     and the later ones old. The best-model triple therefore stages
     ``best_model_meta.json`` last, binding the others by sha256, and
-    :func:`best_model_meta_unbound` catches such a split.
+    :func:`best_model_meta_unbound` catches such a split; with a
+    ``ledger`` (:class:`BestSaveLedger`), :meth:`commit` also notes the
+    staged files' digests before the renames and commits them after,
+    which catches a split pair that no meta binds.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, ledger: BestSaveLedger | None = None) -> None:
         self._staged: list[tuple[Path, Path]] = []
+        self._ledger = ledger
 
     def __enter__(self) -> ReplaceTogether:
         return self
@@ -201,8 +288,14 @@ class ReplaceTogether:
 
     def commit(self) -> None:
         """Rename every staged file over its target, in staging order."""
+        if self._ledger is not None:
+            self._ledger.stage(
+                {target.name: sha256_file(temporary) for temporary, target in self._staged}
+            )
         for temporary, target in self._staged:
             os.replace(temporary, target)
+        if self._ledger is not None:
+            self._ledger.commit()
 
     def __exit__(self, *_exc_info: object) -> None:
         for temporary, _target in self._staged:
@@ -363,6 +456,32 @@ def selection_from_best_model_meta(
     }
 
 
+def unbound_selection(
+    selection: Mapping[str, Any] | None, reason: str
+) -> dict[str, Any]:
+    """``selection`` (or none) marked unbound for ``reason``.
+
+    The shape :func:`selection_from_best_model_meta` gives an unbound
+    meta: no timestep, values or update count, the keys kept (they are
+    the rule, not the result), and both reasons when the meta was
+    unbound already. A reward-selected run's unbound best (no meta, so
+    no selection) gets this block with no keys: the record must say its
+    best-model files are not one save.
+    """
+    previous = None if selection is None else selection.get("unbound_reason")
+    keys = [] if selection is None else selection.get("keys")
+    return {
+        "timestep": None,
+        "keys": list(keys) if isinstance(keys, list) else [],
+        "values": None,
+        "n_updates": None,
+        "bindings": BINDINGS_UNBOUND,
+        "unbound_reason": (
+            reason if previous in (None, reason) else f"{reason}; {previous}"
+        ),
+    }
+
+
 #: The ``config.json`` objects :func:`build_run_record` reads fields
 #: from, as dotted paths.
 _CONFIG_OBJECTS = (
@@ -453,6 +572,7 @@ def build_run_record(
     sync: Mapping[str, Any] | None = None,
     progress: Mapping[str, Any] | None = None,
     snapshots: Mapping[str, Any] | None = None,
+    best_unbound: str | None = None,
 ) -> dict[str, Any]:
     """One run's record, from its ``config.json`` payload and its outcome.
 
@@ -473,7 +593,10 @@ def build_run_record(
     files the meta binds (:func:`selection_from_best_model_meta`), and
     an unbound selection leaves the best-model triple out of
     ``artifacts`` (:data:`BEST_MODEL_ARTIFACTS`): those files are on
-    disk, but they are not one save.
+    disk, but they are not one save. ``best_unbound`` is the trainer's
+    own verdict (:meth:`BestSaveLedger.unbound`): when set, the
+    selection is unbound for that reason too (:func:`unbound_selection`),
+    a reward-selected run's included.
 
     ``snapshots`` is ``experiments.snapshots.snapshot_summary``'s block
     (the evaluation snapshots ``snapshots/index.json`` binds), ``None``
@@ -492,6 +615,8 @@ def build_run_record(
     selection = selection_from_best_model_meta(
         best_model_meta, directory=best_model_dir
     )
+    if best_unbound is not None:
+        selection = unbound_selection(selection, best_unbound)
     if selection is not None and selection["bindings"] == BINDINGS_UNBOUND:
         artifacts = [
             artifact
@@ -661,7 +786,10 @@ class RunDirVerification:
     manifest does not list: written after it (a notebook's plots and
     replay video, :func:`is_post_training_path`), by a sync that failed
     before its new manifest, or by anything else. ``problems`` says, in
-    words, why the directory is incomplete.
+    words, why the directory is incomplete. ``warnings`` says what the
+    listed run record reports wrong inside a faithful directory (an
+    unbound best model, snapshot files its index does not bind,
+    :func:`record_warnings`); under ``strict`` they are problems too.
     """
 
     run_dir: str
@@ -672,6 +800,7 @@ class RunDirVerification:
     mismatches: tuple[ManifestMismatch, ...] = ()
     unlisted: tuple[str, ...] = ()
     problems: tuple[str, ...] = field(default_factory=tuple)
+    warnings: tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -728,6 +857,38 @@ def _record_status(path: Path) -> str | None:
     return status if isinstance(status, str) else None
 
 
+def record_warnings(record: Mapping[str, Any]) -> list[str]:
+    """What a run record reports wrong with the files it seals.
+
+    A sealed directory is exactly what ``train()`` left, damage
+    included; the record says what the damage is. An unbound
+    ``selection`` (best-model files that are not one save) and a
+    ``snapshots`` block with a ``problem`` or ``unindexed`` files
+    (snapshot files ``snapshots/index.json`` does not bind: a snapshot
+    interrupted between its renames) each give one warning.
+    """
+    found: list[str] = []
+    selection = record.get("selection")
+    if isinstance(selection, Mapping) and selection.get("bindings") == BINDINGS_UNBOUND:
+        found.append(
+            f"the run record marks the best model unbound "
+            f"({selection.get('unbound_reason')}): do not deploy best_model.zip"
+        )
+    snapshots = record.get("snapshots")
+    if isinstance(snapshots, Mapping):
+        if snapshots.get("problem"):
+            found.append(f"snapshots: {snapshots['problem']}")
+        unindexed = snapshots.get("unindexed")
+        if isinstance(unindexed, list) and unindexed:
+            found.append(
+                f"{len(unindexed)} snapshot file(s) that snapshots/index.json "
+                f"does not bind (a snapshot interrupted between its renames; "
+                f"never scored): " + ", ".join(str(name) for name in unindexed[:5])
+                + (" ..." if len(unindexed) > 5 else "")
+            )
+    return found
+
+
 def is_temporary_path(relative: str) -> bool:
     """Whether ``relative`` names a writer's temporary file (a leftover)."""
     return bool(_TEMPORARY_SUFFIX.search(PurePosixPath(relative).name))
@@ -736,9 +897,10 @@ def is_temporary_path(relative: str) -> bool:
 def is_post_training_path(relative: str) -> bool:
     """Whether a notebook writes ``relative`` after ``train()`` sealed the run.
 
-    The post-training plots, audits and gate reports under ``reports/``
-    and the replay video (:data:`POST_TRAINING_DIRS`,
-    :data:`POST_TRAINING_FILES`); never a temporary file.
+    The post-training plots, audits and gate reports under ``reports/``,
+    the offline harness's ``scores/`` and the replay video
+    (:data:`POST_TRAINING_DIRS`, :data:`POST_TRAINING_FILES`); never a
+    temporary file.
     """
     if is_temporary_path(relative):
         return False
@@ -764,6 +926,10 @@ def verify_run_dir(
     was sealed) or not, even under ``reports/``. Every unlisted file is
     reported in ``unlisted``; one outside the post-training locations
     fails the directory, and under ``strict`` every unlisted file does.
+    What the listed record reports wrong inside the directory (an
+    unbound best model, unindexed snapshot files: :func:`record_warnings`)
+    is a warning, since the directory is still what ``train()`` left,
+    and a problem under ``strict``.
     A mid-run Drive mirror whose manifest verifies is an intact snapshot
     of an unfinished run: its listed record says ``"running"``, so it is
     incomplete too. A directory whose record is terminal but which has
@@ -843,6 +1009,7 @@ def verify_run_dir(
             )
     on_disk = run_files(root)
     unlisted = tuple(relative for relative in on_disk if relative not in entries)
+    warnings: list[str] = []
     leftovers = sorted(
         relative
         for relative in set(on_disk) | set(entries)
@@ -860,6 +1027,8 @@ def verify_run_dir(
         problems.append(f"{SYNC_MANIFEST_NAME} does not list {RUN_RECORD_NAME}")
     elif record_path.is_file():
         status = _record_status(record_path)
+        if status is not None:
+            warnings.extend(record_warnings(read_json_object(record_path)))
         if status is None:
             problems.append(f"{RUN_RECORD_NAME} is unreadable or has no status")
         elif status not in TERMINAL_STATUSES:
@@ -884,7 +1053,7 @@ def verify_run_dir(
         where = (
             "(strict)"
             if strict
-            else "outside the post-training locations (reports/, "
+            else "outside the post-training locations (reports/, scores/, "
             "media/best_model.mp4)"
         )
         problems.append(
@@ -892,6 +1061,8 @@ def verify_run_dir(
             f"{where}: " + ", ".join(refused[:5])
             + (" ..." if len(refused) > 5 else "")
         )
+    if strict:
+        problems.extend(f"(strict) {warning}" for warning in warnings)
     return RunDirVerification(
         run_dir=str(root),
         complete=not problems,
@@ -901,4 +1072,5 @@ def verify_run_dir(
         mismatches=tuple(mismatches),
         unlisted=unlisted,
         problems=tuple(problems),
+        warnings=tuple(warnings),
     )

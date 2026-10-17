@@ -1451,6 +1451,7 @@ def write_run_summary(
     actual_timesteps: int | None = None,
     stop_reason: str | None = None,
     n_updates: int | None = None,
+    best_unbound: str | None = None,
 ) -> str:
     """Write a human-readable end-of-run report to ``log_dir/stage_summary.txt``.
 
@@ -1489,6 +1490,11 @@ def write_run_summary(
     reward-selected run with ``info_dict_eval=False``) still gets its
     0 from ``config.json``'s ``resolved_training.rollout_env_steps``:
     an evaluation inside the first rollout precedes every update.
+    ``best_unbound`` is ``train()``'s verdict that the best-model files
+    are not one save (``records.BestSaveLedger.unbound``, which covers a
+    reward-selected pair no meta binds); with it, or a meta that does
+    not bind the files beside it, the best model is reported unbound and
+    nothing suggests deploying it.
     """
     env_name = _env_display_name(cfg)
     git_sha = _git_sha()
@@ -1646,6 +1652,23 @@ def write_run_summary(
     # selection (best_model_meta.json) or the reward EvalCallback's.
     headline_selection = bool(cfg.info_dict_eval and cfg.headline_key)
     untrained_best_step: int | None = None
+    # A meta whose sha256s no longer bind the files beside it (a
+    # best-model save interrupted between its renames) describes another
+    # save, the previous best; train()'s own check (best_unbound) also
+    # catches a split pair no meta binds. Either way the best model is
+    # not one save: say so, report no selection, suggest no deploy.
+    best_meta = _read_best_model_meta(log_dir)
+    meta_path = locate_artifact(log_dir, "best_model_meta")
+    meta_unbound = (
+        None
+        if best_meta is None or meta_path is None
+        else best_model_meta_unbound(best_meta, os.path.dirname(meta_path))
+    )
+    unbound = "; ".join(
+        reason
+        for reason in dict.fromkeys((best_unbound, meta_unbound))
+        if reason is not None
+    ) or None
 
     eval_npz = locate_artifact(log_dir, "evaluations")
     best_step: int | None = None
@@ -1692,6 +1715,11 @@ def write_run_summary(
                         "  <-- policy regressed after best, but the best "
                         f"scored {initial_policy} (SB3 n_updates 0)"
                     )
+                elif regressed and unbound is not None:
+                    note = (
+                        "  <-- policy regressed after best; best_model.zip "
+                        "is unbound (below)"
+                    )
                 elif regressed:
                     note = (
                         "  <-- policy regressed after best; deploy best_model.zip"
@@ -1701,17 +1729,7 @@ def write_run_summary(
     # Task-metric selection provenance: when best_model.zip was chosen
     # by the headline metric rather than reward, say so -- the reward
     # lines above describe a *different* checkpoint in that case.
-    best_meta = _read_best_model_meta(log_dir)
     selected_step: int | None = None
-    # A meta whose sha256s no longer bind the files beside it (a
-    # best-model save interrupted between its renames) describes another
-    # save, the previous best: say so, and report no selection from it.
-    meta_path = locate_artifact(log_dir, "best_model_meta")
-    unbound = (
-        None
-        if best_meta is None or meta_path is None
-        else best_model_meta_unbound(best_meta, os.path.dirname(meta_path))
-    )
     if unbound is not None:
         lines.append(
             _kv(

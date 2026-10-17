@@ -1559,8 +1559,10 @@ def test_rescore_notebook_scores_august_layout_runs_outside_their_folders(
     run's policies under the registered run's id, and the tiny run
     itself (a run record, snapshots). The defaults pick the 2026-08
     runs, score the registered one, report the placeholders as refused,
-    and write nothing inside the runs folder; re-running resumes; QUICK
-    and an explicit snapshot series score into their own folders."""
+    and write nothing inside the runs folder; re-running resumes (and
+    re-scores a run whose normalizer changed); QUICK and an explicit
+    snapshot series score into their own folders, and a later session's
+    verdicts merge into ``verdicts.json`` instead of replacing it."""
     import shutil
 
     import matplotlib
@@ -1602,7 +1604,9 @@ def test_rescore_notebook_scores_august_layout_runs_outside_their_folders(
     assert "REFUSED" in out
     out_root = Path("rescores/PaddleTennis/sac/paddle-npoint-short@v3")
     assert ns["OUT_ROOT"] == out_root
-    scores = out_root / registered / "scores" / "paddle-npoint-short@v3.jsonl"
+    scores = (
+        out_root / registered / "checkpoints" / "scores" / "paddle-npoint-short@v3.jsonl"
+    )
     rows = read_scores(scores)
     best_step = json.loads(
         (runs / registered / "model" / "best_model_meta.json").read_text()
@@ -1630,11 +1634,14 @@ def test_rescore_notebook_scores_august_layout_runs_outside_their_folders(
         registered,
         "20261017_101500",
     }
-    assert (out_root / "curves.png").stat().st_size > 0
+    assert (out_root / "curves_checkpoints.png").stat().st_size > 0
     verdicts = json.loads((out_root / "verdicts.json").read_text())
     assert verdicts["protocol_fingerprint"] == protocol.fingerprint
-    assert sorted(verdicts["refused"]) == sorted(ns["REFUSED"])
-    verdict = verdicts["runs"][registered]
+    assert verdicts["refused"] == {
+        run_id: {"checkpoints": reason} for run_id, reason in ns["REFUSED"].items()
+    }
+    assert list(verdicts["runs"]) == [registered]
+    verdict = verdicts["runs"][registered]["checkpoints"]
     assert verdict["scored"] == 4 and verdict["series"] == "checkpoints"
     assert verdict["select"]["step"] in steps
     assert verdict["select"]["accepted_steps"][-1] == verdict["select"]["step"]
@@ -1647,13 +1654,34 @@ def test_rescore_notebook_scores_august_layout_runs_outside_their_folders(
     _exec_rescore_notebook(ns, cells=("rs-rescore",))
     assert f"{registered}: already scored" in capsys.readouterr().out
     assert scores.read_bytes() == written
+    # ... unless a file changed: a checkpoint's normalizer (no meta binds
+    # it) is enough, and the run is scored again.
+    checkpoints = tmp_path / "copy" / "checkpoints"
+    shutil.copytree(runs / registered / "checkpoints", checkpoints)
+    normalizer = runs / registered / "checkpoints" / (
+        "paddle_tennis_sac_vecnormalize_256_steps.pkl"
+    )
+    shutil.copyfile(
+        checkpoints / "paddle_tennis_sac_vecnormalize_512_steps.pkl", normalizer
+    )
+    _exec_rescore_notebook(ns, cells=("rs-rescore",))
+    assert f"{registered}: already scored" not in capsys.readouterr().out
+    assert scores.read_bytes() != written
+    shutil.copyfile(
+        checkpoints / "paddle_tennis_sac_vecnormalize_256_steps.pkl", normalizer
+    )
+    assert _tree_digest(runs) == before
 
     # QUICK: the best model and 3 checkpoints, first to last, elsewhere.
     quick = _exec_rescore_notebook(
         {}, settings=(("QUICK = False", "QUICK = True"),)
     )
     quick_rows = read_scores(
-        Path(f"{out_root}-quick") / registered / "scores" / "paddle-npoint-short@v3.jsonl"
+        Path(f"{out_root}-quick")
+        / registered
+        / "checkpoints"
+        / "scores"
+        / "paddle-npoint-short@v3.jsonl"
     )
     assert [(row["artifact"], row["step"]) for row in quick_rows] == [
         ("best", best_step),
@@ -1676,6 +1704,39 @@ def test_rescore_notebook_scores_august_layout_runs_outside_their_folders(
     snapshot_rows = read_scores(explicit["SCORED"]["20261017_101500"])
     assert [row["artifact"] for row in snapshot_rows] == ["best", *["snapshot"] * 4]
     assert _tree_digest(runs) == before
+    # The snapshot session kept the checkpoint session's scores, curves,
+    # verdicts and refusals, and added its own beside them.
+    assert scores.is_file()
+    assert (out_root / "curves_checkpoints.png").is_file()
+    assert (out_root / "curves_snapshots.png").stat().st_size > 0
+    merged = json.loads((out_root / "verdicts.json").read_text())
+    assert merged["runs"][registered] == verdicts["runs"][registered]
+    assert merged["refused"] == verdicts["refused"]
+    assert merged["runs"]["20261017_101500"]["snapshots"]["scored"] == 4
+    # A run refused later (a snapshot replaced) loses its verdict for the
+    # series, and a later session that does not pick it never revives it
+    # from its now stale score file.
+    snapshot = runs / "20261017_101500" / "snapshots" / "snapshot_512_steps.zip"
+    original = snapshot.read_bytes()
+    snapshot.write_bytes(b"replaced")
+    snapshots_only = (('SERIES = "checkpoints"', 'SERIES = "snapshots"'),)
+    refused = _exec_rescore_notebook(
+        {},
+        settings=(("RUN_IDS = None", 'RUN_IDS = ["20261017_101500"]'), *snapshots_only),
+    )
+    assert list(refused["REFUSED"]) == ["20261017_101500"]
+    later = _exec_rescore_notebook(
+        {},
+        settings=(("RUN_IDS = None", f'RUN_IDS = ["{registered}"]'), *snapshots_only),
+    )
+    assert "20261017_101500" not in later["ALL_SCORES"]
+    merged = json.loads((out_root / "verdicts.json").read_text())
+    assert "snapshots" in merged["refused"]["20261017_101500"]
+    assert "snapshots" not in merged["runs"].get("20261017_101500", {})
+    assert merged["runs"][registered]["checkpoints"] == verdict
+    snapshot.write_bytes(original)
+    assert _tree_digest(runs) == before
+    capsys.readouterr()
     plt.close("all")
 
     # Refusals before any scoring: an unknown protocol, a missing run.

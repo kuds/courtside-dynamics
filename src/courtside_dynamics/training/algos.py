@@ -455,13 +455,20 @@ def _check_checkpoint_policy_family(
     path: str | os.PathLike[str],
     algo: str,
     custom_objects: Mapping[str, Any] | None,
+    *,
+    recorded: bool = False,
+    label: str | None = None,
 ) -> None:
-    """Refuse an explicit ``algo`` the checkpoint's own policy contradicts.
+    """Refuse an ``algo`` the checkpoint's own policy contradicts.
 
     A checkpoint outside any run has no ``config.json`` to check the
     caller's ``algo`` against, but its zip records the policy class:
     ``SAC.load`` of a PPO checkpoint used to fail deep inside SB3
-    (``'ActorCriticPolicy' object has no attribute 'actor'``).
+    (``'ActorCriticPolicy' object has no attribute 'actor'``). With
+    ``recorded``, ``algo`` is what the run's ``config.json`` records,
+    and a contradiction means the record is wrong (``PPO.load`` of an
+    SAC zip raised a ``TypeError`` about ``use_sde``). ``label`` names
+    the file in the message (default: ``path``).
     """
     policy_class = _checkpoint_policy_class(path, custom_objects)
     if policy_class is None:
@@ -475,12 +482,31 @@ def _check_checkpoint_policy_family(
         if found is not None
         else "a policy of no registered algorithm family"
     )
-    raise ValueError(
-        f"{os.fspath(path)} holds a {policy_class.__module__}."
-        f"{policy_class.__qualname__}, {trained_by}, so it cannot load as "
-        f"{algo.upper()} (family {expected}); pass the algorithm that "
-        f"trained it"
+    remedy = (
+        "its run's config.json records the wrong algorithm"
+        if recorded
+        else "pass the algorithm that trained it"
     )
+    raise ValueError(
+        f"{label or os.fspath(path)} holds a {policy_class.__module__}."
+        f"{policy_class.__qualname__}, {trained_by}, so it cannot load as "
+        f"{algo.upper()} (family {expected}); {remedy}"
+    )
+
+
+def checkpoint_family_mismatch(
+    path: str | os.PathLike[str], algo: str, *, label: str | None = None
+) -> str | None:
+    """Why ``path`` cannot load as its run's recorded ``algo``, or ``None``.
+
+    :func:`load_run_model`'s family check, for a caller that checks
+    every artifact before loading any (``experiments.harness``).
+    """
+    try:
+        _check_checkpoint_policy_family(path, algo, None, recorded=True, label=label)
+    except ValueError as error:
+        return str(error)
+    return None
 
 
 def load_run_model(
@@ -504,9 +530,10 @@ def load_run_model(
     not exist), and PPO through ``PPO.load``. Loaders used to
     hard-code ``SAC.load``, which cannot read a PPO checkpoint.
     ``load_kwargs`` go to ``load`` unchanged (``device="cpu"``, say).
-    Without a run configuration, the policy class the zip itself
-    records must belong to ``algo``'s family
-    (:func:`_check_checkpoint_policy_family`).
+    The policy class the zip itself records must belong to the
+    family of the algorithm used, recorded or given
+    (:func:`_check_checkpoint_policy_family`): a mismatch raises
+    ``ValueError`` naming it, never a ``TypeError`` from inside SB3.
     """
     recorded = recorded_run_algo(path)
     if recorded is None:
@@ -528,4 +555,7 @@ def load_run_model(
                 f"recorded"
             )
         name = recorded
+        _check_checkpoint_policy_family(
+            path, name, load_kwargs.get("custom_objects"), recorded=True
+        )
     return resolve_algo(algo_family(name)).load(os.fspath(path), **load_kwargs)

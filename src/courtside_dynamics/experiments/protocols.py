@@ -37,7 +37,7 @@ Registered protocols (:func:`get_protocol`):
     selection evaluation since 2026-10-17; a test pins that the recipe
     still equals it.
 ``<recipe>-inloop@v1``
-    One per other recipe: its in-loop info-dict evaluator as
+    One per other ungated recipe: its in-loop info-dict evaluator as
     ``train()`` wires it today (``RECIPE_PROTOCOLS``), so the harness is
     not paddle-only. These are derived from the live recipe and
     checked against fingerprints pinned at registration
@@ -45,6 +45,20 @@ Registered protocols (:func:`get_protocol`):
     changes, its protocol refuses to load rather than silently score
     something else. Declare the old version literally (as
     ``paddle-npoint@v2`` is) before changing such a recipe.
+
+**Performance-gated runs have no in-loop protocol.** A gate
+(``TrainConfig.performance_gate``) writes each stage's env attributes
+into the info evaluator's env, stage 0 at training start and the next
+at every advance, stamps the stage index into every row as a context
+metric, and resets the selection state on each advance: the stream no
+protocol reproduces. :func:`from_train_config` and
+:func:`from_run_config` refuse such a run (so ``protocol_for_run`` and
+``rescore(..., "inloop")`` do), the gated recipes
+(:data:`GATED_RECIPES`) register no protocol, and
+:func:`eval_protocol_record` records ``{"id": None, "fingerprint":
+None, "reason": "performance_gate"}``. A gated run's artifacts are
+scored under an explicit protocol (a probe derived with a stage's env
+overrides, say), which is not its in-loop evaluation.
 
 **The seed block.** Today's paired evaluation derives its block from
 the run (``train.resolve_eval_seed``: the run's ``eval_seed``, else
@@ -58,14 +72,14 @@ the block explicitly. The confirmation block starts
 start and lets its auto-resets continue: offline that is reproducible
 and the same feed for every artifact, but it reproduces only the
 *first* in-loop evaluation of an unpaired run, whose stream continues
-across evaluations (which is why pairing exists). A performance gate
-rescales its matched evaluator per stage; a protocol scores the
-evaluation env as constructed.
+across evaluations (which is why pairing exists): its confirmation
+block is a fresh block with no in-loop counterpart.
 
 **What a run records.** ``config.json``'s ``comparability_key`` and the
 run record's ``task`` carry ``eval_protocol`` (:func:`eval_protocol_record`):
 the in-loop selection protocol's fingerprint and, when it is a
-registered protocol of the run's recipe, its id.
+registered protocol of the run's recipe, its id (both ``None``, with
+the reason, for a performance-gated run).
 
 Building a protocol imports MuJoCo (the env classes), never
 Stable-Baselines3 or torch; :func:`from_train_config` and the derived
@@ -510,6 +524,25 @@ def resolve_seed_block(
 # -- derivation from a run's configuration ---------------------------------------
 
 
+class GatedEvaluationError(ValueError):
+    """A performance-gated run's in-loop evaluation, which no protocol is."""
+
+
+def _refuse_gated(settings: Mapping[str, Any]) -> None:
+    """Raise :class:`GatedEvaluationError` when ``settings`` set a gate."""
+    if settings.get("performance_gate"):
+        raise GatedEvaluationError(
+            "the run has a performance gate, which rescales its in-loop "
+            "evaluator's env per stage (stage 0 from training start, the next "
+            "at every advance), stamps the stage index into every row and "
+            "resets the selection on each advance: no protocol reproduces "
+            "that evaluation, so there is no in-loop protocol to derive. "
+            "Score its artifacts under an explicit protocol (one derived "
+            "with a stage's env overrides), which is not its in-loop "
+            "evaluation"
+        )
+
+
 def _inloop_protocol(
     *,
     id: str,
@@ -535,6 +568,7 @@ def _inloop_protocol(
             "the run has no info-dict evaluator (info_dict_eval=False), so no "
             "in-loop protocol to derive"
         )
+    _refuse_gated(settings)
     headline_key = settings.get("headline_key")
     success_key = settings.get("success_key")
     n_eval_episodes = int(settings.get("n_eval_episodes", 30))
@@ -590,6 +624,7 @@ def _inloop_protocol(
 #: The ``TrainConfig`` fields :func:`_inloop_protocol` reads.
 _INLOOP_FIELDS = (
     "info_dict_eval",
+    "performance_gate",
     "headline_key",
     "success_key",
     "success_threshold",
@@ -622,10 +657,13 @@ def from_train_config(
     ``config.json`` records them; a caller that already built one
     (``write_run_config``) passes its ``env_cls`` and ``env_kwargs``
     instead. Pairing follows ``train.resolve_eval_seed``. The seed
-    block stays the run's own.
+    block stays the run's own. Raises :class:`GatedEvaluationError` (a
+    ``ValueError``) for a config with a performance gate (see the module
+    docstring), before any env is built.
     """
     from courtside_dynamics.training.train import resolve_eval_seed
 
+    _refuse_gated({"performance_gate": cfg.performance_gate})
     kwargs: Any = env_kwargs
     if env_cls is None:
         if env_kwargs is not None:
@@ -692,11 +730,13 @@ def from_run_config(
     read as tuples). Pairing is the recorded ``evaluation_seeding``,
     else ``train.resolve_eval_seed``'s rule on the recorded fields. A
     field an older ``config.json`` lacks takes ``TrainConfig``'s
-    default. Raises ``ValueError`` for a record it cannot rebuild.
+    default. Raises ``ValueError`` for a record it cannot rebuild, and
+    :class:`GatedEvaluationError` for a performance-gated run.
     """
     train_config = config.get("train_config")
     if not isinstance(train_config, Mapping):
         raise ValueError("config.json has no train_config object")
+    _refuse_gated(train_config)
     evaluation_env = config.get("evaluation_env") or config.get("env")
     if not isinstance(evaluation_env, Mapping):
         raise ValueError("config.json has no evaluation_env object")
@@ -905,7 +945,8 @@ def _paddle_npoint_v3() -> EvalProtocol:
     )
 
 
-#: Recipe -> the protocol of its in-loop selection evaluation.
+#: Recipe -> the protocol of its in-loop selection evaluation. The
+#: performance-gated recipes (:data:`GATED_RECIPES`) have none.
 RECIPE_PROTOCOLS: dict[str, str] = {
     "BallBalance": "ball-balance-inloop@v1",
     "BallBounce": "ball-bounce-inloop@v1",
@@ -921,13 +962,22 @@ RECIPE_PROTOCOLS: dict[str, str] = {
     "PaddleTennis": "paddle-npoint@v3",
     "WallBall": "wall-ball-inloop@v1",
     "WallBallBaseline": "wall-ball-baseline-inloop@v1",
-    "WallBallBootstrap": "wall-ball-bootstrap-inloop@v1",
-    "WallBallDepthCurriculum": "wall-ball-depth-curriculum-inloop@v1",
-    "WallBallDepthCurriculumAligned": "wall-ball-depth-curriculum-aligned-inloop@v1",
-    "WallBallGoalRally": "wall-ball-goal-rally-inloop@v1",
-    "WallBallTrueBaseline": "wall-ball-true-baseline-inloop@v1",
     "WallBallVolley": "wall-ball-volley-inloop@v1",
 }
+
+#: The recipes whose ``train()`` runs a performance gate: their in-loop
+#: evaluation is staged, so no protocol is it (see the module
+#: docstring), and none is registered for them. A test pins that every
+#: recipe is in exactly one of this and :data:`RECIPE_PROTOCOLS`.
+GATED_RECIPES: frozenset[str] = frozenset(
+    {
+        "WallBallBootstrap",
+        "WallBallDepthCurriculum",
+        "WallBallDepthCurriculumAligned",
+        "WallBallGoalRally",
+        "WallBallTrueBaseline",
+    }
+)
 
 #: The fingerprint each derived protocol had when it was registered.
 #: A recipe whose in-loop evaluation changes no longer derives it, and
@@ -957,22 +1007,6 @@ _PINNED_FINGERPRINTS: dict[str, str] = {
     ),
     "wall-ball-baseline-inloop@v1": (
         "2b386484cacbe2c669c2efeee7264c79fdf9e91f15b324ef0f9e16af94b845d2"
-    ),
-    "wall-ball-bootstrap-inloop@v1": (
-        "565ce6241dc1430f3d3e84caaa518d3d690399671c71acc57f1c32a5c03a3207"
-    ),
-    "wall-ball-depth-curriculum-inloop@v1": (
-        "74322b2773af39a8a6e35ffcc98798e8cb8a410ddf0803e35cfee489384bb612"
-    ),
-    "wall-ball-depth-curriculum-aligned-inloop@v1": (
-        "f1d601e4f69186929afd66ca1078a9ed7dc30d4044e197744c57aed289acaf5f"
-    ),
-    # The same evaluation env and settings as the depth curriculum's.
-    "wall-ball-goal-rally-inloop@v1": (
-        "74322b2773af39a8a6e35ffcc98798e8cb8a410ddf0803e35cfee489384bb612"
-    ),
-    "wall-ball-true-baseline-inloop@v1": (
-        "6cd06c805e48b824d54276729066afc0dc0826086f0b5e9bd66f1276df5f13f8"
     ),
     "wall-ball-volley-inloop@v1": (
         "b4d730b7e42af16ffa5e0f5222d71b390b9a83165e7dfa232050473d9918ea07"
@@ -1078,15 +1112,19 @@ def eval_protocol_record(
     the escrows. It is ``None`` when no registered protocol is this
     evaluation (a quick test, other episodes or env settings, an env
     outside the recipes); the fingerprint still names it, so two runs
-    compare only when both fields match. The whole record is ``None``
-    for a run without an info-dict evaluator, and, with a warning, for
-    one whose evaluation env records no constructor kwargs a
-    fingerprint can read.
+    compare only when both fields match. A performance-gated run has no
+    in-loop protocol (its evaluation is staged): ``{"id": None,
+    "fingerprint": None, "reason": "performance_gate"}``, so no reader
+    takes it for a protocol's. The whole record is ``None`` for a run
+    without an info-dict evaluator, and, with a warning, for one whose
+    evaluation env records no constructor kwargs a fingerprint can read.
     """
     import warnings
 
     if not cfg.info_dict_eval:
         return None
+    if cfg.performance_gate:
+        return {"id": None, "fingerprint": None, "reason": "performance_gate"}
     try:
         fingerprint = from_train_config(
             cfg, id="in-loop", env_cls=env_cls, env_kwargs=env_kwargs

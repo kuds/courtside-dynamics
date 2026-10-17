@@ -9,10 +9,13 @@ Prints one verdict per directory (``--json``: one JSON object per line)
 and exits 0 only when every directory is complete
 (:func:`~courtside_dynamics.experiments.records.verify_run_dir`), 1
 otherwise. A file the manifest does not list fails the directory unless
-it is a post-training plot, audit or replay video (``reports/``,
-``media/best_model.mp4``); ``--strict`` fails those too. A writer's
-temporary leftover (``.x.tmp-<pid>``, ``x.tmp.npz`` ...) fails it
-whether the manifest lists it or not.
+it is a post-training plot, audit, score file or replay video
+(``reports/``, ``scores/``, ``media/best_model.mp4``); ``--strict``
+fails those too. A writer's temporary leftover (``.x.tmp-<pid>``,
+``x.tmp.npz`` ...) fails it whether the manifest lists it or not. What
+the sealed run record reports wrong inside a complete directory (an
+unbound best model, snapshot files the index does not bind) prints as
+a ``WARNING`` line; ``--strict`` fails those too.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ def _describe(result) -> list[str]:
     else:
         lines = [f"{result.run_dir}: INCOMPLETE"]
         lines.extend(f"  - {problem}" for problem in result.problems)
+    lines.extend(f"  WARNING: {warning}" for warning in result.warnings)
     if result.unlisted:
         lines.append(
             f"  {len(result.unlisted)} file(s) not in the manifest: "
@@ -49,8 +53,10 @@ def main(argv: list[str] | None = None) -> int:
         "--strict",
         action="store_true",
         help=(
-            "also fail post-training files (reports/, media/best_model.mp4) "
-            "the manifest does not list"
+            "also fail post-training files (reports/, scores/, "
+            "media/best_model.mp4) the manifest does not list, and what the "
+            "run record reports wrong (an unbound best model, unindexed "
+            "snapshot files)"
         ),
     )
     parser.add_argument(

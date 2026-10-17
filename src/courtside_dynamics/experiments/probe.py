@@ -17,7 +17,9 @@ the in-loop evaluator, with no bespoke probe tool::
 block's first seed), ``oracle`` or ``camper`` -- the golden digests'
 frozen definitions (``digests.scripted_policy``), acting on raw
 observations -- or a model zip, loaded through its run's recorded
-algorithm (``--algo`` outside a run). ``--env KEY=VALUE`` (repeatable,
+algorithm (``--algo`` outside a run; outside a run it also needs
+``--normalizer``, or ``--raw-observations`` for a model trained
+without ``VecNormalize``: nothing else says which). ``--env KEY=VALUE`` (repeatable,
 the value read as JSON when it parses) and ``--episodes`` derive an
 unregistered protocol from ``--protocol``; its fingerprint is printed
 with the metrics, so a probe result names exactly what it measured. A
@@ -147,6 +149,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--normalizer", help="the model's VecNormalize .pkl")
     parser.add_argument("--algo", help="the model's algorithm, for a model outside a run")
+    parser.add_argument(
+        "--raw-observations",
+        action="store_true",
+        help="score a model outside a run without a normalizer (it trained "
+        "without VecNormalize)",
+    )
     parser.add_argument("--protocol", required=True, help="a registered protocol id")
     parser.add_argument("--episodes", type=int, help="episodes (derives a probe protocol)")
     parser.add_argument("--seed-start", type=int, help="the block's first seed")
@@ -180,8 +188,11 @@ def main(argv: list[str] | None = None) -> int:
             episodes=args.episodes,
         )
         if args.policy in SCRIPTED_POLICIES:
-            if args.normalizer is not None:
-                raise ValueError("a scripted policy reads raw observations: drop --normalizer")
+            if args.normalizer is not None or args.raw_observations:
+                raise ValueError(
+                    "a scripted policy reads raw observations: drop "
+                    "--normalizer and --raw-observations"
+                )
             metrics = score_scripted(
                 args.policy, protocol, seed_start=args.seed_start, block=args.block
             )
@@ -196,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
                 algo=args.algo,
                 blocks=(args.block,),
                 seed_start=args.seed_start,
+                raw_observations=args.raw_observations,
             )
             metrics = dict(scored.metrics[args.block])
             seed_start = scored.seed_block.start

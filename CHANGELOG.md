@@ -18,6 +18,64 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **Offline evaluation fails loud where it cannot be faithful (phase-4
+  verifier findings, 2026-10-17).** No env stream or training change:
+  golden digests 22/22, recipe snapshot unchanged (96), and the trainer
+  digest against `9f54ae5` differs only in the three components the
+  @v3 step declared.
+  - **Performance-gated runs have no in-loop protocol.** The gate
+    rescales its evaluator's env per stage (stage 0 from training
+    start), stamps the stage into every row and resets the selection at
+    each advance, so the protocol rebuilt from the recipe's eval env
+    scored an evaluation the run never ran (a tiny gated run's rows
+    disagreed with `eval_info.csv` silently). `from_train_config`,
+    `from_run_config`, `protocol_for_run` and `rescore(..., "inloop")`
+    now refuse a gated run (`GatedEvaluationError`); the five gated
+    WallBall recipes no longer register `<recipe>-inloop@v1` (registered
+    since `0be8d77`, unreleased), and a gated run's
+    `eval_protocol` is `{"id": null, "fingerprint": null, "reason":
+    "performance_gate"}`.
+  - **Every best pair is bound.** `train()` now keeps the sha256s of
+    every best-model save it commits (`records.BestSaveLedger`) and
+    checks the files on disk against them when it seals the record. A
+    reward-path pair split between its two renames (a new model beside
+    the previous normalizer) and a first headline save interrupted
+    before its meta's rename (a model with no meta) were sealed as
+    healthy, listed in the record and scored by the harness; now the
+    record's selection is `unbound` (a reward-selected run gets the
+    block too), the files leave `artifacts`, the summary suggests no
+    deploy, and the loaders and the harness refuse the pair.
+  - **`verify` reports what the record says is wrong.** A complete
+    directory whose record marks the best model unbound, or lists
+    snapshot files its index does not bind, prints a `WARNING` line
+    (`warnings` in `--json`); `--strict` fails it. The index flags both.
+  - **Unindexed snapshot files are named.** A snapshot interrupted
+    between its renames left files the index did not list (or, at the
+    first snapshot, no index); the record's `snapshots` block now lists
+    them in `unindexed` (additive), and the harness refuses to score
+    them instead of ignoring them or failing the run as unreadable.
+  - **Harness and CLI refusals.** A model outside a run is refused
+    without a normalizer unless `raw_observations=True`
+    (`probe --raw-observations`); a run whose `config.json` records the
+    wrong algorithm is refused before scoring (it raised a `TypeError`
+    inside SB3 that the CLI and the notebook did not catch);
+    `in_loop_select()` refuses an unpaired confirming protocol, whose
+    in-loop rule it does not replay; `rescore --protocol inloop` notes
+    when only an unpaired run's first evaluation can match
+    `eval_info.csv`.
+  - **`notebooks/rescore_runs.ipynb`** keeps each series' scores apart
+    (`<run id>/<series>/scores/`), re-scores a run whose normalizer
+    changed, plots `curves_<series>.png` and merges `verdicts.json` (keyed
+    by run and series) across sessions instead of rewriting it from one
+    session's picks.
+  - **Fixed:** `test_l2_toml_spelling_reaches_both_envs` asserted the
+    pre-@v3 contract (an `[env]` contact escrow reaching evaluation);
+    it now pins @v3's, and an `[eval_env]` table restoring both escrows
+    reaches the evaluation env and records `paddle-npoint@v2`.
+  - **Open:** periodic checkpoints are hashed and recorded, never bound
+    (SB3's `CheckpointCallback` writes them in place, so a torn one
+    fails only when loaded); the docs now say so instead of claiming
+    every scored pair is checked against a binding.
 - **PaddleTennis selection moves to `paddle-npoint@v3`, the
   evaluation env without training aids (design L3, 2026-10-17): a
   selection-protocol era.** The recipe's `eval_env_overrides` set
@@ -34,7 +92,11 @@ supersedes it (see the ground-rules bullet).
   model selected) and its `run_layout_artifacts` (`snapshots_dir`, from
   the previous step). The recipe snapshot was re-recorded: the 12
   PaddleTennis resolutions' evaluation kwargs read 0.0 for the contact
-  and reach scales (were 0.25) and gain `hold_shaping` 0.0.
+  and reach scales (were 0.25) and gain `hold_shaping` 0.0. The
+  overrides sit above a run file's `[env]` table, so an `[env]`
+  contact, reach or hold shaping no longer reaches evaluation; an
+  `[eval_env]` table restores it (and the run records the protocol it
+  then evaluates under).
   - **Comparability.** The observations hold no escrow state (tested),
     so a policy acts identically under @v2 and @v3: the k≥2 headline,
     `success_rate`, k=1 and every other non-reward metric are identical
@@ -83,16 +145,18 @@ supersedes it (see the ground-rules bullet).
     MB per PaddleTennis SAC snapshot (critics and optimizer states
     included), so about 140 MB per 1M steps.
   - **Protocols** (`experiments.protocols`): frozen `EvalProtocol`s with
-    a content fingerprint. `paddle-npoint@v2` is today's PaddleTennis
-    in-loop selection evaluation, declared literally; every other
-    recipe has `<recipe>-inloop@v1`, derived and pinned. Scores use the
-    run's own seed block and record it.
+    a content fingerprint. `paddle-npoint@v2` was the PaddleTennis
+    in-loop selection evaluation until @v3 (above), declared literally;
+    every other recipe got `<recipe>-inloop@v1`, derived and pinned
+    (the gated ones since withdrawn, above). Scores use the run's own
+    seed block and record it.
   - **Harness** (`experiments.harness`): `evaluate()` and `rescore()`
     run the in-loop evaluator's own collection core, which moved out of
     `InfoDictEvalCallback._collect_metrics` into
     `collect_episode_metrics` (verbatim; the in-loop path is
     bit-identical). A snapshot's offline row equals its `eval_info.csv`
-    row bit for bit on CPU (SAC and PPO). `python -m
+    row bit for bit on CPU (SAC and PPO, paired; an unpaired run's first
+    evaluation only). `python -m
     courtside_dynamics.experiments.rescore --protocol <id> <run_dir>...`
     scores best models, snapshots and checkpoints (the August
     `checkpoints/paddle_tennis_sac_<N>_steps.zip` layout included) into
@@ -109,8 +173,8 @@ supersedes it (see the ground-rules bullet).
     definitions, now `digests.scripted_policy`) or a model under a
     protocol, with `--env`/`--episodes` deriving a fingerprinted probe
     protocol. It reproduces the RS1 reach-shaping witness table.
-  - Not yet: the lever audit mode (L6); `eval_protocol` in the
-    comparability key and run record stays `null` until L3.
+  - Not yet: the lever audit mode (L6). (`eval_protocol` in the
+    comparability key and run record was `null` until L3, above.)
 - **The best model is written atomically and the record checks what it
   seals (L1 verifier round 2, 2026-10-17).** No env stream or training
   change: golden digests 22/22, recipe snapshot unchanged (96), and the

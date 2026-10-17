@@ -17,7 +17,7 @@ wrong).
 
 | File | Written | Says |
 |---|---|---|
-| `run_record.json` | By `train()` at start (`running`), rewritten on every terminal path | What ran and how it ended (`courtside-run-record/1`): status `completed`, `early_stop`, `interrupted` or `crashed` with a `stop_reason`; budget; algorithm; task fingerprints; comparability key; seeds; git; versions; warm start; selection, checked against `best_model_meta.json`'s sha256 bindings; the evaluation `snapshots`; wall clock |
+| `run_record.json` | By `train()` at start (`running`), rewritten on every terminal path | What ran and how it ended (`courtside-run-record/1`): status `completed`, `early_stop`, `interrupted` or `crashed` with a `stop_reason`; budget; algorithm; task fingerprints; comparability key; seeds; git; versions; warm start; selection, checked against `best_model_meta.json`'s sha256 bindings and the saves `train()` committed; the evaluation `snapshots`, unindexed files named; wall clock |
 | `sync_manifest.json` | Last, after the final record | Path, size and sha256 of every other file (`courtside-sync-manifest/1`) |
 
 A directory is **complete** when its manifest verifies, the record it
@@ -36,14 +36,24 @@ On both selection paths the best-model files (`best_model.zip`,
 `best_model_meta.json`) are written under temporary names and renamed
 into place, the meta last: an interrupt (a stopped Colab cell) inside a
 write leaves the previous best whole. One that lands between two
-renames leaves a meta whose sha256s no longer bind the files beside it.
-The record then says so instead of copying the meta:
-`selection.bindings` is `unbound` with an `unbound_reason`, its
-timestep and values are `null` (never the previous best's), and the
-triple is left out of `artifacts`; `stage_summary.txt` says the same
-and `train()` prints a warning. Otherwise `bindings` is `verified`
-(`not_checked` in rows the index backfills). A reward-selected run
-writes no meta, so nothing binds its pair.
+renames leaves files of two saves: a meta whose sha256s no longer bind
+the files beside it, or, where no meta binds the pair (a reward-selected
+run's, a first headline save interrupted before its meta's rename), a
+model beside another save's normalizer or none. `train()` keeps the
+sha256s of every best-model save it committed
+(`records.BestSaveLedger`) and checks the files on disk against them
+when it seals the record, as well as the meta's bindings. Either check
+failing makes the record say so: `selection.bindings` is `unbound` with
+an `unbound_reason` naming which save each file is from, its timestep
+and values are `null` (never the previous best's; a reward-selected
+run, which has no selection otherwise, gets this block too), and the
+best-model files are left out of `artifacts`. `stage_summary.txt` says
+the same and suggests no deploy, `train()` prints a warning, `verify`
+warns, the index flags the row, and the loaders
+(`verify_best_checkpoint_pair`) and the harness refuse the pair.
+Otherwise `bindings` is `verified` (`not_checked` in rows the index
+backfills) under headline selection, and a reward-selected run's
+selection stays `null`.
 
 ```bash
 python -m courtside_dynamics.experiments.verify <run_dir> [<run_dir> ...]
@@ -58,7 +68,11 @@ only `--strict`; any other fails the directory. A writer's temporary leftover (`
 `.x.sync-tmp`, `x.tmp.npz`, `x.tmp`) anywhere fails it too, whether
 or not the manifest lists it: one listed was already there when the run
 was sealed. The writers remove their temporaries when a write fails or
-is interrupted. A directory whose record is terminal but which has no
+is interrupted. What the sealed record reports wrong inside a complete
+directory (an unbound best model, snapshot files the index does not
+bind) prints as a `WARNING` line (`warnings` in `--json`): the
+directory is still exactly what `train()` left, and `--strict` fails
+it. A directory whose record is terminal but which has no
 manifest was never sealed: a mirror pass that did not finish (re-run
 `sync_run_dir`) or a run that died while sealing itself.
 
@@ -141,7 +155,8 @@ Every row has the run record's keys plus two:
 - A field of `config.json` or `best_model_meta.json` with an
   unexpected type (a string where an object belongs) is read as
   missing and named in the row's problems; it never fails the index.
-  A run record whose selection is `unbound` gets a problem too.
+  What a run record reports wrong (an `unbound` selection, unindexed
+  snapshot files: `verify`'s warnings) is a problem too.
 
 Anything else is never parsed as a run: a directory holding files but
 no run marker, a `config.json` without a courtside `train_config`
@@ -175,9 +190,14 @@ and `best_vec_normalize.pkl` (no replay buffer), each pair bound by
 sha256 in `snapshots/index.json` (`courtside-snapshots/1`) and written
 like the best model (temporaries, then renames, the index last). The
 run record's `snapshots` block lists their steps and any that failed
-(a disk error is listed and training continues); the manifest hashes
-them. Saving reads the model only: the trainer digest's training
-components are unchanged. A PaddleTennis SAC snapshot is about 3.5 MB.
+(a disk error is listed and training continues), and names in
+`unindexed` the files the index does not bind: an interrupt between a
+snapshot's renames leaves complete files outside the index (at the
+first snapshot, no index at all, which the block reports as a
+`problem`). `verify` warns about them and the harness refuses to score
+them, never skipping them silently. The manifest hashes every file.
+Saving reads the model only: the trainer digest's training components
+are unchanged. A PaddleTennis SAC snapshot is about 3.5 MB.
 
 **Protocols.** A protocol (`experiments.protocols.EvalProtocol`) fixes
 everything an evaluation batch measures besides the policy: the eval
@@ -190,11 +210,24 @@ score on the run's own seed block (its recorded paired block, else its
 used. `inloop` stands for each run's own in-loop evaluation, rebuilt
 from its `config.json`.
 
+**A performance-gated run has no protocol.** The gate writes each
+stage's env attributes into its in-loop evaluator's env (stage 0 at
+training start, the next at every advance), stamps the stage index into
+every `eval_info.csv` row, and resets the selection at each advance.
+No protocol reproduces that, so the five gated recipes
+(`protocols.GATED_RECIPES`: WallBallBootstrap, WallBallDepthCurriculum,
+WallBallDepthCurriculumAligned, WallBallGoalRally,
+WallBallTrueBaseline) register none, `inloop` refuses a gated run, and
+a gated run records `{"id": null, "fingerprint": null, "reason":
+"performance_gate"}`. Its artifacts can still be scored under an
+explicit protocol (a probe derived with a stage's env overrides, say),
+which is not its in-loop evaluation.
+
 | Protocol | What it is |
 |---|---|
 | `paddle-npoint@v3` | The PaddleTennis recipe's selection evaluation since 2026-10-17 (design L3): 30 paired 1,500-step episodes with alternating serves on the run's block, selected on the k≥2 headline (`episode_rally_returns_a_ep_mean`), `success_rate` and reward (deltas 1/60, 1/60, 0.25), confirmed on the block 100,000 on. The eval env has `contact_shaping`, `reach_shaping` and `hold_shaping` at 0, so the reward is task reward only |
 | `paddle-npoint@v2` | The same with the contact and reach escrows on in the eval env: PaddleTennis selection from the 2026-10-05 instruments until 2026-10-17. Declared literally, so it stays scorable |
-| `<recipe>-inloop@v1` | Every other recipe's in-loop info-dict evaluator, derived from the recipe and pinned to its registration fingerprint (a recipe change makes it refuse to load: declare the old version literally, never re-pin) |
+| `<recipe>-inloop@v1` | Every other ungated recipe's in-loop info-dict evaluator, derived from the recipe and pinned to its registration fingerprint (a recipe change makes it refuse to load: declare the old version literally, never re-pin) |
 
 **@v2 and @v3 read the same policy the same way, except for reward.**
 PaddleTennis observations hold no escrow state (no balance, no hold
@@ -217,9 +250,14 @@ fingerprint. A stock PaddleTennis run records `paddle-npoint@v3`; one
 whose `[eval_env]` table restores the escrows records
 `paddle-npoint@v2`; a quick test, or a run file that changes the
 evaluation episodes or env, records `id: null` with its fingerprint,
-so two runs compare only when both fields match. `eval_protocol` is
-`null` for a run without an info-dict evaluator and for runs recorded
-before 2026-10-17.
+so two runs compare only when both fields match. A performance-gated
+run records both as `null`, with `"reason": "performance_gate"`.
+`eval_protocol` is `null` for a run without an info-dict evaluator and
+for runs recorded before 2026-10-17. A run file's `[env]` contact,
+reach or hold shaping stays out of a PaddleTennis evaluation (the
+recipe's @v3 overrides sit above `[env]`); an `[eval_env]` table, which
+sits above them, restores it, and the run then records the protocol it
+evaluates under.
 
 **Re-scoring.**
 
@@ -234,16 +272,29 @@ python -m courtside_dynamics.experiments.rescore --protocol paddle-npoint@v3 \
 Every best model, snapshot and periodic checkpoint is scored (the
 August runs' `checkpoints/paddle_tennis_sac_<N>_steps.zip` with
 `paddle_tennis_sac_vecnormalize_<N>_steps.pkl` included), loaded through
-the algorithm the run recorded, after every pair is checked against the
-sha256s that bind it; one problem anywhere refuses the whole rescore
-before anything is scored. Rows go to `<run_dir>/scores/<protocol>.jsonl`
+the algorithm the run recorded. Before anything is scored, the best and
+snapshot pairs are checked against the sha256s that bind them (the best
+model against its run record's verdict too), every model's zip against
+the run's recorded algorithm family, and an unindexed snapshot file is
+named; checkpoints are hashed and recorded, since nothing binds them
+(SB3's `CheckpointCallback` writes them in place, so a checkpoint torn
+by an interrupt seals and fails only when it is loaded). One problem
+anywhere refuses the whole rescore before anything is scored. Rows go to `<run_dir>/scores/<protocol>.jsonl`
 (`courtside-score/1`: artifact, step, sha256s, protocol fingerprint,
 seed block, `metrics` and `confirm_metrics`), or one combined file under
 `--out`. `--steps` scores only the snapshots and checkpoints at those
 env steps (besides the best model); a step that names none is refused.
 The scoring code is the in-loop evaluator's own
-(`collect_episode_metrics`), so a snapshot's row under `inloop` equals
-its `eval_info.csv` row bit for bit on the same device. A full
+(`collect_episode_metrics`), so on the same device a snapshot's row
+under `inloop` equals its `eval_info.csv` row bit for bit for every
+evaluation of a paired run, and for the first evaluation only of an
+unpaired run (the BallBalance, WallBall and humanoid recipes' default,
+and the August runs'): its in-loop stream continues across
+evaluations, and its confirmation block is a fresh block with no
+in-loop counterpart. The CLI's summary notes an unpaired run; a gated
+run is refused (above). A model outside a run directory needs its
+normalizer, or `raw_observations=True` (`probe --raw-observations`)
+for one trained without `VecNormalize`: nothing else says which. A full
 PaddleTennis score costs about 2.6 CPU-minutes per artifact (30
 episodes of 1,500 steps on each of the two blocks).
 
@@ -254,18 +305,22 @@ the runs (by default every 2026-08 run that is not a stub and has a
 model, which must include the registered run `20260816_235141`), and
 scores each run's best model and every checkpoint under
 `paddle-npoint@v3` into
-`<Drive>/courtside-dynamics/rescores/PaddleTennis/sac/paddle-npoint@v3/<run id>/scores/`,
+`<Drive>/courtside-dynamics/rescores/PaddleTennis/sac/paddle-npoint@v3/<run id>/<series>/scores/`,
 beside `training_runs/`, never inside it: the run directories stay
 exactly what `train()` left, and the index of `training_runs/` never
 meets a score file. Each run is scored whole or refused with its
 reasons (a placeholder or unbound file, a missing normalizer) while the
 others go on; its file is written when the run is done, and re-running
-skips a run already scored for the same files. It then prints the
-per-checkpoint k≥2 headline and k=1 (each point's first confirmed
-return: `episode_valid_return_count_a` minus the headline) on both
-blocks, plots them (`curves.png`), and writes a `select()` verdict per
-run (`verdicts.json`): the checkpoint the protocol's rule picks, next to
-the run's own `best_model` scored under the same protocol. `QUICK =
+skips a run already scored for the same files (every model's and
+normalizer's sha256). It then prints the per-checkpoint k≥2 headline
+and k=1 (each point's first confirmed return:
+`episode_valid_return_count_a` minus the headline) on both blocks,
+plots them (`curves_<series>.png`), and writes a `select()` verdict per
+run and series (`verdicts.json`): the checkpoint the protocol's rule
+picks, next to the run's own `best_model` scored under the same
+protocol. The plot and the verdicts cover every run scored into the
+folder, and a session merges its verdicts and refusals into
+`verdicts.json` rather than replacing what earlier sessions wrote. `QUICK =
 True` scores the best model and three checkpoints per run (first,
 middle, last) into a `-quick` folder; `SERIES = "snapshots"` scores a
 newer run's evaluation snapshots instead of its checkpoints. The August
@@ -281,8 +336,11 @@ separately. The in-loop callback still compares a candidate's
 confirmation with the first best's standard-block score until a later
 best is confirmed (`repo_review_20261016.md` section 2.2);
 `in_loop_select()` replays that rule over the same rows, so the two can
-be compared run by run. Changing the in-loop rule waits on the
-maintainer's decision.
+be compared run by run. It replays the paired, ungated rule only: given
+an unpaired protocol that confirms (whose callback banks the weaker of
+a candidate's two samples) it refuses, and gated runs have no protocol
+(their selection resets at every advance). Changing the in-loop rule
+waits on the maintainer's decision.
 
 **Probing.** `python -m courtside_dynamics.experiments.probe --recipe
 PaddleTennis --policy zero|random|oracle|camper|<model.zip>

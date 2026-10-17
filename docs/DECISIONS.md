@@ -718,6 +718,106 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### Offline evaluation refuses what it cannot reproduce, and every best pair is bound — *implemented (unreleased, 2026-10-17); phase-4 verifier findings*
+The verifiers of `0be8d77` (M3 + L2) and `09779fa` (L3): two blockers,
+three majors (one of them the gated-run blocker's twin) and the minors. Every env stream and training path is
+unchanged: golden digests 22/22, recipe snapshot unchanged (96), and the
+trainer digest against `9f54ae5` differs only in the three PaddleTennis
+components the @v3 entry below declared (`eval_info.csv`,
+`best_model_meta.json`'s metrics, `run_layout_artifacts`).
+- **A gated run has no in-loop protocol; refuse, don't approximate.**
+  A performance gate writes stage 0 into the info evaluator's env at
+  training start and the next stage at every advance, stamps
+  `curriculum_stage_index` into every row, and resets the selection at
+  each advance. The harness built the recipe's eval env as constructed,
+  so `rescore(..., "inloop")` on a tiny gated run disagreed with
+  `eval_info.csv` (episode length 113.0 against 109.67) with nothing
+  printed, the five gated recipes registered ids for evaluations no run
+  of theirs selected under, and WallBallGoalRally and
+  WallBallDepthCurriculum shared a fingerprint while their stage-0
+  evaluations differed. Folding the stage ladder into a stage-indexed
+  protocol was the alternative; it would need rows that carry the stage
+  and a replay of the selection resets, for runs whose campaigns are
+  closed. So `_inloop_protocol` refuses a config with
+  `performance_gate` set (`GatedEvaluationError`, a `ValueError`, so
+  `protocol_for_run` and the rescore refuse the run before scoring),
+  `GATED_RECIPES` lists the five and `RECIPE_PROTOCOLS` drops them (a
+  test pins that every recipe is in exactly one), and
+  `eval_protocol_record` records `{"id": null, "fingerprint": null,
+  "reason": "performance_gate"}` without a warning: the gate is
+  configured, not a failure. Their ids existed only on this unreleased
+  branch.
+- **The bit-for-bit claim is scoped.** Under the run's own protocol a
+  snapshot's row equals its `eval_info.csv` row for every evaluation of
+  a paired run and for the first evaluation of an unpaired one (its
+  stream continues across evaluations; its confirmation block has no
+  in-loop counterpart): the harness docstring, `docs/experiments.md`,
+  the README and the CHANGELOG now say so, and the rescore CLI notes an
+  unpaired run. `in_loop_select` replays the paired, ungated rule only:
+  passed an unpaired protocol that confirms (whose callback banks the
+  weaker of two samples), it refuses; a bare rule is the caller's word.
+- **Bind every best pair: an in-memory ledger, not a reward-path meta.**
+  The reward path writes no meta, so an interrupt between its two
+  renames left a new model beside the previous normalizer that the
+  record listed, `verify` certified and the harness scored; a first
+  headline save interrupted before its meta's rename left a model with
+  no meta, sealed as a run with no selection. `records.BestSaveLedger`
+  keeps, for one `train()` call, the sha256s of the save being renamed
+  (`ReplaceTogether(ledger)` hashes the temporaries before its first
+  rename) and of the last committed one; the lifecycle checks the files
+  on disk against them when it writes the record, and the summary gets
+  the same verdict. Files matching neither (or present with nothing
+  committed) make the selection `unbound` with a reason naming each
+  file's save, a reward-selected run included (its selection is
+  otherwise `null`), and leave the best files out of `artifacts`. A
+  reward-path `best_model_meta.json` was the other option the verifier
+  offered; it would add a file to every reward-selected run's layout
+  and change what that file means to the consumers that read its
+  presence as "headline selection" (`notebook_utils`'s best-step
+  lookup, the WallBall selection proof, the index), so the ledger
+  closes the window with no layout change. Its limit: it is the
+  trainer's verdict, carried in the record; a reward-selected pair
+  copied out of its run has no binding. The loaders
+  (`verify_best_checkpoint_pair`) and the harness now refuse a pair
+  whose record says `unbound`. Hashing a best save's temporaries reads
+  files only: no stream moves.
+- **Record a split best, and say so on verify (reconciles "Record a
+  split triple, don't refuse to seal it").** A complete directory is
+  still exactly what `train()` left, damage included; what the sealed
+  record reports wrong inside it (an unbound selection, unindexed
+  snapshot files) is now `RunDirVerification.warnings`, printed as
+  `WARNING` lines and failed by `--strict`, and the index lists the
+  same as row problems. Failing the directory outright was the
+  alternative; it would make a faithful Drive copy of a damaged run
+  indistinguishable from a damaged copy.
+- **Snapshot orphans are named, never skipped.** An interrupt between a
+  snapshot's renames leaves complete files outside the index (no index
+  at all at the first snapshot). `snapshot_summary` lists them in
+  `unindexed` (and reports a missing index as a `problem`), and the
+  harness refuses them as problems, naming the files, unless `steps`
+  excludes them; the index stays last in the rename order, so it never
+  names a file that is not whole.
+- **Smaller.** A model outside a run is scored without a normalizer only
+  with `raw_observations=True` (`probe --raw-observations`): the zip
+  cannot say whether it trained normalized. `load_run_model` checks the
+  zip's policy family against a recorded algorithm too, and the harness
+  checks every artifact before scoring any, so a mislabeled run is
+  refused instead of raising a `TypeError` inside SB3 that the CLI and
+  the notebook did not catch. The notebook keeps each series' scores in
+  their own folder, compares normalizer digests too before skipping a
+  run, and merges `verdicts.json` across sessions (it was rewritten from
+  one session's picks). The summary's "deploy best_model.zip" hint is
+  gone when the best is unbound. `test_l2_toml_spelling_reaches_both_envs`
+  (failing since `09779fa`, which ran 18 test files, not the suite) now
+  pins the @v3 contract: an `[env]` contact escrow trains but does not
+  evaluate, and an `[eval_env]` table restoring both escrows evaluates
+  and records `paddle-npoint@v2`.
+- **Open.** Periodic checkpoints are hashed and recorded, never bound:
+  SB3's `CheckpointCallback` writes them in place, so one torn by an
+  interrupt seals and fails only at load time; a subclassed callback
+  that stages and renames (as the best model does) would close it. The
+  gate's stage-best archive still copies with `shutil.copy2`.
+
 ### PaddleTennis selects under `paddle-npoint@v3`: evaluation scores the task without its training aids — *implemented (unreleased, 2026-10-17); design L3, a selection-protocol era*
 `design_campaign_structure_20261016.md` finding S5 and step L3: the
 recipe's evaluation env carried the contact and reach escrows, so the
@@ -906,7 +1006,9 @@ PaddleTennis job's `run_layout_artifacts`, which gains `snapshots_dir`.
   refuse loudly ("declare the old version literally, never re-pin").
   For a reward-selected recipe the protocol is the reporting stream and
   has no selection keys; a performance gate rescales its matched
-  evaluator per stage, which a protocol does not follow.
+  evaluator per stage, which a protocol does not follow. *(Since the
+  phase-4 verifier pass, a gated run has no protocol at all, and the
+  gated recipes register none: entry above.)*
 - **The seed block is the run's.** Today's paired block derives from the
   run (`eval_seed`, else `seed + 1,000,000`), so the registered
   protocols carry `seed_start=None` and `resolve_seed_block` reads the
@@ -940,7 +1042,11 @@ PaddleTennis job's `run_layout_artifacts`, which gains `snapshots_dir`.
   best's standard score (−1.9e-9), where within block it loses to the
   first best's confirmation (1.8e-8); `in_loop_select` reproduces 1,024
   and `select` keeps 256. On the SAC run the two agree with the in-loop
-  pick.
+  pick. *(2026-10-17, after L3: this example predates @v3 and no longer
+  reproduces. The residues were @v2's escrow shaping; under @v3 the
+  same tiny PPO run selects 256 in-loop, and `in_loop_select` and
+  `select` both pick 256 with identical decisions. Only the synthetic
+  rows of `tests/test_select.py` exercise the divergence now.)*
 - **Probe CLI** (`python -m courtside_dynamics.experiments.probe`): the
   golden digests' witnesses (now `digests.scripted_policy`) or a model
   under a protocol; `--env` and `--episodes` derive an unregistered
@@ -1042,7 +1148,11 @@ four jobs, the best-model, evaluation and layout ones included.
   detected; giving the reward path a meta would close it, but it adds
   a file to the layout of every reward-selected run, so it belongs to
   a step that declares that. The gate's stage-best archive copies the
-  triple with `shutil.copy2`, not atomically.
+  triple with `shutil.copy2`, not atomically. *(The reward-path split
+  and a first headline save split before its meta are closed since by
+  the trainer's ledger, without a layout change; a sealed record's
+  unbound selection is a `verify` warning, failed by `--strict`: entry
+  "Offline evaluation refuses what it cannot reproduce" above.)*
 
 ### The run-record verifier pass: a run that raises while closing never reads completed, and a mirror deletes only its own files — *implemented (unreleased, 2026-10-17)*
 Verifiers re-ran the two L1 commits (`d273409`, `4445669`), and the

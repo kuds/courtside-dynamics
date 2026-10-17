@@ -17,7 +17,8 @@ normalizer) at every evaluation when ``TrainConfig.snapshot_evals`` is
 on (:mod:`snapshots`); :mod:`protocols` declares what a score is a
 score of (``paddle-npoint@v3``, the PaddleTennis selection protocol
 since design L3, the earlier ``paddle-npoint@v2``, and one in-loop
-protocol per other recipe) and what a run records of it;
+protocol per other ungated recipe; a performance-gated run has none)
+and what a run records of it;
 :mod:`harness` scores any model under any protocol with the in-loop
 evaluator's own code (``python -m
 courtside_dynamics.experiments.rescore``; ``notebooks/rescore_runs.ipynb``

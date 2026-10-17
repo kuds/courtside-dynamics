@@ -9,9 +9,14 @@ and M3; ``docs/design_campaign_structure_20261016.md`` step L2.
   measurement core (``callbacks.info_dict_eval.collect_episode_metrics``)
   on an evaluation env built the way ``train()`` builds the info
   evaluator's (``make_vec_env``, one worker, Monitor-wrapped, the
-  normalizer frozen with raw rewards), so on the same device a
-  snapshot's offline row equals that evaluation's ``eval_info.csv`` row
-  bit for bit.
+  normalizer frozen with raw rewards). So, on the same device, a
+  snapshot's row under the run's own protocol (``inloop``) equals that
+  evaluation's ``eval_info.csv`` row bit for bit for an ungated run:
+  every evaluation's when the run evaluated paired, only the first
+  one's when it evaluated unpaired (its in-loop stream continues
+  across evaluations, and its confirmation block is a fresh block with
+  no in-loop counterpart). A performance-gated run has no such
+  protocol (``protocols.GatedEvaluationError``).
 - :func:`rescore` scores a run's saved artifacts -- its best model, its
   evaluation snapshots (``snapshots/``), its periodic checkpoints,
   including the pre-snapshot layout of the August runs
@@ -19,8 +24,13 @@ and M3; ``docs/design_campaign_structure_20261016.md`` step L2.
   ``<prefix>_vecnormalize_<N>_steps.pkl``) -- and writes one row per
   artifact to ``<run_dir>/scores/<protocol>.jsonl`` (or one combined
   file under ``out_dir``). Models load through the class the run
-  recorded (``training.algos.load_run_model``); every pair is checked
-  against the sha256s that bind it before anything is scored.
+  recorded (``training.algos.load_run_model``). Before anything is
+  scored, the best and snapshot pairs are checked against the sha256s
+  that bind them (and the best model against the run record's
+  verdict), every model's zip against the run's recorded algorithm,
+  and checkpoints are hashed and recorded: nothing binds a checkpoint,
+  and SB3's ``CheckpointCallback`` writes it in place, so a checkpoint
+  torn by an interrupt fails only when it is loaded.
 - ``experiments.select.select`` picks a best from those rows.
 
 CLI: ``python -m courtside_dynamics.experiments.rescore --protocol
@@ -37,6 +47,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +62,7 @@ from courtside_dynamics.experiments.protocols import (
     resolve_seed_block,
 )
 from courtside_dynamics.experiments.records import (
+    BINDINGS_UNBOUND,
     best_model_meta_unbound,
     read_json_object,
     sha256_file,
@@ -58,10 +70,12 @@ from courtside_dynamics.experiments.records import (
 )
 from courtside_dynamics.experiments.snapshots import (
     MODEL_FILE_PATTERN,
+    SNAPSHOT_INDEX_NAME,
     SNAPSHOTS_DIR_NAME,
     normalizer_file_name,
     read_snapshot_index,
     snapshot_unbound,
+    unindexed_files,
 )
 
 #: A score row's schema tag.
@@ -76,6 +90,10 @@ BLOCKS = ("standard", "confirm")
 
 #: The artifact kinds :func:`rescore` reads, in this order.
 ARTIFACT_KINDS = ("best", "snapshots", "checkpoints")
+
+#: The env step in a snapshot or checkpoint file name (``..._<N>_steps.zip``
+#: or ``.pkl``).
+_STEP_IN_NAME = re.compile(r"_(?P<step>\d+)_steps\.[a-z]+$")
 
 
 @dataclass(frozen=True)
@@ -163,14 +181,18 @@ def score_model(
     device: str = "cpu",
     blocks: Sequence[str] = ("standard",),
     seed_start: int | None = None,
+    raw_observations: bool = False,
 ) -> ScoredModel:
     """Load ``model_path`` once and score it on each of ``blocks``.
 
     The seed block is :func:`~courtside_dynamics.experiments.protocols.resolve_seed_block`'s:
     ``seed_start``, the protocol's own, or the block of the run the
-    model belongs to. ``device`` must be the protocol's. A run that
-    recorded observation normalization must pass its normalizer: a
-    policy scored on raw observations is not that policy.
+    model belongs to. ``device`` must be the protocol's. A policy scored
+    on raw observations is not that policy, so without a normalizer:
+    a model whose run recorded observation normalization is refused,
+    and one outside any run (no ``config.json`` to say) is refused
+    unless ``raw_observations=True`` vouches that it trained without
+    ``VecNormalize`` (the zip cannot say).
     """
     from stable_baselines3.common.utils import check_for_correct_spaces
 
@@ -189,6 +211,11 @@ def score_model(
         raise ValueError(f"protocol {protocol.id} defines no confirmation block")
     model_path = os.fspath(model_path)
     run_config = _run_config_for(model_path)
+    if normalizer_path is not None and raw_observations:
+        raise ValueError(
+            "raw_observations=True scores without a normalizer: drop one or "
+            "the other"
+        )
     if normalizer_path is None and run_config is not None:
         train_config = run_config.get("train_config")
         if isinstance(train_config, Mapping) and train_config.get("normalize_obs"):
@@ -196,6 +223,13 @@ def score_model(
                 f"{model_path}'s run recorded normalize_obs=True: pass its "
                 f"normalizer, or the policy is scored on raw observations"
             )
+    elif normalizer_path is None and not raw_observations:
+        raise ValueError(
+            f"{model_path} is outside any run directory (no config.json says "
+            f"whether it trained on normalized observations): pass its "
+            f"normalizer, or raw_observations=True (--raw-observations) for "
+            f"a model trained without VecNormalize"
+        )
     seeds = resolve_seed_block(protocol, run_config=run_config, seed_start=seed_start)
     model = load_run_model(model_path, algo=algo, device=device)
     resolved_algo = (recorded_run_algo(model_path) or algo or "").upper()
@@ -231,6 +265,7 @@ def evaluate(
     device: str = "cpu",
     block: str = "standard",
     seed_start: int | None = None,
+    raw_observations: bool = False,
 ) -> dict[str, float]:
     """One model's metrics row under ``protocol`` on ``block``.
 
@@ -239,7 +274,8 @@ def evaluate(
     (its ``eval_info.csv`` row without the context metrics and the
     on-policy ``n_updates`` row). ``block`` is ``"standard"`` or
     ``"confirm"`` (the confirmation block, ``confirm_seed_offset`` on).
-    See :func:`score_model` for the seed block, ``algo`` and ``device``.
+    See :func:`score_model` for the seed block, ``algo``, ``device`` and
+    ``raw_observations``.
     """
     resolved = get_protocol(protocol) if isinstance(protocol, str) else protocol
     scored = score_model(
@@ -250,6 +286,7 @@ def evaluate(
         device=device,
         blocks=(block,),
         seed_start=seed_start,
+        raw_observations=raw_observations,
     )
     return dict(scored.metrics[block])
 
@@ -323,19 +360,28 @@ def run_artifacts(
 
     - ``best``: ``best_model.zip`` and ``best_vec_normalize.pkl`` (the
       0.14 ``model/`` layout or the flat root); its step is
-      ``best_model_meta.json``'s, and a meta that does not bind the pair
+      ``best_model_meta.json``'s. A meta that does not bind the pair
       (``records.best_model_meta_unbound``) is a problem, as the loaders
-      refuse it.
+      refuse it, and so is a run record whose selection is ``unbound``
+      (the trainer's own check, which also covers a reward-selected
+      pair, whose saves write no meta) or that cannot be read.
     - ``snapshots``: ``snapshots/index.json``'s entries, each checked
-      against its sha256s.
+      against its sha256s; a snapshot file the index does not bind, or
+      a ``snapshots/`` holding files but no index (a snapshot interrupted
+      between its renames), is a problem, never silently skipped.
     - ``checkpoints``: ``checkpoints/<prefix>_<N>_steps.zip`` with
       ``<prefix>_vecnormalize_<N>_steps.pkl`` (SB3's naming; the August
-      runs' ``paddle_tennis_sac_<N>_steps.zip`` are these).
+      runs' ``paddle_tennis_sac_<N>_steps.zip`` are these), hashed and
+      recorded; nothing binds them.
 
     A kind the run does not have yields nothing (the August runs have
     no snapshots); a pair whose normalizer is missing although the run
-    normalized observations is a problem, never a raw-observation score.
+    normalized observations is a problem, never a raw-observation score;
+    so is a model whose zip holds a policy of another algorithm family
+    than the run recorded (``algos.checkpoint_family_mismatch``: the
+    load would fail inside SB3).
     """
+    from courtside_dynamics.training.algos import checkpoint_family_mismatch
     from courtside_dynamics.training.artifacts import locate_artifact
 
     root = Path(run_dir)
@@ -345,6 +391,10 @@ def run_artifacts(
             return [], [f"{root.name}: no config.json"]
         config = read_json_object(config_path, label=f"{root.name}/config.json")
     needs_normalizer = _needs_normalizer(config)
+    recorded = config.get("train_config")
+    recorded_algo = (
+        recorded.get("algo") if isinstance(recorded, Mapping) else None
+    )
     kinds = tuple(dict.fromkeys(which))
     unknown = [kind for kind in kinds if kind not in ARTIFACT_KINDS]
     if unknown:
@@ -381,6 +431,18 @@ def run_artifacts(
                 f"normalized observations"
             )
             return
+        if not isinstance(recorded_algo, str) or not recorded_algo:
+            problems.append(
+                f"{root.name}: config.json records no train_config.algo, so "
+                f"{relative(model)} cannot load through its run's class"
+            )
+            return
+        mismatch = checkpoint_family_mismatch(
+            model, recorded_algo, label=relative(model)
+        )
+        if mismatch is not None:
+            problems.append(f"{root.name}: {mismatch}")
+            return
         artifacts.append(
             RunArtifact(
                 kind=kind,
@@ -412,6 +474,22 @@ def run_artifacts(
                     step = raw_step if isinstance(raw_step, int) else None
                     raw_updates = meta.get("n_updates")
                     n_updates = raw_updates if isinstance(raw_updates, int) else None
+            record_path = locate_artifact(root, "run_record")
+            if unbound is None and record_path is not None:
+                try:
+                    record = read_json_object(record_path, label="run_record.json")
+                except ValueError as error:
+                    unbound = f"{error}, so whether it is one save is unknown"
+                else:
+                    selection = record.get("selection")
+                    if (
+                        isinstance(selection, Mapping)
+                        and selection.get("bindings") == BINDINGS_UNBOUND
+                    ):
+                        unbound = (
+                            f"the run record marks it unbound "
+                            f"({selection.get('unbound_reason')})"
+                        )
             if unbound is not None:
                 problems.append(f"{root.name}: best model not scored: {unbound}")
             else:
@@ -424,12 +502,31 @@ def run_artifacts(
                 )
     if "snapshots" in kinds:
         directory = root / SNAPSHOTS_DIR_NAME
-        if directory.is_dir():
+        if directory.is_dir() and not (directory / SNAPSHOT_INDEX_NAME).is_file():
+            orphans = unindexed_files(directory, None)
+            if orphans:
+                problems.append(
+                    f"{root.name}: {SNAPSHOTS_DIR_NAME}/ holds {len(orphans)} "
+                    f"file(s) but no {SNAPSHOT_INDEX_NAME} (the first snapshot "
+                    f"was interrupted between its renames): none is bound, so "
+                    f"none is scored; rescore without snapshots"
+                )
+        elif directory.is_dir():
             try:
                 index = read_snapshot_index(directory)
             except ValueError as error:
                 problems.append(f"{root.name}: {error}")
             else:
+                for name in unindexed_files(directory, index):
+                    match = _STEP_IN_NAME.search(name)
+                    if match is not None and not kept(int(match.group("step"))):
+                        continue
+                    problems.append(
+                        f"{root.name}: {SNAPSHOTS_DIR_NAME}/{name} is not in "
+                        f"{SNAPSHOT_INDEX_NAME} (a snapshot interrupted between "
+                        f"its renames): not bound, so not scored; pass steps "
+                        f"the index binds, or rescore without snapshots"
+                    )
                 for entry in index.entries:
                     if not kept(entry.timestep):
                         continue
@@ -532,8 +629,11 @@ def rescore(
 
     ``protocol`` is an :class:`EvalProtocol`, a registered id, or
     ``"inloop"``: each run's own in-loop evaluation, rebuilt from its
-    ``config.json`` (``protocols.protocol_for_run``), whose snapshot rows
-    must equal the run's ``eval_info.csv``. ``blocks`` defaults to both
+    ``config.json`` (``protocols.protocol_for_run``). Under it a paired
+    run's snapshot rows equal its ``eval_info.csv`` rows, an unpaired
+    run's only at the first evaluation (see the module docstring), and a
+    performance-gated run is refused: no protocol is its staged
+    evaluation. ``blocks`` defaults to both
     blocks when the protocol confirms, so ``select()`` can confirm
     within block. ``steps`` scores only the snapshots and checkpoints
     saved at those env steps, besides the best model (a quick look; see

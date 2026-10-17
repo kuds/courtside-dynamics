@@ -464,7 +464,10 @@ def test_an_unlisted_file_outside_the_post_training_locations_fails(
     assert result.manifest == "verified"
     assert result.unlisted == (stray,)
     assert stray in result.problems[0]
-    assert "outside the post-training locations" in result.problems[0]
+    assert (
+        "outside the post-training locations (reports/, scores/, "
+        "media/best_model.mp4)"
+    ) in result.problems[0]
     assert verify_main([str(run_dir)]) == 1
 
 
@@ -595,6 +598,161 @@ def test_verify_cli_exits_zero_only_when_every_run_dir_is_complete(
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_verify_warns_about_what_the_sealed_record_reports_wrong(tmp_path, capsys):
+    """Verifier r3: a run whose best-model save was split between its
+    renames sealed complete, and verify said nothing. The directory is
+    still exactly what train() left, so it stays complete, but verify
+    prints the record's unbound selection and unindexed snapshot files
+    as warnings, and --strict fails them."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "config.json").write_text("{}\n")
+    record = build_run_record(
+        {},
+        run_id="run",
+        created_at="t",
+        status=records.INTERRUPTED,
+        best_unbound="the best-model files are not one save of this run: x",
+        snapshots={"index": "snapshots/index.json", "unindexed": ["snapshot_9_steps.zip"]},
+    )
+    write_run_record(run_dir, record)
+    write_sync_manifest(run_dir)
+    result = verify_run_dir(run_dir)
+    assert result.complete and result.problems == ()
+    assert result.warnings == (
+        "the run record marks the best model unbound (the best-model files "
+        "are not one save of this run: x): do not deploy best_model.zip",
+        "1 snapshot file(s) that snapshots/index.json does not bind (a "
+        "snapshot interrupted between its renames; never scored): "
+        "snapshot_9_steps.zip",
+    )
+    assert verify_main([str(run_dir)]) == 0
+    out = capsys.readouterr().out
+    assert "complete (status interrupted" in out
+    assert "  WARNING: the run record marks the best model unbound" in out
+    assert "  WARNING: 1 snapshot file(s)" in out
+    assert verify_main(["--strict", str(run_dir)]) == 1
+    assert "(strict) the run record marks" in capsys.readouterr().out
+    assert verify_main(["--json", str(run_dir)]) == 0
+    assert len(json.loads(capsys.readouterr().out)["warnings"]) == 2
+    # A healthy sealed directory has none.
+    assert verify_run_dir(_sealed_run_dir(tmp_path / "good")).warnings == ()
+
+
+def _ledger_save(
+    ledger: records.BestSaveLedger,
+    monkeypatch: pytest.MonkeyPatch,
+    model: bytes,
+    normalizer: bytes,
+    *,
+    renames: int = 2,
+) -> None:
+    """One best-model pair saved through ``ledger``, interrupted (a
+    ``KeyboardInterrupt``) after ``renames`` of its two renames."""
+    real_replace = os.replace
+    done = {"n": 0}
+
+    def replace(source, target):
+        if done["n"] == renames:
+            raise KeyboardInterrupt
+        done["n"] += 1
+        real_replace(source, target)
+
+    with records.ReplaceTogether(ledger) as staged:
+        for name, payload in (
+            ("best_model.zip", model),
+            ("best_vec_normalize.pkl", normalizer),
+        ):
+            Path(staged.stage(ledger.directory / name)).write_bytes(payload)
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "replace", replace)
+            staged.commit()
+
+
+def test_best_save_ledger_tells_one_save_from_a_split_one(tmp_path, monkeypatch):
+    """The trainer's in-memory check behind the record's unbound verdict
+    for a pair no meta binds (the reward path, a first save)."""
+    names = ("best_model.zip", "best_vec_normalize.pkl", "best_model_meta.json")
+    ledger = records.BestSaveLedger(tmp_path, names)
+    assert ledger.unbound() is None  # nothing committed, nothing on disk
+    _ledger_save(ledger, monkeypatch, b"m1", b"n1")
+    assert ledger.unbound() is None
+    assert ledger.committed is not None and ledger.pending is None
+    with pytest.raises(KeyboardInterrupt):
+        _ledger_save(ledger, monkeypatch, b"m2", b"n2", renames=1)
+    assert ledger.unbound() == (
+        "the best-model files are not one save of this run: best_model.zip "
+        "from the interrupted save, best_vec_normalize.pkl from the last "
+        "committed save (a best-model save interrupted between its renames)"
+    )
+    # Every rename landed before the interrupt: one save, the new one.
+    (tmp_path / "best_vec_normalize.pkl").write_bytes(b"n2")
+    assert ledger.unbound() is None
+    # A file nothing in this run wrote.
+    (tmp_path / "best_model_meta.json").write_text("{}")
+    assert "best_model_meta.json written by no save of this run" in (
+        ledger.unbound() or ""
+    )
+    # A first save interrupted after its model's rename.
+    (tmp_path / "first").mkdir()
+    first = records.BestSaveLedger(tmp_path / "first", names)
+    with pytest.raises(KeyboardInterrupt):
+        _ledger_save(first, monkeypatch, b"m1", b"n1", renames=1)
+    assert first.unbound() == (
+        "the best-model files are not one save of this run: best_model.zip "
+        "from the interrupted save, best_vec_normalize.pkl missing (a "
+        "best-model save interrupted between its renames)"
+    )
+    with pytest.raises(ValueError, match="names no best-model file"):
+        first.stage({"final_model.zip": "0" * 64})
+
+
+def test_an_unbound_verdict_marks_the_selection_and_drops_the_best_artifacts():
+    artifacts = [
+        {"name": "best_model", "path": "model/best_model.zip"},
+        {"name": "best_vec_normalize", "path": "model/best_vec_normalize.pkl"},
+        {"name": "final_model", "path": "model/final_model.zip"},
+    ]
+    # A reward-selected run: no meta, so no selection, until the
+    # trainer says its pair is not one save.
+    healthy = build_run_record(
+        _CONFIG, run_id="r", created_at="t", status=records.COMPLETED, artifacts=artifacts
+    )
+    assert healthy["selection"] is None
+    assert len(healthy["artifacts"]) == 3
+    split = build_run_record(
+        _CONFIG,
+        run_id="r",
+        created_at="t",
+        status=records.INTERRUPTED,
+        artifacts=artifacts,
+        best_unbound="split",
+    )
+    assert split["selection"] == {
+        "timestep": None,
+        "keys": [],
+        "values": None,
+        "n_updates": None,
+        "bindings": records.BINDINGS_UNBOUND,
+        "unbound_reason": "split",
+    }
+    assert split["artifacts"] == [artifacts[2]]
+    # A meta's selection keeps its keys, and an unbound meta's reason
+    # follows the trainer's.
+    meta = {"timestep": 5, "selection_keys": ["k"], "selection_values": {"k": 1.0}}
+    marked = records.unbound_selection(
+        records.selection_from_best_model_meta(meta), "split"
+    )
+    assert (marked["keys"], marked["timestep"], marked["unbound_reason"]) == (
+        ["k"],
+        None,
+        "split",
+    )
+    both = records.unbound_selection(marked, "torn")
+    assert both["unbound_reason"] == "torn; split"
+    assert records.unbound_selection(marked, "split")["unbound_reason"] == "split"
 
 
 # -- the local-then-sync mirror ------------------------------------------------
@@ -905,10 +1063,25 @@ def _record(log_dir: Path) -> dict[str, Any]:
     return json.loads((log_dir / RUN_RECORD_NAME).read_text())
 
 
-def _assert_sealed(log_dir: Path, status: str) -> dict[str, Any]:
-    result = verify_run_dir(log_dir, strict=True)
+def _assert_sealed(
+    log_dir: Path, status: str, *, unbound: bool = False
+) -> dict[str, Any]:
+    """Sealed complete; with ``unbound``, the record's unbound best model
+    is a verify warning (a problem under strict), else there is none."""
+    result = verify_run_dir(log_dir, strict=not unbound)
     assert result.complete, result.problems
     assert result.status == status
+    if unbound:
+        assert len(result.warnings) == 1
+        assert result.warnings[0].startswith(
+            "the run record marks the best model unbound ("
+        )
+        assert result.warnings[0].endswith("do not deploy best_model.zip")
+        strict = verify_run_dir(log_dir, strict=True)
+        assert not strict.complete
+        assert strict.problems == (f"(strict) {result.warnings[0]}",)
+    else:
+        assert result.warnings == ()
     record = _record(log_dir)
     assert record["status"] == status
     assert record["finished_at"] is not None
@@ -1228,21 +1401,29 @@ def test_an_interrupt_at_each_best_save_boundary_never_seals_a_torn_best(
     log_dir = tmp_path / boundary
     model = train(_cfg(log_dir, env_fn=_improving_env))
     assert model.num_timesteps == 200
-    record = _assert_sealed(log_dir, "interrupted")
+    split = boundary in ("model_renamed", "normalizer_renamed")
+    record = _assert_sealed(log_dir, "interrupted", unbound=split)
     assert _temporaries(log_dir) == []
     selection = record["selection"]
     names = {artifact["name"] for artifact in record["artifacts"]}
     summary = (log_dir / "stage_summary.txt").read_text()
-    if boundary in ("model_renamed", "normalizer_renamed"):
+    if split:
         assert selection["bindings"] == "unbound"
         assert selection["timestep"] is None
         assert selection["values"] is None
+        # The trainer's own verdict first, then the meta's.
+        assert selection["unbound_reason"].startswith(
+            "the best-model files are not one save of this run: "
+            "best_model.zip from the interrupted save, "
+        )
         assert "best_model.zip (sha256 differs)" in selection["unbound_reason"]
         assert not names & {"best_model", "best_vec_normalize", "best_model_meta"}
-        assert "Best model:     unbound: best_model_meta.json does not bind" in (
-            summary
+        assert (
+            "Best model:     unbound: the best-model files are not one save"
+            in summary
         )
-        with pytest.raises(ValueError, match="does not match the SHA-256"):
+        assert "best_model_meta.json does not bind" in summary
+        with pytest.raises(ValueError, match="marks the best model unbound"):
             verify_best_checkpoint_pair(log_dir)
         return
     # The previous best (step 100) stands whole, or the new one (step
@@ -1286,6 +1467,121 @@ def test_an_interrupted_reward_path_best_save_leaves_the_previous_pair(
     first = SAC.load(log_dir / "model" / "final_model.zip", device="cpu")
     # The step-100 best, not the step-200 policy the salvage saved.
     assert best.num_timesteps == 100 < first.num_timesteps
+
+
+def _assert_unbound_best(log_dir: Path, *parts: str) -> dict[str, Any]:
+    """The sealed run's best model is unbound for ``parts``' reasons, and
+    every consumer says so: the record, the summary (no deploy hint), the
+    loader, the harness and verify (a warning; strict fails)."""
+    from courtside_dynamics.experiments.harness import run_artifacts
+    from courtside_dynamics.notebook_utils import verify_best_checkpoint_pair
+
+    record = _assert_sealed(log_dir, "interrupted", unbound=True)
+    assert _temporaries(log_dir) == []
+    selection = record["selection"]
+    assert selection["bindings"] == "unbound"
+    assert (selection["timestep"], selection["values"]) == (None, None)
+    reason = selection["unbound_reason"]
+    assert reason.startswith("the best-model files are not one save of this run: ")
+    for part in parts:
+        assert part in reason, (part, reason)
+    names = {artifact["name"] for artifact in record["artifacts"]}
+    assert not names & {"best_model", "best_vec_normalize", "best_model_meta"}
+    summary = (log_dir / "stage_summary.txt").read_text()
+    assert f"Best model:     unbound: {reason}" in summary
+    assert "deploy best_model.zip" not in summary.replace("do not deploy", "")
+    with pytest.raises(ValueError, match="marks the best model unbound"):
+        verify_best_checkpoint_pair(log_dir)
+    artifacts, problems = run_artifacts(log_dir, ("best",))
+    assert artifacts == []
+    assert problems == [
+        f"{log_dir.name}: best model not scored: the run record marks it "
+        f"unbound ({reason})"
+    ]
+    return record
+
+
+@pytest.mark.parametrize(
+    ("at_save", "parts"),
+    [
+        # The second save: its model beside the first save's normalizer,
+        # which no meta binds on this path.
+        (
+            2,
+            (
+                "best_model.zip from the interrupted save",
+                "best_vec_normalize.pkl from the last committed save",
+            ),
+        ),
+        # The first save: a model with no normalizer at all.
+        (
+            1,
+            (
+                "best_model.zip from the interrupted save",
+                "best_vec_normalize.pkl missing",
+            ),
+        ),
+    ],
+)
+def test_a_reward_path_pair_split_between_its_renames_is_sealed_unbound(
+    tmp_path, monkeypatch, at_save, parts
+):
+    """Verifier r3 (major): the reward path writes no meta, so an
+    interrupt between its two renames left a new model beside the
+    previous normalizer (or, at the first save, none) that the record
+    listed, verify certified and the harness scored. The run's own
+    ledger of committed saves now marks it unbound."""
+    _interrupt_best_save(monkeypatch, "model_renamed", at_save=at_save)
+    log_dir = tmp_path / f"reward_{at_save}"
+    model = train(
+        _cfg(
+            log_dir,
+            env_fn=_improving_env,
+            info_dict_eval=False,
+            headline_key=None,
+        )
+    )
+    assert model.num_timesteps == 100 * at_save
+    record = _assert_unbound_best(log_dir, *parts)
+    # No meta, so no selection keys: the block exists only to say so.
+    assert record["selection"]["keys"] == []
+    assert not (log_dir / "model" / "best_model_meta.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("boundary", "parts"),
+    [
+        (
+            "model_renamed",
+            (
+                "best_model.zip from the interrupted save",
+                "best_vec_normalize.pkl missing",
+                "best_model_meta.json missing",
+            ),
+        ),
+        (
+            "normalizer_renamed",
+            (
+                "best_model.zip from the interrupted save",
+                "best_vec_normalize.pkl from the interrupted save",
+                "best_model_meta.json missing",
+            ),
+        ),
+    ],
+)
+def test_a_first_headline_save_split_before_its_meta_is_sealed_unbound(
+    tmp_path, monkeypatch, boundary, parts
+):
+    """Verifier r3 (major): a first headline save interrupted before its
+    meta's rename published best_model.zip with no meta, and the record
+    (selection null) still listed it."""
+    _interrupt_best_save(monkeypatch, boundary, at_save=1)
+    log_dir = tmp_path / boundary
+    model = train(_cfg(log_dir, env_fn=_improving_env))
+    assert model.num_timesteps == 100
+    record = _assert_unbound_best(log_dir, *parts)
+    # No meta was renamed into place, so none names the keys.
+    assert record["selection"]["keys"] == []
 
 
 def test_an_interrupted_merged_stream_npz_write_leaves_no_temporary(

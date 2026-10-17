@@ -190,6 +190,34 @@ def test_select_accepts_a_protocol_as_the_rule():
     assert select(rows, _Protocol()).step == 2
 
 
+def test_in_loop_select_refuses_an_unpaired_confirming_protocol():
+    """Verifier r3: in_loop_select replays the paired rule only. Unpaired
+    with confirmation, the callback banks the weaker of a candidate's two
+    samples, which is not replayed, so such a protocol is refused rather
+    than its result presented as the in-loop pick."""
+    rule = SelectionRule(("a",), (0.0,), confirm=True)
+
+    class _Protocol:
+        id = "unpaired@v1"
+        confirm = True
+
+        def __init__(self, paired):
+            self.paired = paired
+
+        def selection_rule(self):
+            return rule
+
+    rows = [
+        {"step": step, "metrics": {"a": value}, "confirm_metrics": {"a": value}}
+        for step, value in zip((1, 2), (0.0, 1.0), strict=True)
+    ]
+    with pytest.raises(ValueError, match="'unpaired@v1' is unpaired and confirms"):
+        in_loop_select(rows, _Protocol(paired=False))
+    assert in_loop_select(rows, _Protocol(paired=True)).step == 2
+    # A bare rule carries no pairing: the caller vouches for it.
+    assert in_loop_select(rows, rule).step == 2
+
+
 def test_rows_order_does_not_matter():
     rule = SelectionRule(("a",), (0.0,))
     rows = [

@@ -21,7 +21,11 @@ Every snapshot is written the way the best model is
 (``records.ReplaceTogether``): both files and the new index go to
 temporaries, are hashed, and are renamed into place, the index last,
 so the index only ever names complete files; an interrupt leaves the
-previous index whole. The offline harness
+previous index whole. An interrupt between the renames leaves complete
+snapshot files the index does not bind (and, at the first snapshot,
+no index at all): :func:`unindexed_files` names them, the run record's
+``snapshots`` block lists them, ``verify`` warns, and the harness
+refuses to score them. The offline harness
 (``experiments.harness.rescore``) re-scores any of them under any
 protocol, so a new instrument means re-scoring, not retraining.
 
@@ -42,6 +46,7 @@ from typing import Any
 from courtside_dynamics.experiments.records import (
     ReplaceTogether,
     describe_read_error,
+    is_temporary_path,
     read_json_object,
     sha256_file,
     write_json_atomic,
@@ -345,17 +350,59 @@ def snapshot_unbound(directory: str | os.PathLike[str], entry: SnapshotEntry) ->
     return None
 
 
+def unindexed_files(
+    directory: str | os.PathLike[str], index: SnapshotIndex | None
+) -> list[str]:
+    """The files in ``directory`` that ``index`` does not bind, sorted.
+
+    Snapshot files an interrupt between a snapshot's renames left
+    outside the index (every file but the index itself when ``index``
+    is ``None``). A writer's temporary leftover is not listed here:
+    ``verify`` fails the directory for it already.
+    """
+    root = Path(directory)
+    bound = {SNAPSHOT_INDEX_NAME}
+    for entry in () if index is None else index.entries:
+        bound.add(entry.model)
+        if entry.normalizer is not None:
+            bound.add(entry.normalizer)
+    return sorted(
+        path.name
+        for path in root.iterdir()
+        if path.is_file()
+        and path.name not in bound
+        and not is_temporary_path(path.name)
+    )
+
+
 def snapshot_summary(run_dir: str | os.PathLike[str]) -> dict[str, Any] | None:
     """The run record's ``snapshots`` block, or ``None`` without snapshots.
 
-    ``{"index", "count", "timesteps", "failures"}`` read from the index
-    as written (the manifest hashes the files themselves); an index
-    that does not parse gives ``{"index", "problem"}``, never a crash.
+    ``{"index", "count", "timesteps", "failures", "unindexed"}`` read
+    from the index as written (the manifest hashes the files
+    themselves); ``unindexed`` names the files the index does not bind
+    (:func:`unindexed_files`). An index that does not parse gives
+    ``{"index", "problem"}``, and a directory holding snapshot files but
+    no index (the first snapshot interrupted between its renames)
+    ``{"index", "problem", "unindexed"}``: never a crash, never silence.
     """
     directory = Path(run_dir) / SNAPSHOTS_DIR_NAME
     relative = f"{SNAPSHOTS_DIR_NAME}/{SNAPSHOT_INDEX_NAME}"
-    if not (directory / SNAPSHOT_INDEX_NAME).is_file():
+    if not directory.is_dir():
         return None
+    if not (directory / SNAPSHOT_INDEX_NAME).is_file():
+        orphans = unindexed_files(directory, None)
+        if not orphans:
+            return None
+        return {
+            "index": relative,
+            "problem": (
+                f"no {relative}, though {SNAPSHOTS_DIR_NAME}/ holds "
+                f"{len(orphans)} file(s): the first snapshot was interrupted "
+                f"between its renames, and none is bound"
+            ),
+            "unindexed": orphans,
+        }
     try:
         index = read_snapshot_index(directory)
     except ValueError as error:
@@ -365,4 +412,5 @@ def snapshot_summary(run_dir: str | os.PathLike[str]) -> dict[str, Any] | None:
         "count": len(index.entries),
         "timesteps": [entry.timestep for entry in index.entries],
         "failures": [failure.get("timestep") for failure in index.failures],
+        "unindexed": unindexed_files(directory, index),
     }

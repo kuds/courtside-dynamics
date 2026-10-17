@@ -303,7 +303,22 @@ def in_loop_select(scores: Iterable[Mapping[str, Any]], rule: Any) -> Selection:
     scores ``-inf``, as in the callback. Where it and :func:`select`
     decide a row differently, the difference is the in-loop rule's
     cross-block comparison.
+
+    It replays the paired, ungated rule only. Unpaired with
+    confirmation, the callback banks the weaker of a candidate's two
+    samples, and a performance gate resets the selection at every
+    advance; neither is replayed. Passed a protocol, it refuses an
+    unpaired one that confirms (``ValueError``; gated runs have no
+    protocol, ``experiments.protocols``). A bare :class:`SelectionRule`
+    says nothing about pairing, so the caller vouches that the rows
+    come from a paired, ungated run's evaluations.
     """
+    if getattr(rule, "paired", True) is False and getattr(rule, "confirm", False):
+        raise ValueError(
+            f"protocol {getattr(rule, 'id', rule)!r} is unpaired and confirms: "
+            f"the in-loop callback banks the weaker of an unpaired "
+            f"candidate's two samples, which in_loop_select does not replay"
+        )
     resolved = _rule_of(rule)
     rows = _ordered_rows(scores)
     decisions: list[Decision] = []

@@ -140,12 +140,24 @@ class _SaveBestOnNewBest(BaseCallback):
     saved. Replaying ``best_model`` against final-step stats is a silent
     obs-distribution mismatch. ``normalizer_path`` is ``None`` for a run
     without ``VecNormalize``; a model without one writes no stats either.
+
+    No meta binds the pair, so an interrupt between its two renames
+    would leave a new model beside the previous normalizer that nothing
+    on disk can tell from a healthy pair: ``ledger`` (the run's
+    ``records.BestSaveLedger``) keeps every save's digests, and the run
+    record seals such a pair as unbound.
     """
 
-    def __init__(self, model_path: str, normalizer_path: str | None) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        normalizer_path: str | None,
+        ledger: run_records.BestSaveLedger | None = None,
+    ) -> None:
         super().__init__()
         self.model_path = model_path
         self.normalizer_path = normalizer_path
+        self.ledger = ledger
 
     def _init_callback(self) -> None:
         # Where EvalCallback created its best_model_save_path.
@@ -154,7 +166,7 @@ class _SaveBestOnNewBest(BaseCallback):
     def _on_step(self) -> bool:
         get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
         vec_norm = get_vec_norm() if get_vec_norm is not None else None
-        with run_records.ReplaceTogether() as staged:
+        with run_records.ReplaceTogether(self.ledger) as staged:
             # SB3 appends ".zip" only to a path without a suffix; the
             # temporary's ".tmp-<pid>" keeps it as given.
             self.model.save(staged.stage(self.model_path))
@@ -351,6 +363,16 @@ class _RunLifecycle:
             if sync_dir is None
             else RunDirMirror(cfg.log_dir, sync_dir, run_id=self.run_id)
         )
+        # Every best-model save's digests (both selection paths): the
+        # record checks the best files on disk against them.
+        best_model = Path(artifact_path(cfg.log_dir, "best_model"))
+        self.best_ledger = run_records.BestSaveLedger(
+            best_model.parent,
+            names=tuple(
+                os.path.basename(artifact_path(cfg.log_dir, name))
+                for name in sorted(run_records.BEST_MODEL_ARTIFACTS)
+            ),
+        )
         self.model: BaseAlgorithm | None = None
         self.status: str | None = None
         self.stop_reason: str | None = None
@@ -454,6 +476,10 @@ class _RunLifecycle:
             sync=sync,
             progress=progress,
             snapshots=snapshot_summary(self.log_dir),
+            # The files on disk against the saves this run committed:
+            # the only check of a reward-path pair (no meta binds it) and
+            # of a first save interrupted before its meta's rename.
+            best_unbound=self.best_ledger.unbound(),
         )
         selection = record["selection"]
         if (
@@ -463,9 +489,9 @@ class _RunLifecycle:
         ):
             print(
                 f"[train] WARNING: the best model is unbound -- "
-                f"{selection['unbound_reason']}. The run record leaves its "
-                f"selection unbound and best_model / best_vec_normalize / "
-                f"best_model_meta out of its artifacts; do not deploy "
+                f"{selection['unbound_reason']}. The run record marks its "
+                f"selection unbound and leaves best_model / best_vec_normalize "
+                f"/ best_model_meta out of its artifacts; do not deploy "
                 f"best_model.zip from {self.log_dir}"
             )
         run_records.write_run_record(self.log_dir, record)
@@ -2838,6 +2864,7 @@ def _salvage_crashed_run(
     gate_callback: PerformanceGatedEnvStagesCallback | None,
     start_time: float,
     error: BaseException,
+    best_unbound: Callable[[], str | None] = lambda: None,
 ) -> None:
     """Best-effort epilogue for a run whose ``learn()`` raised.
 
@@ -2846,7 +2873,8 @@ def _salvage_crashed_run(
     marked ``crashed`` -- skipping the closing evaluation (the env may
     be the thing that broke). Every step is isolated: a salvage
     failure is printed and never masks the original exception, which
-    the caller re-raises.
+    the caller re-raises. ``best_unbound`` is the run's best-model
+    verdict (``records.BestSaveLedger.unbound``), for the summary.
     """
     steps: list[tuple[str, Callable[[], object]]] = [
         (
@@ -2893,6 +2921,7 @@ def _salvage_crashed_run(
                 actual_timesteps=int(model.num_timesteps),
                 stop_reason=f"crashed: {error!r}",
                 n_updates=_on_policy_updates(cfg, model),
+                best_unbound=best_unbound(),
             ),
         )
     )
@@ -2913,6 +2942,7 @@ def _salvage_interrupted_run(
     start_time: float,
     stop_reason: str,
     eval_clock: _EvalClock,
+    best_unbound: Callable[[], str | None] = lambda: None,
 ) -> None:
     """Epilogue for a run stopped by ``KeyboardInterrupt``.
 
@@ -2926,7 +2956,9 @@ def _salvage_interrupted_run(
     next step runs. Unlike it, the closing evaluation still runs (the
     env stepped fine until the interrupt, and the tennis event sampler
     now discards a control step the interrupt left open), and the
-    summary is marked ``interrupted``.
+    summary is marked ``interrupted``, reporting ``best_unbound``'s
+    verdict on the best model (an interrupt is when a best-model save
+    is split between its renames).
     """
     closing: dict[str, float] = {}
 
@@ -3004,6 +3036,7 @@ def _salvage_interrupted_run(
                 actual_timesteps=int(model.num_timesteps),
                 stop_reason=stop_reason,
                 n_updates=_on_policy_updates(cfg, model),
+                best_unbound=best_unbound(),
             ),
         )
     )
@@ -3671,6 +3704,7 @@ def _train_in_log_dir(
                     if use_vec_normalize
                     else None
                 ),
+                ledger=run.best_ledger,
             )
 
         # PPO plan Step 6: an on-policy run's early stops wait until its
@@ -3836,6 +3870,7 @@ def _train_in_log_dir(
                 selection_kwargs: dict[str, Any] = {
                     "best_metric_keys": _selection_metric_keys(cfg),
                     "best_model_save_path": best_model_dir,
+                    "best_ledger": run.best_ledger,
                     "best_metric_min_delta": cfg.best_metric_min_delta,
                     "confirm_best": cfg.confirm_best_eval,
                     "degenerate_flat_keys": cfg.degenerate_flat_keys,
@@ -4353,6 +4388,7 @@ def _train_in_log_dir(
                     gate_callback=gate_callback,
                     start_time=start_time,
                     error=error,
+                    best_unbound=run.best_ledger.unbound,
                 )
                 raise
             if interrupted:
@@ -4372,6 +4408,7 @@ def _train_in_log_dir(
                     start_time=start_time,
                     stop_reason=interrupt_reason,
                     eval_clock=run.eval_clock,
+                    best_unbound=run.best_ledger.unbound,
                 )
                 return model
             if _is_on_policy(cfg):
@@ -4458,6 +4495,7 @@ def _train_in_log_dir(
                 actual_timesteps=int(model.num_timesteps),
                 stop_reason=stop_reason,
                 n_updates=_on_policy_updates(cfg, model),
+                best_unbound=run.best_ledger.unbound(),
             )
             run.note_outcome(status, stop_reason, model)
         finally:

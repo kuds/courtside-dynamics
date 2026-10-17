@@ -1549,7 +1549,10 @@ def verify_best_checkpoint_pair(run_dir: str | Path) -> dict[str, Any]:
     ``ValueError``). :func:`score_paddle_stage` calls it before scoring
     a campaign leg, and the campaign notebook before warm-starting a leg
     from a source run: ``train()``'s own warm-start resolution checks
-    source digests only against pins the plan names.
+    source digests only against pins the plan names. A run whose
+    ``run_record.json`` marks its selection ``unbound`` raises
+    ``ValueError`` too: ``train()`` found the best-model files are not
+    one save, which no meta can show for a reward-selected pair.
 
     Returns ``{"model_path", "normalizer_path", "model_sha256",
     "normalizer_sha256", "pair_verification", "best_model_meta"}``.
@@ -1559,6 +1562,23 @@ def verify_best_checkpoint_pair(run_dir: str | Path) -> dict[str, Any]:
         name: locate_artifact(run_dir, name)
         for name in ("best_model", "best_vec_normalize", "best_model_meta")
     }
+    record_path = locate_artifact(run_dir, "run_record")
+    if record_path is not None:
+        from courtside_dynamics.experiments.records import (
+            BINDINGS_UNBOUND,
+            read_json_object,
+        )
+
+        selection = read_json_object(record_path).get("selection")
+        if (
+            isinstance(selection, Mapping)
+            and selection.get("bindings") == BINDINGS_UNBOUND
+        ):
+            raise ValueError(
+                f"{record_path} marks the best model unbound "
+                f"({selection.get('unbound_reason')}): best_model.zip and "
+                f"best_vec_normalize.pkl are not one save"
+            )
     model_path = located["best_model"]
     normalizer_path = located["best_vec_normalize"]
     if model_path is None or normalizer_path is None:

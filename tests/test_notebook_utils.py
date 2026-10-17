@@ -274,6 +274,35 @@ def test_write_run_summary_flags_post_best_regression(tmp_path):
     assert "6500 FPS" in text
 
 
+def test_write_run_summary_suggests_no_deploy_of_an_unbound_best(tmp_path):
+    """Verifier r3: for an unbound best the regression line still said
+    "deploy best_model.zip", one line above "do not deploy" it."""
+    from courtside_dynamics.envs import BallBalanceEnv
+    from courtside_dynamics.training import TrainConfig
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    _write_synthetic_evaluations(tmp_path, best_mean=6.0, tail_mean=-1.0)
+    cfg = TrainConfig(env_fn=lambda: BallBalanceEnv(), log_dir=str(tmp_path))
+    out = write_run_summary(
+        cfg,
+        str(tmp_path),
+        final_mean_reward=-1.0,
+        final_std_reward=0.1,
+        duration_seconds=100.0,
+        best_unbound="the best-model files are not one save of this run: x",
+    )
+    text = open(out).read()
+    assert (
+        "<-- policy regressed after best; best_model.zip is unbound (below)"
+        in text
+    )
+    assert "deploy best_model.zip" not in text.replace("do not deploy", "")
+    assert (
+        "Best model:     unbound: the best-model files are not one save of "
+        "this run: x  <-- WARNING: do not deploy best_model.zip"
+    ) in text
+
+
 def test_write_run_summary_no_regression_flag_when_final_matches_best(tmp_path):
     """A healthy run (final ~ best) must not carry the scary flag."""
     from courtside_dynamics.envs import BallBalanceEnv

@@ -185,6 +185,7 @@ def test_snapshots_are_recorded_sealed_and_survive_rescoring(tiny_runs, inloop_r
         "count": 4,
         "timesteps": [256, 512, 768, 1024],
         "failures": [],
+        "unindexed": [],
     }
     assert {"name": "snapshots_dir", "path": "snapshots"} in record["artifacts"]
     config = json.loads((run_dir / "config.json").read_text())
@@ -381,12 +382,31 @@ def test_rescore_refuses_before_scoring_anything(tmp_path, tiny_runs):
         harness.rescore([empty], protocol)
 
 
-def test_evaluate_refuses_what_it_cannot_score_faithfully(tiny_runs):
+def test_evaluate_refuses_what_it_cannot_score_faithfully(tiny_runs, tmp_path):
     run_dir = tiny_runs["SAC"]
     model = run_dir / "snapshots" / "snapshot_256_steps.zip"
     protocol = protocol_for_run(run_dir)
     with pytest.raises(ValueError, match="normalize_obs=True"):
         harness.evaluate(model, None, protocol)
+    # Verifier r3: outside its run, nothing says the model trained on
+    # normalized observations, so no normalizer is refused unless the
+    # caller vouches for raw observations.
+    outside = tmp_path / "outside" / "snapshot_256_steps.zip"
+    outside.parent.mkdir()
+    shutil.copyfile(model, outside)
+    with pytest.raises(ValueError, match="outside any run directory"):
+        harness.evaluate(outside, None, protocol, algo="SAC", seed_start=5)
+    with pytest.raises(ValueError, match="drop one or the other"):
+        harness.evaluate(
+            outside,
+            run_dir / "snapshots" / "snapshot_vecnormalize_256_steps.pkl",
+            protocol,
+            algo="SAC",
+            seed_start=5,
+            raw_observations=True,
+        )
+    with pytest.raises(ValueError, match="normalize_obs=True"):
+        harness.evaluate(model, None, protocol, raw_observations=True)
     with pytest.raises(ValueError, match="not this protocol's"):
         harness.evaluate(
             model, run_dir / "snapshots" / "snapshot_vecnormalize_256_steps.pkl",
@@ -397,6 +417,91 @@ def test_evaluate_refuses_what_it_cannot_score_faithfully(tiny_runs):
             model, run_dir / "snapshots" / "snapshot_vecnormalize_256_steps.pkl",
             protocol, block="held_out",
         )
+
+
+def test_a_run_recording_the_wrong_algorithm_is_refused_before_scoring(
+    tmp_path, tiny_runs
+):
+    """Verifier r3: a config.json naming PPO over SAC zips failed inside
+    SB3 with a TypeError neither the CLI nor the notebook caught. The
+    family check now runs for a recorded algorithm too, and the harness
+    runs it on every artifact before scoring any."""
+    from courtside_dynamics.training.algos import load_run_model
+
+    run_dir = tmp_path / "wrongalgo"
+    shutil.copytree(tiny_runs["SAC"], run_dir)
+    shutil.rmtree(run_dir / "scores", ignore_errors=True)
+    config = json.loads((run_dir / "config.json").read_text())
+    config["train_config"]["algo"] = "PPO"
+    (run_dir / "config.json").write_text(json.dumps(config))
+    artifacts, problems = harness.run_artifacts(run_dir, ("best", "snapshots"))
+    assert artifacts == []
+    assert len(problems) == 5
+    assert problems[0] == (
+        "wrongalgo: model/best_model.zip holds a "
+        "stable_baselines3.sac.policies.SACPolicy, a SAC-family policy, so it "
+        "cannot load as PPO (family PPO); its run's config.json records the "
+        "wrong algorithm"
+    )
+    with pytest.raises(ValueError, match="refused before scoring anything"):
+        harness.rescore([run_dir], _legacy_protocol())
+    assert not (run_dir / "scores").exists()
+    with pytest.raises(ValueError, match="records the wrong algorithm"):
+        load_run_model(run_dir / "model" / "best_model.zip", device="cpu")
+
+
+def test_snapshot_files_the_index_does_not_bind_are_named(tmp_path, tiny_runs):
+    """Verifier r3: a snapshot interrupted between its renames left
+    complete files the index did not list (and, at the first snapshot,
+    no index): the record counted only the indexed ones and the harness
+    ignored the orphans, or refused the whole run as unreadable. Both
+    now name them."""
+    run_dir = tmp_path / "run"
+    shutil.copytree(tiny_runs["SAC"], run_dir)
+    directory = run_dir / "snapshots"
+    for suffix in ("_2048_steps.zip", "_vecnormalize_2048_steps.pkl"):
+        source = directory / f"snapshot{suffix.replace('2048', '1024')}"
+        shutil.copyfile(source, directory / f"snapshot{suffix}")
+    summary = snapshots.snapshot_summary(run_dir)
+    assert summary is not None
+    assert summary["unindexed"] == [
+        "snapshot_2048_steps.zip",
+        "snapshot_vecnormalize_2048_steps.pkl",
+    ]
+    assert records.record_warnings({"snapshots": summary}) == [
+        "2 snapshot file(s) that snapshots/index.json does not bind (a "
+        "snapshot interrupted between its renames; never scored): "
+        "snapshot_2048_steps.zip, snapshot_vecnormalize_2048_steps.pkl"
+    ]
+    artifacts, problems = harness.run_artifacts(run_dir, ("snapshots",))
+    assert len(artifacts) == 4
+    assert problems == [
+        f"run: snapshots/{name} is not in index.json (a snapshot interrupted "
+        f"between its renames): not bound, so not scored; pass steps the "
+        f"index binds, or rescore without snapshots"
+        for name in summary["unindexed"]
+    ]
+    # Steps the index binds score without them.
+    artifacts, problems = harness.run_artifacts(run_dir, ("snapshots",), steps=[512])
+    assert ([a.step for a in artifacts], problems) == ([512], [])
+    # No index at all: every file is unbound.
+    (directory / "index.json").unlink()
+    summary = snapshots.snapshot_summary(run_dir)
+    assert summary is not None
+    assert summary["problem"].startswith("no snapshots/index.json, though snapshots/ holds 10")
+    assert len(summary["unindexed"]) == 10
+    artifacts, problems = harness.run_artifacts(run_dir, ("best", "snapshots"))
+    assert [a.kind for a in artifacts] == ["best"]
+    assert problems == [
+        "run: snapshots/ holds 10 file(s) but no index.json (the first "
+        "snapshot was interrupted between its renames): none is bound, so "
+        "none is scored; rescore without snapshots"
+    ]
+    # An empty snapshots/ (opened, nothing written yet) is no snapshots.
+    for path in directory.iterdir():
+        path.unlink()
+    assert snapshots.snapshot_summary(run_dir) is None
+    assert harness.run_artifacts(run_dir, ("best", "snapshots"))[1] == []
 
 
 def test_rescore_cli(tiny_runs, capsys, tmp_path):
@@ -510,6 +615,22 @@ def test_eval_protocol_record_names_the_registered_protocol_or_none():
         from_train_config(cfg, id="x", env_kwargs={"episode_len": 1500})
     cfg.info_dict_eval = False
     assert protocols.eval_protocol_record(cfg) is None
+
+
+@pytest.mark.parametrize("recipe", sorted(protocols.GATED_RECIPES))
+def test_a_gated_recipe_records_no_protocol(recipe):
+    """Verifier r3: the gate rescales its evaluator's env per stage, so
+    the as-constructed eval env was never a gated run's selection
+    evaluation (WallBallGoalRally and WallBallDepthCurriculum shared a
+    fingerprint while their stage-0 evaluations differed)."""
+    cfg = build_train_config(recipe, log_dir="x", seed=0)
+    assert protocols.eval_protocol_record(cfg) == {
+        "id": None,
+        "fingerprint": None,
+        "reason": "performance_gate",
+    }
+    with pytest.raises(protocols.GatedEvaluationError, match="performance gate"):
+        from_train_config(cfg, id="x")
 
 
 def _same_value(left: Any, right: Any) -> bool:
@@ -664,7 +785,13 @@ def test_v2_and_v3_differ_only_in_the_shaping_reward(tiny_runs, tmp_path):
 
 
 def test_every_registered_protocol_is_its_recipes_in_loop_evaluation():
-    assert set(RECIPE_PROTOCOLS) == set(RECIPES)
+    # Every recipe is registered or gated (a staged evaluation, which no
+    # protocol is), never both.
+    assert set(RECIPE_PROTOCOLS) == set(RECIPES) - protocols.GATED_RECIPES
+    assert protocols.GATED_RECIPES <= set(RECIPES)
+    for recipe in RECIPES:
+        cfg = build_train_config(recipe, log_dir="x", seed=0)
+        assert bool(cfg.performance_gate) == (recipe in protocols.GATED_RECIPES), recipe
     # Every recipe's in-loop protocol, plus the earlier PaddleTennis era.
     assert set(registered_protocols()) == {
         *RECIPE_PROTOCOLS.values(),
@@ -716,7 +843,7 @@ def test_the_fingerprint_is_the_content():
         v2.env_kwargs["episode_len"] = 1  # type: ignore[index]
 
 
-@pytest.mark.parametrize("recipe", ["PaddleTennis", "WallBallTrueBaseline", "BallBalance"])
+@pytest.mark.parametrize("recipe", ["PaddleTennis", "WallBallVolley", "BallBalance"])
 def test_a_runs_config_json_rebuilds_its_in_loop_protocol(tmp_path, recipe):
     from courtside_dynamics.training.artifacts import write_run_config
 
@@ -768,7 +895,7 @@ def test_seed_blocks_resolve_from_the_run_or_refuse():
         explicit.for_block(paired, "held_out")
 
 
-def test_an_unpaired_protocol_reproduces_the_first_in_loop_evaluation(tmp_path):
+def test_an_unpaired_protocol_reproduces_the_first_in_loop_evaluation(tmp_path, capsys):
     """An unpaired run's stream continues across evaluations, so the
     harness (a fresh env per score) reproduces only its first row; the
     protocol's block is the info evaluator's env seed."""
@@ -802,6 +929,62 @@ def test_an_unpaired_protocol_reproduces_the_first_in_loop_evaluation(tmp_path):
     assert metrics == _eval_info_rows(run_dir)[first.timestep]
     with pytest.raises(ValueError, match="no selection keys"):
         protocol.selection_rule()
+    # The rescore CLI says which of its rows can match eval_info.csv.
+    from courtside_dynamics.experiments.rescore import main
+
+    assert main(["--protocol", INLOOP, "--which", "snapshots", str(run_dir)]) == 0
+    assert "note: the run evaluated unpaired, so only its first" in (
+        capsys.readouterr().out
+    )
+
+
+def test_a_gated_run_is_refused_its_in_loop_rescore(tmp_path, capsys):
+    """Verifier r3 (blocker): a performance gate writes stage 0 into the
+    info evaluator's env at training start (and the next stage at every
+    advance) and stamps the stage index into every row, so the protocol
+    rebuilt from config.json scored an evaluation the run never ran and
+    disagreed with eval_info.csv silently. A gated run records no
+    protocol, and its in-loop rescore is refused before anything is
+    scored."""
+    from courtside_dynamics.experiments.rescore import main
+
+    run_dir = tmp_path / "gated"
+    cfg = build_train_config(
+        "WallBallBootstrap",
+        algo="SAC",
+        log_dir=str(run_dir),
+        total_timesteps=600,
+        seed=4,
+        eval_freq=200,
+        n_eval_episodes=2,
+        n_envs=1,
+        checkpoint_freq=0,
+        video_freq=0,
+        record_video=False,
+        snapshot_evals=True,
+        model_kwargs={"learning_starts": 50, "buffer_size": 1_000, "batch_size": 32},
+    )
+    assert cfg.performance_gate
+    train(cfg)
+    # What no protocol reproduces: the stage, stamped into every row.
+    assert all(
+        "curriculum_stage_index" in row for row in _eval_info_rows(run_dir).values()
+    )
+    gated = {"id": None, "fingerprint": None, "reason": "performance_gate"}
+    config = json.loads((run_dir / "config.json").read_text())
+    assert config["comparability_key"]["eval_protocol"] == gated
+    record = json.loads((run_dir / "run_record.json").read_text())
+    assert record["task"]["eval_protocol"] == gated
+    with pytest.raises(protocols.GatedEvaluationError, match="performance gate"):
+        protocol_for_run(run_dir)
+    with pytest.raises(protocols.GatedEvaluationError):
+        from_run_config(config, id="x")
+    with pytest.raises(ValueError, match="refused before scoring anything") as refused:
+        harness.rescore([run_dir], INLOOP)
+    assert "performance gate" in str(refused.value)
+    assert not (run_dir / "scores").exists()
+    assert main(["--protocol", INLOOP, str(run_dir)]) == 2
+    assert "performance gate" in capsys.readouterr().err
 
 
 # -- snapshots ------------------------------------------------------------------
@@ -860,6 +1043,7 @@ def test_snapshot_writer_binds_each_pair_atomically(tmp_path):
         "count": 2,
         "timesteps": [100, 200],
         "failures": [300],
+        "unindexed": [],
     }
     with pytest.raises(ValueError, match="already written"):
         writer.write(100, save_model=save(b"again"))
@@ -1009,7 +1193,7 @@ def test_probe_scores_a_witness_under_a_derived_protocol(capsys):
     assert "raw observations" in capsys.readouterr().err
 
 
-def test_probe_scores_a_snapshot_like_the_harness(tiny_runs, capsys):
+def test_probe_scores_a_snapshot_like_the_harness(tiny_runs, capsys, tmp_path):
     from courtside_dynamics.experiments.probe import main
 
     run_dir = tiny_runs["PPO"]
@@ -1031,6 +1215,18 @@ def test_probe_scores_a_snapshot_like_the_harness(tiny_runs, capsys):
     assert report["metrics"] == {
         k: v for k, v in _eval_info_rows(run_dir)[512].items() if k != "n_updates"
     }
+    # Verifier r3: copied out of its run, the model is scored without a
+    # normalizer only when --raw-observations says it trained so.
+    outside = tmp_path / "snapshot_512_steps.zip"
+    shutil.copyfile(model, outside)
+    argv = [
+        "--recipe", "PaddleTennis", "--policy", str(outside), "--algo", "PPO",
+        "--protocol", "paddle-npoint@v3", "--seed-start", "5",
+    ]
+    assert main(argv) == 2
+    assert "outside any run directory" in capsys.readouterr().err
+    assert main([*argv, "--raw-observations", "--normalizer", str(normalizer)]) == 2
+    assert "drop one or the other" in capsys.readouterr().err
 
 
 def test_experiments_modules_import_without_the_training_stack():

@@ -48,7 +48,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecEnv
 
 from courtside_dynamics.callbacks._info import _scalar_info_keys
-from courtside_dynamics.experiments.records import ReplaceTogether
+from courtside_dynamics.experiments.records import BestSaveLedger, ReplaceTogether
 from courtside_dynamics.experiments.select import improves
 
 #: Offset between a paired evaluation's standard batch and its
@@ -693,6 +693,11 @@ class InfoDictEvalCallback(BaseCallback):
         metric, so selection, the gate and TensorBoard never see it.
         ``best_model_meta.json`` records the selecting evaluation's
         count as a top-level ``n_updates`` (outside its ``metrics``).
+    best_ledger:
+        ``train()``'s ``experiments.records.BestSaveLedger``: every best
+        save's digests, so the run record can tell a save split between
+        its renames even when no meta was renamed (a first save). Only
+        read with ``best_model_save_path``.
     """
 
     def __init__(
@@ -727,6 +732,7 @@ class InfoDictEvalCallback(BaseCallback):
         eval_seed: int | None = None,
         eval_reset_options: Sequence[Mapping[str, Any]] | None = None,
         record_n_updates: bool = False,
+        best_ledger: BestSaveLedger | None = None,
     ) -> None:
         super().__init__(verbose)
         # The rollout loop reads infos[0]/rewards[0] and counts episodes
@@ -815,6 +821,7 @@ class InfoDictEvalCallback(BaseCallback):
         ) = None
         self.best_metric_keys = tuple(dict.fromkeys(best_metric_keys))
         self.best_model_save_path = best_model_save_path
+        self.best_ledger = best_ledger
         self.early_stop_patience = early_stop_patience
         self.early_stop_min_evals = int(early_stop_min_evals)
         # The configured form (scalar or per-key dict) stays inspectable;
@@ -1552,12 +1559,13 @@ class InfoDictEvalCallback(BaseCallback):
         write (a stopped Colab cell) leaves the previous best whole and
         no temporary behind. One between two renames leaves a meta whose
         sha256s no longer bind the files, which the run record reports
-        instead of the meta's selection.
+        instead of the meta's selection (as it reports, through
+        ``best_ledger``, a first save split before its meta's rename).
         """
         if self.best_model_save_path is None:
             return
         os.makedirs(self.best_model_save_path, exist_ok=True)
-        with ReplaceTogether() as staged:
+        with ReplaceTogether(self.best_ledger) as staged:
             self._stage_best(staged, metrics, confirmation)
             staged.commit()
 

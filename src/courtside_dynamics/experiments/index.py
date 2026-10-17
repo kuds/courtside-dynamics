@@ -86,7 +86,6 @@ from pathlib import Path
 from typing import Any
 
 from courtside_dynamics.experiments.records import (
-    BINDINGS_UNBOUND,
     COMPLETED,
     CRASHED,
     EARLY_STOP,
@@ -98,6 +97,7 @@ from courtside_dynamics.experiments.records import (
     build_run_record,
     describe_read_error,
     read_json_object,
+    record_warnings,
     shape_problems,
     verify_run_dir,
 )
@@ -689,16 +689,10 @@ def _record_row(
     files = _files(run_dir)
     status = record.get("status")
     terminal = isinstance(status, str) and status in TERMINAL_STATUSES
-    selection = record.get("selection")
-    if (
-        isinstance(selection, Mapping)
-        and selection.get("bindings") == BINDINGS_UNBOUND
-    ):
-        problems.append(
-            f"the best model is unbound ({selection.get('unbound_reason')}): "
-            f"the record reports no selection, and best_model.zip is not the "
-            f"one best_model_meta.json describes"
-        )
+    # What the record reports wrong with the files it sealed: an unbound
+    # best model (a meta that no longer binds its files, or the
+    # trainer's own check of a pair no meta binds), unindexed snapshots.
+    problems.extend(record_warnings(record))
     if status == RUNNING and files["sync_manifest"]:
         problems.append(
             f"{RUN_RECORD_NAME} says 'running' and {SYNC_MANIFEST_NAME} "

@@ -9,7 +9,10 @@ and periodic checkpoint of each run (the August runs' legacy
 and the rows go to ``<run_dir>/scores/<protocol>.jsonl`` (or one
 combined ``<DIR>/scores/<protocol>.jsonl``). ``--protocol inloop``
 re-derives each run's own in-loop evaluation from its ``config.json``:
-its snapshot rows must equal the run's ``eval_info.csv``.
+a paired run's snapshot rows must equal its ``eval_info.csv``, an
+unpaired run's only at the first evaluation (the summary says so), and
+a performance-gated run is refused (no protocol is its staged
+evaluation).
 
 Each run's summary lists the scored artifacts with the protocol's
 selection keys, and, when the snapshots were scored, the offline
@@ -89,6 +92,14 @@ def _summarize(rows: Sequence[Mapping[str, Any]], run_dir: Path | None) -> None:
         protocol = protocol_for_run(run_dir) if run_dir is not None else None
     else:
         protocol = get_protocol(str(first["protocol"]))
+    if protocol is not None and str(first["protocol"]).startswith(f"{INLOOP}:"):
+        if not protocol.paired:
+            print(
+                "  note: the run evaluated unpaired, so only its first "
+                "evaluation's row reproduces eval_info.csv (the in-loop stream "
+                "continues across evaluations; the confirmation block has no "
+                "in-loop counterpart)"
+            )
     keys = () if protocol is None else protocol.selection_keys
     rule = protocol.selection_rule() if protocol is not None and keys else None
     for row in rows:
