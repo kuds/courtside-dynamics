@@ -718,6 +718,127 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### PaddleTennis selects under `paddle-npoint@v3`: evaluation scores the task without its training aids — *implemented (unreleased, 2026-10-17); design L3, a selection-protocol era*
+`design_campaign_structure_20261016.md` finding S5 and step L3: the
+recipe's evaluation env carried the contact and reach escrows, so the
+last selection key, `episode_reward_mean` (delta 0.25), and every
+evaluation reward mixed shaping into task reward. An oracle batch under
+`paddle-npoint@v2` (2 episodes of 1,500 steps, seeds 5500+) scores
+12.52, of which 2.52 is shaping (1.625 contact paid, 0.25 clawed back,
+1.146 reach), the S5 range of +2.48 to +2.98 on task returns of 10-14.
+- **The protocol.** `paddle-npoint@v3` is `paddle-npoint@v2` with
+  `contact_shaping`, `reach_shaping` and `hold_shaping` at 0 in the
+  evaluation env (`protocols.PADDLE_TRAINING_AIDS_OFF`; the radius and
+  travel parameters stay, paying nothing at scale 0). It is derived
+  from the literal @v2 in code, so it is as frozen as @v2, and both
+  fingerprints are pinned in a test (`30526bfd...` for @v2, unchanged
+  by this step; `863bb384...` for @v3). Every other field is @v2's: 30
+  paired episodes on the run's block, alternating serves, the k≥2
+  headline, `success_rate` and reward with deltas 1/60, 1/60, 0.25, the
+  confirmation block 100,000 on, CPU. `hold_shaping` is 0 in @v2's env
+  too; it is set explicitly so a run file's `[env]` hold escrow (an
+  LH1-style pilot) stays out of evaluation, as the drill does.
+- **Why the bump is sound: the observations hold no escrow state.** The
+  48 observations are physical state, the rules' snapshot, the clock and
+  the contact latches; no escrow balance, no hold window. A test steps
+  @v2's and @v3's envs side by side under the oracle (seeds 5500 and
+  5501, both serves) and a random policy: observations, actions,
+  endings and every non-`rew_*` info value are bit-identical at every
+  step while an escrow is pending (over 50 pending steps per oracle
+  episode), and the reward differs by exactly the six escrow channels
+  (1e-12). So a policy acts identically under both protocols.
+- **The gate** (`tests/test_eval_harness.py`): for the oracle (full
+  episodes, both blocks; it converts k≥2 and collects shaping) and a
+  tiny trained SAC run's best model and four snapshots (both blocks),
+  every non-reward metric is identical under @v2 and @v3, the k≥2
+  headline and `success_rate` included, and `episode_reward_mean`
+  differs by the shaping collected (`rew_{shaping,reach,hold}[_clawback]`
+  episode sums) up to the float32 the VecEnv stores each step's reward
+  in (|Δ| < 1e-5); the task channels (`rew_return`, `rew_fault`,
+  `rew_unsafe`) are equal. So a selection under @v3 can differ from
+  @v2's only through the reward tie-break.
+- **Adopted as the recipe's in-loop protocol.** The PaddleTennis
+  recipe's `eval_env_overrides` gain the three zeros (they sit above a
+  run file's `[env]` table, below its `[eval_env]`), and
+  `RECIPE_PROTOCOLS["PaddleTennis"]` is `paddle-npoint@v3`; @v2 stays
+  registered and scorable. Training is untouched: the training env
+  keeps both escrows, golden digests 22/22, and the trainer digest
+  against `9f54ae5` matches 89 of 92 components: every policy,
+  normalizer, monitor, RNG, `resolved_model`, `evaluations.npz`,
+  best-model weight and normalizer and diagnosis-report component of
+  all four jobs. Three PaddleTennis components differ, as declared: `eval_info.csv` and
+  `best_model_meta.json`'s metrics, at the evaluation at 768 steps, where
+  @v2 read `episode_reward_mean` 3.7e-9 (a reach escrow of 0.054 paid and
+  clawed back, leaving a float32 residue) and @v3 reads 0.0 with the
+  `rew_reach*` metrics 0, the same model selected; and
+  `run_layout_artifacts`, which gained `snapshots_dir` in the previous
+  step (`9f54ae5` predates snapshots). The recipe snapshot was
+  re-recorded: the 12 PaddleTennis resolutions' `eval_env_fn` kwargs
+  read `contact_shaping` and `reach_shaping` 0.0 (were 0.25) and gain
+  `hold_shaping` 0.0; nothing else in the 96.
+- **The era boundary.** An era is (task fingerprint, protocol). The task
+  did not move; the protocol did. From now on a PaddleTennis run's
+  evaluation rewards (`eval_info.csv`, `evaluations.npz`, the closing
+  evaluation, the summary's Final and Best eval lines) are task reward,
+  and its `best_model` and early stop follow @v3's tie-break. Rewards
+  across the boundary compare only after re-scoring the older runs under
+  @v3; the k≥2 headline, `success_rate` and k=1 compare as they are.
+  Dropping `episode_reward_mean` from the selection keys (cardinal rule
+  4's advice) was the alternative; L3 keeps the key and makes it honest,
+  one change at a time.
+- **Runs record their protocol.** `config.json`'s
+  `comparability_key.eval_protocol` (null since L1) is
+  `{"id", "fingerprint"}` (`protocols.eval_protocol_record`): the in-loop
+  selection protocol's fingerprint, computed from the evaluation env
+  `write_run_config` already probes (no extra env is built), and the id
+  of the registered protocol of the run's recipe with that fingerprint
+  (its in-loop protocol first, then the literal ones declared for it).
+  A stock run records `paddle-npoint@v3`; an `[eval_env]` table
+  restoring the escrows records `paddle-npoint@v2`; a quick test or a
+  run file that changes evaluation episodes or env records `id: null`
+  with its fingerprint, so two runs compare only when both match. The
+  run record's `task.eval_protocol` copies it (one source), and a
+  wrong-typed value is read as missing and named in the index's
+  problems. Tests pin that the recorded fingerprint is the one
+  `protocol_for_run` rebuilds from `config.json`. Null for a run without
+  an info-dict evaluator and every run before this step; the schemas
+  stay `courtside-run-record/1` (additive).
+- **Re-scoring the history: `notebooks/rescore_runs.ipynb`.** Mounts
+  Drive, indexes `training_runs/PaddleTennis/sac` (the L1 index, written
+  with the scores), picks the 2026-08 runs that have a model (the
+  registered run `20260816_235141` must be among them), scores each
+  run's best model and every checkpoint under @v3 on CPU with both
+  blocks, and prints and plots the per-checkpoint k≥2 and k=1 curves
+  with a `select()` verdict per run beside its own `best_model`. Scores
+  go to `courtside-dynamics/rescores/<runs subdir>/<protocol>/`, beside
+  `training_runs/`, never inside it (a run directory stays what
+  `train()` sealed, and the index never meets a score file; the
+  notebook refuses an output folder inside the runs root). A run is
+  scored whole or refused with its reasons while the others go on, its
+  file lands when it is done, and a re-run skips runs already scored for
+  the same files (sha256). `QUICK` scores the best model and 3
+  checkpoints (first, middle, last) into a `-quick` folder. The harness
+  gained what this needed: `rescore(steps=...)`/`--steps` and
+  `run_artifacts(steps=...)` (a step the run lacks is refused, never
+  silently skipped) and `series_steps()` (the steps from file names,
+  nothing hashed). Validated locally (`tests/test_notebooks.py`) on a
+  runs folder holding the phase-3 index fixture's PaddleTennis runs
+  (placeholder model files: refused with "sha256 differs" and "has no
+  normalizer"; the LT1 stub: not picked), a tiny trained run's policies
+  in the August layout under the registered run's id (scored: best plus
+  four checkpoints on seed block 1,000,000, `run_seed_offset`), and the
+  tiny run itself; the runs folder's files hash the same before and
+  after. Cost: about 2.6 CPU-minutes per artifact (a default-size SAC
+  policy, both blocks), so about an hour per 2M-step run with
+  checkpoints every 100k; `QUICK` about 10 minutes.
+- **Open.** The August runs themselves are not re-scored here (they are
+  on the maintainer's Drive; the notebook is the step). The notebook's
+  `REPO_REF` is a placeholder (`0be8d77`, which predates @v3; its
+  protocol cell refuses until the week-1 wrap-up bumps the pin). The
+  lever "audit mode" waits for L6. The August runs' checkpoints are
+  every 100k against evaluations every 25k, so their offline pick can
+  differ from the in-loop one by granularity alone.
+
 ### Offline evaluation: one evaluation code path, snapshots at every evaluation, versioned protocols, a pure select() — *implemented (unreleased, 2026-10-17); design M3 + L2*
 `design_env_ladder_and_structure_20261016.md` M3 and
 `design_campaign_structure_20261016.md` L2: new instruments and era

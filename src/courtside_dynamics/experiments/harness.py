@@ -24,7 +24,9 @@ and M3; ``docs/design_campaign_structure_20261016.md`` step L2.
 - ``experiments.select.select`` picks a best from those rows.
 
 CLI: ``python -m courtside_dynamics.experiments.rescore --protocol
-<id> <run_dir>... [--which best,snapshots,checkpoints] [--out DIR]``.
+<id> <run_dir>... [--which best,snapshots,checkpoints] [--steps N,...]
+[--out DIR]``; ``notebooks/rescore_runs.ipynb`` drives it over a Drive
+runs folder.
 
 Not here yet: the lever "audit mode" (scoring with a reward term
 logged but not paid) arrives with the levers themselves (design L6).
@@ -35,7 +37,7 @@ from __future__ import annotations
 import json
 import os
 import platform
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -273,6 +275,33 @@ class RunArtifact:
     n_updates: int | None = None
 
 
+def series_steps(run_dir: str | os.PathLike[str], kind: str) -> list[int]:
+    """The env steps of a run's ``"snapshots"`` or ``"checkpoints"``, sorted.
+
+    Read from the snapshot index or the checkpoint file names, nothing
+    hashed: for choosing ``steps`` (:func:`run_artifacts`) before any
+    file is read. A malformed snapshot index raises ``ValueError``.
+    """
+    from courtside_dynamics.training.artifacts import locate_artifact
+
+    root = Path(run_dir)
+    if kind == "snapshots":
+        directory = root / SNAPSHOTS_DIR_NAME
+        if not directory.is_dir():
+            return []
+        return sorted(entry.timestep for entry in read_snapshot_index(directory).entries)
+    if kind == "checkpoints":
+        found = locate_artifact(root, "checkpoints_dir")
+        if found is None:
+            return []
+        return sorted(
+            int(match.group("step"))
+            for path in Path(found).iterdir()
+            if (match := MODEL_FILE_PATTERN.match(path.name)) and path.is_file()
+        )
+    raise ValueError(f"kind must be 'snapshots' or 'checkpoints', got {kind!r}")
+
+
 def _needs_normalizer(config: Mapping[str, Any]) -> bool:
     train_config = config.get("train_config")
     return isinstance(train_config, Mapping) and bool(train_config.get("normalize_obs"))
@@ -283,8 +312,14 @@ def run_artifacts(
     which: Iterable[str] = ARTIFACT_KINDS,
     *,
     config: Mapping[str, Any] | None = None,
+    steps: Collection[int] | None = None,
 ) -> tuple[list[RunArtifact], list[str]]:
     """The run's scorable artifacts of the kinds in ``which``, and problems.
+
+    ``steps`` keeps only the snapshots and checkpoints saved at those
+    env steps (the best model is kept whatever its step); a step that
+    names no snapshot or checkpoint of the run is a problem, so a
+    subset is never smaller than asked without saying so.
 
     - ``best``: ``best_model.zip`` and ``best_vec_normalize.pkl`` (the
       0.14 ``model/`` layout or the flat root); its step is
@@ -314,8 +349,21 @@ def run_artifacts(
     unknown = [kind for kind in kinds if kind not in ARTIFACT_KINDS]
     if unknown:
         raise ValueError(f"which must be drawn from {ARTIFACT_KINDS}, got {unknown}")
+    if steps is not None and not {"snapshots", "checkpoints"} & set(kinds):
+        raise ValueError("steps select snapshots or checkpoints; which names neither")
     artifacts: list[RunArtifact] = []
     problems: list[str] = []
+    wanted = None if steps is None else {int(step) for step in steps}
+    seen_steps: set[int] = set()
+
+    def kept(step: int) -> bool:
+        """Whether a snapshot or checkpoint at ``step`` is scored."""
+        if wanted is None:
+            return True
+        if step in wanted:
+            seen_steps.add(step)
+            return True
+        return False
 
     def relative(path: str | Path) -> str:
         return Path(path).relative_to(root).as_posix()
@@ -383,6 +431,8 @@ def run_artifacts(
                 problems.append(f"{root.name}: {error}")
             else:
                 for entry in index.entries:
+                    if not kept(entry.timestep):
+                        continue
                     unbound = snapshot_unbound(directory, entry)
                     if unbound is not None:
                         problems.append(f"{root.name}: {unbound}")
@@ -404,6 +454,8 @@ def run_artifacts(
                 if match and path.is_file():
                     found.append((int(match.group("step")), match.group("prefix"), path))
             for step_value, prefix, path in sorted(found):
+                if not kept(step_value):
+                    continue
                 normalizer_path = directory / normalizer_file_name(step_value, prefix)
                 pair(
                     "checkpoint",
@@ -411,6 +463,11 @@ def run_artifacts(
                     path,
                     normalizer_path if normalizer_path.is_file() else None,
                 )
+    if wanted is not None and wanted - seen_steps:
+        problems.append(
+            f"{root.name}: no {'/'.join(k for k in kinds if k != 'best')} "
+            f"artifact at step(s) {sorted(wanted - seen_steps)}"
+        )
     if not artifacts and not problems:
         problems.append(f"{root.name}: no {'/'.join(kinds)} artifact to score")
     return artifacts, problems
@@ -469,6 +526,7 @@ def rescore(
     blocks: Sequence[str] | None = None,
     device: str = "cpu",
     seed_start: int | None = None,
+    steps: Collection[int] | None = None,
 ) -> list[Path]:
     """Score every artifact of ``run_dirs`` under ``protocol``; write the rows.
 
@@ -477,10 +535,12 @@ def rescore(
     ``config.json`` (``protocols.protocol_for_run``), whose snapshot rows
     must equal the run's ``eval_info.csv``. ``blocks`` defaults to both
     blocks when the protocol confirms, so ``select()`` can confirm
-    within block. Every run's artifacts are enumerated and checked
-    against their digests before anything is scored, and any problem
-    raises ``ValueError`` naming all of them, so a rescore never writes
-    a partial set silently.
+    within block. ``steps`` scores only the snapshots and checkpoints
+    saved at those env steps, besides the best model (a quick look; see
+    :func:`run_artifacts`). Every run's artifacts are enumerated and
+    checked against their digests before anything is scored, and any
+    problem raises ``ValueError`` naming all of them, so a rescore never
+    writes a partial set silently.
 
     Rows go to ``<run_dir>/scores/<protocol>.jsonl`` (one file per run,
     rewritten whole), or, with ``out_dir``, to one
@@ -518,7 +578,7 @@ def rescore(
                 f"only blocks of protocol {resolved.id} "
                 f"({'standard, confirm' if resolved.confirm else 'standard'})"
             )
-        artifacts, found = run_artifacts(root, kinds)
+        artifacts, found = run_artifacts(root, kinds, steps=steps)
         problems.extend(found)
         planned.append((root, resolved, artifacts))
     if problems:

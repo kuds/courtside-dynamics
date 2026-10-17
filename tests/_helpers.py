@@ -15,6 +15,8 @@ before::
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import mujoco
 import numpy as np
@@ -26,6 +28,9 @@ from courtside_dynamics.envs.robot_models import (
     initialize_humanoid_tennis_home,
 )
 from courtside_dynamics.envs.tennis_rules import RallyEvent
+
+if TYPE_CHECKING:
+    from courtside_dynamics.training.train import TrainConfig
 
 
 def event_batch(
@@ -129,3 +134,73 @@ class FakeGetEnvModel:
 
     def get_env(self):
         return self._training_env
+
+
+#: The tiny PaddleTennis runs' episode length, evaluation cadence and
+#: budget (:func:`tiny_paddle_config`): four evaluations.
+TINY_EPISODE_LEN = 300
+TINY_EVAL_FREQ = 256
+TINY_BUDGET = 1024
+
+
+def tiny_paddle_config(algo: str, log_dir: Path) -> TrainConfig:
+    """A PaddleTennis-shaped run: the recipe's paired selection evaluation
+    (alternating serves, confirm_best, its keys and instruments) on
+    300-step episodes, 2 evaluation episodes, 4 evaluations, small nets.
+
+    The deltas are 0 so the reward tie-break decides between the
+    untrained policies (their headline reads 0) and confirmations roll;
+    the degenerate stop is off so all four evaluations run. Snapshots
+    are on (the recipe's default) and checkpoints fall every 512 steps.
+    """
+    from courtside_dynamics.recipes import (
+        build_train_config,
+        make_env_fn,
+        make_eval_env_fn,
+    )
+
+    short = {"episode_len": TINY_EPISODE_LEN}
+    recipe_kwargs = build_train_config(
+        "PaddleTennis", algo=algo, log_dir=str(log_dir), seed=0
+    ).model_kwargs
+    if algo == "SAC":
+        model_kwargs = {
+            **recipe_kwargs,
+            "buffer_size": 5_000,
+            "learning_starts": 64,
+            "batch_size": 64,
+            "train_freq": (16, "step"),
+            "policy_kwargs": {"net_arch": [32, 32]},
+        }
+        extra: dict[str, Any] = {}
+    else:
+        model_kwargs = {
+            **recipe_kwargs,
+            "n_steps": 64,
+            "batch_size": 64,
+            "n_epochs": 4,
+            "learning_rate": 3e-3,
+            "policy_kwargs": {**recipe_kwargs["policy_kwargs"], "net_arch": [32, 32]},
+        }
+        extra = {"min_policy_updates_before_stop": 0}
+    return build_train_config(
+        "PaddleTennis",
+        algo=algo,
+        log_dir=str(log_dir),
+        seed=0,
+        n_envs=2,
+        total_timesteps=TINY_BUDGET,
+        eval_freq=TINY_EVAL_FREQ,
+        checkpoint_freq=512,
+        n_eval_episodes=2,
+        reward_eval_episodes=1,
+        best_metric_min_delta=0.0,
+        early_stop_degenerate_evals=0,
+        checkpoint_diagnosis=None,
+        video_freq=0,
+        record_video=False,
+        env_fn=make_env_fn("PaddleTennis", env_overrides=short),
+        eval_env_fn=make_eval_env_fn("PaddleTennis", env_overrides=short),
+        model_kwargs=model_kwargs,
+        **extra,
+    )

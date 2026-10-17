@@ -1,7 +1,8 @@
 """Re-score runs' saved policies under an evaluation protocol (CLI).
 
 ``python -m courtside_dynamics.experiments.rescore --protocol <id>
-<run_dir>... [--which best,snapshots,checkpoints] [--out DIR]`` runs
+<run_dir>... [--which best,snapshots,checkpoints] [--steps N,...]
+[--out DIR]`` runs
 ``experiments.harness.rescore``: every best model, evaluation snapshot
 and periodic checkpoint of each run (the August runs' legacy
 ``checkpoints/`` layout included) is scored under the protocol on CPU,
@@ -48,6 +49,18 @@ def _csv(value: str, allowed: Sequence[str], name: str) -> tuple[str, ...]:
             f"{name} takes a comma-separated subset of {', '.join(allowed)}"
         )
     return items
+
+
+def _steps(value: str) -> tuple[int, ...]:
+    try:
+        steps = tuple(int(item) for item in value.split(",") if item.strip())
+    except ValueError:
+        steps = ()
+    if not steps or any(step < 0 for step in steps):
+        raise argparse.ArgumentTypeError(
+            "--steps takes comma-separated nonnegative env steps"
+        )
+    return steps
 
 
 def _in_loop_best(run_dir: Path) -> Any:
@@ -121,6 +134,13 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="evaluation blocks (default: both when the protocol confirms)",
     )
+    parser.add_argument(
+        "--steps",
+        type=_steps,
+        default=None,
+        help="score only the snapshots and checkpoints at these env steps "
+        "(comma-separated; the best model is scored as well)",
+    )
     parser.add_argument("--out", type=Path, help="write one combined file here")
     parser.add_argument("--seed-start", type=int, help="override the seed block")
     args = parser.parse_args(argv)
@@ -132,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
             out_dir=args.out,
             blocks=args.blocks,
             seed_start=args.seed_start,
+            steps=args.steps,
         )
     except (OSError, KeyError, ValueError) as error:
         print(f"rescore: {error}", file=sys.stderr)

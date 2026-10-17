@@ -18,6 +18,51 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **PaddleTennis selection moves to `paddle-npoint@v3`, the
+  evaluation env without training aids (design L3, 2026-10-17): a
+  selection-protocol era.** The recipe's `eval_env_overrides` set
+  `contact_shaping`, `reach_shaping` and `hold_shaping` to 0, so the
+  reward tie-break in selection and every PaddleTennis evaluation
+  reward (`eval_info.csv`, `evaluations.npz`, the closing evaluation,
+  the summary's eval lines) are task reward only. Training keeps the
+  escrows: golden digests 22/22; the trainer digest against `9f54ae5`
+  matches every training, `evaluations.npz`, best-model weight and
+  diagnosis component of the four jobs, and differs only in the
+  PaddleTennis job's `eval_info.csv` and `best_model_meta.json`
+  metrics (at 768 steps @v2's `episode_reward_mean` was a 3.7e-9 float32
+  residue of a reach escrow paid and clawed back; @v3 reads 0.0, the same
+  model selected) and its `run_layout_artifacts` (`snapshots_dir`, from
+  the previous step). The recipe snapshot was re-recorded: the 12
+  PaddleTennis resolutions' evaluation kwargs read 0.0 for the contact
+  and reach scales (were 0.25) and gain `hold_shaping` 0.0.
+  - **Comparability.** The observations hold no escrow state (tested),
+    so a policy acts identically under @v2 and @v3: the k≥2 headline,
+    `success_rate`, k=1 and every other non-reward metric are identical
+    (tested on the oracle and a trained run), and `episode_reward_mean`
+    differs by the shaping collected. Evaluation rewards and reward
+    tie-break picks compare across 2026-10-17 only after re-scoring the
+    older runs under @v3.
+  - **`paddle-npoint@v3`** is registered beside `paddle-npoint@v2`
+    (still scorable); `RECIPE_PROTOCOLS["PaddleTennis"]` names @v3.
+  - **Runs record their protocol.** `config.json`'s
+    `comparability_key.eval_protocol` and the run record's
+    `task.eval_protocol` (both `null` since L1) are now
+    `{"id", "fingerprint"}`: the in-loop selection protocol's
+    fingerprint and the registered id it equals (`paddle-npoint@v3` for
+    a stock PaddleTennis run, `ball-balance-inloop@v1` for BallBalance,
+    `null` for a quick test or a run file that changes the evaluation).
+    `null` for a run without an info-dict evaluator.
+  - **`notebooks/rescore_runs.ipynb`** (new): re-scores a Drive runs
+    folder (default: the 2026-08 PaddleTennis runs, the registered run
+    `20260816_235141` among them) under @v3 on CPU, best model and every
+    checkpoint, into `courtside-dynamics/rescores/` beside
+    `training_runs/`, never inside a run; prints and plots the
+    per-checkpoint k≥2 and k=1 curves and a `select()` verdict per run;
+    resumes, and `QUICK` scores the best model and 3 checkpoints. Its
+    `REPO_REF` is a placeholder until the week-1 wrap-up bumps it.
+  - **Harness:** `rescore(steps=...)` and the CLI's `--steps` score only
+    the snapshots and checkpoints at those steps (a missing step is
+    refused); `harness.series_steps()` lists them without hashing.
 - **Offline evaluation: snapshots, protocols, the re-scoring harness,
   `select()` and a probe CLI (design M3 + L2, 2026-10-17).** No env
   stream or training change: golden digests 22/22; the recipe snapshot

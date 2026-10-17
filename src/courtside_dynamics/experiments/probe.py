@@ -11,7 +11,7 @@ the in-loop evaluator, with no bespoke probe tool::
     python -m courtside_dynamics.experiments.probe --recipe PaddleTennis \\
         --policy run/snapshots/snapshot_25000_steps.zip \\
         --normalizer run/snapshots/snapshot_vecnormalize_25000_steps.pkl \\
-        --protocol paddle-npoint@v2
+        --protocol paddle-npoint@v3
 
 ``--policy`` is ``zero``, ``random`` (``np.random.default_rng`` of the
 block's first seed), ``oracle`` or ``camper`` -- the golden digests'

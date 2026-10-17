@@ -126,6 +126,29 @@ _CONFIG: dict[str, Any] = {
 }
 
 
+def test_run_record_copies_the_eval_protocol_from_the_comparability_key():
+    protocol = {"id": "paddle-npoint@v3", "fingerprint": "e" * 64}
+    config = {
+        **_CONFIG,
+        "comparability_key": {**_CONFIG["comparability_key"], "eval_protocol": protocol},
+    }
+    record = build_run_record(
+        config, run_id="r", created_at="2026-10-17T10:10:10+00:00", status=records.RUNNING
+    )
+    assert record["task"]["eval_protocol"] == protocol
+    assert record["comparability_key"]["eval_protocol"] == protocol
+    # A key of the wrong shape is read as missing, and said so.
+    broken = {**_CONFIG, "comparability_key": {"eval_protocol": "paddle-npoint@v3"}}
+    record = build_run_record(
+        broken, run_id="r", created_at="2026-10-17T10:10:10+00:00", status=records.RUNNING
+    )
+    assert record["task"]["eval_protocol"] is None
+    assert records.shape_problems(broken) == [
+        "config.json comparability_key.eval_protocol is a string, not an object; "
+        "read as missing"
+    ]
+
+
 def test_run_record_is_built_from_config_json_and_the_outcome():
     meta = {
         "timestep": 450_000,
@@ -893,6 +916,9 @@ def _assert_sealed(log_dir: Path, status: str) -> dict[str, Any]:
     # The record and the config it summarizes agree.
     config = json.loads((log_dir / "config.json").read_text())
     assert record["comparability_key"] == config["comparability_key"]
+    # The in-loop protocol (design L3), copied from the key (None
+    # here: these toy envs record no constructor kwargs to pin).
+    assert record["task"]["eval_protocol"] == config["comparability_key"]["eval_protocol"]
     assert record["algo"]["impl"] == config["algorithm"]["implementation"]
     assert record["task"]["env_class"] == config["env"]["class"]
     assert record["git"]["sha"] == config["git_sha"]

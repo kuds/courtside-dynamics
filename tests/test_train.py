@@ -5037,12 +5037,21 @@ def test_config_json_records_algorithm_and_comparability_key(
         "implementation": f"sb3=={stable_baselines3.__version__}",
     }
     # Without a recipe the task is the env class; SAC and PPO runs of
-    # one task never share a key.
+    # one task never share a key. The in-loop evaluation is no
+    # registered protocol, so only its fingerprint names it.
+    from courtside_dynamics.experiments.protocols import (
+        from_train_config,
+        protocol_for_run,
+    )
+
+    fingerprint = from_train_config(cfg, id="x").fingerprint
     assert payload["comparability_key"] == {
         "task": "BallBalanceEnv",
-        "eval_protocol": None,
+        "eval_protocol": {"id": None, "fingerprint": fingerprint},
         "algo_family": family,
     }
+    # The recorded fingerprint is the one a rescore of the run rebuilds.
+    assert protocol_for_run(tmp_path).fingerprint == fingerprint
     recipe_cfg = TrainConfig(
         env_fn=lambda: BallBalanceEnv(episode_len=8),
         algo=algo,
@@ -5052,6 +5061,54 @@ def test_config_json_records_algorithm_and_comparability_key(
     write_run_config(recipe_cfg, str(tmp_path / "recipe"))
     recorded = json.loads((tmp_path / "recipe" / "config.json").read_text())
     assert recorded["comparability_key"]["task"] == "BallBalance"
+
+
+@pytest.mark.parametrize(
+    ("recipe", "eval_env", "expected"),
+    [
+        ("PaddleTennis", None, "paddle-npoint@v3"),
+        # An [eval_env] table restoring the escrows evaluates under the
+        # earlier era's protocol, and the record says so.
+        (
+            "PaddleTennis",
+            {"contact_shaping": 0.25, "reach_shaping": 0.25},
+            "paddle-npoint@v2",
+        ),
+        ("PaddleTennis", {"episode_len": 300}, None),
+        ("BallBalance", None, "ball-balance-inloop@v1"),
+    ],
+)
+def test_config_json_records_the_in_loop_evaluation_protocol(
+    tmp_path, recipe, eval_env, expected
+):
+    """Design L3: ``comparability_key.eval_protocol`` names the in-loop
+    selection protocol by fingerprint and, when it is a registered
+    protocol of the run's recipe, by id."""
+    from courtside_dynamics.experiments.protocols import (
+        get_protocol,
+        protocol_for_run,
+    )
+    from courtside_dynamics.recipes import build_train_config, make_eval_env_fn
+
+    overrides = (
+        {} if eval_env is None
+        else {"eval_env_fn": make_eval_env_fn(recipe, env_overrides=eval_env)}
+    )
+    cfg = build_train_config(recipe, log_dir=str(tmp_path), seed=0, **overrides)
+    write_run_config(cfg, str(tmp_path))
+    recorded = json.loads((tmp_path / "config.json").read_text())
+    protocol = recorded["comparability_key"]["eval_protocol"]
+    fingerprint = protocol_for_run(tmp_path).fingerprint
+    assert protocol == {"id": expected, "fingerprint": fingerprint}
+    if expected is not None:
+        assert get_protocol(expected).fingerprint == fingerprint
+    # A run without an info-dict evaluator has no in-loop protocol.
+    off = tmp_path / "off"
+    off.mkdir()
+    cfg.info_dict_eval = False
+    write_run_config(cfg, str(off))
+    payload = json.loads((off / "config.json").read_text())
+    assert payload["comparability_key"]["eval_protocol"] is None
 
 
 # -- PPO plan Step 12: tests that cross the whole path ------------------------

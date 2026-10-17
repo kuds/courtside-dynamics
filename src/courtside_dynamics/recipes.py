@@ -1348,9 +1348,22 @@ RECIPES: dict[str, Recipe] = {
         # still wins last by the documented layering, so the freeze
         # checklist forbids drill keys there and the frozen plan pins
         # the recorded evaluation env via eval_env_kwargs.
+        #
+        # Selection protocol paddle-npoint@v3 (2026-10-17, design L3 of
+        # docs/design_campaign_structure_20261016.md): the evaluation
+        # env also strips the escrowed shaping aids, so the reward
+        # tie-break in selection and every evaluation reward (eval_info,
+        # evaluations.npz, the closing eval) is task reward only; under
+        # @v2 an oracle's evaluation episodes carried +2.5 to +3.0 of
+        # shaping on task returns of 10-14. Training keeps the aids.
+        # PaddleTennis observations hold no escrow state, so the policy
+        # acts identically and every non-reward metric is unchanged.
         eval_env_overrides={
             "drill_library": None,
             "drill_fraction": 0.0,
+            "contact_shaping": 0.0,
+            "reach_shaping": 0.0,
+            "hold_shaping": 0.0,
         },
         default_total_timesteps=2_000_000,
         name_prefix="paddle_tennis",

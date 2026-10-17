@@ -7,6 +7,8 @@ Kind: **Adopted design — week 1 in progress (2026-10-16).** A whole-repo desig
 
 The maintainer then made PPO a binding requirement. Section 8 records that. Week 1 implements M0–M3, and the companion campaign-structure design's L0–L3 runs alongside them. Probes cited below ran in session scratch space and are not committed.
 
+**Status (2026-10-17).** M3 done: the evaluation harness (`experiments.harness`, equal to a fresh run's in-loop rows bit for bit), `paddle-npoint@v2` declared literally, and the rescore CLI, plus the campaign design's L2 alongside it; the lever "audit mode" is deferred to L6. Its L3 era step is done too: `paddle-npoint@v3` (the eval env without shaping) is the PaddleTennis selection protocol, and the comparability key records each run's protocol id and fingerprint. See `docs/DECISIONS.md`.
+
 **Basis.** Proposal 2 ("extract, don't rewrite") is the base. It is the only proposal that all three judges ranked in their top two. Grafted onto it:
 - from Proposal 3: the brain/body ladder and the feasibility spikes;
 - from Proposal 4: the experiment system;

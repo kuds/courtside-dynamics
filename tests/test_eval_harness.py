@@ -48,6 +48,12 @@ from courtside_dynamics.recipes import (
     make_eval_env_fn,
 )
 from courtside_dynamics.training.train import TrainConfig, train
+from tests._helpers import (
+    TINY_BUDGET,
+    TINY_EPISODE_LEN,
+    TINY_EVAL_FREQ,
+)
+from tests._helpers import tiny_paddle_config as _tiny_paddle_config
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
 _AUGUST_RUN = (
@@ -55,66 +61,10 @@ _AUGUST_RUN = (
     / "tests/fixtures/run_index/training_runs/PaddleTennis/sac/20260815_180815"
 )
 
-#: The tiny runs' episode length and evaluation cadence.
-_EPISODE_LEN = 300
-_EVAL_FREQ = 256
-_BUDGET = 1024
-
-
-def _tiny_paddle_config(algo: str, log_dir: Path) -> TrainConfig:
-    """A PaddleTennis-shaped run: the recipe's paired selection evaluation
-    (alternating serves, confirm_best, its keys and instruments) on
-    300-step episodes, 2 evaluation episodes, 4 evaluations, small nets.
-
-    The deltas are 0 so the reward tie-break decides between the
-    untrained policies (their headline reads 0) and confirmations roll;
-    the degenerate stop is off so all four evaluations run.
-    """
-    short = {"episode_len": _EPISODE_LEN}
-    recipe_kwargs = build_train_config(
-        "PaddleTennis", algo=algo, log_dir=str(log_dir), seed=0
-    ).model_kwargs
-    if algo == "SAC":
-        model_kwargs = {
-            **recipe_kwargs,
-            "buffer_size": 5_000,
-            "learning_starts": 64,
-            "batch_size": 64,
-            "train_freq": (16, "step"),
-            "policy_kwargs": {"net_arch": [32, 32]},
-        }
-        extra: dict[str, Any] = {}
-    else:
-        model_kwargs = {
-            **recipe_kwargs,
-            "n_steps": 64,
-            "batch_size": 64,
-            "n_epochs": 4,
-            "learning_rate": 3e-3,
-            "policy_kwargs": {**recipe_kwargs["policy_kwargs"], "net_arch": [32, 32]},
-        }
-        extra = {"min_policy_updates_before_stop": 0}
-    return build_train_config(
-        "PaddleTennis",
-        algo=algo,
-        log_dir=str(log_dir),
-        seed=0,
-        n_envs=2,
-        total_timesteps=_BUDGET,
-        eval_freq=_EVAL_FREQ,
-        checkpoint_freq=512,
-        n_eval_episodes=2,
-        reward_eval_episodes=1,
-        best_metric_min_delta=0.0,
-        early_stop_degenerate_evals=0,
-        checkpoint_diagnosis=None,
-        video_freq=0,
-        record_video=False,
-        env_fn=make_env_fn("PaddleTennis", env_overrides=short),
-        eval_env_fn=make_eval_env_fn("PaddleTennis", env_overrides=short),
-        model_kwargs=model_kwargs,
-        **extra,
-    )
+#: The tiny runs' episode length and evaluation cadence (tests/_helpers.py).
+_EPISODE_LEN = TINY_EPISODE_LEN
+_EVAL_FREQ = TINY_EVAL_FREQ
+_BUDGET = TINY_BUDGET
 
 
 @pytest.fixture(scope="module")
@@ -161,7 +111,7 @@ def test_harness_equals_every_in_loop_evaluation_bit_for_bit(tiny_runs, algo):
     assert protocol.paired and protocol.confirm and protocol.n_episodes == 2
     # The run's own protocol is the recipe's, at this run's episode
     # length and episode count.
-    recipe_protocol = get_protocol("paddle-npoint@v2").derive(
+    recipe_protocol = get_protocol("paddle-npoint@v3").derive(
         "tiny@v1", env_overrides={"episode_len": _EPISODE_LEN}, n_episodes=2,
         min_deltas=(0.0, 0.0, 0.0),
     )
@@ -343,6 +293,60 @@ def test_rescore_reads_the_august_runs_legacy_layout(tmp_path, tiny_runs):
     ]
 
 
+def test_rescore_scores_only_the_steps_asked_for(tmp_path, tiny_runs, capsys):
+    """``steps`` (the notebook's QUICK, the CLI's --steps) keeps the
+    snapshots and checkpoints at those steps, besides the best model,
+    and refuses a step the run does not have."""
+    from courtside_dynamics.experiments.rescore import main
+
+    run_dir = tmp_path / "run"
+    shutil.copytree(tiny_runs["SAC"], run_dir)
+    shutil.rmtree(run_dir / "scores", ignore_errors=True)
+    assert harness.series_steps(run_dir, "snapshots") == [256, 512, 768, 1024]
+    assert harness.series_steps(run_dir, "checkpoints") == [512, 1024]
+    assert harness.series_steps(tmp_path, "checkpoints") == []
+    with pytest.raises(ValueError, match="'snapshots' or 'checkpoints'"):
+        harness.series_steps(run_dir, "best")
+    best_step = json.loads((run_dir / "model" / "best_model_meta.json").read_text())[
+        "timestep"
+    ]
+    artifacts, problems = harness.run_artifacts(
+        run_dir, ("best", "snapshots"), steps=[512, 1024]
+    )
+    assert problems == []
+    assert [(a.kind, a.step) for a in artifacts] == [
+        ("best", best_step),
+        ("snapshot", 512),
+        ("snapshot", 1024),
+    ]
+    protocol = _legacy_protocol()
+    [path] = harness.rescore(
+        [run_dir], protocol, which=("best", "checkpoints"), steps=(1024,),
+        blocks=("standard",), out_dir=tmp_path / "out",
+    )
+    assert [(r["artifact"], r["step"]) for r in harness.read_scores(path)] == [
+        ("best", best_step),
+        ("checkpoint", 1024),
+    ]
+    with pytest.raises(ValueError, match=r"no checkpoints artifact at step\(s\) \[300\]"):
+        harness.rescore(
+            [run_dir], protocol, which=("checkpoints",), steps=(1024, 300),
+            out_dir=tmp_path / "refused",
+        )
+    assert not (tmp_path / "refused").exists()
+    with pytest.raises(ValueError, match="steps select snapshots or checkpoints"):
+        harness.run_artifacts(run_dir, ("best",), steps=(512,))
+    assert main(
+        ["--protocol", INLOOP, "--which", "snapshots", "--steps", "256,1024", str(run_dir)]
+    ) == 0
+    capsys.readouterr()
+    rows = harness.read_scores(run_dir / "scores" / "inloop.jsonl")
+    assert [r["step"] for r in rows] == [256, 1024]
+    with pytest.raises(SystemExit):
+        main(["--protocol", INLOOP, "--steps", "x", str(run_dir)])
+    assert "--steps takes" in capsys.readouterr().err
+
+
 def test_rescore_refuses_before_scoring_anything(tmp_path, tiny_runs):
     run_dir = _legacy_run(tmp_path, tiny_runs["SAC"])
     protocol = _legacy_protocol()
@@ -413,32 +417,259 @@ def test_rescore_cli(tiny_runs, capsys, tmp_path):
 # -- protocols ------------------------------------------------------------------
 
 
-def test_paddle_npoint_v2_is_todays_in_loop_selection_evaluation():
+def test_paddle_npoint_v3_is_todays_in_loop_selection_evaluation():
     """The literal protocol equals what train() wires for the recipe."""
     from courtside_dynamics.callbacks.info_dict_eval import CONFIRMATION_SEED_OFFSET
     from courtside_dynamics.training.train import EVAL_SEED_OFFSET
 
-    v2 = get_protocol("paddle-npoint@v2")
+    v3 = get_protocol("paddle-npoint@v3")
+    assert RECIPE_PROTOCOLS["PaddleTennis"] == "paddle-npoint@v3"
     for algo in ("SAC", "PPO"):
         cfg = build_train_config("PaddleTennis", algo=algo, log_dir="x", seed=0)
         derived = from_train_config(cfg, id="derived")
-        assert derived.fingerprint == v2.fingerprint, algo
-    assert v2.n_episodes == 30 and v2.paired and v2.confirm
-    assert v2.seed_start is None  # the run's own block
-    assert v2.confirm_seed_offset == CONFIRMATION_SEED_OFFSET
-    assert v2.run_seed_offset == EVAL_SEED_OFFSET
-    assert [dict(option) for option in v2.reset_options or ()] == [
+        assert derived.fingerprint == v3.fingerprint, algo
+    assert v3.n_episodes == 30 and v3.paired and v3.confirm
+    assert v3.seed_start is None  # the run's own block
+    assert v3.confirm_seed_offset == CONFIRMATION_SEED_OFFSET
+    assert v3.run_seed_offset == EVAL_SEED_OFFSET
+    assert [dict(option) for option in v3.reset_options or ()] == [
         {"serve_side": "a"},
         {"serve_side": "b"},
     ]
-    assert v2.selection_rule().min_deltas == (1 / 60, 1 / 60, 0.25)
-    assert v2.env_kwargs["drill_fraction"] == 0.0
-    assert v2.device == "cpu"
+    assert v3.selection_rule().min_deltas == (1 / 60, 1 / 60, 0.25)
+    assert v3.env_kwargs["drill_fraction"] == 0.0
+    assert v3.device == "cpu"
+    # Training keeps the aids; only the evaluation env strips them.
+    recipe = RECIPES["PaddleTennis"]
+    assert recipe.env_kwargs["contact_shaping"] == 0.25
+    assert recipe.env_kwargs["reach_shaping"] == 0.25
+    for name in ("contact_shaping", "reach_shaping", "hold_shaping"):
+        assert recipe.eval_env_overrides[name] == 0.0
+
+
+#: The two eras' fingerprints, pinned: @v2 is unchanged by L3 (its
+#: value before @v3 existed), and either changing is a new version.
+_V2_FINGERPRINT = "30526bfdad6dd23dbc5c8dc5bac884064baefb4a2cc95a450a708c1a6b018a66"
+_V3_FINGERPRINT = "863bb3843aa9ec0fbd6e5ca2f8f2d16a6faaba70e4a522c5b4f165cbbb766efa"
+
+#: The escrow channels @v3 zeroes (rew_* info keys).
+_SHAPING_CHANNELS = (
+    "rew_shaping",
+    "rew_shaping_clawback",
+    "rew_reach",
+    "rew_reach_clawback",
+    "rew_hold",
+    "rew_hold_clawback",
+)
+
+
+def test_paddle_npoint_v3_is_v2_without_the_training_aids():
+    v2 = get_protocol("paddle-npoint@v2")
+    v3 = get_protocol("paddle-npoint@v3")
+    assert (v2.fingerprint, v3.fingerprint) == (_V2_FINGERPRINT, _V3_FINGERPRINT)
+    assert {"paddle-npoint@v2", "paddle-npoint@v3"} <= set(registered_protocols())
+    # Every field but the env's kwargs is @v2's ...
+    content_v2, content_v3 = v2.canonical(), v3.canonical()
+    assert content_v2.pop("env_kwargs") != content_v3.pop("env_kwargs")
+    assert content_v2 == content_v3
+    # ... and the kwargs differ exactly in the shaping scales @v2 had on.
+    changed = {
+        key: (v2.env_kwargs[key], v3.env_kwargs[key])
+        for key in v2.env_kwargs
+        if v2.env_kwargs[key] != v3.env_kwargs[key]
+    }
+    assert changed == {"contact_shaping": (0.25, 0.0), "reach_shaping": (0.25, 0.0)}
+    assert set(v2.env_kwargs) == set(v3.env_kwargs)
+    assert v3.env_kwargs["hold_shaping"] == 0.0 == v2.env_kwargs["hold_shaping"]
+    assert dict(protocols.PADDLE_TRAINING_AIDS_OFF) == {
+        "contact_shaping": 0.0,
+        "reach_shaping": 0.0,
+        "hold_shaping": 0.0,
+    }
+    restored = v3.derive(
+        "restored@v1", env_overrides={"contact_shaping": 0.25, "reach_shaping": 0.25}
+    )
+    assert restored.fingerprint == v2.fingerprint
+
+
+def test_eval_protocol_record_names_the_registered_protocol_or_none():
+    from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
+
+    cfg = build_train_config("PaddleTennis", log_dir="x", seed=0)
+    assert protocols.eval_protocol_record(cfg) == {
+        "id": "paddle-npoint@v3",
+        "fingerprint": _V3_FINGERPRINT,
+    }
+    # An env whose constructor kwargs cannot be read: no record, said so.
+    with pytest.warns(UserWarning, match="no evaluation protocol recorded"):
+        assert (
+            protocols.eval_protocol_record(cfg, env_cls=PaddleTennisEnv, env_kwargs=None)
+            is None
+        )
+    with pytest.raises(ValueError, match="pass its env_cls"):
+        from_train_config(cfg, id="x", env_kwargs={"episode_len": 1500})
+    cfg.info_dict_eval = False
+    assert protocols.eval_protocol_record(cfg) is None
+
+
+def _same_value(left: Any, right: Any) -> bool:
+    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+        return bool(np.array_equal(left, right))
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            _same_value(left[key], right[key]) for key in left
+        )
+    return bool(left == right)
+
+
+@pytest.mark.parametrize(("policy", "seed", "side"), [
+    ("oracle", 5500, "a"), ("oracle", 5501, "b"), ("random", 5502, "a"),
+])
+def test_paddle_tennis_observations_carry_no_escrow_state(policy, seed, side):
+    """@v3's premise. The observation is physical state, the rules'
+    snapshot, the clock and the contact latches: no escrow balance, no
+    hold window. So with the escrows on (@v2's eval env) and off
+    (@v3's), the same seeds and actions give bit-identical observations,
+    endings and non-reward info at every step while an escrow is
+    pending, and the reward differs by exactly the escrow channels."""
+    from courtside_dynamics.digests import scripted_policy
+    from courtside_dynamics.training.artifacts import env_observation_names
+
+    v2 = get_protocol("paddle-npoint@v2")
+    v3 = get_protocol("paddle-npoint@v3")
+    shaped, bare = v2.make_env(), v3.make_env()
+    names = env_observation_names(shaped)
+    assert names == env_observation_names(bare)
+    assert names is not None and len(names) == shaped.observation_space.shape[0]
+    for fragment in ("shaping", "escrow", "reach", "hold", "clawback", "rew"):
+        assert not any(fragment in name for name in names), fragment
+    act_shaped = scripted_policy(policy, shaped, seed)
+    act_bare = scripted_policy(policy, bare, seed)
+    options = {"serve_side": side}
+    obs_shaped, _ = shaped.reset(seed=seed, options=options)
+    obs_bare, _ = bare.reset(seed=seed, options=options)
+    paid = pending_steps = 0.0
+    for _ in range(v3.env_kwargs["episode_len"]):
+        assert obs_shaped.tobytes() == obs_bare.tobytes()
+        action = np.asarray(act_shaped(obs_shaped))
+        assert np.array_equal(action, np.asarray(act_bare(obs_bare)))
+        obs_shaped, reward_shaped, term_shaped, trunc_shaped, info_shaped = shaped.step(action)
+        obs_bare, reward_bare, term_bare, trunc_bare, info_bare = bare.step(action)
+        assert (term_shaped, trunc_shaped) == (term_bare, trunc_bare)
+        escrow = sum(info_shaped[key] for key in _SHAPING_CHANNELS)
+        assert all(info_bare[key] == 0.0 for key in _SHAPING_CHANNELS)
+        assert reward_shaped - reward_bare == pytest.approx(escrow, abs=1e-12)
+        assert info_bare.keys() == info_shaped.keys()
+        for key in info_shaped:
+            if key not in _SHAPING_CHANNELS:
+                assert _same_value(info_shaped[key], info_bare[key]), key
+        paid += abs(escrow)
+        pending_steps += shaped._pending_shaping > 0 or shaped._pending_reach > 0
+        if term_shaped or trunc_shaped:
+            break
+    assert obs_shaped.tobytes() == obs_bare.tobytes()
+    if policy == "oracle":
+        # Not vacuous: the oracle collects shaping and holds an escrow
+        # balance the observation never shows.
+        assert paid > 0.5 and pending_steps > 50
+
+
+#: The metrics the escrow channels feed: everything else must agree.
+def _reward_metrics(metrics: dict[str, float]) -> set[str]:
+    return {"episode_reward_mean"} | {
+        key for key in metrics if key.startswith(("rew_shaping", "rew_reach", "rew_hold"))
+    }
+
+
+def _assert_v2_v3_agree(v2_metrics: dict[str, float], v3_metrics: dict[str, float]) -> float:
+    """Every non-reward metric equal bit for bit; the reward apart by the
+    escrows. Returns the escrow the batch collected under @v2."""
+    assert v2_metrics.keys() == v3_metrics.keys()
+    reward_keys = _reward_metrics(v2_metrics)
+    for key in v2_metrics.keys() - reward_keys:
+        assert v2_metrics[key] == v3_metrics[key], key
+    for key in RECIPE_SELECTION_KEYS[:2]:
+        assert v2_metrics[key] == v3_metrics[key], key
+    escrow = sum(
+        v2_metrics.get(f"{channel}_ep_sum_mean", 0.0) for channel in _SHAPING_CHANNELS
+    )
+    for channel in _SHAPING_CHANNELS:
+        assert v3_metrics.get(f"{channel}_ep_sum_mean", 0.0) == 0.0
+    # The VecEnv stores each step's reward as float32, so the @v2 sum
+    # carries that rounding; the task reward itself is identical.
+    assert v2_metrics["episode_reward_mean"] - v3_metrics[
+        "episode_reward_mean"
+    ] == pytest.approx(escrow, abs=1e-5)
+    for channel in ("rew_return", "rew_fault", "rew_unsafe"):
+        key = f"{channel}_ep_sum_mean"
+        assert v2_metrics[key] == v3_metrics[key], key
+    return escrow
+
+
+#: The PaddleTennis selection keys, in order (headline, success, reward).
+RECIPE_SELECTION_KEYS = (
+    "episode_rally_returns_a_ep_mean",
+    "success_rate",
+    "episode_reward_mean",
+)
+
+
+def test_v2_and_v3_differ_only_in_the_shaping_reward(tiny_runs, tmp_path):
+    """Design L3's gate: for the same policy, the k>=2 headline and the
+    other non-reward selection key (indeed every non-reward metric) are
+    identical under @v2 and @v3, on both blocks, while
+    episode_reward_mean differs exactly by the shaping collected. The
+    scripted oracle (which converts k>=2 and collects shaping) on full
+    1,500-step episodes, and the tiny trained run's snapshots and best
+    model on the 300-step episodes it trained on. Two episodes a block."""
+    from courtside_dynamics.experiments.probe import score_scripted
+
+    v2 = get_protocol("paddle-npoint@v2").derive("v2-gate@v1", n_episodes=2)
+    v3 = get_protocol("paddle-npoint@v3").derive("v3-gate@v1", n_episodes=2)
+    assert v2.selection_rule() == v3.selection_rule()
+    assert v3.selection_rule().keys == RECIPE_SELECTION_KEYS
+    for block in harness.BLOCKS:
+        oracle_v2 = score_scripted("oracle", v2, seed_start=5500, block=block)
+        oracle_v3 = score_scripted("oracle", v3, seed_start=5500, block=block)
+        escrow = _assert_v2_v3_agree(oracle_v2, oracle_v3)
+        # The oracle converts k>=2 and its @v2 tie-break carried shaping.
+        assert oracle_v2["episode_rally_returns_a_ep_mean"] > 0.0
+        assert escrow > 1.0
+    run_dir = tiny_runs["SAC"]
+    rows: dict[str, list[dict[str, Any]]] = {}
+    short = {"episode_len": _EPISODE_LEN}
+    for protocol in (
+        v2.derive("v2-gate-short@v1", env_overrides=short),
+        v3.derive("v3-gate-short@v1", env_overrides=short),
+    ):
+        [path] = harness.rescore(
+            [run_dir], protocol, which=("best", "snapshots"), out_dir=tmp_path / protocol.id
+        )
+        rows[protocol.id] = harness.read_scores(path)
+    rows_v2, rows_v3 = rows["v2-gate-short@v1"], rows["v3-gate-short@v1"]
+    assert [(r["artifact"], r["step"]) for r in rows_v2] == [
+        (r["artifact"], r["step"]) for r in rows_v3
+    ]
+    assert len(rows_v2) == 5  # the best model and four snapshots
+    for row_v2, row_v3 in zip(rows_v2, rows_v3, strict=True):
+        assert row_v2["seed_start"] == row_v3["seed_start"] == 1_000_000
+        _assert_v2_v3_agree(row_v2["metrics"], row_v3["metrics"])
+        _assert_v2_v3_agree(row_v2["confirm_metrics"], row_v3["confirm_metrics"])
+    # The rule's first two keys never move, so select() can differ only
+    # through the reward tie-break: the era boundary, and nothing else.
+    snapshots_v2 = [r for r in rows_v2 if r["artifact"] == "snapshot"]
+    snapshots_v3 = [r for r in rows_v3 if r["artifact"] == "snapshot"]
+    for chosen in (select(snapshots_v2, v2), select(snapshots_v3, v3)):
+        assert chosen.step in {r["step"] for r in snapshots_v2}
 
 
 def test_every_registered_protocol_is_its_recipes_in_loop_evaluation():
     assert set(RECIPE_PROTOCOLS) == set(RECIPES)
-    assert set(registered_protocols()) == set(RECIPE_PROTOCOLS.values())
+    # Every recipe's in-loop protocol, plus the earlier PaddleTennis era.
+    assert set(registered_protocols()) == {
+        *RECIPE_PROTOCOLS.values(),
+        "paddle-npoint@v2",
+    }
     for recipe, protocol_id in RECIPE_PROTOCOLS.items():
         assert protocols.PROTOCOL_ID.match(protocol_id), protocol_id
         protocol = get_protocol(protocol_id)
@@ -788,7 +1019,7 @@ def test_probe_scores_a_snapshot_like_the_harness(tiny_runs, capsys):
         main(
             [
                 "--recipe", "PaddleTennis", "--policy", str(model),
-                "--normalizer", str(normalizer), "--protocol", "paddle-npoint@v2",
+                "--normalizer", str(normalizer), "--protocol", "paddle-npoint@v3",
                 "--env", f"episode_len={_EPISODE_LEN}", "--episodes", "2", "--json",
             ]
         )

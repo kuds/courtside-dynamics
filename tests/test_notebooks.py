@@ -1264,7 +1264,9 @@ def test_every_notebook_installs_a_pinned_immutable_ref() -> None:
     Each notebook installs the package from ``REPO_REF``, which must be a
     full commit SHA or a dated tag. Every install line goes through it.
     """
-    for path in (SB3_NOTEBOOK, CAMPAIGN_NOTEBOOK, HUMANOID_NOTEBOOK):
+    for path in (
+        SB3_NOTEBOOK, CAMPAIGN_NOTEBOOK, HUMANOID_NOTEBOOK, RESCORE_NOTEBOOK
+    ):
         notebook = json.loads(path.read_text())
         install_cells = [
             _source(cell)
@@ -1380,3 +1382,311 @@ def test_campaign_local_then_sync_is_operational_not_fingerprinted(
     # Everything after train() keeps reading the Drive attempt dir.
     assert 'locate_artifact(stage_dir, "config")' in run_leg
     assert "stage_summary_status(stage_dir)" in run_leg
+
+
+# -- Rescore notebook (design L3) ---------------------------------------------
+
+RESCORE_NOTEBOOK = REPOSITORY_ROOT / "notebooks" / "rescore_runs.ipynb"
+_FIXTURE_RUNS = (
+    REPOSITORY_ROOT / "tests" / "fixtures" / "run_index" / "training_runs"
+    / "PaddleTennis" / "sac"
+)
+#: The notebook's code cells in execution order, the install cell aside.
+_RESCORE_CELLS = (
+    "rs-settings",
+    "rs-protocol",
+    "rs-paths",
+    "rs-index",
+    "rs-pick",
+    "rs-rescore",
+    "rs-read",
+    "rs-plot",
+    "rs-verdict",
+)
+
+
+def _rescore_cells() -> dict[str, str]:
+    notebook = json.loads(RESCORE_NOTEBOOK.read_text())
+    return {
+        cell["id"]: _source(cell)
+        for cell in notebook["cells"]
+        if cell["cell_type"] == "code"
+    }
+
+
+def test_rescore_notebook_is_clean_and_code_cells_compile() -> None:
+    notebook = json.loads(RESCORE_NOTEBOOK.read_text())
+    assert notebook["nbformat"] == 4
+    assert notebook["nbformat_minor"] == 5
+    cells = notebook["cells"]
+    cell_ids = [cell["id"] for cell in cells]
+    assert len(cell_ids) == len(set(cell_ids))
+    code_ids = [cell["id"] for cell in cells if cell["cell_type"] == "code"]
+    assert code_ids == ["rs-install", *_RESCORE_CELLS]
+    for cell in cells:
+        if cell["cell_type"] != "code":
+            continue
+        assert cell["execution_count"] is None
+        assert cell["outputs"] == []
+        source = _source(cell)
+        if any(
+            line.lstrip().startswith(("!", "%"))
+            for line in source.splitlines()
+        ):
+            continue
+        compile(source, f"{RESCORE_NOTEBOOK}:{cell['id']}", "exec")
+
+
+def test_rescore_notebook_defaults_score_the_august_runs_beside_their_folder() -> None:
+    """The defaults are design L3's re-score (the August runs and the
+    registered run under @v3, every checkpoint, on CPU), and the scores
+    folder is built beside training_runs/, refused inside it."""
+    cells = _rescore_cells()
+    settings = cells["rs-settings"]
+    for line in (
+        'PROTOCOL_ID = "paddle-npoint@v3"',
+        "RUN_IDS = None",
+        'REGISTERED_RUN = "20260816_235141"',
+        'SERIES = "checkpoints"',
+        "QUICK = False",
+        "QUICK_CHECKPOINTS = 3",
+        "FORCE = False",
+        "USE_DRIVE = True",
+    ):
+        assert f"\n{line}\n" in f"\n{settings}\n", line
+    paths = cells["rs-paths"]
+    assert 'OUT_ROOT = PROJECT_ROOT / "rescores" / RUNS_SUBDIR' in paths
+    assert "OUT_ROOT.resolve().is_relative_to(TRAINING_RUNS.resolve())" in paths
+    rescore = cells["rs-rescore"]
+    assert "out_dir=out_dir" in rescore and 'device="cpu"' in rescore
+    assert "OUT_ROOT / 'index' / 'runs.jsonl'" in cells["rs-index"]
+
+
+def _august_layout_run(source: Path, run_dir: Path) -> list[int]:
+    """A run directory in the August layout holding a tiny trained run's
+    policies: the n-point pilot's ``config.json``, summary and run
+    config byte for byte (SAC, seed 0, normalized, evaluated unpaired),
+    its best pair replaced by the tiny run's and rebound by sha256 in
+    the meta, and the tiny run's evaluation snapshots renamed to the
+    August checkpoint names (``paddle_tennis_sac_<N>_steps.zip`` with
+    ``paddle_tennis_sac_vecnormalize_<N>_steps.pkl``)."""
+    import shutil
+
+    from courtside_dynamics.experiments.records import sha256_file
+    from courtside_dynamics.experiments.snapshots import read_snapshot_index
+
+    shutil.copytree(_FIXTURE_RUNS / "20260810_211754", run_dir)
+    for name in (
+        "best_model.zip",
+        "best_vec_normalize.pkl",
+        "final_model.zip",
+        "vec_normalize.pkl",
+    ):
+        shutil.copyfile(source / "model" / name, run_dir / "model" / name)
+    shutil.rmtree(run_dir / "checkpoints")
+    (run_dir / "checkpoints").mkdir()
+    steps = []
+    for entry in read_snapshot_index(source / "snapshots").entries:
+        assert entry.normalizer is not None
+        shutil.copyfile(
+            source / "snapshots" / entry.model,
+            run_dir / "checkpoints" / f"paddle_tennis_sac_{entry.timestep}_steps.zip",
+        )
+        shutil.copyfile(
+            source / "snapshots" / entry.normalizer,
+            run_dir
+            / "checkpoints"
+            / f"paddle_tennis_sac_vecnormalize_{entry.timestep}_steps.pkl",
+        )
+        steps.append(entry.timestep)
+    meta_path = run_dir / "model" / "best_model_meta.json"
+    meta = json.loads(meta_path.read_text())
+    tiny_meta = json.loads((source / "model" / "best_model_meta.json").read_text())
+    meta["timestep"] = tiny_meta["timestep"]
+    meta["artifacts"] = {
+        name: {"sha256": sha256_file(run_dir / "model" / name)}
+        for name in ("best_model.zip", "best_vec_normalize.pkl")
+    }
+    meta_path.write_text(json.dumps(meta, indent=2))
+    return steps
+
+
+def _tree_digest(root: Path) -> dict[str, str]:
+    from courtside_dynamics.experiments.records import sha256_file
+
+    return {
+        path.relative_to(root).as_posix(): sha256_file(path)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _exec_rescore_notebook(
+    namespace: dict[str, Any],
+    cells: tuple[str, ...] = _RESCORE_CELLS,
+    settings: tuple[tuple[str, str], ...] = (),
+) -> dict[str, Any]:
+    """Run the notebook's cells in ``namespace``: Drive off, and the
+    protocol cell's protocol shortened to 2 episodes of 150 steps (a
+    protocol derived from the registered one, all else equal)."""
+    sources = _rescore_cells()
+    for cell_id in cells:
+        source = sources[cell_id]
+        if cell_id == "rs-settings":
+            source = f"\n{source}\n".replace("\nUSE_DRIVE = True\n", "\nUSE_DRIVE = False\n")
+            for old, new in settings:
+                assert source.count(f"\n{old}\n") == 1, old
+                source = source.replace(f"\n{old}\n", f"\n{new}\n")
+        if cell_id == "rs-protocol":
+            line = "PROTOCOL = get_protocol(PROTOCOL_ID)\n"
+            assert source.count(line) == 1
+            source = source.replace(
+                line,
+                "PROTOCOL = get_protocol(PROTOCOL_ID).derive("
+                '"paddle-npoint-short@v3", env_overrides={"episode_len": 150}, '
+                "n_episodes=2)\n",
+            )
+        exec(compile(source, f"{RESCORE_NOTEBOOK}:{cell_id}", "exec"), namespace)
+    return namespace
+
+
+def test_rescore_notebook_scores_august_layout_runs_outside_their_folders(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """The notebook's whole code path, locally: a runs folder holding the
+    phase-3 index fixture's PaddleTennis runs (placeholder model files,
+    and a stub), a run in the August layout carrying a tiny trained
+    run's policies under the registered run's id, and the tiny run
+    itself (a run record, snapshots). The defaults pick the 2026-08
+    runs, score the registered one, report the placeholders as refused,
+    and write nothing inside the runs folder; re-running resumes; QUICK
+    and an explicit snapshot series score into their own folders."""
+    import shutil
+
+    import matplotlib
+    import pytest
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from courtside_dynamics.experiments.harness import read_scores
+    from courtside_dynamics.experiments.protocols import get_protocol
+    from courtside_dynamics.training.train import train
+    from tests._helpers import tiny_paddle_config
+
+    # Trained under a run id, so its record names the directory it is
+    # copied to.
+    tiny = tmp_path / "trained" / "20261017_101500"
+    train(tiny_paddle_config("SAC", tiny))
+    runs = tmp_path / "logs" / "PaddleTennis" / "sac"
+    for name in ("20260810_211754", "20260815_180815", "20260828_114038"):
+        shutil.copytree(_FIXTURE_RUNS / name, runs / name)
+    registered = "20260816_235141"
+    steps = _august_layout_run(tiny, runs / registered)
+    assert steps == [256, 512, 768, 1024]
+    shutil.copytree(tiny, runs / "20261017_101500")
+    before = _tree_digest(runs)
+    monkeypatch.chdir(tmp_path)
+
+    ns = _exec_rescore_notebook({})
+    out = capsys.readouterr().out
+    protocol = ns["PROTOCOL"]
+    assert protocol.fingerprint == get_protocol("paddle-npoint@v3").derive(
+        "x@v1", env_overrides={"episode_len": 150}, n_episodes=2
+    ).fingerprint
+    assert ns["PICKED"] == ["20260810_211754", "20260815_180815", registered]
+    assert list(ns["SCORED"]) == [registered]
+    assert sorted(ns["REFUSED"]) == ["20260810_211754", "20260815_180815"]
+    assert "sha256 differs" in ns["REFUSED"]["20260810_211754"]
+    assert "has no normalizer" in ns["REFUSED"]["20260815_180815"]
+    assert "REFUSED" in out
+    out_root = Path("rescores/PaddleTennis/sac/paddle-npoint-short@v3")
+    assert ns["OUT_ROOT"] == out_root
+    scores = out_root / registered / "scores" / "paddle-npoint-short@v3.jsonl"
+    rows = read_scores(scores)
+    best_step = json.loads(
+        (runs / registered / "model" / "best_model_meta.json").read_text()
+    )["timestep"]
+    assert [(row["artifact"], row["step"]) for row in rows] == [
+        ("best", best_step),
+        *(("checkpoint", step) for step in steps),
+    ]
+    for row in rows:
+        assert row["protocol_fingerprint"] == protocol.fingerprint
+        assert row["device"] == "cpu" and row["algo"] == "SAC"
+        # The August seeds: unpaired runs, seed 0, block seed + 1,000,000.
+        assert (row["seed_start"], row["seed_source"]) == (1_000_000, "run_seed_offset")
+        assert row["confirm_metrics"] is not None
+    # Nothing was written inside the runs folder.
+    assert _tree_digest(runs) == before
+    index = [
+        json.loads(line)
+        for line in (out_root / "index" / "runs.jsonl").read_text().splitlines()
+    ]
+    assert {row["run_id"] for row in index} == {
+        "20260810_211754",
+        "20260815_180815",
+        "20260828_114038",
+        registered,
+        "20261017_101500",
+    }
+    assert (out_root / "curves.png").stat().st_size > 0
+    verdicts = json.loads((out_root / "verdicts.json").read_text())
+    assert verdicts["protocol_fingerprint"] == protocol.fingerprint
+    assert sorted(verdicts["refused"]) == sorted(ns["REFUSED"])
+    verdict = verdicts["runs"][registered]
+    assert verdict["scored"] == 4 and verdict["series"] == "checkpoints"
+    assert verdict["select"]["step"] in steps
+    assert verdict["select"]["accepted_steps"][-1] == verdict["select"]["step"]
+    assert verdict["best_model"]["step"] == best_step
+    assert set(verdict["select"]["metrics"]) == set(protocol.selection_keys)
+    assert f"{registered}: select() over 4 checkpoints picks step" in out
+
+    # Re-running resumes: the scored run is not scored again.
+    written = scores.read_bytes()
+    _exec_rescore_notebook(ns, cells=("rs-rescore",))
+    assert f"{registered}: already scored" in capsys.readouterr().out
+    assert scores.read_bytes() == written
+
+    # QUICK: the best model and 3 checkpoints, first to last, elsewhere.
+    quick = _exec_rescore_notebook(
+        {}, settings=(("QUICK = False", "QUICK = True"),)
+    )
+    quick_rows = read_scores(
+        Path(f"{out_root}-quick") / registered / "scores" / "paddle-npoint-short@v3.jsonl"
+    )
+    assert [(row["artifact"], row["step"]) for row in quick_rows] == [
+        ("best", best_step),
+        ("checkpoint", 256),
+        ("checkpoint", 768),
+        ("checkpoint", 1024),
+    ]
+    assert quick["OUT_ROOT"] == Path(f"{out_root}-quick")
+    capsys.readouterr()
+
+    # An explicit run list: the tiny run's own snapshots (a run record).
+    explicit = _exec_rescore_notebook(
+        {},
+        settings=(
+            ("RUN_IDS = None", 'RUN_IDS = ["20261017_101500"]'),
+            ('SERIES = "checkpoints"', 'SERIES = "snapshots"'),
+        ),
+    )
+    assert list(explicit["SCORED"]) == ["20261017_101500"]
+    snapshot_rows = read_scores(explicit["SCORED"]["20261017_101500"])
+    assert [row["artifact"] for row in snapshot_rows] == ["best", *["snapshot"] * 4]
+    assert _tree_digest(runs) == before
+    plt.close("all")
+
+    # Refusals before any scoring: an unknown protocol, a missing run.
+    with pytest.raises(ValueError, match="bump REPO_REF"):
+        _exec_rescore_notebook(
+            {},
+            cells=("rs-settings", "rs-protocol"),
+            settings=(
+                ('PROTOCOL_ID = "paddle-npoint@v3"', 'PROTOCOL_ID = "paddle-npoint@v9"'),
+            ),
+        )
+    shutil.rmtree(runs / registered)
+    with pytest.raises(ValueError, match="registered run 20260816_235141"):
+        _exec_rescore_notebook({}, cells=_RESCORE_CELLS[:5])

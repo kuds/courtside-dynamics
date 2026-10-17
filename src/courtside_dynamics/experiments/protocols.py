@@ -19,13 +19,23 @@ row names the content it was scored under, not only an id.
 Registered protocols (:func:`get_protocol`):
 
 ``paddle-npoint@v2``
-    Exactly today's PaddleTennis in-loop selection evaluation (the
-    2026-10-05 instruments): 30 paired episodes on the run's own seed
-    block with alternating serves, the recipe's evaluation env (drill
-    off), the k>=2 headline, ``success_rate`` and reward with per-key
-    deltas, and a confirmation block 100,000 seeds on. It is declared
-    here literally, so it outlives a change to the recipe (L3's @v3);
-    a test pins that the recipe's in-loop evaluation still equals it.
+    The PaddleTennis in-loop selection evaluation of the 2026-10-05
+    instruments: 30 paired episodes on the run's own seed block with
+    alternating serves, the recipe's evaluation env as it was through
+    2026-10-17 (drill off, the contact and reach escrows on), the k>=2
+    headline, ``success_rate`` and reward with per-key deltas, and a
+    confirmation block 100,000 seeds on. Declared literally, so it
+    outlived the recipe's move to @v3 and stays scorable.
+``paddle-npoint@v3``
+    @v2 with the evaluation env's training aids stripped (design L3):
+    ``contact_shaping``, ``reach_shaping`` and ``hold_shaping`` are 0,
+    so ``episode_reward_mean``, the last selection tie-break, is task
+    reward only. Nothing else moves: PaddleTennis observations hold no
+    escrow state, so a policy sees the same observations and acts the
+    same under both, and every non-reward metric (the k>=2 headline,
+    ``success_rate``) is identical. The PaddleTennis recipe's in-loop
+    selection evaluation since 2026-10-17; a test pins that the recipe
+    still equals it.
 ``<recipe>-inloop@v1``
     One per other recipe: its in-loop info-dict evaluator as
     ``train()`` wires it today (``RECIPE_PROTOCOLS``), so the harness is
@@ -51,6 +61,11 @@ and the same feed for every artifact, but it reproduces only the
 across evaluations (which is why pairing exists). A performance gate
 rescales its matched evaluator per stage; a protocol scores the
 evaluation env as constructed.
+
+**What a run records.** ``config.json``'s ``comparability_key`` and the
+run record's ``task`` carry ``eval_protocol`` (:func:`eval_protocol_record`):
+the in-loop selection protocol's fingerprint and, when it is a
+registered protocol of the run's recipe, its id.
 
 Building a protocol imports MuJoCo (the env classes), never
 Stable-Baselines3 or torch; :func:`from_train_config` and the derived
@@ -592,23 +607,36 @@ _INLOOP_FIELDS = (
 )
 
 
-def from_train_config(cfg: Any, *, id: str, description: str = "") -> EvalProtocol:
+def from_train_config(
+    cfg: Any,
+    *,
+    id: str,
+    description: str = "",
+    env_cls: type | None = None,
+    env_kwargs: Mapping[str, Any] | None = None,
+) -> EvalProtocol:
     """The in-loop selection protocol ``train(cfg)`` would evaluate under.
 
     Builds one evaluation env (``cfg.eval_env_fn``, else ``cfg.env_fn``)
     to read its class and resolved constructor kwargs, as
-    ``config.json`` records them. Pairing follows
-    ``train.resolve_eval_seed``. The seed block stays the run's own.
+    ``config.json`` records them; a caller that already built one
+    (``write_run_config``) passes its ``env_cls`` and ``env_kwargs``
+    instead. Pairing follows ``train.resolve_eval_seed``. The seed
+    block stays the run's own.
     """
     from courtside_dynamics.training.train import resolve_eval_seed
 
-    env = (cfg.eval_env_fn or cfg.env_fn)()
-    try:
-        env_cls = type(env)
-        kwargs = getattr(env, "_ezpickle_kwargs", None)
-    finally:
-        env.close()
-    if not isinstance(kwargs, dict):
+    kwargs: Any = env_kwargs
+    if env_cls is None:
+        if env_kwargs is not None:
+            raise ValueError("env_kwargs describe an env: pass its env_cls too")
+        env = (cfg.eval_env_fn or cfg.env_fn)()
+        try:
+            env_cls = type(env)
+            kwargs = getattr(env, "_ezpickle_kwargs", None)
+        finally:
+            env.close()
+    if not isinstance(kwargs, Mapping):
         raise TypeError(
             f"{env_cls.__name__} records no constructor kwargs "
             f"(_ezpickle_kwargs), so a protocol cannot pin its env"
@@ -729,9 +757,9 @@ def _paddle_npoint_v2() -> EvalProtocol:
         id="paddle-npoint@v2",
         recipe="PaddleTennis",
         env_cls=PaddleTennisEnv,
-        # The recipe's evaluation env (contact and reach escrows on,
-        # continuous n-point play, the drill off), every argument as the
-        # env resolves it.
+        # The recipe's evaluation env through 2026-10-17 (contact and
+        # reach escrows on, continuous n-point play, the drill off),
+        # every argument as the env resolves it.
         env_kwargs={
             "episode_len": 1500,
             "serve_config": None,
@@ -849,6 +877,34 @@ def _paddle_npoint_v2() -> EvalProtocol:
     )
 
 
+#: The training aids @v3 strips from @v2's evaluation env: the escrowed
+#: shaping terms (``docs/design_campaign_structure_20261016.md`` section
+#: 5, "Eras"). Their radius and travel parameters stay as they were;
+#: with the scale at 0 they pay nothing.
+PADDLE_TRAINING_AIDS_OFF: Mapping[str, float] = types.MappingProxyType(
+    {"contact_shaping": 0.0, "reach_shaping": 0.0, "hold_shaping": 0.0}
+)
+
+
+def _paddle_npoint_v3() -> EvalProtocol:
+    return _paddle_npoint_v2().derive(
+        "paddle-npoint@v3",
+        env_overrides=PADDLE_TRAINING_AIDS_OFF,
+        description=(
+            "paddle-npoint@v2 with the evaluation env's training aids "
+            "stripped (contact, reach and hold shaping 0), so "
+            "episode_reward_mean, the last selection tie-break, is task "
+            "reward only: 30 paired episodes on the run's seed block "
+            "(eval_seed, else seed + 1,000,000) with alternating serves, "
+            "selected lexicographically on the k>=2 headline "
+            "(episode_rally_returns_a_ep_mean), success_rate and task "
+            "reward (deltas 1/60, 1/60, 0.25), confirmed on the block "
+            "100,000 on. PaddleTennis observations carry no escrow "
+            "state, so every non-reward metric equals @v2's"
+        ),
+    )
+
+
 #: Recipe -> the protocol of its in-loop selection evaluation.
 RECIPE_PROTOCOLS: dict[str, str] = {
     "BallBalance": "ball-balance-inloop@v1",
@@ -861,7 +917,8 @@ RECIPE_PROTOCOLS: dict[str, str] = {
     "HumanoidTennisStage2RandomizedReturn": (
         "humanoid-tennis-stage2-randomized-return-inloop@v1"
     ),
-    "PaddleTennis": "paddle-npoint@v2",
+    # paddle-npoint@v2 until 2026-10-17 (design L3's era boundary).
+    "PaddleTennis": "paddle-npoint@v3",
     "WallBall": "wall-ball-inloop@v1",
     "WallBallBaseline": "wall-ball-baseline-inloop@v1",
     "WallBallBootstrap": "wall-ball-bootstrap-inloop@v1",
@@ -925,6 +982,7 @@ _PINNED_FINGERPRINTS: dict[str, str] = {
 #: Literal (recipe-independent) protocols.
 _LITERAL: dict[str, Callable[[], EvalProtocol]] = {
     "paddle-npoint@v2": _paddle_npoint_v2,
+    "paddle-npoint@v3": _paddle_npoint_v3,
 }
 
 _CACHE: dict[str, EvalProtocol] = {}
@@ -984,3 +1042,69 @@ def get_protocol(protocol_id: str) -> EvalProtocol:
         )
     _CACHE[protocol_id] = protocol
     return protocol
+
+
+def _registered_for_recipe(recipe: str | None) -> list[str]:
+    """The registered ids a run of ``recipe`` may evaluate under.
+
+    The recipe's in-loop protocol first, then the literal protocols
+    declared for it (an earlier era, ``paddle-npoint@v2``).
+    """
+    if recipe is None:
+        return []
+    ids = [RECIPE_PROTOCOLS[recipe]] if recipe in RECIPE_PROTOCOLS else []
+    ids.extend(
+        protocol_id
+        for protocol_id in sorted(_LITERAL)
+        if protocol_id not in ids and get_protocol(protocol_id).recipe == recipe
+    )
+    return ids
+
+
+def eval_protocol_record(
+    cfg: Any,
+    *,
+    env_cls: type | None = None,
+    env_kwargs: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """``config.json``'s ``eval_protocol``: what ``train(cfg)`` selects under.
+
+    ``{"id": ..., "fingerprint": ...}``. The fingerprint is the in-loop
+    selection protocol's (:func:`from_train_config`, which takes
+    ``env_cls`` and ``env_kwargs`` the same way). The id is the
+    registered protocol of the run's recipe with that fingerprint:
+    ``paddle-npoint@v3`` for a stock PaddleTennis run,
+    ``paddle-npoint@v2`` for one whose ``[eval_env]`` table restores
+    the escrows. It is ``None`` when no registered protocol is this
+    evaluation (a quick test, other episodes or env settings, an env
+    outside the recipes); the fingerprint still names it, so two runs
+    compare only when both fields match. The whole record is ``None``
+    for a run without an info-dict evaluator, and, with a warning, for
+    one whose evaluation env records no constructor kwargs a
+    fingerprint can read.
+    """
+    import warnings
+
+    if not cfg.info_dict_eval:
+        return None
+    try:
+        fingerprint = from_train_config(
+            cfg, id="in-loop", env_cls=env_cls, env_kwargs=env_kwargs
+        ).fingerprint
+    except (TypeError, ValueError) as error:
+        warnings.warn(
+            f"no evaluation protocol recorded for this run: {error}", stacklevel=2
+        )
+        return None
+    registered: str | None = None
+    for protocol_id in _registered_for_recipe(cfg.recipe_name):
+        try:
+            candidate = get_protocol(protocol_id)
+        except ValueError as error:
+            # A derived protocol whose recipe moved names nothing now.
+            warnings.warn(str(error), stacklevel=2)
+            continue
+        if candidate.fingerprint == fingerprint:
+            registered = protocol_id
+            break
+    return {"id": registered, "fingerprint": fingerprint}

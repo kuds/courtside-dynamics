@@ -1,6 +1,6 @@
 # Run records, manifests, the run index and offline re-scoring
 
-Living reference for `courtside_dynamics.experiments` (design L1 and L2
+Living reference for `courtside_dynamics.experiments` (design L1 to L3
 in [`design_campaign_structure_20261016.md`](design_campaign_structure_20261016.md),
 M3 in [`design_env_ladder_and_structure_20261016.md`](design_env_ladder_and_structure_20261016.md)).
 Records, manifests, verification, the index, snapshot indexes, score
@@ -184,22 +184,51 @@ everything an evaluation batch measures besides the policy: the eval
 env (class and every constructor argument), episodes, the paired seed
 block and reset options, the info keys and aggregates, the selection
 keys and per-key deltas, the confirmation block, and the device (CPU).
-Its fingerprint is the sha256 of that content. `paddle-npoint@v2` is
-today's PaddleTennis in-loop selection evaluation, declared literally;
-every other recipe has `<recipe>-inloop@v1`, its in-loop info-dict
-evaluator, derived from the recipe and pinned to its registration
-fingerprint (a recipe change makes it refuse to load). Registered
-protocols score on the run's own seed block (its recorded paired block,
-else its `eval_seed`, else `seed + 1,000,000`); a score row records the
-block it used. `inloop` stands for each run's own in-loop evaluation,
-rebuilt from its `config.json`.
+Its fingerprint is the sha256 of that content. Registered protocols
+score on the run's own seed block (its recorded paired block, else its
+`eval_seed`, else `seed + 1,000,000`); a score row records the block it
+used. `inloop` stands for each run's own in-loop evaluation, rebuilt
+from its `config.json`.
+
+| Protocol | What it is |
+|---|---|
+| `paddle-npoint@v3` | The PaddleTennis recipe's selection evaluation since 2026-10-17 (design L3): 30 paired 1,500-step episodes with alternating serves on the run's block, selected on the k≥2 headline (`episode_rally_returns_a_ep_mean`), `success_rate` and reward (deltas 1/60, 1/60, 0.25), confirmed on the block 100,000 on. The eval env has `contact_shaping`, `reach_shaping` and `hold_shaping` at 0, so the reward is task reward only |
+| `paddle-npoint@v2` | The same with the contact and reach escrows on in the eval env: PaddleTennis selection from the 2026-10-05 instruments until 2026-10-17. Declared literally, so it stays scorable |
+| `<recipe>-inloop@v1` | Every other recipe's in-loop info-dict evaluator, derived from the recipe and pinned to its registration fingerprint (a recipe change makes it refuse to load: declare the old version literally, never re-pin) |
+
+**@v2 and @v3 read the same policy the same way, except for reward.**
+PaddleTennis observations hold no escrow state (no balance, no hold
+window), so with the escrows on or off a policy sees bit-identical
+observations and acts identically; every non-reward metric, the k≥2
+headline and `success_rate` included, is identical under both, and
+`episode_reward_mean` differs by the shaping the episodes collected
+(`tests/test_eval_harness.py` pins both on the oracle and a trained
+run). A selection under @v3 can differ from @v2's only through the
+reward tie-break; that is the era boundary. Comparing evaluation
+rewards across it needs the older runs re-scored under @v3 (below);
+headline, success and k=1 compare as they are.
+
+**What a run records.** `config.json`'s `comparability_key.eval_protocol`
+(and the run record's `task.eval_protocol`, copied from it) is
+`{"id", "fingerprint"}`: the fingerprint of the run's in-loop selection
+protocol, the one `--protocol inloop` rebuilds from `config.json`, and
+the id of the registered protocol of the run's recipe with that
+fingerprint. A stock PaddleTennis run records `paddle-npoint@v3`; one
+whose `[eval_env]` table restores the escrows records
+`paddle-npoint@v2`; a quick test, or a run file that changes the
+evaluation episodes or env, records `id: null` with its fingerprint,
+so two runs compare only when both fields match. `eval_protocol` is
+`null` for a run without an info-dict evaluator and for runs recorded
+before 2026-10-17.
 
 **Re-scoring.**
 
 ```bash
-python -m courtside_dynamics.experiments.rescore --protocol paddle-npoint@v2 <run_dir> ...
+python -m courtside_dynamics.experiments.rescore --protocol paddle-npoint@v3 <run_dir> ...
 python -m courtside_dynamics.experiments.rescore --protocol inloop --which snapshots <run_dir>
-python -m courtside_dynamics.experiments.rescore --protocol paddle-npoint@v2 --out <dir> <run_dir> ...
+python -m courtside_dynamics.experiments.rescore --protocol paddle-npoint@v3 --out <dir> <run_dir> ...
+python -m courtside_dynamics.experiments.rescore --protocol paddle-npoint@v3 \
+    --which best,checkpoints --steps 100000,1000000,2000000 <run_dir>
 ```
 
 Every best model, snapshot and periodic checkpoint is scored (the
@@ -210,9 +239,39 @@ sha256s that bind it; one problem anywhere refuses the whole rescore
 before anything is scored. Rows go to `<run_dir>/scores/<protocol>.jsonl`
 (`courtside-score/1`: artifact, step, sha256s, protocol fingerprint,
 seed block, `metrics` and `confirm_metrics`), or one combined file under
-`--out`. The scoring code is the in-loop evaluator's own
+`--out`. `--steps` scores only the snapshots and checkpoints at those
+env steps (besides the best model); a step that names none is refused.
+The scoring code is the in-loop evaluator's own
 (`collect_episode_metrics`), so a snapshot's row under `inloop` equals
-its `eval_info.csv` row bit for bit on the same device.
+its `eval_info.csv` row bit for bit on the same device. A full
+PaddleTennis score costs about 2.6 CPU-minutes per artifact (30
+episodes of 1,500 steps on each of the two blocks).
+
+**Re-scoring a Drive runs folder: `notebooks/rescore_runs.ipynb`.** The
+Colab driver for design L3's re-scoring (a CPU runtime is enough). It
+indexes `training_runs/PaddleTennis/sac` (the run index above), picks
+the runs (by default every 2026-08 run that is not a stub and has a
+model, which must include the registered run `20260816_235141`), and
+scores each run's best model and every checkpoint under
+`paddle-npoint@v3` into
+`<Drive>/courtside-dynamics/rescores/PaddleTennis/sac/paddle-npoint@v3/<run id>/scores/`,
+beside `training_runs/`, never inside it: the run directories stay
+exactly what `train()` left, and the index of `training_runs/` never
+meets a score file. Each run is scored whole or refused with its
+reasons (a placeholder or unbound file, a missing normalizer) while the
+others go on; its file is written when the run is done, and re-running
+skips a run already scored for the same files. It then prints the
+per-checkpoint k≥2 headline and k=1 (each point's first confirmed
+return: `episode_valid_return_count_a` minus the headline) on both
+blocks, plots them (`curves.png`), and writes a `select()` verdict per
+run (`verdicts.json`): the checkpoint the protocol's rule picks, next to
+the run's own `best_model` scored under the same protocol. `QUICK =
+True` scores the best model and three checkpoints per run (first,
+middle, last) into a `-quick` folder; `SERIES = "snapshots"` scores a
+newer run's evaluation snapshots instead of its checkpoints. The August
+runs kept checkpoints every 100k against evaluations every 25k, so
+their offline pick can differ from the in-loop one for that reason
+alone.
 
 **Selecting.** `experiments.select.select(rows, protocol)` is the
 in-loop lexicographic rule as a pure function, except that confirmation
@@ -241,8 +300,9 @@ python -m courtside_dynamics.experiments.probe --recipe PaddleTennis --policy or
   --episodes 100 --seed-start 5500
 ```
 
-The lever "audit mode" (a reward term logged but not paid) arrives with
-the levers (design L6).
+The same witness under `--protocol paddle-npoint@v3` scores the bare
+task. The lever "audit mode" (a reward term logged but not paid)
+arrives with the levers (design L6).
 
 ## On Colab
 

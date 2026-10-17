@@ -122,7 +122,8 @@ schedule. The available recipe keys are:
   rally on the probe-frozen paddle court vs the frozen scripted opponent,
   in continuous n-point play with the escrowed contact and reach
   shapings; selection and success follow the policy's own k≥2 rally
-  returns, `episode_rally_returns_a`, on paired, seeded evaluation)
+  returns, `episode_rally_returns_a`, on paired, seeded evaluation of
+  the bare task, the shapings off: protocol `paddle-npoint@v3`)
 - `HumanoidTennisStage0Intercept`
 - `HumanoidTennisStage1AnchoredReturn`
 - `HumanoidTennisStage2RandomizedReturn`
@@ -206,6 +207,11 @@ pip-installed sessions can bootstrap a config without cloning the repo.
   Colab driver for every recipe.
 - [`notebooks/humanoid_tennis_training.ipynb`](notebooks/humanoid_tennis_training.ipynb)
   runs the gated Stage 0–2 PPO transfer curriculum.
+- [`notebooks/rescore_runs.ipynb`](notebooks/rescore_runs.ipynb) re-scores a
+  Drive runs folder's best models and checkpoints under an evaluation
+  protocol on CPU (by default the August PaddleTennis runs under
+  `paddle-npoint@v3`), into a scores folder beside `training_runs/`, with
+  per-checkpoint curves and a `select()` verdict per run.
 
 The humanoid notebook advances after a passing canonical evaluation. It
 warm-starts the next stage from the passing policy and its matching observation
@@ -352,13 +358,20 @@ joined to the campaign map of what it tested. See
 [`docs/experiments.md`](docs/experiments.md), which also covers verification
 and Colab use.
 
-`python -m courtside_dynamics.experiments.rescore --protocol paddle-npoint@v2
+`python -m courtside_dynamics.experiments.rescore --protocol paddle-npoint@v3
 <run_dir>` re-scores a run's best model, evaluation snapshots and checkpoints
 offline under a versioned evaluation protocol, with the in-loop evaluator's
 own code (a snapshot's row equals its `eval_info.csv` row bit for bit on
 CPU); `experiments.select.select()` picks a best from the rows, and
 `python -m courtside_dynamics.experiments.probe` scores the scripted
-witnesses or any model under a protocol.
+witnesses or any model under a protocol. `paddle-npoint@v3`, the PaddleTennis
+recipe's selection protocol since 2026-10-17, evaluates without the
+training shapings, so evaluation rewards are task reward; its k≥2 headline
+reads exactly what the earlier `paddle-npoint@v2` reads. Each run's
+`config.json` names its in-loop protocol (id and fingerprint) in the
+comparability key. See [`docs/experiments.md`](docs/experiments.md) for the
+protocols, re-scoring a Drive folder with `notebooks/rescore_runs.ipynb`,
+and the probe CLI.
 
 ## Development
 

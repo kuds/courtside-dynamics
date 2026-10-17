@@ -7,6 +7,8 @@ Kind: **Adopted design — week 1 in progress (2026-10-16).** A design study of 
 
 Three proposals were scored by two judges, then synthesized. The L-steps interleave with the M-steps of `design_env_ladder_and_structure_20261016.md`.
 
+**Status (2026-10-17).** L1 done (run records, manifests, the run index and its backfill). L2 done except the lever "audit mode", deferred to L6 with the levers it audits: snapshots, a pure `select()`, CPU-pinned protocols and the probe CLI shipped with M3. L3 done: `paddle-npoint@v3` is declared and is the PaddleTennis recipe's selection protocol, the k≥2 headline is identical under @v2 and @v3 (tested), and `notebooks/rescore_runs.ipynb` re-scores the Drive history under it; running that notebook on the August runs is the maintainer's step. See `docs/DECISIONS.md` and `docs/experiments.md`.
+
 **Short answer.** Yes. The problem is structural, not one bug:
 - Every training aid (a "lever") was built as a default-off kwarg inside the env class, and none were removed afterwards.
 - Each experiment is defined in 5–7 places.

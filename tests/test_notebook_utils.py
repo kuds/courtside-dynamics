@@ -2086,9 +2086,16 @@ def test_score_paddle_stage_scores_a_real_ppo_checkpoint(tmp_path):
     assert payload["policy"]["pair_verification"] == (
         "verified_by_best_model_meta_sha256"
     )
+    from courtside_dynamics.experiments.protocols import protocol_for_run
+
+    # A 40-step evaluation is no registered protocol: its fingerprint,
+    # the one a rescore of the leg rebuilds, names it.
     assert payload["comparability_key"] == {
         "task": "PaddleTennis",
-        "eval_protocol": None,
+        "eval_protocol": {
+            "id": None,
+            "fingerprint": protocol_for_run(tmp_path / "leg").fingerprint,
+        },
         "algo_family": "PPO",
     }
     assert payload["environment"]["constructor_kwargs"]["episode_len"] == 40

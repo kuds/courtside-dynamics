@@ -15,10 +15,13 @@ The offline evaluation layer (design M3 and L2) re-scores what a run
 saved. ``train()`` keeps an evaluation snapshot (policy plus
 normalizer) at every evaluation when ``TrainConfig.snapshot_evals`` is
 on (:mod:`snapshots`); :mod:`protocols` declares what a score is a
-score of (``paddle-npoint@v2`` and one in-loop protocol per recipe);
+score of (``paddle-npoint@v3``, the PaddleTennis selection protocol
+since design L3, the earlier ``paddle-npoint@v2``, and one in-loop
+protocol per other recipe) and what a run records of it;
 :mod:`harness` scores any model under any protocol with the in-loop
 evaluator's own code (``python -m
-courtside_dynamics.experiments.rescore``); :mod:`select` picks a best
+courtside_dynamics.experiments.rescore``; ``notebooks/rescore_runs.ipynb``
+drives it over a Drive runs folder); :mod:`select` picks a best
 from the rows, purely; and :mod:`probe` scores the scripted witnesses
 (``python -m courtside_dynamics.experiments.probe``).
 

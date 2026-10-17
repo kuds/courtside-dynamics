@@ -373,6 +373,8 @@ _CONFIG_OBJECTS = (
     "evaluation_env",
     "evaluation_env.constructor_kwargs",
     "algorithm",
+    "comparability_key",
+    "comparability_key.eval_protocol",
     "initialization",
     "initialization.source_artifacts",
     "versions",
@@ -459,10 +461,12 @@ def build_run_record(
     the task's env classes and observation fingerprint, the
     comparability key, the seeds, the git sha and the library versions.
     The task's constructor kwargs are recorded as the sha256 of their
-    canonical JSON. ``eval_protocol`` stays ``None`` until evaluation
-    protocols are versioned, and the ``experiment`` block holds the
-    placeholders the spec system will fill. A ``config.json`` object
-    of the wrong type is read as missing (:func:`shape_problems`).
+    canonical JSON. ``task.eval_protocol`` is the comparability key's
+    (the in-loop selection protocol's id and fingerprint,
+    ``experiments.protocols.eval_protocol_record``), ``None`` for a run
+    recorded before protocols were versioned. The ``experiment`` block
+    holds the placeholders the spec system will fill. A ``config.json``
+    object of the wrong type is read as missing (:func:`shape_problems`).
 
     ``best_model_dir`` is the directory holding ``best_model_meta.json``
     (``train()`` passes it): the selection is then checked against the
@@ -483,6 +487,7 @@ def build_run_record(
     env = _mapping(config.get("env"))
     evaluation_env = _mapping(config.get("evaluation_env"))
     algorithm = _mapping(config.get("algorithm"))
+    eval_protocol = _mapping(config.get("comparability_key")).get("eval_protocol")
     versions = config.get("versions")
     selection = selection_from_best_model_meta(
         best_model_meta, directory=best_model_dir
@@ -520,7 +525,9 @@ def build_run_record(
                 evaluation_env
             ),
             "observation_names_sha256": env.get("observation_names_sha256"),
-            "eval_protocol": None,
+            "eval_protocol": (
+                dict(eval_protocol) if isinstance(eval_protocol, Mapping) else None
+            ),
         },
         "comparability_key": config.get("comparability_key"),
         "seeds": {

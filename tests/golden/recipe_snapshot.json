@@ -8477,11 +8477,12 @@
      "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
      "env_cls": "courtside_dynamics.envs.paddle_tennis.PaddleTennisEnv",
      "kwargs": {
-      "contact_shaping": 0.25,
+      "contact_shaping": 0.0,
       "drill_fraction": 0.0,
       "drill_library": null,
+      "hold_shaping": 0.0,
       "points_per_episode": null,
-      "reach_shaping": 0.25,
+      "reach_shaping": 0.0,
       "render_mode": "rgb_array"
      }
     },
@@ -8732,11 +8733,12 @@
      "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
      "env_cls": "courtside_dynamics.envs.paddle_tennis.PaddleTennisEnv",
      "kwargs": {
-      "contact_shaping": 0.25,
+      "contact_shaping": 0.0,
       "drill_fraction": 0.0,
       "drill_library": null,
+      "hold_shaping": 0.0,
       "points_per_episode": null,
-      "reach_shaping": 0.25,
+      "reach_shaping": 0.0,
       "render_mode": "rgb_array"
      }
     },
@@ -8992,11 +8994,12 @@
      "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
      "env_cls": "courtside_dynamics.envs.paddle_tennis.PaddleTennisEnv",
      "kwargs": {
-      "contact_shaping": 0.25,
+      "contact_shaping": 0.0,
       "drill_fraction": 0.0,
       "drill_library": null,
+      "hold_shaping": 0.0,
       "points_per_episode": null,
-      "reach_shaping": 0.25,
+      "reach_shaping": 0.0,
       "render_mode": "rgb_array"
      }
     },
@@ -9247,11 +9250,12 @@
      "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
      "env_cls": "courtside_dynamics.envs.paddle_tennis.PaddleTennisEnv",
      "kwargs": {
-      "contact_shaping": 0.25,
+      "contact_shaping": 0.0,
       "drill_fraction": 0.0,
       "drill_library": null,
+      "hold_shaping": 0.0,
       "points_per_episode": null,
-      "reach_shaping": 0.25,
+      "reach_shaping": 0.0,
       "render_mode": "rgb_array"
      }
     },
@@ -9507,11 +9511,12 @@
      "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
      "env_cls": "courtside_dynamics.envs.paddle_tennis.PaddleTennisEnv",
      "kwargs": {
-      "contact_shaping": 0.25,
+      "contact_shaping": 0.0,
       "drill_fraction": 0.0,
       "drill_library": null,
+      "hold_shaping": 0.0,
       "points_per_episode": null,
-      "reach_shaping": 0.25,
+      "reach_shaping": 0.0,
       "render_mode": "rgb_array"
      }
     },
@@ -9770,11 +9775,12 @@
      "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
      "env_cls": "courtside_dynamics.envs.paddle_tennis.PaddleTennisEnv",
      "kwargs": {
-      "contact_shaping": 0.25,
+      "contact_shaping": 0.0,
       "drill_fraction": 0.0,
       "drill_library": null,
+      "hold_shaping": 0.0,
       "points_per_episode": null,
-      "reach_shaping": 0.25,
+      "reach_shaping": 0.0,
       "render_mode": "rgb_array"
      }
     },
@@ -10038,11 +10044,12 @@
      "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
      "env_cls": "courtside_dynamics.envs.paddle_tennis.PaddleTennisEnv",
      "kwargs": {
-      "contact_shaping": 0.25,
+      "contact_shaping": 0.0,
       "drill_fraction": 0.0,
       "drill_library": null,
+      "hold_shaping": 0.0,
       "points_per_episode": null,
-      "reach_shaping": 0.25,
+      "reach_shaping": 0.0,
       "render_mode": "rgb_array"
      }
     },
@@ -10301,11 +10308,12 @@
      "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
      "env_cls": "courtside_dynamics.envs.paddle_tennis.PaddleTennisEnv",
      "kwargs": {
-      "contact_shaping": 0.25,
+      "contact_shaping": 0.0,
       "drill_fraction": 0.0,
       "drill_library": null,
+      "hold_shaping": 0.0,
       "points_per_episode": null,
-      "reach_shaping": 0.25,
+      "reach_shaping": 0.0,
       "render_mode": "rgb_array"
      }
     },
@@ -10569,11 +10577,12 @@
      "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
      "env_cls": "courtside_dynamics.envs.paddle_tennis.PaddleTennisEnv",
      "kwargs": {
-      "contact_shaping": 0.25,
+      "contact_shaping": 0.0,
       "drill_fraction": 0.0,
       "drill_library": null,
+      "hold_shaping": 0.0,
       "points_per_episode": null,
-      "reach_shaping": 0.25,
+      "reach_shaping": 0.0,
       "render_mode": "rgb_array"
      }
     },
@@ -10824,11 +10833,12 @@
      "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
      "env_cls": "courtside_dynamics.envs.paddle_tennis.PaddleTennisEnv",
      "kwargs": {
-      "contact_shaping": 0.25,
+      "contact_shaping": 0.0,
       "drill_fraction": 0.0,
       "drill_library": null,
+      "hold_shaping": 0.0,
       "points_per_episode": null,
-      "reach_shaping": 0.25,
+      "reach_shaping": 0.0,
       "render_mode": "rgb_array"
      }
     },
@@ -11084,11 +11094,12 @@
      "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
      "env_cls": "courtside_dynamics.envs.paddle_tennis.PaddleTennisEnv",
      "kwargs": {
-      "contact_shaping": 0.25,
+      "contact_shaping": 0.0,
       "drill_fraction": 0.0,
       "drill_library": null,
+      "hold_shaping": 0.0,
       "points_per_episode": null,
-      "reach_shaping": 0.25,
+      "reach_shaping": 0.0,
       "render_mode": "rgb_array"
      }
     },
@@ -11339,11 +11350,12 @@
      "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
      "env_cls": "courtside_dynamics.envs.paddle_tennis.PaddleTennisEnv",
      "kwargs": {
-      "contact_shaping": 0.25,
+      "contact_shaping": 0.0,
       "drill_fraction": 0.0,
       "drill_library": null,
+      "hold_shaping": 0.0,
       "points_per_episode": null,
-      "reach_shaping": 0.25,
+      "reach_shaping": 0.0,
       "render_mode": "rgb_array"
      }
     },

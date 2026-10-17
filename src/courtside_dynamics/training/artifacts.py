@@ -278,6 +278,12 @@ def observation_fingerprint_mismatch(
 
 def _probe_env_fn(env_fn: Any) -> dict[str, Any]:
     """Construct one factory's env to capture class + space metadata."""
+    return _probe_env_profile(env_fn)[0]
+
+
+def _probe_env_profile(env_fn: Any) -> tuple[dict[str, Any], type | None]:
+    """:func:`_probe_env_fn`'s metadata, plus the env's class (``None``
+    when the factory raised), from the one env it constructs."""
     info: dict[str, Any] = {
         "class": None,
         "observation_shape": None,
@@ -286,7 +292,7 @@ def _probe_env_fn(env_fn: Any) -> dict[str, Any]:
     try:
         env = env_fn()
     except Exception:
-        return info
+        return info, None
     try:
         info["class"] = type(env).__name__
         obs_shape = getattr(env.observation_space, "shape", None)
@@ -326,7 +332,7 @@ def _probe_env_fn(env_fn: Any) -> dict[str, Any]:
             env.close()
         except Exception:
             pass
-    return info
+    return info, type(env)
 
 
 def _probe_env(cfg: TrainConfig) -> dict[str, Any]:
@@ -402,25 +408,32 @@ def algorithm_record(algo: str) -> dict[str, str]:
     }
 
 
-def comparability_key(cfg: TrainConfig, env_class: str | None) -> dict[str, Any]:
+def comparability_key(
+    cfg: TrainConfig,
+    env_class: str | None,
+    eval_protocol: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """``config.json``'s ``comparability_key`` block (PPO plan Step 11).
 
     Two runs' scores are comparable only when every field matches: the
     same task, read by the same evaluation protocol, from the same
     algorithm family. ``task`` is the recipe name, else the training
     env's class.
-    ``eval_protocol`` is a placeholder, ``None`` until evaluation
-    protocols are versioned (the week-1 evaluation harness); a
-    versioned run never matches an unversioned one. ``algo_family``
-    keeps SAC and PPO runs of one task apart: a reader that groups or
-    ranks runs on the task alone would rank an SAC campaign leg against
-    a PPO probe without saying so, so it must key on this whole block.
+    ``eval_protocol`` is the run's in-loop selection protocol
+    (``experiments.protocols.eval_protocol_record``: its fingerprint and
+    registered id, such as ``paddle-npoint@v3``), ``None`` for a run
+    without an info-dict evaluator and for every run recorded before
+    protocols were versioned; a versioned run never matches an
+    unversioned one. ``algo_family`` keeps SAC and PPO runs of one task
+    apart: a reader that groups or ranks runs on the task alone would
+    rank an SAC campaign leg against a PPO probe without saying so, so
+    it must key on this whole block.
     """
     from courtside_dynamics.training.algos import algo_family
 
     return {
         "task": cfg.recipe_name or env_class,
-        "eval_protocol": None,
+        "eval_protocol": dict(eval_protocol) if eval_protocol is not None else None,
         "algo_family": algo_family(cfg.algo),
     }
 
@@ -439,6 +452,20 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
         with open(copy_path, "w", encoding="utf-8") as f:
             f.write(run_file.text)
     env_profile = _probe_env(cfg)
+    evaluation_env, evaluation_env_cls = _probe_env_profile(
+        cfg.eval_env_fn or cfg.env_fn
+    )
+    # The in-loop selection protocol (design L3), fingerprinted from the
+    # evaluation env just probed, so no further env is built.
+    eval_protocol = None
+    if evaluation_env_cls is not None:
+        from courtside_dynamics.experiments.protocols import eval_protocol_record
+
+        eval_protocol = eval_protocol_record(
+            cfg,
+            env_cls=evaluation_env_cls,
+            env_kwargs=evaluation_env.get("constructor_kwargs"),
+        )
     payload: dict[str, Any] = {
         "timestamp_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "git_sha": _git_sha(),
@@ -458,13 +485,15 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
         # its scores may be compared with: SAC and PPO runs of one task
         # carry different keys.
         "algorithm": algorithm_record(cfg.algo),
-        "comparability_key": comparability_key(cfg, env_profile.get("class")),
+        "comparability_key": comparability_key(
+            cfg, env_profile.get("class"), eval_protocol
+        ),
         "evaluation_seeding": _evaluation_seeding(cfg),
         "env": env_profile,
         # Keep ``env`` as the training profile for backwards compatibility.
         # Evaluation may intentionally disable curriculum reset modes while
         # preserving spaces and physics, so record that constructor too.
-        "evaluation_env": _probe_env_fn(cfg.eval_env_fn or cfg.env_fn),
+        "evaluation_env": evaluation_env,
         "train_config": {
             "algo": cfg.algo,
             "total_timesteps": cfg.total_timesteps,
