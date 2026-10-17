@@ -18,6 +18,68 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **PPO is first-class: loaders, provenance, health flags, learning
+  bars, notebooks and docs (PPO plan Steps 10–12 and 14,
+  2026-10-17).** No env stream or SAC-family training change: the
+  trainer digest against `f920d8f` matches every component of the SAC,
+  DemoSAC and PaddleTennis-SAC jobs. The PPO job's `resolved_model`
+  gains the keys below (and its `eval_info.csv` keeps Step 6's
+  `n_updates` rows); the recipe snapshot is unchanged.
+  - **Loaders (Step 10).** New `algos.load_run_model(path, algo=None)`
+    (with `algos.locate_run_config` and `algos.recorded_run_algo`)
+    loads a model through the algorithm its run's `config.json` records:
+    `SAC.load` for SAC and DemoSAC, `PPO.load` for PPO. An explicit
+    `algo` that disagrees with the record raises, and so does a record
+    without `train_config.algo`; a checkpoint outside any run needs
+    `algo=`. It replaces the hard-coded `SAC.load` in
+    `paddle_diagnosis.native_checkpoint_policy` (new `algo=` keyword),
+    the P5 transfer champion loader and `score_paddle_stage`, and backs
+    `_load_best_model`, `record_best_model_video` (default `algo` is now
+    `None`, was `"SAC"`) and `evaluate_best_wall_ball` (a DemoSAC run
+    now loads through `SAC.load`). The diagnosis, post-swing, k=2
+    harvest, k=2 step-0 and P5 transfer tools take `--algo`.
+    `score_paddle_stage`'s report names the scored algorithm and the
+    run's comparability key.
+  - **Provenance (Step 11).** `config.json` gains top-level `algorithm`
+    (`name`, `family`, `implementation` = `sb3==<version>`) and
+    `comparability_key` (`task`, `eval_protocol` = `null` for now,
+    `algo_family`) blocks, for every run. On-policy `resolved_model`
+    adds `target_kl`, `sde_sample_freq`, `log_std_init` and `ortho_init`,
+    and is re-recorded when training ends with SB3's `n_updates` and
+    `timesteps` (trained vs budget); SAC's block is byte-identical. An
+    on-policy summary reads its timesteps against the budget, saying by
+    how much the last rollout ran past it.
+  - **Training Health flags (Step 11).** A PPO run's
+    `stage_summary.txt` flags, over the last quarter of its updates,
+    mean approx_kl above max(2 × target_kl, 0.05), mean clip_fraction
+    above 0.3, mean explained_variance below 0, and a final log std
+    more than 1 nat from `log_std_init` (also printed). New
+    `artifacts.on_policy_health_flags`.
+  - **Tests (Step 12).** A parametrized SAC/PPO end-to-end `train()`
+    test, PPO determinism, `score_paddle_stage` on a real PPO
+    checkpoint, and a CI learning bar: PPO learns a 1-D reach through
+    `train()` in about 11 s (best paired return −3.2 to −3.4 over three
+    seeds against a −6 bar; the zero action scores −26.7).
+  - **`tools/ppo_learning_probe.py` (Step 12).** BallBalance on its
+    recipe's PPO profile for at most 330 s, then the best model on 20
+    held-out seeds; PASS at a mean of 700 of 750. Run once here: 750.0
+    on all 20 seeds after 491,520 steps.
+  - **Notebooks.** `paddle_tennis_campaign` admits `ALGO = "PPO"`: the
+    legs use the recipe's PPO profile on new `PPO_N_ENVS` /
+    `PPO_EVAL_FREQ` / `PPO_CHECKPOINT_FREQ` (8 workers, 24,576,
+    98,304), no SAC key reaches them, the settings cell refuses
+    `REQUIRE_DEVICE = "cuda"`, a temperature skip, a geometry the
+    on-policy pre-flight refuses and a package without first-class PPO
+    (the pinned `REPO_REF` included), a PPO campaign refuses a non-PPO
+    warm-start lineage before its manifest exists, and it lives under
+    `PaddleTennisCampaign/ppo/`. The SAC-family plan is unchanged.
+    `sb3_training` keeps a recipe's PPO profile worker count when
+    switching to PPO (it forced 16), and its worker table and
+    training-health notes describe the PPO profiles and flags.
+  - **Docs (Step 14).** README "Algorithms", the `TrainConfig.algo`
+    and `build_train_config` docstrings, the run-config spec's
+    per-family settings tables, a DECISIONS entry, and the plan's
+    status line.
 - **PPO runtime: stops counted in updates, matched normalizer gamma,
   CPU default, warm-start exploration, subprocess workers (PPO plan
   Steps 6–9 and 13, 2026-10-17).** No env stream changes, and every SAC

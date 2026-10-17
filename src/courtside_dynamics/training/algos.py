@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import difflib
 import inspect
+import json
+import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -17,6 +19,7 @@ from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 
+from courtside_dynamics.training.artifacts import RUN_LAYOUT, locate_artifact
 from courtside_dynamics.training.demo_sac import DemoSAC
 
 #: Maps the ``algo`` string used throughout the project to its SB3 class.
@@ -277,3 +280,129 @@ def resolve_algo(name: str) -> type[BaseAlgorithm]:
         raise ValueError(
             f"Unknown algo '{name}'. Expected one of {sorted(ALGOS)}."
         ) from exc
+
+
+def _model_directories() -> tuple[tuple[str, ...], ...]:
+    """Where a run keeps model files, relative to the run directory.
+
+    The run root itself (the pre-0.14 flat layout), the layout's model
+    folder (``model/``), ``checkpoints/``, and one stage directory
+    under the performance gate's stage archive (``model/stage_bests/``,
+    pre-0.14 ``stage_bests/``). Derived from :data:`RUN_LAYOUT`, so a
+    moved artifact moves the search with it.
+    """
+    model_dir = os.path.dirname(RUN_LAYOUT["best_model"])
+    stage_archive = RUN_LAYOUT["stage_bests_dir"]
+    shapes = {
+        (),
+        tuple(model_dir.split("/")),
+        tuple(RUN_LAYOUT["checkpoints_dir"].split("/")),
+        (*stage_archive.split("/"), "*"),
+        (os.path.basename(stage_archive), "*"),
+    }
+    return tuple(sorted(shapes, key=lambda shape: (len(shape), shape)))
+
+
+def locate_run_config(path: str | os.PathLike[str]) -> str | None:
+    """The ``config.json`` of the run that ``path`` belongs to.
+
+    ``path`` is a run directory or a model file inside one
+    (``model/best_model.zip``, a ``checkpoints/`` snapshot, a stage
+    archive's ``best_model.zip``, or a pre-0.14 run's root-level file;
+    an SB3 path without its ``.zip`` suffix works too). Only the
+    directories the run layout puts a model in are searched, nearest
+    first, so a checkpoint copied out of its run does not borrow a
+    ``config.json`` from an arbitrary folder above it. ``None`` when no
+    run configuration is found.
+    """
+    target = os.path.abspath(os.fspath(path))
+    if os.path.isdir(target):
+        return locate_artifact(target, "config")
+    here = os.path.dirname(target)
+    for shape in _model_directories():
+        root = here
+        matched = True
+        for part in reversed(shape):
+            if part != "*" and os.path.basename(root) != part:
+                matched = False
+                break
+            root = os.path.dirname(root)
+        if not matched:
+            continue
+        candidate = os.path.join(root, RUN_LAYOUT["config"])
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def recorded_run_algo(path: str | os.PathLike[str]) -> str | None:
+    """The algorithm ``path``'s run recorded in ``config.json``, upper-cased.
+
+    ``path`` is anything :func:`locate_run_config` accepts. ``None``
+    when no run configuration is found. A ``config.json`` that cannot
+    be read, or records no ``train_config.algo``, raises instead: the
+    record exists and says nothing, so falling back to a guess would
+    load the checkpoint through whichever class the guess names.
+    """
+    config_path = locate_run_config(path)
+    if config_path is None:
+        return None
+    try:
+        with open(config_path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"could not read the run configuration {config_path} "
+            f"({error!r}), so the algorithm that trained {os.fspath(path)} "
+            f"is unknown"
+        ) from error
+    train_config = payload.get("train_config") if isinstance(payload, dict) else None
+    algo = train_config.get("algo") if isinstance(train_config, dict) else None
+    if not isinstance(algo, str) or not algo:
+        raise ValueError(
+            f"{config_path} records no train_config.algo, so the algorithm "
+            f"that trained {os.fspath(path)} is unknown"
+        )
+    return algo.upper()
+
+
+def load_run_model(
+    path: str | os.PathLike[str],
+    algo: str | None = None,
+    **load_kwargs: Any,
+) -> BaseAlgorithm:
+    """Load a saved model through the class its run recorded.
+
+    ``path`` is the model file (``best_model.zip``, a checkpoint, a
+    stage archive's best); the algorithm comes from the run's
+    ``config.json`` (:func:`recorded_run_algo`). ``algo``, when given,
+    must name the recorded algorithm (case-insensitively), else this
+    raises: a caller that expected SAC is about to score a PPO run.
+    Without a run configuration, ``algo`` is required, and the
+    caller vouches for it.
+
+    Each family loads through its root class: SAC and DemoSAC through
+    ``SAC.load``, which is DemoSAC's designed inference path (its demo
+    buffers are rebuilt only for training, so the library file need
+    not exist), and PPO through ``PPO.load``. Loaders used to
+    hard-code ``SAC.load``, which cannot read a PPO checkpoint.
+    ``load_kwargs`` go to ``load`` unchanged (``device="cpu"``, say).
+    """
+    recorded = recorded_run_algo(path)
+    if recorded is None:
+        if algo is None:
+            raise FileNotFoundError(
+                f"no run configuration (config.json) records the algorithm "
+                f"that trained {os.fspath(path)}; pass the algorithm "
+                f"explicitly (algo=..., or the tool's --algo)"
+            )
+        name = algo
+    else:
+        if algo is not None and algo.upper() != recorded:
+            raise ValueError(
+                f"requested algorithm {algo.upper()} does not match the "
+                f"algorithm {recorded} that the run of {os.fspath(path)} "
+                f"recorded"
+            )
+        name = recorded
+    return resolve_algo(algo_family(name)).load(os.fspath(path), **load_kwargs)

@@ -2228,7 +2228,13 @@ def build_train_config(
         applies over its ``extra_cfg``, ``model_kwargs`` merged one level
         deep. A flat ``model_kwargs`` key from
         ``algos.DIVERGENT_SHARED_KWARGS`` (recipe or file) is refused when
-        the run's family is not the recipe default's.
+        the run's family is not the recipe default's. Every recipe carries
+        a PPO profile (``algo_cfg["PPO"]``, the PPO design's section 3), so
+        ``algo="PPO"`` gets calibrated rollouts rather than SB3's defaults.
+        A PPO config also passes the on-policy pre-flight here
+        (``train._validate_on_policy_config``: cadences in whole rollouts,
+        no SAC-only gate levers), so the retired depth ladders refuse it at
+        build time.
     log_dir:
         Directory for monitor logs, TensorBoard, checkpoints, videos.
     total_timesteps:

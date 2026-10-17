@@ -313,14 +313,20 @@ def stub_oracle_policy() -> WallBallPolicy:
 
 
 def champion_policy(
-    model_path: str, vec_normalize_path: str
+    model_path: str, vec_normalize_path: str, *, algo: str | None = None
 ) -> WallBallPolicy:
-    """A saved SB3 SAC champion behind its frozen normalizer."""
+    """A saved SB3 champion behind its frozen normalizer.
+
+    The model loads through the algorithm its run recorded
+    (``algos.load_run_model``: ``SAC.load`` for SAC and DemoSAC,
+    ``PPO.load`` for PPO); ``algo`` must agree with that record, and
+    is required for a champion outside any run directory.
+    """
     import pickle
 
-    from stable_baselines3 import SAC
+    from courtside_dynamics.training.algos import load_run_model
 
-    model = SAC.load(model_path, device="cpu")
+    model = load_run_model(model_path, algo, device="cpu")
     with open(vec_normalize_path, "rb") as handle:
         normalizer = pickle.load(handle)
     normalizer.training = False
@@ -448,11 +454,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "--model", help="SB3 SAC checkpoint (best_model.zip)"
+        "--model", help="SB3 checkpoint (best_model.zip)"
     )
     parser.add_argument(
         "--vec-normalize",
         help="frozen normalizer (best_vec_normalize.pkl)",
+    )
+    parser.add_argument(
+        "--algo",
+        default=None,
+        help="algorithm that trained --model (default: the one its run's "
+        "config.json records; required for a checkpoint outside its run)",
     )
     parser.add_argument(
         "--baseline",
@@ -474,7 +486,9 @@ def main(argv: list[str] | None = None) -> int:
     refuse_reserved(args.seed_start, args.episodes, allow=(_OWN_BLOCK,))
 
     if args.model:
-        policy = champion_policy(args.model, args.vec_normalize)
+        policy = champion_policy(
+            args.model, args.vec_normalize, algo=args.algo
+        )
         player_name = f"champion:{args.model}"
     else:
         policy = stub_oracle_policy()

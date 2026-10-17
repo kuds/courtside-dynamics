@@ -298,14 +298,44 @@ def test_sb3_notebook_worker_count_follows_the_algorithm_family() -> None:
     assert _sb3_worker_override("SAC", "PaddleTennis") == {}
     assert _sb3_worker_override("DemoSAC", "PaddleTennis") == {}
     assert _sb3_worker_override("PPO", "HumanoidTennisStage0Intercept") == {}
-    # Switching family applies the section-2 table.
-    assert _sb3_worker_override("PPO", "PaddleTennis") == {"n_envs": 16}
+    # Switching to a family the recipe has a block for keeps the block's
+    # geometry (PPO plan Step 14): the PPO profiles size n_envs with
+    # n_steps, so the table's 16 no longer overrides them (it used to
+    # train BallBalance's measured 8 x 512 profile at 16 x 512).
+    assert _sb3_worker_override("PPO", "PaddleTennis") == {}
+    assert _sb3_worker_override("PPO", "BallBalance") == {}
+    assert _sb3_worker_override("PPO", "HumanoidTennisCoopSmoke") == {}
+    # A family without a block applies the section-2 table.
     assert _sb3_worker_override("SAC", "HumanoidTennisStage0Intercept") == {
         "n_envs": 8
     }
     assert _sb3_worker_override(
         "DemoSAC", "HumanoidTennisStage0Intercept"
     ) == {"n_envs": 8}
+
+
+def test_sb3_notebook_worker_table_falls_back_on_a_package_without_blocks(
+    monkeypatch,
+) -> None:
+    """On a package from before per-family blocks (no ``algo_family``,
+    no ``algo_cfg``), a family switch still takes the section-2 table."""
+    from courtside_dynamics.training import algos
+
+    monkeypatch.delattr(algos, "algo_family")
+    assert _sb3_worker_override("PPO", "PaddleTennis") == {"n_envs": 16}
+    assert _sb3_worker_override("PPO", "BallBalance") == {"n_envs": 16}
+
+
+def test_sb3_notebook_ppo_guidance_matches_the_profiles() -> None:
+    """The section-2 worker table names the recipe's PPO profile, not a
+    flat 16, and the health section names the summary's PPO flags."""
+    source = "\n".join(_source(cell) for cell in _load_sb3_notebook()["cells"])
+    assert "| PPO  | **16**" not in source
+    assert "**the recipe's PPO profile**" in source
+    assert "whole rollouts" in source
+    assert 'vec_env = "subproc"' in source
+    assert "max(2 × `target_kl`, 0.05)" in source
+    assert "SAC | DemoSAC | PPO" in source
 
 
 def test_sb3_notebook_replay_uses_tennis_court_style() -> None:
@@ -469,10 +499,14 @@ def test_campaign_notebook_resumes_and_branches_via_helpers() -> None:
     source = "\n".join(
         _source(cell) for cell in _load_campaign_notebook()["cells"]
     )
-    # Manifest-driven resume on a stable (non-timestamped) root.
-    assert '"PaddleTennisCampaign", "sac", use_drive=USE_DRIVE, timestamp=False' in (
-        source
-    )
+    # Manifest-driven resume on a stable (non-timestamped) root, one
+    # folder per algorithm family.
+    assert (
+        '    "PaddleTennisCampaign",\n'
+        '    "ppo" if PPO_PLAN else "sac",\n'
+        "    use_drive=USE_DRIVE,\n"
+        "    timestamp=False,"
+    ) in source
     assert "load_campaign_manifest" in source
     assert "write_campaign_manifest" in source
     assert (
@@ -858,16 +892,157 @@ def test_campaign_demosac_plan_builds_and_validates(tmp_path) -> None:
         raise AssertionError("a mismatched demo library digest passed the plan")
 
 
+_PPO_PLAN = (
+    ("ALGO = None", 'ALGO = "PPO"'),
+    ('REQUIRE_DEVICE = "cuda"', "REQUIRE_DEVICE = None"),
+)
+
+
+def test_campaign_ppo_plan_builds_the_profile_legs(tmp_path) -> None:
+    """ALGO = "PPO" (PPO plan Step 14's notebook item): both legs build
+    with the recipe's PPO profile on the PPO_* whole-rollout geometry,
+    no SAC key reaches either leg (no learning_starts on the warm-started
+    one), the plan and fingerprint record that geometry, and a
+    config.json recorded from the leg passes the leg's plan."""
+    from courtside_dynamics.notebook_utils import validate_run_config_against_plan
+    from courtside_dynamics.recipes import build_train_config
+    from courtside_dynamics.training import WarmStartConfig
+    from courtside_dynamics.training.artifacts import write_run_config
+
+    ns = _exec_campaign_plan(_PPO_PLAN)
+    assert ns["PPO_PLAN"] is True
+    assert ns["RESOLVED_ALGO"] == "PPO"
+    fingerprint = ns["FINGERPRINT"]
+    assert fingerprint["algo"] == "PPO"
+    assert (fingerprint["n_envs"], fingerprint["eval_freq"]) == (8, 24_576)
+    assert fingerprint["checkpoint_freq"] == 98_304
+    profile = build_train_config(
+        "PaddleTennis", algo="PPO", log_dir=str(tmp_path / "unused"), seed=0
+    ).model_kwargs
+    assert profile["target_kl"] == 0.02 and profile["use_sde"] is True
+
+    sac_only = {"learning_starts", "buffer_size", "train_freq", "target_entropy"}
+    for name, warm_start in (
+        ("leg1", None),
+        ("leg2", WarmStartConfig(source_run_dir=str(tmp_path))),
+    ):
+        cfg = ns["make_leg_config"](
+            log_dir=tmp_path / name,
+            seed=0,
+            total_timesteps=1_000_000,
+            warm_start=warm_start,
+        )
+        assert cfg.algo == "PPO"
+        assert cfg.model_kwargs == profile, name
+        assert not sac_only & set(cfg.model_kwargs), name
+        assert (cfg.n_envs, cfg.eval_freq, cfg.checkpoint_freq) == (
+            8,
+            24_576,
+            98_304,
+        )
+        assert cfg.require_device is None
+    # A leg's own kwargs merge over the profile.
+    tuned = ns["make_leg_config"](
+        log_dir=tmp_path / "tuned",
+        seed=0,
+        total_timesteps=1_000_000,
+        model_kwargs={"target_kl": 0.01},
+    )
+    assert tuned.model_kwargs == {**profile, "target_kl": 0.01}
+
+    plan = ns["leg_expected_plan"](
+        seed=0, total_timesteps=1_000_000, warm_start=None
+    )
+    assert plan["algo"] == "PPO"
+    assert (plan["n_envs"], plan["eval_freq"], plan["checkpoint_freq"]) == (
+        8,
+        24_576,
+        98_304,
+    )
+    leg1 = ns["make_leg_config"](
+        log_dir=tmp_path / "leg1", seed=0, total_timesteps=1_000_000
+    )
+    (tmp_path / "leg1").mkdir()
+    validate_run_config_against_plan(
+        write_run_config(leg1, str(tmp_path / "leg1")), plan
+    )
+
+
+def test_campaign_ppo_plan_refuses_a_non_ppo_lineage(tmp_path) -> None:
+    """A PPO campaign checks every warm-start lineage's recorded
+    algorithm after Drive mounts and before the manifest exists: the
+    frozen SAC fallback would otherwise be refused by train() only when
+    the main leg starts, a whole gate leg later."""
+    import pytest
+
+    root = next(
+        _source(cell)
+        for cell in _load_campaign_notebook()["cells"]
+        if cell["cell_type"] == "code" and "FINGERPRINT = {" in _source(cell)
+    )
+    check = root[root.index("if PPO_PLAN:") : root.index("CAMPAIGN_ROOT.mkdir")]
+
+    def lineage(name: str, algo: str | None) -> str:
+        run_dir = tmp_path / name
+        run_dir.mkdir()
+        if algo is not None:
+            (run_dir / "config.json").write_text(
+                json.dumps({"train_config": {"algo": algo}})
+            )
+        return str(run_dir)
+
+    def run(fallback, leg1=None, ppo_plan=True):
+        namespace = {
+            "PPO_PLAN": ppo_plan,
+            "LEG1_WARM_START_RUN_DIR": leg1,
+            "FALLBACK_WARM_START_RUN_DIR": fallback,
+        }
+        exec(compile(check, f"{CAMPAIGN_NOTEBOOK}:lineages", "exec"), namespace)
+
+    ppo_run = lineage("ppo_run", "PPO")
+    sac_run = lineage("sac_run", "SAC")
+    run(ppo_run, leg1=ppo_run)
+    run(None)
+    with pytest.raises(ValueError, match="FALLBACK_WARM_START_RUN_DIR .* records SAC"):
+        run(sac_run)
+    with pytest.raises(ValueError, match="LEG1_WARM_START_RUN_DIR .* records DEMOSAC"):
+        run(ppo_run, leg1=lineage("demo_run", "DemoSAC"))
+    with pytest.raises(ValueError, match="records nothing"):
+        run(lineage("bare", None))
+    # The SAC family's campaigns never read a lineage here.
+    run(sac_run, ppo_plan=False)
+
+
 def test_campaign_settings_refuse_misconfigured_algo_knobs() -> None:
     """Each refusal fires in the settings cell -- before Drive is
     mounted and the manifest freezes a plan that could never launch."""
     import pytest
 
     demo = f"LEG1_MODEL_KWARGS = {_DEMO_LEG_KWARGS!r}"
+    ppo = ("ALGO = None", 'ALGO = "PPO"')
+    on_cpu = ('REQUIRE_DEVICE = "cuda"', "REQUIRE_DEVICE = None")
     cases = (
         # demo_* keys need ALGO = "DemoSAC".
         ((("LEG1_MODEL_KWARGS = {}", demo),), "not accepted by SAC"),
-        ((("ALGO = None", 'ALGO = "PPO"'),), "ALGO must be None"),
+        ((("ALGO = None", 'ALGO = "TD3"'),), "Unknown algo 'TD3'"),
+        # PPO trains on CPU (its profile pins the device) ...
+        ((ppo,), r"set REQUIRE_DEVICE = None"),
+        # ... has no temperature to skip ...
+        (
+            (ppo, on_cpu, ("LEG2_TRANSFER_LOG_ENT_COEF = True", "LEG2_TRANSFER_LOG_ENT_COEF = False")),
+            "no entropy temperature to skip",
+        ),
+        # ... refuses SAC keys in its legs ...
+        (
+            (ppo, on_cpu, ("LEG1_MODEL_KWARGS = {}", 'LEG1_MODEL_KWARGS = {"buffer_size": 1}')),
+            "not accepted by PPO",
+        ),
+        # ... and a cadence that is not a whole rollout (the on-policy
+        # pre-flight, run before the manifest freezes the plan).
+        (
+            (ppo, on_cpu, ("PPO_EVAL_FREQ = 24_576", "PPO_EVAL_FREQ = 25_000")),
+            "whole",
+        ),
         (
             (("LEG1_MODEL_KWARGS = {}", 'LEG1_MODEL_KWARGS = {"seed": 1}'),),
             r"may not set \['seed'\]",

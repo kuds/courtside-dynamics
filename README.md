@@ -98,9 +98,10 @@ pipeline and is not a PettingZoo multi-agent environment.
 
 ### Recipes
 
-Recipes hold each task's constructor settings, algorithm defaults, training
-budget, evaluation metric, recording schema, and artifact schedule. The
-available recipe keys are:
+Recipes hold each task's constructor settings, its default algorithm, a
+calibrated settings block per algorithm family (see Algorithms below),
+training budget, evaluation metric, recording schema, and artifact
+schedule. The available recipe keys are:
 
 - `BallBalance`
 - `BallBounce`
@@ -132,6 +133,42 @@ not evidence of learned convergence. SAC remains selectable, but its entropy
 tuner sees all 58 action dimensions and is not mask-aware; PPO also spends
 exploration on inactive coordinates. `HumanoidTennisCoopSmoke` is a 10,000-step
 integration and recording check, not a learning baseline.
+
+### Algorithms
+
+`algo` selects `"SAC"`, `"DemoSAC"` (SAC with optional demonstration
+injection, identical to SAC with it off) or `"PPO"`. SAC and DemoSAC
+form the SAC family; PPO is the on-policy family. Each recipe keeps one
+calibrated block per family, and `build_train_config(recipe, algo=...)`
+applies the block for the run's family, so an SAC bundle never reaches
+a PPO run. Every recipe carries a PPO profile (rollout geometry,
+`target_kl`, exploration noise and reward normalization; see the PPO
+design's section 3); the two historical depth ladders refuse PPO, since
+their gates use SAC-only levers. The trainer runs PPO by on-policy
+rules:
+
+- Evaluation and checkpoint cadences must be whole rollouts of
+  `n_steps × n_envs`, and the minibatch must divide the rollout.
+  `train()` refuses anything else before writing a file.
+- Early stops wait for `min_policy_updates_before_stop` (20) policy
+  updates, and curriculum gates and schedules change the task only
+  between rollouts.
+- An MLP-policy run trains on the CPU unless it sets a device, and a
+  reward-normalizing run discounts its return statistics with the
+  model's own gamma.
+
+Every loader (`best_model.zip` replay, the campaign scorer, the
+PaddleTennis tools) loads a checkpoint through the algorithm its run's
+`config.json` records (`training.algos.load_run_model`). `config.json`
+records the algorithm, its family and implementation (`sb3==<version>`),
+and a comparability key (task, evaluation protocol, algorithm family)
+that keeps SAC and PPO runs of one task apart. A PPO run's
+`stage_summary.txt` also flags trust-region and exploration trouble
+under Training Health. Two learning bars guard PPO: a CI test learns a
+1-D reach through `train()` in about 15 s, and
+`tools/ppo_learning_probe.py` (minutes; run by hand or nightly) must
+balance BallBalance for at least 700 of 750 steps on 20 held-out
+seeds. See [`docs/design_ppo_first_class_20261016.md`](docs/design_ppo_first_class_20261016.md).
 
 For full control, construct `TrainConfig` directly:
 

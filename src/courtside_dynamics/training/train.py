@@ -421,7 +421,18 @@ class TrainConfig:
         disabled so checkpoint selection always measures complete episodes
         from the canonical starting state.
     algo:
-        ``"SAC"`` or ``"PPO"``.
+        A registered algorithm (``training.algos.ALGOS``, matched
+        case-insensitively): ``"SAC"``, ``"DemoSAC"`` (SAC with optional
+        demonstration injection; SAC family) or ``"PPO"`` (on-policy).
+        The family decides what applies: an on-policy run is checked in
+        whole rollouts before any output (``_validate_on_policy_config``),
+        floors its early stops at ``min_policy_updates_before_stop``
+        updates, changes curriculum stages and schedules only between
+        rollouts, defaults reward normalization on with the model's
+        gamma, and trains on the CPU unless a device is set. ``config.json``
+        records the algorithm, its family, its implementation and the
+        run's comparability key, and every loader reads that record
+        (``algos.load_run_model``).
     total_timesteps:
         Total env steps to train for (summed across workers).
     log_dir:
@@ -1975,6 +1986,15 @@ def _salvage_crashed_run(
         )
     if gate_callback is not None:
         steps.append(("performance-gate stage history", gate_callback.finalize))
+    if _is_on_policy(cfg):
+        steps.append(
+            (
+                "config.json training progress",
+                lambda: update_run_config_with_model(
+                    model, cfg.log_dir, progress=True
+                ),
+            )
+        )
     steps.append(
         (
             "stage_summary",
@@ -3288,6 +3308,11 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 )
                 raise
             model.save(artifact_path(cfg.log_dir, "final_model"))
+            if _is_on_policy(cfg):
+                # The training progress (SB3 n_updates, env steps trained
+                # against the budget) exists only now; the off-policy
+                # record stays the construction-time one.
+                update_run_config_with_model(model, cfg.log_dir, progress=True)
             if use_vec_normalize:
                 assert isinstance(train_env, VecNormalize)
                 train_env.save(artifact_path(cfg.log_dir, "vec_normalize"))

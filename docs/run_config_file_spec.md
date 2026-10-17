@@ -11,7 +11,8 @@ sha256 every run. `build_train_config` itself still never discovers
 anything -- it only receives the path the notebook visibly resolved.
 v1.2 (PPO plan Step 2, 2026-10-17) adds per-algorithm-family tables,
 `[train.algo.sac]` and `[train.algo.ppo]` (see Format and Merge
-semantics).
+semantics). The section "Per-family settings" (PPO plan Step 14) lists
+what belongs in each.
 
 ## Motivation
 
@@ -148,6 +149,46 @@ since it replaces the whole merged bundle anyway.
 Explicit keyword arguments keep today's replace-wholesale semantics (no
 behavior change for existing code); the file is the recommended layer for
 partial tweaks precisely because it merges.
+
+## Per-family settings
+
+`[train.algo.sac]` (SAC and DemoSAC runs) and `[train.algo.ppo]` (PPO
+runs) accept any `[train]` field. The settings below mean something to
+one family only, or something different to each, so they belong in the
+family's table: a file then carries both profiles and each run reads
+its own.
+
+**`model_kwargs`** (`[train.algo.<family>.model_kwargs]`):
+
+| Setting | SAC family | PPO |
+|---|---|---|
+| `n_steps` | n-step returns (DemoSAC refuses more than 1 with a demo library) | rollout length per worker: one update consumes `n_steps × n_envs` env steps |
+| `batch_size` | replay sample per gradient step | minibatch; must divide `n_steps × n_envs` |
+| `ent_coef` | `"auto"` / `"auto_<init>"` (a tuned temperature) or a fixed float | a fixed entropy-loss weight; numbers only |
+| `use_sde`, `sde_sample_freq` | gSDE noise drawn at each `train_freq` collection (and every `sde_sample_freq` steps within it) | gSDE noise drawn at each rollout start (and every `sde_sample_freq` steps within it) |
+| Only this family (the main ones) | `buffer_size`, `learning_starts`, `train_freq`, `gradient_steps`, `tau`, `target_entropy`, `target_update_interval`, `use_sde_at_warmup`; DemoSAC's `demo_*` keys | `n_epochs`, `gae_lambda`, `clip_range`, `clip_range_vf`, `vf_coef`, `max_grad_norm`, `normalize_advantage`, `target_kl`; the policy's `log_std_init` and `ortho_init` (`policy_kwargs`) |
+
+The first four rows are `algos.DIVERGENT_SHARED_KWARGS`: a flat one (in
+the recipe's `extra_cfg` or the file's `[train.model_kwargs]`) is
+refused under the family the recipe does not default to. A key the
+run's algorithm does not accept is refused for every run
+(`algos.validate_model_kwargs`, `algos.validate_policy_kwargs`).
+
+**`TrainConfig` fields:**
+
+| Field | SAC family | PPO |
+|---|---|---|
+| `eval_freq`, `checkpoint_freq` | any env-step count | whole rollouts, with `eval_freq // n_envs >= n_steps`; anything else is refused, naming the nearest whole-rollout value |
+| `total_timesteps` | the budget | the budget, at least one rollout; PPO trains whole rollouts, so the last can run past it (the summary says by how much) |
+| `n_envs` | worker count | worker count, and with `n_steps` the rollout every cadence above is counted in |
+| `min_policy_updates_before_stop` | must stay at its default, 20 (refused otherwise) | K: every early stop waits ceil(K · rollout / `eval_freq`) evaluations |
+| `normalize_reward` (unset) | off | on, with the model's gamma as the normalizer's discount |
+| `performance_gate` levers `advance_update_pause_steps`, `clear_replay_buffer_on_advance`, `reset_entropy_on_advance` | available | refused; a PPO gate advances between rollouts instead |
+| device (`model_kwargs["device"]`, `require_device` unset) | SB3's `"auto"` | the CPU, for SB3's MLP actor-critic |
+| `warm_start` (`TrainConfig` only, not file-configurable) | `transfer_log_ent_coef = False` skips the entropy temperature | `reset_log_std = True` restarts the exploration noise; `transfer_log_ent_coef = False` is refused |
+
+`vec_env` (`"dummy"` or `"subproc"`) and every other field mean the same
+for both families.
 
 ## Validation and failure behavior
 

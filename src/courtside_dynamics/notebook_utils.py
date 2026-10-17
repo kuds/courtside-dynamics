@@ -818,15 +818,20 @@ def plot_training_health(
     return fig
 
 
-def _load_best_model(log_dir: str, algo: str):
-    from courtside_dynamics.training.algos import resolve_algo
+def _load_best_model(log_dir: str, algo: str | None = None):
+    """``best_model.zip`` through the algorithm the run recorded.
 
-    cls = resolve_algo(algo)
+    ``algo`` (optional) must agree with ``config.json``'s record, and
+    is required only for a run that has no ``config.json``
+    (``algos.load_run_model``).
+    """
+    from courtside_dynamics.training.algos import load_run_model
+
     candidate = locate_artifact(log_dir, "best_model")
     if candidate is None:
         # Ancient runs saved SB3's extension-less "best_model" stem.
         candidate = os.path.join(log_dir, "best_model")
-    return cls.load(candidate)
+    return load_run_model(candidate, algo)
 
 
 def _run_recorded_obs_normalization(log_dir: str) -> bool:
@@ -1772,9 +1777,11 @@ def evaluate_best_wall_ball(
     from stable_baselines3.common.utils import check_for_correct_spaces
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-    from courtside_dynamics.training.algos import resolve_algo
+    from courtside_dynamics.training.algos import load_run_model
 
-    model = resolve_algo(recorded_algo).load(model_path, device=device)
+    # The family's root class (SAC.load for a DemoSAC run, its designed
+    # inference path), read from the same config.json checked above.
+    model = load_run_model(model_path, recorded_algo, device=device)
     model_timestep = getattr(model, "num_timesteps", None)
     if model_timestep != selected_timestep:
         raise ValueError(
@@ -2002,7 +2009,7 @@ def record_best_model_video(
     log_dir: str | Path,
     env_fn: Callable,
     *,
-    algo: str = "SAC",
+    algo: str | None = None,
     video_length: int = 750,
     deterministic: bool = True,
     fps: int = 60,
@@ -2015,6 +2022,11 @@ def record_best_model_video(
     ``vec_normalize.pkl`` is present in ``log_dir`` the saved
     obs-normalizer is applied to each observation before
     ``model.predict``, matching the training-time wrapper.
+
+    The model loads through the algorithm ``config.json`` records;
+    ``algo`` (default ``None``) only cross-checks that record, and a
+    disagreeing one raises. The default used to be ``"SAC"``, which
+    could not load a PPO run's model.
     """
     import imageio.v2 as imageio
 
@@ -2472,12 +2484,13 @@ def score_campaign_bars(
 
 def _paddle_stage_scoring_inputs(
     run_dir: str,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], Mapping[str, Any]]:
     """:func:`score_paddle_stage`'s preconditions, checked before any load.
 
-    Returns ``(env_kwargs, pair)``: the evaluation constructor kwargs
-    ``config.json`` records, and the best checkpoint pair as
-    :func:`verify_best_checkpoint_pair` verified it. Raises
+    Returns ``(env_kwargs, pair, config)``: the evaluation constructor
+    kwargs ``config.json`` records, the best checkpoint pair as
+    :func:`verify_best_checkpoint_pair` verified it, and the parsed
+    ``config.json`` itself. Raises
     ``FileNotFoundError`` when ``config.json``, either half of the best
     pair, or ``best_model_meta.json`` is missing, and ``ValueError``
     when the config is not a PaddleTennisEnv run with constructor
@@ -2526,7 +2539,7 @@ def _paddle_stage_scoring_inputs(
             "instrument cannot rebuild the leg's environment"
         )
     pair = verify_best_checkpoint_pair(run_dir)
-    return dict(constructor_kwargs), pair
+    return dict(constructor_kwargs), pair, config
 
 
 def score_paddle_stage(
@@ -2561,10 +2574,17 @@ def score_paddle_stage(
     checkpoint is one of them), so a PASS is sound while a FAIL may
     under-credit a run whose peak on that metric came elsewhere.
 
+    The checkpoint loads through the algorithm the leg's
+    ``config.json`` records (``algos.load_run_model``: ``SAC.load`` for
+    SAC and DemoSAC, ``PPO.load`` for PPO), and the report names that
+    algorithm and the run's comparability key, so a PPO leg's reading
+    is never mistaken for an SAC one's.
+
     The payload is written atomically to ``reports/<report_name>``
     under ``run_dir`` and returned.
     """
     from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
+    from courtside_dynamics.training.algos import recorded_run_algo
     from courtside_dynamics.training.paddle_diagnosis import (
         native_checkpoint_policy,
         run_player,
@@ -2578,7 +2598,7 @@ def score_paddle_stage(
     ):
         raise ValueError("episodes must be a positive integer")
 
-    env_kwargs, pair = _paddle_stage_scoring_inputs(run_dir)
+    env_kwargs, pair, config = _paddle_stage_scoring_inputs(run_dir)
     model_path = pair["model_path"]
     normalizer_path = pair["normalizer_path"]
     policy = native_checkpoint_policy(model_path, normalizer_path)
@@ -2597,6 +2617,7 @@ def score_paddle_stage(
         "run_dir": run_dir,
         "policy": {
             "artifact": os.path.basename(model_path),
+            "algo": recorded_run_algo(model_path),
             "sha256": pair["model_sha256"],
             "pair_verification": pair["pair_verification"],
             # The selection event's timestep only: the meta's metric
@@ -2608,6 +2629,10 @@ def score_paddle_stage(
             "artifact": os.path.basename(normalizer_path),
             "sha256": pair["normalizer_sha256"],
         },
+        # What this reading may be compared with (task, evaluation
+        # protocol, algorithm family); None for a run recorded before
+        # config.json carried the key.
+        "comparability_key": config.get("comparability_key"),
         "environment": {
             "class": "PaddleTennisEnv",
             "constructor_kwargs": _canonicalize_constructor_value(env_kwargs),

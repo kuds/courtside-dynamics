@@ -718,6 +718,128 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### PPO is first-class: loaders follow the record, runs carry their family, and two learning bars guard it — *implemented (unreleased, 2026-10-17)*
+PPO plan Steps 10–12 and 14 (`design_ppo_first_class_20261016.md`,
+static-6/9/10/11, empirical-3, tests-gaps-9/13), which close the plan.
+PPO is now selected, configured, checked, run, recorded, loaded and
+tested per family like SAC; every env stream and SAC-family training
+path is unchanged (golden digests 22/22, recipe snapshot unchanged,
+trainer digest matches on the SAC, DemoSAC and PaddleTennis-SAC jobs).
+- **Loaders read the run's record.** `algos.load_run_model(path,
+  algo=None)` finds the run's `config.json` from the model path, looking
+  only where the run layout puts a model (the root of a pre-0.14 run,
+  `model/`, `checkpoints/`, a stage archive), and loads each family
+  through its root class: SAC and DemoSAC through `SAC.load`
+  (DemoSAC's inference path, which needs no demo library), PPO through
+  `PPO.load`. An explicit `algo` must name the recorded algorithm
+  (DemoSAC is not SAC there, although both load alike). A record that
+  says nothing (unreadable JSON, no `train_config.algo`) raises rather
+  than guessing, and a checkpoint outside any run needs `algo=` (the
+  tools' new `--algo`). It replaces `SAC.load` in
+  `native_checkpoint_policy` (and so in the diagnosis, post-swing, k=2
+  harvest and k=2 step-0 tools), the P5 champion loader,
+  `score_paddle_stage`, `_load_best_model` and `record_best_model_video`
+  (whose default was `algo="SAC"`, now `None`). `evaluate_best_wall_ball`
+  already followed the record but loaded DemoSAC through
+  `DemoSAC.load`; it uses the shared loader too. SAC keeps the exact
+  call it made.
+- **On-policy provenance.** `resolved_model` gains `target_kl`
+  (shared key list: SAC has no such attribute, so it is skipped there)
+  and, gated on `OnPolicyAlgorithm`, `sde_sample_freq` and the
+  policy's `log_std_init` and `ortho_init`. The gate matters: SAC
+  models do carry `sde_sample_freq` and `_n_updates`, and the trainer
+  digest freezes SAC's record. When an on-policy run's training ends
+  (also in the crash salvage), the block is re-recorded with SB3's
+  `n_updates` and `timesteps` (`trained` vs `budget`). PPO checks the
+  budget between whole rollouts, so it can overrun by up to one; the
+  summary's Timesteps line now says by how much (on-policy runs only).
+- **Family and comparability in `config.json`.** A top-level
+  `algorithm` block (`name` = the registered class, `family`,
+  `implementation` = `sb3==<version>`, since a GPU-stack PPO would be
+  another implementation under the same name) and a
+  `comparability_key` (`task` = recipe or env class, `eval_protocol`,
+  `algo_family`). `eval_protocol` is `null` until the evaluation
+  protocols are versioned. Both are top-level because `train_config`
+  must hold only configured fields and `resolved_model` is frozen for
+  SAC. The campaign scorer's report names the algorithm and copies the
+  key. No reader ranks runs yet; the run index (week 1, phase 3) must
+  key on the whole block, not on the task alone.
+- **Training Health flags (on-policy).** Four flags, each on the mean
+  of the last quarter of the logged updates, so one noisy update
+  neither raises nor clears one: approx_kl > max(2 · target_kl, 0.05)
+  (SB3 cuts an update's epochs at 1.5 · target_kl, so twice the target
+  means the cut is not holding); clip_fraction > 0.3; explained_variance
+  < 0; and the final `train/std` more than 1 nat from `log_std_init`
+  (`train/std` is SB3's mean of exp(log_std), read on its log). The
+  references come from the run's own `resolved_model`. A non-finite
+  window is flagged, never averaged away. Flags print as well as land
+  in the summary; the SAC summary is unchanged. A humanoid-shaped
+  progress.csv (approx_kl 0.22–1.71, clip_fraction 0.72–0.83, the log
+  std up 1.6 nats) fires all four. The BallBalance probe below fires
+  none: last-quarter approx_kl 0.013, clip_fraction 0.16,
+  explained_variance 0.38, log std −1.36 against −1.
+- **Characteristic: explained_variance is ill-conditioned once returns
+  stop varying.** In that probe's last quarter, after every episode had
+  reached 750, it swung between −2.0 and 0.98 and ended at −1.995 while
+  the value loss was 2e-5. A run kept going long past convergence can
+  raise the flag; read it next to the reward curve.
+- **Tests that cross the whole path.** A parametrized SAC/PPO
+  `train()` test on 12-step BallBalance (one worker, PPO on 8-step
+  rollouts) covers headline selection with `confirm_best` and a paired
+  `eval_seed`, the final-config stream, VecNormalize checkpoints, a
+  one-stage gate, the patience stop and the closing evaluation. It
+  checks the artifacts, `resolved_model`, the stop step (evaluation 4
+  for SAC, 7 for PPO, whose warm-up the update floor raises to 5),
+  `norm_reward` in every pickled normalizer, and that every saved model
+  reloads through its own class. Two seeded PPO runs train identical
+  weights and normalizers. A real tiny PPO PaddleTennis run trained by
+  `train()` is scored by `score_paddle_stage`.
+- **CI learning bar.** A 1-D reach defined in the test (reward
+  −|goal − x|, truncated at 40 steps, never terminated) learns through
+  `train()` with PPO on 4 × 256 rollouts, minibatch 256, lr 1e-3 and
+  reward normalization on, in about 11 s of one thread. Measured best
+  paired-evaluation return over 24,576 steps: −3.41, −3.22 and −3.23
+  for seeds 0, 1 and 2. The optimum, full speed to the goal and then
+  hold, averages about −3.3; the zero action −26.7. Max approx_kl was
+  0.014–0.022. The bar is best ≥ −6 and approx_kl < 0.1. Selection is
+  on the paired evaluator's reward (`best_metric_keys=
+  ("episode_reward_mean",)`), so the reloaded best pair replays the
+  selecting batch's seeds and must reproduce its mean exactly. The
+  plan's −1.8 was the audit run's unpaired reward stream (10 fresh
+  episodes per evaluation, −15.6 to −1.77), an easier draw than these
+  paired batches.
+- **Manual learning bar.** `tools/ppo_learning_probe.py` trains
+  BallBalance on its recipe's PPO profile as `build_train_config`
+  resolves it, capped at 330 s of wall clock, and scores the best model
+  behind its normalizer on held-out seeds 70,000–70,019 (bar: mean ≥
+  700 of 750). Run once here on one thread: 491,520 steps and 1,190 SB3
+  updates in the cap (349 s with the closing evaluation), evaluations
+  at 749.4 from 294,912 steps and 750.0 from 319,488, held-out mean
+  750.0 on all 20 seeds: PASS. Exit status 1 on a FAIL. Scheduling it
+  nightly or by workflow_dispatch is left open.
+- **Notebooks.** The campaign notebook admits `ALGO = "PPO"`. The legs
+  build on the recipe's PPO profile, at 8 workers with evaluations
+  every 24,576 steps and checkpoints every 98,304: the whole-rollout
+  cadences nearest the SAC plan's 25,000 and 100,000, so a PPO gate
+  reads about as many evaluations and diagnosis probes. The profile's
+  own 32,768 and 245,760 are sized for 16 workers too. No SAC key
+  reaches a PPO leg (no `learning_starts` on a warm-started one). The
+  settings cell refuses `REQUIRE_DEVICE` (PPO trains on the CPU), a
+  temperature skip, a package without first-class PPO (the pinned
+  `REPO_REF` included) and a geometry the on-policy pre-flight
+  refuses. After Drive mounts, every warm-start lineage must record a
+  PPO algorithm: train() would refuse the frozen SAC fallback only at
+  the main leg, a whole gate leg later. PPO campaigns live under
+  `PaddleTennisCampaign/ppo/`. `sb3_training` no longer gives a family
+  switch 16 workers when the recipe has a block for the new family:
+  its PPO profile sizes `n_envs` with `n_steps`, and BallBalance under
+  PPO used to train its measured 8 × 512 profile at 16 × 512.
+- **Left open.** A campaign `reset_log_std` knob (the PaddleTennis
+  profile has no measured warm-start story yet); the humanoid
+  notebook's own `resolve_algo(cfg.algo).load` (its automatic
+  advancement is PPO-only, so it already loads the recorded class);
+  the plan's section 4 items beyond Step 9.
+
 ### PPO's stops count updates, and its task changes only between rollouts — *implemented (unreleased, 2026-10-17)*
 PPO plan Steps 6–9 and 13 (`design_ppo_first_class_20261016.md`,
 static-3/4/5, empirical-1/4, tests-gaps-8). The runtime still treated

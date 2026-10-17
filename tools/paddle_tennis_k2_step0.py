@@ -298,6 +298,12 @@ def main() -> None:
     parser.add_argument("--library", required=True)
     parser.add_argument("--model", default=None)
     parser.add_argument("--vec-normalize", default=None)
+    parser.add_argument(
+        "--algo",
+        default=None,
+        help="algorithm that trained --model (default: the one its run's "
+        "config.json records; required for a checkpoint outside its run)",
+    )
     parser.add_argument("--arm", choices=("feed", "full", "both"), default="both")
     parser.add_argument(
         "--policy", choices=("checkpoint", "oracle"), default="checkpoint"
@@ -317,7 +323,9 @@ def main() -> None:
     else:
         if not (args.model and args.vec_normalize):
             raise SystemExit("--model and --vec-normalize required for checkpoint policy")
-        policy = native_checkpoint_policy(args.model, args.vec_normalize)
+        policy = native_checkpoint_policy(
+            args.model, args.vec_normalize, algo=args.algo
+        )
 
     arms = ("feed", "full") if args.arm == "both" else (args.arm,)
     results = []

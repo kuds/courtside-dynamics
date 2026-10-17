@@ -196,6 +196,7 @@ def run_probe(
     *,
     hold_shaping: float = 0.0,
     hold_shaping_travel: float = 4.0,
+    algo: str | None = None,
 ) -> list[WindowRecord]:
     policy: Callable[[np.ndarray], np.ndarray]
     if model_path is None:
@@ -207,7 +208,9 @@ def run_probe(
     else:
         if vec_normalize_path is None:
             raise ValueError("vec_normalize_path is required alongside model_path")
-        policy = native_checkpoint_policy(model_path, vec_normalize_path)
+        policy = native_checkpoint_policy(
+            model_path, vec_normalize_path, algo=algo
+        )
     env = PaddleTennisEnv(
         episode_len=1500,
         court_style="diagnostic",
@@ -312,6 +315,12 @@ def main() -> None:
     parser.add_argument("--model", default=None)
     parser.add_argument("--vec-normalize", default=None)
     parser.add_argument(
+        "--algo",
+        default=None,
+        help="algorithm that trained --model (default: the one its run's "
+        "config.json records; required for a checkpoint outside its run)",
+    )
+    parser.add_argument(
         "--oracle",
         action="store_true",
         help="probe the scripted ground oracle instead of a checkpoint "
@@ -337,6 +346,7 @@ def main() -> None:
         args.seed_start,
         hold_shaping=args.hold_shaping,
         hold_shaping_travel=args.hold_shaping_travel,
+        algo=args.algo,
     )
     groups = {
         "all": windows,

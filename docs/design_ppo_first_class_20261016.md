@@ -1,6 +1,8 @@
 # Making PPO a first-class algorithm (2026-10-16)
 
-Kind: **Adopted plan — week 1 in progress (2026-10-16).** The 2026-10-16 PPO audit at `main`@`b9585e2` ran three passes:
+Status (2026-10-17): **Steps 0–14 implemented** on `claude/week1-foundations` (Step 0 as the recipe snapshot plus the trainer digest; see `DECISIONS.md`, "PPO is first-class" and the entries before it). Open: the section 4 "Build" items beyond Step 9 (`reset_log_std_on_advance`, `critic_warmup_rollouts`), scheduling the learning probe (nightly or workflow_dispatch), and probing the WallBall, PaddleTennis and humanoid profiles.
+
+Kind: **Adopted plan — implemented on the week-1 branch (2026-10-17).** The 2026-10-16 PPO audit at `main`@`b9585e2` ran three passes:
 - a static pass over every algorithm-dependent path;
 - an empirical pass that ran PPO end to end through `train()` on five recipes, including a learning smoke test on BallBalance;
 - a pass on test coverage and the gaps.

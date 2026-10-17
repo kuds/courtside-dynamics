@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import os
 import platform
 import statistics
@@ -343,6 +344,50 @@ def _resolved_training(cfg: TrainConfig) -> dict[str, Any]:
     return resolved_training_settings(cfg)
 
 
+def algorithm_record(algo: str) -> dict[str, str]:
+    """``config.json``'s ``algorithm`` block for ``algo``.
+
+    The registered class's name, its config family (``"SAC"`` for SAC
+    and DemoSAC, ``"PPO"``), and the implementation that ran it
+    (``"sb3==<version>"``): the GPU stack the PPO design defers to would
+    train "PPO" with different code, so the name alone does not say
+    what produced a run. Raises ``ValueError`` for an unregistered
+    algorithm, like the registry.
+    """
+    import stable_baselines3
+
+    from courtside_dynamics.training.algos import algo_family, resolve_algo
+
+    return {
+        "name": resolve_algo(algo).__name__,
+        "family": algo_family(algo),
+        "implementation": f"sb3=={stable_baselines3.__version__}",
+    }
+
+
+def comparability_key(cfg: TrainConfig, env_class: str | None) -> dict[str, Any]:
+    """``config.json``'s ``comparability_key`` block (PPO plan Step 11).
+
+    Two runs' scores are comparable only when every field matches: the
+    same task, read by the same evaluation protocol, from the same
+    algorithm family. ``task`` is the recipe name, else the training
+    env's class.
+    ``eval_protocol`` is a placeholder, ``None`` until evaluation
+    protocols are versioned (the week-1 evaluation harness); a
+    versioned run never matches an unversioned one. ``algo_family``
+    keeps SAC and PPO runs of one task apart: a reader that groups or
+    ranks runs on the task alone would rank an SAC campaign leg against
+    a PPO probe without saying so, so it must key on this whole block.
+    """
+    from courtside_dynamics.training.algos import algo_family
+
+    return {
+        "task": cfg.recipe_name or env_class,
+        "eval_protocol": None,
+        "algo_family": algo_family(cfg.algo),
+    }
+
+
 def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
     """Snapshot the resolved cfg + provenance to ``log_dir/config.json``.
 
@@ -356,6 +401,7 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
         copy_path = artifact_path(log_dir, "run_config_toml")
         with open(copy_path, "w", encoding="utf-8") as f:
             f.write(run_file.text)
+    env_profile = _probe_env(cfg)
     payload: dict[str, Any] = {
         "timestamp_utc": datetime.now(UTC).isoformat(timespec="seconds"),
         "git_sha": _git_sha(),
@@ -371,8 +417,13 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             else None
         ),
         "recipe_name": cfg.recipe_name,
+        # What trained the run (name, family, implementation) and what
+        # its scores may be compared with: SAC and PPO runs of one task
+        # carry different keys.
+        "algorithm": algorithm_record(cfg.algo),
+        "comparability_key": comparability_key(cfg, env_profile.get("class")),
         "evaluation_seeding": _evaluation_seeding(cfg),
-        "env": _probe_env(cfg),
+        "env": env_profile,
         # Keep ``env`` as the training profile for backwards compatibility.
         # Evaluation may intentionally disable curriculum reset modes while
         # preserving spaces and physics, so record that constructor too.
@@ -563,13 +614,24 @@ def _scalar_or_initial(value: Any) -> Any:
     return value
 
 
-def _model_info(model: Any) -> dict[str, Any]:
+def _model_info(model: Any, *, progress: bool = False) -> dict[str, Any]:
     """Snapshot the SB3-resolved model + policy hyperparameters.
 
     Captures both what the user passed and what SB3 filled in from its
     defaults (e.g. ``net_arch=[256, 256]`` for ``MlpPolicy``), so the
     ``config.json`` is enough to reconstruct the exact training setup.
+
+    An on-policy model also records what PPO's stability depends on
+    (PPO plan Step 11): ``sde_sample_freq`` and the policy's
+    ``log_std_init`` / ``ortho_init``. With ``progress`` (``train()``
+    re-records an on-policy run when training ends) it adds SB3's
+    ``n_updates`` and the env steps trained against the budget: PPO
+    trains whole rollouts, so it can overrun ``total_timesteps`` by up
+    to one. The off-policy record is unchanged (the trainer digest
+    freezes it); SAC has no ``target_kl``, so that key is skipped there.
     """
+    from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
+
     info: dict[str, Any] = {}
     info["algo_class"] = type(model).__name__
     info["device"] = str(getattr(model, "device", ""))
@@ -606,7 +668,7 @@ def _model_info(model: Any) -> dict[str, Any]:
         "use_sde", "use_sde_at_warmup",
         # On-policy (PPO, A2C)
         "n_steps", "n_epochs", "gae_lambda", "clip_range",
-        "clip_range_vf", "vf_coef", "normalize_advantage",
+        "clip_range_vf", "vf_coef", "normalize_advantage", "target_kl",
         # Demonstration injection (DemoSAC)
         "demo_library", "demo_fraction", "demo_bc_coef",
         "demo_bc_filter", "demo_window", "demo_transitions",
@@ -621,7 +683,22 @@ def _model_info(model: Any) -> dict[str, Any]:
         elif attr == "train_freq":
             value = repr(value)
         hyperparams[attr] = value
+    on_policy = isinstance(model, OnPolicyAlgorithm)
+    if on_policy:
+        # Off-policy SB3 models carry sde_sample_freq too, but their
+        # record is frozen, so it is added for on-policy runs only.
+        hyperparams["sde_sample_freq"] = getattr(model, "sde_sample_freq", None)
     info["hyperparameters"] = hyperparams
+    if on_policy and policy is not None:
+        for attr in ("log_std_init", "ortho_init"):
+            if hasattr(policy, attr):
+                info[attr] = getattr(policy, attr)
+    if on_policy and progress:
+        info["n_updates"] = int(getattr(model, "_n_updates", 0))
+        info["timesteps"] = {
+            "trained": int(model.num_timesteps),
+            "budget": int(getattr(model, "_total_timesteps", 0)),
+        }
     # The consumed demo library's digest (the model-side analogue of
     # the env probe's drill_library_sha256): what the run loaded, not
     # what the file at the path contains at audit time.
@@ -661,18 +738,23 @@ def _read_config_for_update(
         return None
 
 
-def update_run_config_with_model(model: Any, log_dir: str) -> str | None:
+def update_run_config_with_model(
+    model: Any, log_dir: str, *, progress: bool = False
+) -> str | None:
     """Augment ``log_dir/config.json`` with resolved model details.
 
     Called after the SB3 algorithm is constructed so SB3-default values
     (``net_arch=[256, 256]``, ``learning_rate=3e-4``, ``buffer_size=1e6``,
     etc.) end up on disk even when the user passes an empty
     ``model_kwargs``. No-op if ``config.json`` doesn't exist yet.
+    ``progress`` re-records the block with an on-policy run's training
+    progress (:func:`_model_info`); ``train()`` passes it when an
+    on-policy run's training ends.
     """
     path = locate_artifact(log_dir, "config")
     if path is None:
         return None
-    info = _model_info(model)
+    info = _model_info(model, progress=progress)
     payload = _read_config_for_update(
         path,
         block="resolved_model",
@@ -746,23 +828,23 @@ def _read_monitor(log_dir: str) -> tuple[list[float], list[int]]:
     return read_monitor_rewards_lengths(monitor_dir)
 
 
-def _read_training_health(log_dir: str) -> dict[str, float]:
-    """Final value of every ``train/*`` metric from ``progress.csv``.
+def _read_training_health_series(log_dir: str) -> dict[str, list[float]]:
+    """Every logged value of each ``train/*`` metric, in row order.
 
     SB3's CSV logger writes ``LOG_DIR/metrics/progress.csv`` (pre-0.14:
     ``LOG_DIR/tensorboard/progress.csv``) with one column per metric;
     cells are blank when a metric wasn't logged on that row. We discover
     the ``train/*`` columns from the header (so the same code covers SAC
-    and PPO, and picks up any metric SB3 adds) and keep the last
-    non-blank float per key, i.e. its end-of-run value. This matches
-    ``plot_training_health``'s generic ``train/*`` discovery so the static
-    report and the plot never disagree on which metrics matter. Returns
-    ``{}`` if the file is absent (e.g. CSV logging off).
+    and PPO, and picks up any metric SB3 adds) and keep each key's
+    non-blank floats. This matches ``plot_training_health``'s generic
+    ``train/*`` discovery so the static report and the plot never
+    disagree on which metrics matter. Returns ``{}`` if the file is
+    absent (e.g. CSV logging off).
     """
     path = locate_artifact(log_dir, "progress_csv")
     if path is None:
         return {}
-    finals: dict[str, float] = {}
+    series: dict[str, list[float]] = {}
     with open(path) as f:
         reader = csv.DictReader(f)
         health_keys = [
@@ -774,10 +856,146 @@ def _read_training_health(log_dir: str) -> dict[str, float]:
                 if value in ("", None):
                     continue
                 try:
-                    finals[key] = float(value)
+                    series.setdefault(key, []).append(float(value))
                 except (TypeError, ValueError):
                     continue
-    return finals
+    return series
+
+
+#: On-policy Training Health bounds (PPO plan Step 11). The humanoid
+#: probe that motivated them ran with approx_kl 0.22-1.71 and
+#: clip_fraction 0.72-0.83 on every stage, and its per-dimension log
+#: std drifted under the entropy bonus.
+#: approx_kl is flagged above ``max(2 * target_kl, floor)``: SB3 cuts an
+#: update's epochs once approx_kl passes 1.5 * target_kl, so a mean
+#: above twice the target means the cut is not holding the step inside
+#: the trust region (or that there is no target_kl to cut on).
+ON_POLICY_APPROX_KL_FLOOR = 0.05
+#: Above this fraction of clipped samples, a large share of each
+#: minibatch has left the clip range and adds no policy gradient (the
+#: BallBalance profile's learning run read about 0.16).
+ON_POLICY_CLIP_FRACTION_MAX = 0.3
+#: How far, in nats, the policy's log std may move from its
+#: ``log_std_init`` before the exploration noise counts as drifted.
+ON_POLICY_LOG_STD_DRIFT_MAX = 1.0
+
+
+def _last_quarter(values: Sequence[float]) -> list[float]:
+    """The last quarter of a logged series (at least one value)."""
+    return list(values[-math.ceil(len(values) / 4) :])
+
+
+def on_policy_health_flags(
+    series: Mapping[str, Sequence[float]],
+    *,
+    target_kl: float | None,
+    log_std_init: float | None,
+) -> list[str]:
+    """Training Health flags for an on-policy run's ``train/*`` series.
+
+    ``series`` is :func:`_read_training_health_series`'s output (one
+    row per PPO update). The flags, each over the last quarter of the
+    logged rows so one noisy update neither raises nor clears one:
+
+    - mean ``approx_kl`` above ``max(2 * target_kl, 0.05)`` (0.05 when
+      the run sets no ``target_kl``);
+    - mean ``clip_fraction`` above 0.3;
+    - mean ``explained_variance`` below 0: the value function predicts
+      returns worse than their mean, so the advantages are noise;
+    - the final ``train/std`` more than 1 nat from ``log_std_init``
+      (``train/std`` is SB3's mean of ``exp(log_std)``, so the drift is
+      read on the log of that mean).
+
+    A non-finite value in a window is flagged too, never averaged
+    away. A metric the run did not log, or a ``log_std_init`` that is
+    unknown (``None``), skips its flag. Returns one line per flag.
+    """
+    flags: list[str] = []
+
+    def window(name: str) -> list[float] | None:
+        values = series.get(f"train/{name}")
+        if not values:
+            return None
+        recent = _last_quarter(values)
+        if not all(math.isfinite(value) for value in recent):
+            flags.append(f"{name}: non-finite values in the last quarter")
+            return None
+        return recent
+
+    kl_limit = (
+        ON_POLICY_APPROX_KL_FLOOR
+        if target_kl is None
+        else max(2.0 * float(target_kl), ON_POLICY_APPROX_KL_FLOOR)
+    )
+    kl = window("approx_kl")
+    if kl is not None and statistics.fmean(kl) > kl_limit:
+        flags.append(
+            f"approx_kl {statistics.fmean(kl):.3g} > {kl_limit:.3g} "
+            f"(max(2 x target_kl {target_kl}, {ON_POLICY_APPROX_KL_FLOOR})): "
+            "updates leave the trust region"
+        )
+    clip = window("clip_fraction")
+    if clip is not None and statistics.fmean(clip) > ON_POLICY_CLIP_FRACTION_MAX:
+        flags.append(
+            f"clip_fraction {statistics.fmean(clip):.3g} > "
+            f"{ON_POLICY_CLIP_FRACTION_MAX}: updates push many samples past "
+            "the clip range"
+        )
+    explained = window("explained_variance")
+    if explained is not None and statistics.fmean(explained) < 0.0:
+        flags.append(
+            f"explained_variance {statistics.fmean(explained):.3g} < 0: "
+            "the value function predicts worse than the mean return"
+        )
+    std = series.get("train/std")
+    if std and log_std_init is not None:
+        final = std[-1]
+        if not (math.isfinite(final) and final > 0.0):
+            flags.append(f"std: final value {final} is not a positive number")
+        else:
+            drift = math.log(final) - float(log_std_init)
+            if abs(drift) > ON_POLICY_LOG_STD_DRIFT_MAX:
+                flags.append(
+                    f"log std {math.log(final):+.3g} vs log_std_init "
+                    f"{float(log_std_init):+.3g}: drifted {drift:+.3g} nats "
+                    f"(limit {ON_POLICY_LOG_STD_DRIFT_MAX})"
+                )
+    return flags
+
+
+def _on_policy_health_reference(log_dir: str) -> tuple[float | None, float | None]:
+    """``(target_kl, log_std_init)`` from ``config.json``'s ``resolved_model``.
+
+    The flags read the run's own record of the model it built
+    (:func:`_model_info`); ``(None, None)`` when it is unreadable or
+    absent, which leaves the KL flag at its floor and skips the drift
+    flag.
+    """
+    path = locate_artifact(log_dir, "config")
+    if path is None:
+        return None, None
+    try:
+        with open(path) as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    resolved = payload.get("resolved_model") if isinstance(payload, dict) else None
+    if not isinstance(resolved, dict):
+        return None, None
+    hyperparameters = resolved.get("hyperparameters")
+    target_kl = (
+        hyperparameters.get("target_kl")
+        if isinstance(hyperparameters, dict)
+        else None
+    )
+    log_std_init = resolved.get("log_std_init")
+
+    def number(value: Any) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
+
+    return number(target_kl), number(log_std_init)
 
 
 def _read_eval_info_at_step(log_dir: str, target_step: int) -> dict[str, float]:
@@ -1074,7 +1292,12 @@ def write_run_summary(
     passes ``None`` for the SAC family, whose summary is unchanged. Zero
     is flagged, because every saved model is then the untrained initial
     policy however "completed" the status reads (a PPO quick test could
-    end exactly so).
+    end exactly so). An on-policy run (``n_updates`` given) also gets
+    its timesteps read against the budget even when it finished (PPO
+    trains whole rollouts, so the last one can run past the budget),
+    and :func:`on_policy_health_flags` under Training Health, checked
+    against the ``target_kl`` and ``log_std_init`` its ``config.json``
+    recorded; flags are printed too.
     """
     env_name = _env_display_name(cfg)
     git_sha = _git_sha()
@@ -1122,6 +1345,21 @@ def write_run_summary(
                 "Timesteps",
                 f"{steps_trained:,} of {cfg.total_timesteps:,} budget "
                 "(stopped early)",
+            )
+        )
+    elif n_updates is not None:
+        # On-policy: the budget is checked between whole rollouts, so
+        # the last one can overrun it; the line says by how much.
+        lines.append(
+            _kv(
+                "Timesteps",
+                f"{steps_trained:,} of {cfg.total_timesteps:,} budget"
+                + (
+                    f" (+{steps_trained - cfg.total_timesteps:,}: the last "
+                    "rollout ran past it)"
+                    if steps_trained > cfg.total_timesteps
+                    else ""
+                ),
             )
         )
     else:
@@ -1421,12 +1659,29 @@ def write_run_summary(
                     pct = eval_info[k] * 100
                     lines.append(f"    {label.ljust(pf_width)}{pct:.1f}%")
 
-    health = _read_training_health(log_dir)
+    health_series = _read_training_health_series(log_dir)
+    # Each metric's end-of-run value: its last logged float.
+    health = {key: values[-1] for key, values in health_series.items()}
+    health_flags: list[str] = []
     if health:
         lines.extend(_section("Training Health (final)"))
         hw = max(len(k) for k in health) + 2
         for key in sorted(health):
             lines.append(f"  {(key + ':').ljust(hw)}{health[key]:.4g}")
+        if n_updates is not None:
+            target_kl, log_std_init = _on_policy_health_reference(log_dir)
+            health_flags = on_policy_health_flags(
+                health_series, target_kl=target_kl, log_std_init=log_std_init
+            )
+            lines.append("  On-policy flags (means over the last quarter):")
+            lines.extend(f"    FLAG {flag}" for flag in health_flags)
+            if not health_flags:
+                lines.append("    none")
+            if log_std_init is None:
+                lines.append(
+                    "    (log std drift not checked: no log_std_init in "
+                    "config.json's resolved_model)"
+                )
 
     artifact_lines: list[str] = []
     for label, _path in EXPECTED_ARTIFACTS:
@@ -1452,4 +1707,6 @@ def write_run_summary(
             f"in {steps_trained:,} env steps; every saved model is the "
             f"untrained initial policy (see {out})"
         )
+    for flag in health_flags:
+        print(f"[train] WARNING: on-policy training health: {flag}")
     return out

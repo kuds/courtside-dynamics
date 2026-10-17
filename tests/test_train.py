@@ -3952,3 +3952,647 @@ def test_ppo_trains_identically_on_subproc_workers(tmp_path):
     assert dummy_monitors and dummy_monitors == sub_monitors
     assert kinds == {"dummy": "DummyVecEnv", "subproc": "DummyDtypeSubprocVecEnv"}
     assert config["train_config"]["vec_env"] == "subproc"
+
+
+# -- PPO plan Step 10: loaders follow the recorded algorithm ------------------
+
+
+def _write_recorded_algo(run_dir, algo) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "config.json").write_text(
+        json.dumps({"train_config": {"algo": algo}})
+    )
+
+
+def test_locate_run_config_follows_the_run_layout(tmp_path):
+    """Every place the run layout puts a model resolves to its run's
+    config.json, and nowhere else does."""
+    from courtside_dynamics.training.algos import locate_run_config
+
+    run = tmp_path / "run"
+    _write_recorded_algo(run, "PPO")
+    config = str(run / "config.json")
+    for relative in (
+        "best_model.zip",  # pre-0.14 flat layout
+        "best_model",  # SB3's extension-less stem
+        "model/best_model.zip",
+        "model/final_model.zip",
+        "checkpoints/rl_model_64_steps.zip",
+        "model/stage_bests/stage_00/best_model.zip",
+        "stage_bests/stage_01/best_model.zip",  # pre-0.14 stage archive
+    ):
+        assert locate_run_config(run / relative) == config, relative
+    assert locate_run_config(run) == config
+    # Outside the layout's model folders, a config.json above is not
+    # the checkpoint's record.
+    assert locate_run_config(run / "elsewhere" / "best_model.zip") is None
+    assert locate_run_config(run / "metrics" / "monitor" / "x.zip") is None
+    assert locate_run_config(tmp_path / "loose.zip") is None
+
+
+def test_recorded_run_algo_refuses_a_record_that_says_nothing(tmp_path):
+    from courtside_dynamics.training.algos import recorded_run_algo
+
+    assert recorded_run_algo(tmp_path / "model" / "best_model.zip") is None
+    _write_recorded_algo(tmp_path / "ok", "DemoSAC")
+    assert recorded_run_algo(tmp_path / "ok" / "model" / "best_model.zip") == (
+        "DEMOSAC"
+    )
+    blank = tmp_path / "blank"
+    blank.mkdir()
+    (blank / "config.json").write_text(json.dumps({"train_config": {}}))
+    with pytest.raises(ValueError, match="records no train_config.algo"):
+        recorded_run_algo(blank / "model" / "best_model.zip")
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    (broken / "config.json").write_text("{not json")
+    with pytest.raises(ValueError, match="could not read"):
+        recorded_run_algo(broken / "model" / "best_model.zip")
+
+
+def _saved_model(algo_cls, path, **kwargs):
+    venv = make_vec_env(lambda: BallBalanceEnv(episode_len=8), n_envs=1)
+    try:
+        model = algo_cls("MlpPolicy", venv, seed=0, device="cpu", **kwargs)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        model.save(str(path))
+    finally:
+        venv.close()
+    return model
+
+
+def test_load_run_model_loads_each_family_through_its_root_class(
+    tmp_path, monkeypatch
+):
+    """SAC and DemoSAC runs load through SAC.load (DemoSAC's inference
+    path: no demo library needed), PPO runs through PPO.load; an
+    explicit algorithm must agree with the record."""
+    from stable_baselines3 import PPO, SAC
+
+    from courtside_dynamics.training.algos import load_run_model
+    from courtside_dynamics.training.demo_sac import DemoSAC
+
+    sac_path = tmp_path / "sac" / "model" / "best_model.zip"
+    _saved_model(SAC, sac_path, buffer_size=100, learning_starts=0)
+    _write_recorded_algo(tmp_path / "sac", "SAC")
+    demo_path = tmp_path / "demo" / "model" / "best_model.zip"
+    _saved_model(DemoSAC, demo_path, buffer_size=100, learning_starts=0)
+    _write_recorded_algo(tmp_path / "demo", "DemoSAC")
+    ppo_path = tmp_path / "ppo" / "checkpoints" / "rl_model_8_steps.zip"
+    saved_ppo = _saved_model(PPO, ppo_path, n_steps=8, batch_size=8)
+    _write_recorded_algo(tmp_path / "ppo", "PPO")
+
+    # SAC keeps exactly the call it always made.
+    calls = []
+    real_sac_load = SAC.load
+
+    def spy(path, **kwargs):
+        calls.append((path, kwargs))
+        return real_sac_load(path, **kwargs)
+
+    monkeypatch.setattr(SAC, "load", spy)
+    assert type(load_run_model(sac_path, device="cpu")) is SAC
+    assert type(load_run_model(demo_path, "demosac", device="cpu")) is SAC
+    assert calls == [
+        (str(sac_path), {"device": "cpu"}),
+        (str(demo_path), {"device": "cpu"}),
+    ]
+
+    ppo = load_run_model(ppo_path, device="cpu")
+    assert type(ppo) is PPO
+    for name, tensor in saved_ppo.policy.state_dict().items():
+        assert torch.equal(tensor, ppo.policy.state_dict()[name]), name
+
+    with pytest.raises(ValueError, match="requested algorithm SAC does not match"):
+        load_run_model(ppo_path, "SAC")
+    # DemoSAC and SAC share a family but are different records.
+    with pytest.raises(ValueError, match="does not match the algorithm DEMOSAC"):
+        load_run_model(demo_path, "SAC")
+
+    loose = tmp_path / "loose.zip"
+    loose.write_bytes(ppo_path.read_bytes())
+    with pytest.raises(FileNotFoundError, match="pass the algorithm"):
+        load_run_model(loose)
+    assert type(load_run_model(loose, "PPO", device="cpu")) is PPO
+
+
+def test_notebook_best_model_loader_follows_the_record(tmp_path):
+    """record_best_model_video's loader: algo=None reads the record, a
+    disagreeing algo raises (the old "SAC" default could not load a PPO
+    run)."""
+    import inspect as _inspect
+
+    from stable_baselines3 import PPO
+
+    from courtside_dynamics.notebook_utils import (
+        _load_best_model,
+        record_best_model_video,
+    )
+
+    _saved_model(PPO, tmp_path / "model" / "best_model.zip", n_steps=8, batch_size=8)
+    _write_recorded_algo(tmp_path, "PPO")
+    assert type(_load_best_model(str(tmp_path))) is PPO
+    assert type(_load_best_model(str(tmp_path), "ppo")) is PPO
+    with pytest.raises(ValueError, match="does not match"):
+        _load_best_model(str(tmp_path), "SAC")
+    default = _inspect.signature(record_best_model_video).parameters["algo"]
+    assert default.default is None
+
+
+# -- PPO plan Step 11: provenance and on-policy training health ---------------
+
+
+def test_model_info_records_on_policy_stability_settings(tmp_path):
+    """PPO's resolved_model gains target_kl, sde_sample_freq,
+    log_std_init, ortho_init and, once training ends, its progress;
+    SAC's record is untouched (no target_kl attribute, and the on-policy
+    keys are gated)."""
+    from stable_baselines3 import PPO, SAC
+
+    from courtside_dynamics.training.artifacts import _model_info
+
+    ppo = _saved_model(
+        PPO,
+        tmp_path / "ppo.zip",
+        n_steps=8,
+        batch_size=8,
+        n_epochs=1,
+        target_kl=0.02,
+        use_sde=True,
+        sde_sample_freq=4,
+        policy_kwargs={"log_std_init": -2.0, "ortho_init": False},
+    )
+    info = _model_info(ppo)
+    assert info["hyperparameters"]["target_kl"] == 0.02
+    assert info["hyperparameters"]["sde_sample_freq"] == 4
+    assert info["log_std_init"] == -2.0
+    assert info["ortho_init"] is False
+    assert "n_updates" not in info and "timesteps" not in info
+    venv = make_vec_env(lambda: BallBalanceEnv(episode_len=8), n_envs=1)
+    try:
+        ppo.set_env(venv)
+        ppo.learn(total_timesteps=12)
+    finally:
+        venv.close()
+    progressed = _model_info(ppo, progress=True)
+    assert progressed["n_updates"] == ppo._n_updates == 2
+    assert progressed["timesteps"] == {"trained": 16, "budget": 12}
+
+    sac = _saved_model(SAC, tmp_path / "sac.zip", buffer_size=100, use_sde=True)
+    sac_info = _model_info(sac, progress=True)
+    assert "target_kl" not in sac_info["hyperparameters"]
+    assert "sde_sample_freq" not in sac_info["hyperparameters"]
+    for key in ("log_std_init", "ortho_init", "n_updates", "timesteps"):
+        assert key not in sac_info, key
+
+
+def _humanoid_shaped_series(rows: int = 40) -> dict[str, list[float]]:
+    """progress.csv rows as the 2026-10-16 humanoid PPO probe read: no
+    target_kl cut, approx_kl 0.22-1.71, clip_fraction 0.72-0.83, a value
+    head that ends worse than the mean, and a log std that drifted up
+    from log_std_init -2 under the entropy bonus."""
+    fraction = [index / (rows - 1) for index in range(rows)]
+    return {
+        "train/approx_kl": [0.22 + 1.49 * f for f in fraction],
+        "train/clip_fraction": [0.72 + 0.11 * f for f in fraction],
+        "train/explained_variance": [0.4 - 0.8 * f for f in fraction],
+        "train/std": [float(np.exp(-2.0 + 1.6 * f)) for f in fraction],
+    }
+
+
+def test_on_policy_health_flags_fire_on_a_humanoid_shaped_run():
+    from courtside_dynamics.training.artifacts import on_policy_health_flags
+
+    flags = on_policy_health_flags(
+        _humanoid_shaped_series(), target_kl=0.02, log_std_init=-2.0
+    )
+    assert [flag.split(" ", 1)[0] for flag in flags] == [
+        "approx_kl",
+        "clip_fraction",
+        "explained_variance",
+        "log",
+    ]
+    assert "> 0.05" in flags[0]
+    assert "drifted +1.6 nats" in flags[3]
+    # A healthy run (the BallBalance profile's measured approx_kl
+    # 0.011-0.014) raises nothing; a looser target_kl raises the limit.
+    healthy = {
+        "train/approx_kl": [0.011, 0.014, 0.012, 0.013],
+        "train/clip_fraction": [0.1, 0.12, 0.11, 0.09],
+        "train/explained_variance": [-0.5, 0.2, 0.6, 0.8],
+        "train/std": [0.36, 0.35, 0.33, 0.30],
+    }
+    assert on_policy_health_flags(healthy, target_kl=0.03, log_std_init=-1.0) == []
+    assert on_policy_health_flags(
+        {"train/approx_kl": [0.07]}, target_kl=0.05, log_std_init=None
+    ) == []
+    assert on_policy_health_flags(
+        {"train/approx_kl": [0.07]}, target_kl=None, log_std_init=None
+    )
+    # Only the last quarter counts: an early spike does not flag.
+    assert on_policy_health_flags(
+        {"train/explained_variance": [-3.0, -2.0, -1.0, 0.5]},
+        target_kl=None,
+        log_std_init=None,
+    ) == []
+    # A non-finite window is flagged, never averaged away; an unknown
+    # log_std_init skips the drift flag.
+    nan_flags = on_policy_health_flags(
+        {"train/approx_kl": [0.01, float("nan")], "train/std": [5.0]},
+        target_kl=0.02,
+        log_std_init=None,
+    )
+    assert nan_flags == ["approx_kl: non-finite values in the last quarter"]
+
+
+def _write_progress_csv(log_dir, series) -> None:
+    from courtside_dynamics.training.artifacts import artifact_path
+
+    keys = sorted(series)
+    rows = max(len(values) for values in series.values())
+    with open(artifact_path(str(log_dir), "progress_csv"), "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["time/total_timesteps", *keys])
+        for index in range(rows):
+            writer.writerow(
+                [index * 2048]
+                + [
+                    series[key][index] if index < len(series[key]) else ""
+                    for key in keys
+                ]
+            )
+
+
+def test_run_summary_flags_on_policy_health_against_the_record(tmp_path, capsys):
+    """The summary reads target_kl and log_std_init from the run's own
+    resolved_model; the SAC family's summary has no flag block."""
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=8),
+        algo="PPO",
+        log_dir=str(tmp_path),
+        total_timesteps=10_000,
+    )
+    write_run_config(cfg, str(tmp_path))
+    payload = json.loads((tmp_path / "config.json").read_text())
+    payload["resolved_model"] = {
+        "hyperparameters": {"target_kl": 0.02},
+        "log_std_init": -2.0,
+    }
+    (tmp_path / "config.json").write_text(json.dumps(payload))
+    _write_progress_csv(tmp_path, _humanoid_shaped_series())
+
+    def summary(**kwargs):
+        write_run_summary(
+            cfg,
+            str(tmp_path),
+            final_mean_reward=None,
+            final_std_reward=None,
+            duration_seconds=1.0,
+            actual_timesteps=12_288,
+            **kwargs,
+        )
+        return (tmp_path / "stage_summary.txt").read_text()
+
+    text = summary(n_updates=60)
+    assert "Timesteps:      12,288 of 10,000 budget (+2,288: the last rollout ran past it)" in text
+    assert "On-policy flags (means over the last quarter):" in text
+    assert text.count("    FLAG ") == 4
+    assert "FLAG approx_kl" in text and "FLAG log std" in text
+    printed = capsys.readouterr().out
+    assert printed.count("[train] WARNING: on-policy training health:") == 4
+
+    # The off-policy summary (n_updates None) keeps its old shape.
+    text = summary(n_updates=None)
+    assert "On-policy flags" not in text and "FLAG" not in text
+    assert "Timesteps:      10,000\n" in text
+    assert "train/approx_kl:" in text
+
+
+@pytest.mark.parametrize(
+    ("algo", "family", "name"),
+    [("SAC", "SAC", "SAC"), ("demosac", "SAC", "DemoSAC"), ("PPO", "PPO", "PPO")],
+)
+def test_config_json_records_algorithm_and_comparability_key(
+    tmp_path, algo, family, name
+):
+    import stable_baselines3
+
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=8),
+        algo=algo,
+        log_dir=str(tmp_path),
+    )
+    write_run_config(cfg, str(tmp_path))
+    payload = json.loads((tmp_path / "config.json").read_text())
+    assert payload["algorithm"] == {
+        "name": name,
+        "family": family,
+        "implementation": f"sb3=={stable_baselines3.__version__}",
+    }
+    # Without a recipe the task is the env class; SAC and PPO runs of
+    # one task never share a key.
+    assert payload["comparability_key"] == {
+        "task": "BallBalanceEnv",
+        "eval_protocol": None,
+        "algo_family": family,
+    }
+    recipe_cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=8),
+        algo=algo,
+        log_dir=str(tmp_path / "recipe"),
+        recipe_name="BallBalance",
+    )
+    write_run_config(recipe_cfg, str(tmp_path / "recipe"))
+    recorded = json.loads((tmp_path / "recipe" / "config.json").read_text())
+    assert recorded["comparability_key"]["task"] == "BallBalance"
+
+
+# -- PPO plan Step 12: tests that cross the whole path ------------------------
+
+
+def _family_e2e_cfg(log_dir, algo: str, **overrides) -> TrainConfig:
+    """A tiny BallBalance run (episode_len 12, one worker) through the
+    whole trainer: headline selection with confirm_best and a paired
+    eval_seed, the final-config stream, VecNormalize checkpoints, a
+    one-stage performance gate, a patience stop and the closing
+    evaluation. Each family gets its own update geometry: SAC updates
+    every step after 16, PPO every 8-step rollout."""
+    if algo == "PPO":
+        model_kwargs = {"n_steps": 8, "batch_size": 8, "n_epochs": 2}
+    else:
+        model_kwargs = {"learning_starts": 16, "buffer_size": 500, "batch_size": 16}
+    fields: dict[str, Any] = {
+        "env_fn": _steps_alive_env,
+        "algo": algo,
+        "log_dir": str(log_dir),
+        "n_envs": 1,
+        "seed": 0,
+        "total_timesteps": 1_024,
+        "eval_freq": 32,
+        "checkpoint_freq": 64,
+        "video_freq": 0,
+        "record_video": False,
+        "n_eval_episodes": 2,
+        "info_dict_eval": True,
+        "headline_key": "steps_alive",
+        "confirm_best_eval": True,
+        "eval_seed": 4_000,
+        "final_info_eval": True,
+        "early_stop_patience": 2,
+        "performance_gate": {
+            "metric_key": "steps_alive_ep_mean",
+            "threshold": 1e9,
+            "sustain_evals": 1,
+            "stages": ({"episode_len": 12},),
+        },
+        "model_kwargs": model_kwargs,
+    }
+    fields.update(overrides)
+    return TrainConfig(**fields)
+
+
+@pytest.mark.parametrize("algo", ["SAC", "PPO"])
+def test_train_runs_each_family_end_to_end(tmp_path, algo):
+    """Both families through every stage of train(): selection,
+    checkpoints, the gate, the stop and the closing evaluation, with
+    the artifacts, records and loaders each family needs."""
+    import pickle
+
+    from courtside_dynamics.notebook_utils import _load_best_model
+    from courtside_dynamics.training.algos import load_run_model, resolve_algo
+
+    model = train(_family_e2e_cfg(tmp_path, algo))
+    on_policy = algo == "PPO"
+
+    # The headline stream plateaus at 12 steps alive (BallBalance
+    # cannot drop the ball in 12 steps), so patience ends the run:
+    # SAC after its 2-evaluation warm-up, PPO only once the update
+    # floor's ceil(20 * 8 / 32) = 5 evaluations have passed.
+    summary = (tmp_path / "stage_summary.txt").read_text()
+    assert "Stop reason:    early_stop_patience: no improvement in" in summary
+    assert model.num_timesteps < 1_024
+    assert (
+        f"Timesteps:      {model.num_timesteps:,} of 1,024 budget (stopped early)"
+        in summary
+    )
+    assert "[closing eval, fresh episodes]" in summary
+    assert "[task-metric selection]" in summary
+    assert ("SB3 n_updates" in summary) is on_policy
+    assert ("On-policy flags" in summary) is on_policy
+    # Evaluation 1 sets the best and every later one ties it, so the
+    # stop lands at warm-up + patience evaluations: 2 + 2 for SAC,
+    # 5 + 2 for PPO.
+    expected_stop = (5 + 2) * 32 if on_policy else (2 + 2) * 32
+    assert model.num_timesteps == expected_stop
+
+    for relative in (
+        "config.json",
+        "model/best_model.zip",
+        "model/best_vec_normalize.pkl",
+        "model/best_model_meta.json",
+        "model/final_model.zip",
+        "model/vec_normalize.pkl",
+        "model/stage_bests/stage_00/best_model.zip",
+        "metrics/evaluations.npz",
+        "metrics/eval_info.csv",
+        "reports/curriculum_stages.json",
+    ):
+        assert (tmp_path / relative).is_file(), relative
+    for steps in range(64, model.num_timesteps + 1, 64):
+        assert (tmp_path / "checkpoints" / f"rl_model_{steps}_steps.zip").is_file()
+        assert (
+            tmp_path / "checkpoints" / f"rl_model_vecnormalize_{steps}_steps.pkl"
+        ).is_file()
+
+    meta = json.loads((tmp_path / "model" / "best_model_meta.json").read_text())
+    assert meta["selection_keys"][0] == "steps_alive_ep_mean"
+    assert meta["eval_seed"] == 4_000
+    eval_rows = (tmp_path / "metrics" / "eval_info.csv").read_text()
+    assert (",n_updates," in eval_rows) is on_policy
+
+    config = json.loads((tmp_path / "config.json").read_text())
+    family = "PPO" if on_policy else "SAC"
+    assert config["algorithm"]["family"] == family
+    assert config["comparability_key"]["algo_family"] == family
+    resolved = config["resolved_model"]
+    assert resolved["algo_class"] == algo
+    on_policy_keys = {"log_std_init", "ortho_init", "n_updates", "timesteps"}
+    if on_policy:
+        assert on_policy_keys <= set(resolved)
+        assert {"target_kl", "sde_sample_freq", "n_steps"} <= set(
+            resolved["hyperparameters"]
+        )
+        assert resolved["n_updates"] == model._n_updates > 0
+        assert resolved["timesteps"] == {
+            "trained": model.num_timesteps,
+            "budget": 1_024,
+        }
+    else:
+        assert not on_policy_keys & set(resolved)
+        assert {"buffer_size", "learning_starts", "ent_coef"} <= set(
+            resolved["hyperparameters"]
+        )
+        assert "target_kl" not in resolved["hyperparameters"]
+
+    # Reward normalization follows the family (on for PPO, off for SAC),
+    # in the record and in every pickled normalizer.
+    assert config["resolved_training"]["normalize_reward_resolved"] is on_policy
+    for pickled in (
+        tmp_path / "model" / "vec_normalize.pkl",
+        tmp_path / "model" / "best_vec_normalize.pkl",
+        tmp_path / "checkpoints" / "rl_model_vecnormalize_64_steps.pkl",
+    ):
+        with open(pickled, "rb") as stream:
+            normalizer = pickle.load(stream)
+        assert normalizer.norm_obs is True
+        assert normalizer.norm_reward is on_policy, pickled
+
+    # Every saved model loads back through its own class.
+    cls = resolve_algo(algo)
+    for path in (
+        tmp_path / "model" / "best_model.zip",
+        tmp_path / "model" / "stage_bests" / "stage_00" / "best_model.zip",
+        tmp_path / "checkpoints" / "rl_model_64_steps.zip",
+    ):
+        assert type(load_run_model(path, device="cpu")) is cls, path
+    assert type(_load_best_model(str(tmp_path))) is cls
+
+
+def test_ppo_training_is_deterministic(tmp_path):
+    """The PPO counterpart of SD0: two seeded runs (reward normalization
+    on, two workers) train identical parameters and normalizers."""
+    import pickle
+
+    states = []
+    normalizers = []
+    for name in ("first", "second"):
+        model = train(
+            _family_e2e_cfg(
+                tmp_path / name,
+                "PPO",
+                n_envs=2,
+                total_timesteps=128,
+                eval_freq=32,
+                checkpoint_freq=0,
+                early_stop_patience=None,
+                model_kwargs={"n_steps": 16, "batch_size": 16, "n_epochs": 2},
+            )
+        )
+        states.append(model.policy.state_dict())
+        with open(tmp_path / name / "model" / "vec_normalize.pkl", "rb") as f:
+            normalizers.append(pickle.load(f))
+    assert states[0].keys() == states[1].keys()
+    for key in states[0]:
+        assert torch.equal(states[0][key], states[1][key]), key
+    for stats in ("obs_rms", "ret_rms"):
+        left, right = (getattr(n, stats) for n in normalizers)
+        np.testing.assert_array_equal(left.mean, right.mean)
+        np.testing.assert_array_equal(left.var, right.var)
+
+
+class _Reach1D(gym.Env):
+    """A point mass steered toward a goal on a line: the CI learning bar.
+
+    Reward ``-|goal - x|`` every step, truncated at 40 steps and never
+    terminated, so the value head must bootstrap every episode end. The
+    zero action scores about -26.7; the optimum (full speed to the goal,
+    then hold) averages about -3.3 over the start distribution.
+    """
+
+    metadata: dict[str, Any] = {"render_modes": []}
+
+    def __init__(self) -> None:
+        self.observation_space = gym.spaces.Box(-np.inf, np.inf, (2,), np.float32)
+        self.action_space = gym.spaces.Box(-1.0, 1.0, (1,), np.float32)
+        self.x = 0.0
+        self.goal = 0.0
+        self.t = 0
+
+    def _obs(self) -> np.ndarray:
+        return np.array([self.x, self.goal - self.x], dtype=np.float32)
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        self.x = float(self.np_random.uniform(-1.0, 1.0))
+        self.goal = float(self.np_random.uniform(-1.0, 1.0))
+        self.t = 0
+        return self._obs(), {"distance": abs(self.goal - self.x)}
+
+    def step(self, action):
+        self.x += 0.1 * float(np.clip(action[0], -1.0, 1.0))
+        self.t += 1
+        distance = abs(self.goal - self.x)
+        return self._obs(), -distance, False, self.t >= 40, {"distance": distance}
+
+
+def test_ppo_learns_a_one_dimensional_reach_through_train(tmp_path):
+    """PPO plan Step 12's CI learning bar: PPO through the whole trainer
+    (4 workers x 256-step rollouts, reward normalization on) must learn
+    a task SB3 PPO solves in seconds. Measured (seeds 0, 1, 2): the best
+    paired batch reached -3.41, -3.22 and -3.23 within 24,576 steps
+    (24 rollouts, SB3 n_updates 240; about 11 s on one thread), max
+    approx_kl 0.014-0.022. A broken advantage, normalizer, gamma or
+    rollout path fails the -6 bar long before it fails a unit test.
+    Selection is on the paired evaluator's reward, so the reloaded best
+    pair must reproduce the selecting batch exactly."""
+    import pickle
+
+    from courtside_dynamics.training.algos import load_run_model
+    from courtside_dynamics.training.artifacts import _read_training_health_series
+
+    eval_seed = 9_000
+    cfg = TrainConfig(
+        env_fn=_Reach1D,
+        algo="PPO",
+        log_dir=str(tmp_path),
+        n_envs=4,
+        seed=0,
+        total_timesteps=24_576,
+        eval_freq=4_096,
+        checkpoint_freq=0,
+        video_freq=0,
+        record_video=False,
+        n_eval_episodes=10,
+        early_stop_patience=None,
+        info_dict_eval=True,
+        headline_key="distance",
+        best_metric_keys=("episode_reward_mean",),
+        eval_seed=eval_seed,
+        model_kwargs={
+            "n_steps": 256,
+            "batch_size": 256,
+            "n_epochs": 10,
+            "learning_rate": 1e-3,
+        },
+    )
+    model = train(cfg)
+    config = json.loads((tmp_path / "config.json").read_text())
+    assert config["resolved_training"]["normalize_reward_resolved"] is True
+    assert model._n_updates == 24 * 10
+
+    meta = json.loads((tmp_path / "model" / "best_model_meta.json").read_text())
+    best = meta["metrics"]["episode_reward_mean"]
+    assert best >= -6.0, best
+    approx_kl = _read_training_health_series(str(tmp_path))["train/approx_kl"]
+    assert approx_kl and max(approx_kl) < 0.1, approx_kl
+
+    best_model = load_run_model(tmp_path / "model" / "best_model.zip", device="cpu")
+    with open(tmp_path / "model" / "best_vec_normalize.pkl", "rb") as stream:
+        normalizer = pickle.load(stream)
+    returns = []
+    for episode in range(cfg.n_eval_episodes):
+        env = _Reach1D()
+        obs, _ = env.reset(seed=eval_seed + episode)
+        total, done = 0.0, False
+        while not done:
+            action, _ = best_model.predict(
+                normalizer.normalize_obs(obs[None]), deterministic=True
+            )
+            obs, reward, terminated, truncated, _ = env.step(action[0])
+            # The evaluator sums the vec env's float32 reward buffer.
+            total += float(np.float32(reward))
+            done = terminated or truncated
+        returns.append(total)
+    assert sum(returns) / len(returns) == best

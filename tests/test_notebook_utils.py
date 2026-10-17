@@ -1857,10 +1857,11 @@ def _write_paddle_best_pair(run_dir, *, normalizer_bytes=b"pkl", meta=True):
     (run_dir / "config.json").write_text(
         json.dumps(
             {
+                "train_config": {"algo": "SAC"},
                 "evaluation_env": {
                     "class": "PaddleTennisEnv",
                     "constructor_kwargs": {"episode_len": 1500},
-                }
+                },
             }
         )
     )
@@ -1909,12 +1910,73 @@ def test_score_paddle_stage_records_the_verified_pair(tmp_path, monkeypatch):
     assert payload["policy"]["pair_verification"] == (
         "verified_by_best_model_meta_sha256"
     )
+    assert payload["policy"]["algo"] == "SAC"
+    # A config.json from before the comparability key records none.
+    assert payload["comparability_key"] is None
     assert payload["policy"]["selected_timestep"] == 750_000
     assert payload["policy"]["sha256"] == hashlib.sha256(b"zip").hexdigest()
     assert payload["normalization"]["sha256"] == hashlib.sha256(b"pkl").hexdigest()
     assert payload["verdict"] == "PASS"
     report = json.loads((tmp_path / "reports" / "campaign_gate.json").read_text())
     assert report == payload
+
+
+def test_score_paddle_stage_scores_a_real_ppo_checkpoint(tmp_path):
+    """PPO plan Step 10: the campaign scorer used to load every leg with
+    ``SAC.load``, which cannot read a PPO checkpoint. A tiny PPO
+    PaddleTennis run trained by train() (the recipe's PPO profile on
+    short rollouts and 40-step episodes) is scored end to end: the
+    model loads through PPO.load, behind its own normalizer, on the
+    environment its config.json records, and the report names the
+    algorithm and the run's comparability key."""
+    from courtside_dynamics.recipes import (
+        build_train_config,
+        make_env_fn,
+        make_eval_env_fn,
+    )
+    from courtside_dynamics.training import train
+
+    short = {"episode_len": 40}
+    profile = build_train_config(
+        "PaddleTennis", algo="PPO", log_dir=str(tmp_path / "unused"), seed=0
+    ).model_kwargs
+    cfg = build_train_config(
+        "PaddleTennis",
+        algo="PPO",
+        log_dir=str(tmp_path / "leg"),
+        seed=0,
+        n_envs=2,
+        total_timesteps=128,
+        eval_freq=64,
+        checkpoint_freq=128,
+        checkpoint_diagnosis={"episodes": 1, "seed_start": 5200},
+        video_freq=0,
+        record_video=False,
+        n_eval_episodes=1,
+        reward_eval_episodes=1,
+        env_fn=make_env_fn("PaddleTennis", env_overrides=short),
+        eval_env_fn=make_eval_env_fn("PaddleTennis", env_overrides=short),
+        model_kwargs={**profile, "n_steps": 32, "batch_size": 32, "n_epochs": 1},
+    )
+    train(cfg)
+    payload = score_paddle_stage(
+        tmp_path / "leg", bars=_LS_C_BARS, episodes=1, report_name="gate.json"
+    )
+    assert payload["policy"]["algo"] == "PPO"
+    assert payload["policy"]["pair_verification"] == (
+        "verified_by_best_model_meta_sha256"
+    )
+    assert payload["comparability_key"] == {
+        "task": "PaddleTennis",
+        "eval_protocol": None,
+        "algo_family": "PPO",
+    }
+    assert payload["environment"]["constructor_kwargs"]["episode_len"] == 40
+    assert payload["evaluation"]["episodes"] == 1
+    assert payload["verdict"] in ("PASS", "MIDDLE", "FAIL", "NO_DATA")
+    assert (tmp_path / "leg" / "reports" / "gate.json").is_file()
+    # The in-run checkpoint diagnosis replayed the live PPO model too.
+    assert list((tmp_path / "leg" / "reports" / "diagnosis").glob("*128*"))
 
 
 def test_verify_best_checkpoint_pair_outcomes(tmp_path):
