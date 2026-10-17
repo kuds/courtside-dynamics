@@ -18,6 +18,54 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **Offline evaluation: snapshots, protocols, the re-scoring harness,
+  `select()` and a probe CLI (design M3 + L2, 2026-10-17).** No env
+  stream or training change: golden digests 22/22; the recipe snapshot
+  differs only by the new `snapshot_evals` field (re-recorded: `false`
+  in 80 resolutions, `true` in the 12 PaddleTennis ones); the trainer
+  digest against `9f54ae5` matches every policy, normalizer, monitor,
+  RNG, `resolved_model`, evaluation, `eval_info.csv` and best-model
+  component, and the PaddleTennis job's `run_layout_artifacts` gains
+  `snapshots_dir` as declared.
+  - **Snapshots.** `TrainConfig.snapshot_evals` (default off; on in the
+    PaddleTennis recipe) saves the policy and its normalizer at every
+    evaluation, before any evaluator runs at that step:
+    `snapshots/snapshot_<N>_steps.zip` and
+    `snapshot_vecnormalize_<N>_steps.pkl`, the best model's format,
+    bound by sha256 in `snapshots/index.json`, written atomically,
+    listed in the run record's new `snapshots` block and in the
+    manifest. A disk error is listed and training continues. About 3.5
+    MB per PaddleTennis SAC snapshot (critics and optimizer states
+    included), so about 140 MB per 1M steps.
+  - **Protocols** (`experiments.protocols`): frozen `EvalProtocol`s with
+    a content fingerprint. `paddle-npoint@v2` is today's PaddleTennis
+    in-loop selection evaluation, declared literally; every other
+    recipe has `<recipe>-inloop@v1`, derived and pinned. Scores use the
+    run's own seed block and record it.
+  - **Harness** (`experiments.harness`): `evaluate()` and `rescore()`
+    run the in-loop evaluator's own collection core, which moved out of
+    `InfoDictEvalCallback._collect_metrics` into
+    `collect_episode_metrics` (verbatim; the in-loop path is
+    bit-identical). A snapshot's offline row equals its `eval_info.csv`
+    row bit for bit on CPU (SAC and PPO). `python -m
+    courtside_dynamics.experiments.rescore --protocol <id> <run_dir>...`
+    scores best models, snapshots and checkpoints (the August
+    `checkpoints/paddle_tennis_sac_<N>_steps.zip` layout included) into
+    `scores/<protocol>.jsonl`, now a post-training location for
+    `verify`.
+  - **`select()`** (`experiments.select`): the lexicographic per-key
+    delta rule as a pure function over score rows, with confirmation
+    compared within block (`repo_review_20261016` section 2.2's
+    semantics). The in-loop `confirm_best` rule is unchanged pending
+    the maintainer's decision; `in_loop_select()` replays it for
+    comparison. The callback's comparison is now `select.improves`.
+  - **Probe CLI** (`python -m courtside_dynamics.experiments.probe`):
+    the zero, random, oracle and camper witnesses (the golden digests'
+    definitions, now `digests.scripted_policy`) or a model under a
+    protocol, with `--env`/`--episodes` deriving a fingerprinted probe
+    protocol. It reproduces the RS1 reach-shaping witness table.
+  - Not yet: the lever audit mode (L6); `eval_protocol` in the
+    comparability key and run record stays `null` until L3.
 - **The best model is written atomically and the record checks what it
   seals (L1 verifier round 2, 2026-10-17).** No env stream or training
   change: golden digests 22/22, recipe snapshot unchanged (96), and the

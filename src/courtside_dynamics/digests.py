@@ -392,17 +392,30 @@ def _box_action_space(env: gymnasium.Env) -> gymnasium.spaces.Box:
     return space
 
 
-def _make_policy(case: StreamCase, env: gymnasium.Env, seed: int) -> Policy:
+def scripted_policy(name: str, env: gymnasium.Env, seed: int) -> Policy:
+    """The driving policy ``name`` (:data:`POLICIES`) for ``env``.
+
+    The digests' frozen definitions, shared with the probe CLI
+    (``experiments.probe``) so a probe drives exactly the policy a
+    golden stream does: ``random`` draws from
+    ``np.random.default_rng(seed)``.
+    """
+    if name not in POLICIES:
+        raise ValueError(f"policy must be one of {POLICIES}, got {name!r}")
     space = _box_action_space(env)
-    if case.policy == "zero":
+    if name == "zero":
         zero = np.zeros(space.shape, dtype=space.dtype)
         return lambda _obs: zero.copy()
-    if case.policy == "random":
+    if name == "random":
         rng = np.random.default_rng(seed)
         return lambda _obs: rng.uniform(space.low, space.high).astype(space.dtype)
-    if case.policy == "oracle":
+    if name == "oracle":
         return _oracle_policy(env)
     return _camper_policy(env)
+
+
+def _make_policy(case: StreamCase, env: gymnasium.Env, seed: int) -> Policy:
+    return scripted_policy(case.policy, env, seed)
 
 
 # -- the drill library ---------------------------------------------------------

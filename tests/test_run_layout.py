@@ -28,12 +28,14 @@ _DIRECTORY_NAMES = {
     "checkpoints_dir",
     "stage_bests_dir",
     "diagnosis_dir",
+    "snapshots_dir",
 }
 
 
 def test_layout_keeps_human_files_at_root_and_sorts_the_rest():
     """Root keeps exactly the three files a human opens first plus the
-    run's record and manifest (experiments.records reads them there);
+    run's record and manifest (experiments.records reads them there)
+    and the checkpoint and evaluation-snapshot folders;
     every other artifact is one folder deep by audience, and
     progress.csv is directly in metrics/ (pandas metrics, not TB event
     data)."""
@@ -48,6 +50,7 @@ def test_layout_keeps_human_files_at_root_and_sorts_the_rest():
         "stage_summary",
         "run_config_toml",
         "checkpoints_dir",
+        "snapshots_dir",
         "run_record",
         "sync_manifest",
     }
@@ -57,6 +60,10 @@ def test_layout_keeps_human_files_at_root_and_sorts_the_rest():
     assert RUN_LAYOUT["stage_summary"] == "stage_summary.txt"
     assert RUN_LAYOUT["run_config_toml"] == "run_config.toml"
     assert RUN_LAYOUT["checkpoints_dir"] == "checkpoints"
+    # experiments.snapshots writes there without importing the layout.
+    from courtside_dynamics.experiments.snapshots import SNAPSHOTS_DIR_NAME
+
+    assert RUN_LAYOUT["snapshots_dir"] == SNAPSHOTS_DIR_NAME == "snapshots"
     assert RUN_LAYOUT["progress_csv"] == "metrics/progress.csv"
     assert RUN_LAYOUT["best_model"] == "model/best_model.zip"
     assert RUN_LAYOUT["evaluations"] == "metrics/evaluations.npz"

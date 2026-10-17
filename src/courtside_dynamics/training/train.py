@@ -77,6 +77,11 @@ from courtside_dynamics.callbacks.video_record import (
     VideoRecordCallback,
 )
 from courtside_dynamics.experiments import records as run_records
+from courtside_dynamics.experiments.snapshots import (
+    SNAPSHOT_INDEX_NAME,
+    SnapshotWriter,
+    snapshot_summary,
+)
 from courtside_dynamics.experiments.sync import (
     RunDirMirror,
     SyncError,
@@ -159,6 +164,58 @@ class _SaveBestOnNewBest(BaseCallback):
                 )
                 vec_norm.save(staged.stage(self.normalizer_path))
             staged.commit()
+        return True
+
+
+class _SnapshotOnEvaluation(BaseCallback):
+    """Save the policy and its normalizer at every evaluation.
+
+    ``TrainConfig.snapshot_evals`` (``experiments.snapshots``): at every
+    ``eval_freq`` call -- the evaluators' cadence -- the model and its
+    ``VecNormalize`` statistics go to ``snapshots/`` in the format the
+    best model uses, bound in ``snapshots/index.json``. ``train()``
+    puts this callback first, so the snapshot at step N is taken before
+    any evaluator, gate or checkpoint callback runs at N: the policy
+    and observation statistics every evaluation at N scores (an
+    evaluation only reads the model; a gate's advance may reset the
+    entropy temperature after it). Saving only reads the model, so no
+    stream or RNG moves. A disk error is printed and listed in the
+    index's ``failures``, and training continues, like
+    ``evaluations.npz``; any other error propagates.
+    """
+
+    def __init__(self, directory: str, *, run_id: str, eval_freq: int) -> None:
+        super().__init__()
+        self.writer = SnapshotWriter(directory, run_id=run_id)
+        self.eval_freq = eval_freq
+
+    def _init_callback(self) -> None:
+        self.writer.open()
+
+    def _on_step(self) -> bool:
+        if self.eval_freq <= 0 or self.n_calls % self.eval_freq != 0:
+            return True
+        get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
+        vec_norm = get_vec_norm() if get_vec_norm is not None else None
+        n_updates = getattr(self.model, "_n_updates", None)
+        try:
+            self.writer.write(
+                self.num_timesteps,
+                save_model=self.model.save,
+                save_normalizer=None if vec_norm is None else vec_norm.save,
+                n_updates=(
+                    n_updates
+                    if isinstance(n_updates, int) and not isinstance(n_updates, bool)
+                    else None
+                ),
+            )
+        except OSError as error:
+            print(
+                f"[train] could not save the evaluation snapshot at "
+                f"{self.num_timesteps:,} steps ({error!r}); training "
+                f"continues, and snapshots/index.json lists it as failed"
+            )
+            self.writer.note_failure(self.num_timesteps, error)
         return True
 
 
@@ -396,6 +453,7 @@ class _RunLifecycle:
             artifacts=self._artifacts(),
             sync=sync,
             progress=progress,
+            snapshots=snapshot_summary(self.log_dir),
         )
         selection = record["selection"]
         if (
@@ -1351,6 +1409,25 @@ class TrainConfig:
         raises once the local run directory is complete (a run that is
         already failing keeps its own exception, and the mirror failure
         is printed).
+    snapshot_evals:
+        Save the policy and its ``VecNormalize`` statistics at every
+        evaluation (``eval_freq``) under ``snapshots/``
+        (``experiments.snapshots``): ``snapshot_<N>_steps.zip`` and
+        ``snapshot_vecnormalize_<N>_steps.pkl``, the format
+        ``best_model.zip`` / ``best_vec_normalize.pkl`` use (no replay
+        buffer), each pair bound by sha256 in ``snapshots/index.json``
+        and written atomically. Saved before that step's evaluations
+        run, so a snapshot is exactly the policy (and normalizer) the
+        in-loop evaluators score at that step; the offline harness
+        (``python -m courtside_dynamics.experiments.rescore``) re-scores
+        them under any evaluation protocol. Saving reads the model and
+        consumes no RNG, so training is unchanged. A PaddleTennis SAC
+        snapshot is about 3.5 MB (the zip carries the critics, their
+        targets and the optimizer states besides the policy), so about
+        140 MB per 1M steps at the recipe's 25k cadence. A snapshot that
+        fails on a disk error is printed and listed in the index's
+        ``failures``, and training continues. Default off; the
+        PaddleTennis recipe turns it on.
 
     Every run directory also carries ``run_record.json`` (written right
     after ``config.json`` with status ``"running"`` and rewritten on every
@@ -1436,6 +1513,7 @@ class TrainConfig:
     min_policy_updates_before_stop: int = DEFAULT_MIN_POLICY_UPDATES_BEFORE_STOP
     vec_env: str = "dummy"
     sync_dir: str | os.PathLike[str] | None = None
+    snapshot_evals: bool = False
 
 
 #: Offset of the derived paired-evaluation seed block from ``cfg.seed``
@@ -2046,6 +2124,10 @@ def _validate_evaluation_config(cfg: TrainConfig) -> None:
         raise TypeError(
             f"reuse_log_dir must be a bool, got {cfg.reuse_log_dir!r}"
         )
+    if not isinstance(cfg.snapshot_evals, bool):
+        raise TypeError(
+            f"snapshot_evals must be a bool, got {cfg.snapshot_evals!r}"
+        )
 
 
 #: Keys a ``performance_gate`` mapping must set (the rest default).
@@ -2506,12 +2588,15 @@ def _check_log_dir_reuse(cfg: TrainConfig) -> None:
     ever) the new attempt overwrites them. Every shipped caller already
     starts in a fresh directory (``resolve_run_dir`` timestamps one,
     the campaign's ``next_stage_attempt_dir`` numbers one). A previous
-    attempt is recognized by its evaluation rows or by its
-    ``run_record.json``, which every attempt writes first.
+    attempt is recognized by its evaluation rows, by its
+    ``run_record.json``, which every attempt writes first, or by its
+    ``snapshots/index.json`` (whose entries a new attempt would
+    otherwise refuse mid-launch, ``TrainConfig.snapshot_evals``).
 
     Under ``reuse_log_dir=True`` every run-layout artifact the previous
     attempt left (``RUN_LAYOUT``: summary, run record, sync manifest,
-    the model files, the metrics, reports, media and checkpoints) but
+    the model files, the metrics, reports, media, checkpoints and
+    snapshots) but
     ``config.json``, which this attempt rewrites first, rotates aside as
     ``<name>.attempt_<UTC time>`` (a directory whole). The monitor and
     TensorBoard directories were the first (``repo_review_20261016``
@@ -2534,10 +2619,21 @@ def _check_log_dir_reuse(cfg: TrainConfig) -> None:
         if path is not None and _has_data_rows(path)
     ]
     previous_record = locate_artifact(cfg.log_dir, "run_record")
-    if not stale and previous_record is None:
+    snapshots_dir = locate_artifact(cfg.log_dir, "snapshots_dir")
+    previous_snapshots = (
+        os.path.join(snapshots_dir, SNAPSHOT_INDEX_NAME)
+        if snapshots_dir is not None
+        and os.path.isfile(os.path.join(snapshots_dir, SNAPSHOT_INDEX_NAME))
+        else None
+    )
+    if not stale and previous_record is None and previous_snapshots is None:
         return
     if not cfg.reuse_log_dir:
-        evidence = stale + ([previous_record] if previous_record else [])
+        evidence = (
+            stale
+            + ([previous_record] if previous_record else [])
+            + ([previous_snapshots] if previous_snapshots else [])
+        )
         raise ValueError(
             f"log_dir {cfg.log_dir} already holds a previous training "
             f"attempt ({', '.join(evidence)}); a new run would append to its "
@@ -3644,9 +3740,19 @@ def _train_in_log_dir(
                 verbose=0 if headline_selection else eval_verbose,
             )
 
-        callbacks: list[BaseCallback] = (
-            [] if eval_callback is None else [eval_callback]
-        )
+        callbacks: list[BaseCallback] = []
+        if cfg.snapshot_evals:
+            # First: each snapshot is taken before any evaluator, gate
+            # or checkpoint callback runs at its step.
+            callbacks.append(
+                _SnapshotOnEvaluation(
+                    artifact_path(cfg.log_dir, "snapshots_dir"),
+                    run_id=run.run_id,
+                    eval_freq=_calls(cfg.eval_freq),
+                )
+            )
+        if eval_callback is not None:
+            callbacks.append(eval_callback)
         # Bound outside the gated-construction branch so the interrupt
         # salvage path can finalize the gate's stage history (or skip
         # cleanly for non-gated runs).

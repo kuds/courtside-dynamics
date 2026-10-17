@@ -718,6 +718,129 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### Offline evaluation: one evaluation code path, snapshots at every evaluation, versioned protocols, a pure select() — *implemented (unreleased, 2026-10-17); design M3 + L2*
+`design_env_ladder_and_structure_20261016.md` M3 and
+`design_campaign_structure_20261016.md` L2: new instruments and era
+bumps should mean re-scoring saved policies, not retraining. Every env
+stream and training path is unchanged: golden digests 22/22; the
+recipe snapshot differs only by the new `snapshot_evals` field (`false`
+in 80 resolutions, `true` in the 12 PaddleTennis ones); the trainer
+digest against `9f54ae5` matches 91 of 92 components, policy,
+normalizer, monitor, RNG, `resolved_model`, evaluation, `eval_info.csv`
+and best-model components included, and differs only in the
+PaddleTennis job's `run_layout_artifacts`, which gains `snapshots_dir`.
+- **The harness is the in-loop evaluator.** The body of
+  `InfoDictEvalCallback._collect_metrics` moved verbatim into
+  `callbacks.info_dict_eval.collect_episode_metrics` (with
+  `reset_eval_episode` and `is_episode_sum_key`); the callback calls it
+  with its own settings and `experiments.harness` with a protocol's, on
+  an eval env built as `train()` builds the info evaluator's
+  (`make_vec_env`, one Monitor-wrapped worker, the saved
+  `VecNormalize` frozen with raw rewards). The lexicographic comparison
+  moved to `experiments.select.improves`, which the callback's
+  `_improves` calls. A second implementation would have been checked
+  against the first forever; one cannot drift.
+- **Gate.** On fresh CPU tiny runs trained by `train()` (SAC and PPO,
+  the PaddleTennis recipe's paired evaluation with `confirm_best`,
+  300-step episodes, 2 evaluation episodes, 4 evaluations),
+  `harness.evaluate` on each snapshot equals that evaluation's
+  `eval_info.csv` row in all 132 metric columns, bit for bit (the CSV
+  writes `repr`, so floats round-trip); PPO's snapshot `n_updates`
+  equals the CSV's `n_updates` rows. An unpaired run (BallBalance)
+  reproduces its first evaluation's row. `tests/test_eval_harness.py`
+  runs both.
+- **Snapshots** (`TrainConfig.snapshot_evals`, on in the PaddleTennis
+  recipe only; `experiments.snapshots`). At every evaluation cadence
+  `snapshots/snapshot_<N>_steps.zip` and
+  `snapshot_vecnormalize_<N>_steps.pkl` (`model.save` and
+  `VecNormalize.save`, the best model's format, no replay buffer; SB3's
+  checkpoint naming, so one parser reads both), bound by sha256 in
+  `snapshots/index.json` and written like the best model (temporaries,
+  then renames, the index last). The callback runs first in the list,
+  before any evaluator or gate at that step: an evaluation only reads
+  the model, but a gate advance may reset the entropy temperature after
+  it. A disk error is printed and listed in the index's `failures`, and
+  training continues (like `evaluations.npz`): the snapshots are
+  evidence for offline selection, not the run. The run record gains an
+  additive `snapshots` block (schema still `courtside-run-record/1`),
+  the manifest hashes the files, `reuse_log_dir` rotates the folder and
+  treats a previous index as a previous attempt, and `load_run_model`
+  finds the run's `config.json` from `snapshots/`.
+- **Measured size: 3.5 MB per PaddleTennis SAC snapshot**, about 140 MB
+  per 1M steps at the 25k cadence, not the design's 1.6 MB and 64 MB:
+  that counted the policy weights; the zip also carries both critics,
+  their targets and three optimizer states, and SB3's `load` requires
+  them. A policy-only format would need its own loader.
+- **Protocols** (`experiments.protocols.EvalProtocol`, frozen, with a
+  fingerprint over everything but id, recipe and description). The env
+  is pinned by class and every resolved constructor argument (its
+  EzPickle kwargs, what `config.json` records), so a default that moves
+  does not move the protocol. `paddle-npoint@v2` is declared literally:
+  L3 will move the recipe to @v3 eval overrides while @v2 must stay
+  scorable, and a test pins that the recipe's in-loop evaluation (SAC
+  and PPO builds) still equals it. The 14 other recipes'
+  `<recipe>-inloop@v1` are derived from the live recipe and checked
+  against fingerprints pinned at registration: literal copies would be
+  weight without a consumer today, and the pin makes a recipe change
+  refuse loudly ("declare the old version literally, never re-pin").
+  For a reward-selected recipe the protocol is the reporting stream and
+  has no selection keys; a performance gate rescales its matched
+  evaluator per stage, which a protocol does not follow.
+- **The seed block is the run's.** Today's paired block derives from the
+  run (`eval_seed`, else `seed + 1,000,000`), so the registered
+  protocols carry `seed_start=None` and `resolve_seed_block` reads the
+  run's `config.json`: its recorded paired block, its `eval_seed`, or
+  the seed derivation for runs that evaluated unpaired (the August runs,
+  seed 0: block 1,000,000). Every score row records the block and its
+  source. An unpaired protocol scores one fresh stream from the info
+  evaluator's env seed (`seed + n_envs + 1`): reproducible offline, but
+  equal to the in-loop row only for a run's first evaluation, since an
+  unpaired stream continues across evaluations.
+- **rescore** writes `scores/<protocol>.jsonl` beside the run (a
+  post-training location now, like `reports/`), or one combined file.
+  It reads the best pair (its meta's step, refusing an unbound pair as
+  the loaders do), the snapshots and `checkpoints/<prefix>_<N>_steps.zip`
+  with `<prefix>_vecnormalize_<N>_steps.pkl`, in the 0.14 or the flat
+  layout, and checks every pair before scoring anything: one problem
+  refuses the whole rescore, so no partial set is written silently.
+  `--protocol inloop` rebuilds each run's own in-loop evaluation from
+  its `config.json` (refused when the record holds an object's repr,
+  as the humanoid runs' reward configs are).
+- **select() confirms within block; the in-loop rule is unchanged.**
+  `select(rows, protocol)` banks the first best's confirmation-block
+  score and compares each block with itself, the semantics
+  `repo_review_20261016.md` section 2.2 calls correct.
+  `InfoDictEvalCallback` still compares a candidate's confirmation with
+  the first best's standard-block score until a confirmed best exists;
+  changing it is the maintainer's call. `in_loop_select()` replays the
+  in-loop rule over the same rows. The tiny PPO gate run shows the
+  difference on its own (selection deltas 0, reward residues): the
+  in-loop kept step 1,024, whose confirmation (0.0) beat the first
+  best's standard score (−1.9e-9), where within block it loses to the
+  first best's confirmation (1.8e-8); `in_loop_select` reproduces 1,024
+  and `select` keeps 256. On the SAC run the two agree with the in-loop
+  pick.
+- **Probe CLI** (`python -m courtside_dynamics.experiments.probe`): the
+  golden digests' witnesses (now `digests.scripted_policy`) or a model
+  under a protocol; `--env` and `--episodes` derive an unregistered
+  protocol whose fingerprint is printed. It reproduces the RS1 table
+  (`design_paddle_tennis_reach_shaping.md` section 3a) from
+  `paddle-npoint@v2` with `points_per_episode=1`, `contact_shaping=0.0`,
+  100 episodes from seed 5500: statue (zero) mean reward −0.620, reach
+  paid 2.622 and clawed back; camper −0.530, paid 13.299; ground oracle
+  7.575 with 418 hits, 379 confirms, paid 75.025, clawed −1.511; the
+  stacked arm (contact 0.25) 8.523. Identical at the table's precision;
+  the means differ from the probe tool's float64 sums in the last bits
+  only because a VecEnv stores rewards as float32, as in-loop
+  evaluation does.
+- **Not here.** The lever "audit mode" waits for the levers (L6).
+  `comparability_key.eval_protocol` and the record's
+  `task.eval_protocol` stay `null` until L3 declares the eras. Scores
+  on another device are not a protocol's (it pins CPU). The reward
+  path's SB3 `EvalCallback` rows are not reproduced (its Monitor rounds
+  episode returns). The August runs themselves (on Drive) are not
+  re-scored in this step.
+
 ### The best model is replaced whole, and a record never certifies a split one — *implemented (unreleased, 2026-10-17)*
 The L1 verifiers' second round on `d273409`, `4445669` and `9f54ae5`:
 three majors and the minors. Every env stream and training path is

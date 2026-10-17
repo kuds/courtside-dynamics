@@ -1480,6 +1480,11 @@ RECIPES: dict[str, Recipe] = {
                 "episodes": 30,
                 "seed_start": 5200,
             },
+            # The policy and normalizer at every evaluation, for
+            # offline re-scoring under any evaluation protocol
+            # (experiments.harness; design L2): a new instrument or an
+            # era bump re-scores the snapshots instead of retraining.
+            "snapshot_evals": True,
             "phase_key": "rally_phase",
             "phase_labels": {
                 0: "initial_feed",

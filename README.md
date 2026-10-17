@@ -331,11 +331,13 @@ enabled.
 | `config.json` | Resolved training settings, environment class/space/curriculum metadata, resolved SB3 settings, versions, device, Git SHA, and warm-start identities |
 | `run_config.toml` | Byte-exact copy of the TOML run config, when one was used |
 | `stage_summary.txt` | Final evaluation and, when scheduled evaluation ran, best evaluation, plus duration, throughput, device, and final training-health metrics |
-| `run_record.json` | What ran and how it ended (`courtside-run-record/1`): status (`running`, then `completed`, `early_stop`, `interrupted` or `crashed`) and stop reason, budget, algorithm, task fingerprints, comparability key, seeds, git state, warm start, selection, and wall clock with its evaluation share. Written when `train()` starts and rewritten on every terminal path |
+| `run_record.json` | What ran and how it ended (`courtside-run-record/1`): status (`running`, then `completed`, `early_stop`, `interrupted` or `crashed`) and stop reason, budget, algorithm, task fingerprints, comparability key, seeds, git state, warm start, selection, evaluation snapshots, and wall clock with its evaluation share. Written when `train()` starts and rewritten on every terminal path |
 | `sync_manifest.json` | Path, size and sha256 of every other file, written last. A run directory without one that verifies is incomplete: `python -m courtside_dynamics.experiments.verify <run_dir>`. With `TrainConfig.sync_dir` (the notebooks' `LOCAL_THEN_SYNC`), a run trains on local disk and mirrors itself there at every checkpoint and at the end, each mirror sealed by its own manifest |
 | `model/` | The protected best pair (`best_model.zip`, `best_vec_normalize.pkl`) with `best_model_meta.json` binding them by sha256, each written to a temporary file and renamed into place; the end-of-run `final_model.zip` and `vec_normalize.pkl`; and `stage_bests/`, one archived best per curriculum stage |
 | `metrics/` | `eval_info.csv` (matched-stage info metrics), `eval_info_final.csv` (the unsynced goal-task stream), `evaluations.npz`, `progress.csv`, and the `tensorboard/` and `monitor/` directories |
 | `checkpoints/`, `media/videos/` | Periodic snapshots and milestone rollout recordings |
+| `snapshots/` | With `TrainConfig.snapshot_evals` (on in the PaddleTennis recipe): the policy and normalizer at every evaluation, bound by sha256 in `snapshots/index.json`, for offline re-scoring |
+| `scores/` | Written after training by `python -m courtside_dynamics.experiments.rescore --protocol <id> <run_dir>`: one row per scored model under an evaluation protocol |
 | `reports/` | `curriculum_stages.json` (per-stage entry/exit, promotion windows, per-stage bests), `ladder_certification.json` (the startup scripted sweep of the gate's stages, 0.23.0+), the held-out long-horizon audit (`best_model_long_horizon_eval.json` and its per-episode CSV), and the diagnostic plots |
 
 `courtside_dynamics.notebook_utils` can replay the stage summary, audit a run
@@ -349,6 +351,14 @@ as written with their manifest verdict, and older directories backfilled from
 joined to the campaign map of what it tested. See
 [`docs/experiments.md`](docs/experiments.md), which also covers verification
 and Colab use.
+
+`python -m courtside_dynamics.experiments.rescore --protocol paddle-npoint@v2
+<run_dir>` re-scores a run's best model, evaluation snapshots and checkpoints
+offline under a versioned evaluation protocol, with the in-loop evaluator's
+own code (a snapshot's row equals its `eval_info.csv` row bit for bit on
+CPU); `experiments.select.select()` picks a best from the rows, and
+`python -m courtside_dynamics.experiments.probe` scores the scripted
+witnesses or any model under a protocol.
 
 ## Development
 
@@ -450,7 +460,8 @@ courtside-dynamics/
 │   ├── envs/                    # Gymnasium tasks and curriculum contracts
 │   ├── callbacks/               # Evaluation and video recording
 │   ├── training/                # SAC/PPO training, artifacts, and promotion
-│   ├── experiments/             # Run records, sync manifests, verification, run index
+│   ├── experiments/             # Run records, sync manifests, verification, run index,
+│   │                            #   snapshots, eval protocols, re-scoring harness, select, probe
 │   ├── run_configs/             # Packaged starter TOMLs, one per recipe
 │   ├── digests.py               # Golden env-stream digests (the refactor gate)
 │   ├── recipes.py               # Curated environment/training presets

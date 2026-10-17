@@ -624,6 +624,7 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "min_policy_updates_before_stop": cfg.min_policy_updates_before_stop,
             "vec_env": cfg.vec_env,
             "sync_dir": None if cfg.sync_dir is None else str(cfg.sync_dir),
+            "snapshot_evals": cfg.snapshot_evals,
         },
         # What train() resolves beyond the configured fields: the reward
         # normalization and the normalizer's return discount, the device
@@ -1251,6 +1252,10 @@ RUN_LAYOUT: dict[str, str] = {
     "videos_dir": "media/videos",
     # checkpoints/: periodic full-state snapshots (unchanged location).
     "checkpoints_dir": "checkpoints",
+    # snapshots/: the policy and normalizer at every evaluation
+    # (TrainConfig.snapshot_evals), bound by snapshots/index.json, for
+    # offline re-scoring (experiments.snapshots, experiments.harness).
+    "snapshots_dir": "snapshots",
 }
 
 #: Pre-0.14 locations that differ from "same basename at the run root".
@@ -1337,6 +1342,9 @@ _CONDITIONAL_ARTIFACTS: frozenset[str] = frozenset(
         # Written only by runs with checkpoint diagnosis enabled
         # (``TrainConfig.checkpoint_diagnosis``, PaddleTennis recipe).
         "diagnosis_dir",
+        # Written only by runs with ``TrainConfig.snapshot_evals``
+        # (PaddleTennis recipe).
+        "snapshots_dir",
     }
 )
 

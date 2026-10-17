@@ -8,7 +8,7 @@ a partial one (``repo_review_20261016.md`` R3). Two files close that:
 ``run_record.json`` (:data:`RUN_RECORD_SCHEMA`)
     One JSON object per run: its identity, budget, algorithm, task,
     comparability key, seeds, git state, library versions, warm start,
-    selection, wall clock, and how it ended. ``train()`` writes it with
+    selection, evaluation snapshots, wall clock, and how it ended. ``train()`` writes it with
     status ``"running"`` right after ``config.json`` and rewrites it on
     every terminal path (:data:`TERMINAL_STATUSES`).
 ``sync_manifest.json`` (:data:`SYNC_MANIFEST_SCHEMA`)
@@ -96,10 +96,11 @@ TERMINAL_STATUSES = frozenset({COMPLETED, EARLY_STOP, INTERRUPTED, CRASHED})
 #: and the replay video (``training.artifacts.RUN_LAYOUT``'s
 #: ``learning_curve``, ``eval_*``, ``training_health_plot``,
 #: ``best_long_eval*`` and ``best_model_video``; a test pins the
-#: agreement). :func:`verify_run_dir` reports an unlisted file there
+#: agreement), and the offline harness's ``scores/<protocol>.jsonl``
+#: (``experiments.harness.rescore``). :func:`verify_run_dir` reports an unlisted file there
 #: and fails it only under ``strict``; an unlisted file anywhere else
 #: fails the directory.
-POST_TRAINING_DIRS = ("reports/",)
+POST_TRAINING_DIRS = ("reports/", "scores/")
 POST_TRAINING_FILES = frozenset({"media/best_model.mp4"})
 
 #: Basename suffixes of the temporary files this repository's writers
@@ -449,6 +450,7 @@ def build_run_record(
     artifacts: Sequence[Mapping[str, str]] = (),
     sync: Mapping[str, Any] | None = None,
     progress: Mapping[str, Any] | None = None,
+    snapshots: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One run's record, from its ``config.json`` payload and its outcome.
 
@@ -468,6 +470,10 @@ def build_run_record(
     an unbound selection leaves the best-model triple out of
     ``artifacts`` (:data:`BEST_MODEL_ARTIFACTS`): those files are on
     disk, but they are not one save.
+
+    ``snapshots`` is ``experiments.snapshots.snapshot_summary``'s block
+    (the evaluation snapshots ``snapshots/index.json`` binds), ``None``
+    for a run that took none.
     """
     if status not in RUN_STATUSES:
         raise ValueError(
@@ -528,6 +534,7 @@ def build_run_record(
         "wall_clock": dict(wall_clock) if wall_clock else None,
         "preflight_warnings": list(preflight_warnings),
         "sync": dict(sync) if sync else None,
+        "snapshots": dict(snapshots) if snapshots else None,
         "experiment": {"id": None, "parent": None, "lever": None, "kind": None},
         "artifacts": [dict(artifact) for artifact in artifacts],
     }

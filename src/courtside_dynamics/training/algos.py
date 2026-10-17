@@ -317,10 +317,11 @@ def _model_directories() -> tuple[tuple[str, ...], ...]:
     """Where a run keeps model files, relative to the run directory.
 
     The run root itself (the pre-0.14 flat layout), the layout's model
-    folder (``model/``), ``checkpoints/``, and one stage directory
-    under the performance gate's stage archive (``model/stage_bests/``,
-    pre-0.14 ``stage_bests/``). Derived from :data:`RUN_LAYOUT`, so a
-    moved artifact moves the search with it.
+    folder (``model/``), ``checkpoints/``, the evaluation snapshots
+    (``snapshots/``), and one stage directory under the performance
+    gate's stage archive (``model/stage_bests/``, pre-0.14
+    ``stage_bests/``). Derived from :data:`RUN_LAYOUT`, so a moved
+    artifact moves the search with it.
     """
     model_dir = os.path.dirname(RUN_LAYOUT["best_model"])
     stage_archive = RUN_LAYOUT["stage_bests_dir"]
@@ -328,6 +329,7 @@ def _model_directories() -> tuple[tuple[str, ...], ...]:
         (),
         tuple(model_dir.split("/")),
         tuple(RUN_LAYOUT["checkpoints_dir"].split("/")),
+        tuple(RUN_LAYOUT["snapshots_dir"].split("/")),
         (*stage_archive.split("/"), "*"),
         (os.path.basename(stage_archive), "*"),
     }
