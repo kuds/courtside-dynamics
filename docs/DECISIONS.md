@@ -718,6 +718,122 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### The best model says which save it holds on both paths, final saves are atomic, and a protocol pins its device — *implemented (unreleased, 2026-10-17); phase-4 verifier findings, round 2*
+The round-2 verifiers of `17befbf`: four majors and six minors. No env
+stream or training path moved: golden digests 22/22, recipe snapshot
+unchanged (96), and the trainer digest against `17befbf` matches 83 of
+92 components, every policy, normalizer, monitor, RNG,
+`resolved_model`, evaluation, `eval_info.csv`, best-model weight,
+checkpoint-name and diagnosis component of the four jobs. The nine that
+differ are the reward-path meta below, three per reward-selected
+BallBalance job (SAC, DemoSAC off, PPO): `best_model_meta`,
+`best_model_meta_bindings` and `run_layout_artifacts`.
+- **The device is part of the protocol a run records; a run on CUDA
+  claims no CPU protocol's id.** `_inloop_protocol` built every in-loop
+  protocol on the default CPU, so a Colab GPU SAC run (SB3's `"auto"`,
+  the design's SAC norm) recorded `paddle-npoint@v3`, which pins CPU,
+  and GPU- and CPU-selected runs shared one fingerprint, the thing the
+  comparability key exists to separate. `eval_protocol_record` now
+  fingerprints the protocol on the device `train()` builds the model on
+  (`train.inloop_eval_device`, SB3's own `get_device` resolution, and
+  `train()` checks the built model against it before training), records
+  that `device`, and, when no registered protocol of the recipe has the
+  fingerprint, records `id: null` with `nearest` (the registered
+  protocol with the fewest differing fields) and `differs` (those
+  fields: `["device"]` for a stock GPU run, `["env_kwargs",
+  "n_episodes"]` for a quick test). `from_run_config` rebuilds a run on
+  its recorded device (`eval_protocol.device`, else
+  `resolved_model.device`, else CPU), so `inloop:<run>` of a GPU run is
+  a CUDA protocol and `rescore` refuses it on CPU before scoring
+  anything, pointing at `nearest`. Recording the device beside an
+  unchanged id was the verifier's other option; it would leave the id
+  naming a protocol the run never evaluated under, so every reader that
+  keys on the id (the index, a campaign table) would have to know to
+  check a second field. The shape is additive (`courtside-run-record/1`
+  unchanged); the notebook pins CPU, so the comparable number of a GPU
+  run is its CPU re-score under `nearest`.
+- **The reward path writes `best_model_meta.json` (reverses "an
+  in-memory ledger, not a reward-path meta").** The ledger told whether
+  the best files were one save, not which save: SB3 appends an
+  evaluation to `evaluations.npz` before its new-best callback runs, so
+  an interrupt inside the second save left `best_model.zip` holding
+  step 500 while the summary, from the npz argmax, read "Best
+  Checkpoint Evaluation (step 1,000)" and "deploy best_model.zip"
+  (verifier injection, rising rewards). `_SaveBestOnNewBest` now stages
+  a meta after the pair (`"selected_by": "reward"`, the timestep,
+  `selection_keys` `["mean_reward"]` with SB3's `best_mean_reward`, an
+  on-policy run's `n_updates`, the pair's sha256s), renamed last, and
+  every consumer reads the step from the bound meta: the summary's best
+  evaluation and Best Checkpoint Evaluation section (a series peak no
+  file holds is named, and with no completed save nothing suggests a
+  deploy), the notebooks' best-checkpoint marker (which also refuses a
+  meta that does not bind its files), the record (a `verified`
+  selection with keys `["mean_reward"]`, where it was `null`) and the
+  harness (the best row's step). Handing the ledger's committed step to
+  the summary was the verifier's narrower option; it would leave the
+  step in memory only, so the harness, the plot marker and anything
+  reading a copied run directory would still guess from the npz. The
+  layout cost the earlier entry named is paid and declared: every
+  reward-selected run gains the file, and the consumers that read its
+  presence as headline selection were rechecked: the plot marker is
+  right on both paths now, the WallBall long-horizon proof refuses a
+  reward meta by its keys as it refused a missing one, the index and
+  `records` read `mean_reward` as the keys, and a meta without
+  `selected_by` stays the headline evaluator's (every earlier meta). A
+  reward-selected pair copied out of its run is now bound by sha256 like
+  a headline pair.
+- **`verify` fails a complete directory that is not clean (reconciles
+  "Record a split best, and say so on verify").** A record marking the
+  best unbound, or naming unindexed snapshot files, printed a `WARNING`
+  and exited 0, so a CI step checking the exit code passed an unbound
+  best. The verdict is split instead of redefined: `complete` keeps
+  meaning "exactly what `train()` left" and `RunDirVerification.clean`
+  (complete, no warning) is new; the CLI prints `NOT CLEAN` with the
+  damage and exits 2 (1 stays "incomplete"), `--allow-warnings` accepts
+  it for the faithful-copy check the earlier entry cited, and
+  `--strict` (exclusive with it) still counts the damage as incomplete.
+  `--json` and the index's `verification` block carry `clean`. Making
+  `complete` false was the verifier's other option; it would make a
+  faithful copy of a damaged run indistinguishable from a damaged copy
+  in the API, which the earlier entry's reason still holds against.
+- **`final_model.zip`, `vec_normalize.pkl` and periodic checkpoints are
+  written atomically (closes the previous entry's Open item).** All were
+  written in place, on the completed path and both salvage paths, so an
+  injected interrupt inside the write sealed a torn zip or pickle that
+  the record listed and `verify` passed. `records.write_atomically`
+  stages each to a temporary beside its target and renames it;
+  `_AtomicCheckpointCallback` subclasses SB3's `CheckpointCallback` and
+  overrides only its save (same names, steps and contents, tested
+  against SB3's own; the normalizer, and a replay buffer if asked, are
+  renamed before the model, so an interrupt between renames leaves a
+  normalizer no reader pairs). An interrupt inside a write now leaves
+  that file absent, and the record, which lists only files on disk,
+  omits it. A cheap integrity probe in `verify` was the verifier's
+  fallback; with the writes atomic there is nothing for it to find in a
+  new run, and the harness opens every model zip before scoring (below).
+- **Smaller.** `harness.snapshot_gaps` names each snapshot the run
+  failed to save, printed by the rescore CLI before its `select()` line
+  and by the notebook beside its verdict (kept as the verdict's `gaps`);
+  a gap is a note, not a refusal, since the series is still bound.
+  `algos.checkpoint_zip_problem` opens every model zip whole (every
+  member's CRC, the `data` entry) before anything is scored, so a torn
+  August checkpoint refuses the run by name, every torn one listed,
+  instead of raising mid-run an hour in. The rescore notebook's QUICK
+  and resume reads sit inside its per-run `try` (`OSError` too), so an
+  unreadable snapshot index or `config.json` refuses that run, not the
+  cell (tested). Score rows name the algorithm by its class
+  (`DemoSAC`), as `config.json`'s `algorithm.name` does. The summary's
+  Artifacts section flags an unbound best's files (the record leaves
+  them out). The README's layout table tells `checkpoints/` from
+  `snapshots/` and says the meta binds on both paths; the PaddleTennis
+  run file's header says evaluation runs without the escrows.
+- **Open.** The rescore CLI has no `--device` (the Python API's
+  `device=` has), so an `inloop` re-score of a GPU run needs a GPU and
+  the API; the notebook pins CPU on purpose. The gate's stage-best
+  archive still copies with `shutil.copy2`. Runs from before this entry
+  keep their records: a reward-selected run without a meta reads its
+  best step from the series' argmax, as before.
+
 ### Offline evaluation refuses what it cannot reproduce, and every best pair is bound — *implemented (unreleased, 2026-10-17); phase-4 verifier findings*
 The verifiers of `0be8d77` (M3 + L2) and `09779fa` (L3): two blockers,
 three majors (one of them the gated-run blocker's twin) and the minors. Every env stream and training path is
@@ -777,7 +893,9 @@ components the @v3 entry below declared (`eval_info.csv`,
   lookup, the WallBall selection proof, the index), so the ledger
   closes the window with no layout change. Its limit: it is the
   trainer's verdict, carried in the record; a reward-selected pair
-  copied out of its run has no binding. The loaders
+  copied out of its run has no binding. *(Reversed since: the reward
+  path writes a meta, because the ledger cannot say which step the
+  pair holds; entry above.)* The loaders
   (`verify_best_checkpoint_pair`) and the harness now refuse a pair
   whose record says `unbound`. Hashing a best save's temporaries reads
   files only: no stream moves.
@@ -789,7 +907,9 @@ components the @v3 entry below declared (`eval_info.csv`,
   `WARNING` lines and failed by `--strict`, and the index lists the
   same as row problems. Failing the directory outright was the
   alternative; it would make a faithful Drive copy of a damaged run
-  indistinguishable from a damaged copy.
+  indistinguishable from a damaged copy. *(Since round 2 the verdict is
+  split: such a directory stays complete but is not clean, and the CLI
+  exits 2 unless `--allow-warnings`; entry above.)*
 - **Snapshot orphans are named, never skipped.** An interrupt between a
   snapshot's renames leaves complete files outside the index (no index
   at all at the first snapshot). `snapshot_summary` lists them in
@@ -816,7 +936,8 @@ components the @v3 entry below declared (`eval_info.csv`,
   SB3's `CheckpointCallback` writes them in place, so one torn by an
   interrupt seals and fails only at load time; a subclassed callback
   that stages and renames (as the best model does) would close it. The
-  gate's stage-best archive still copies with `shutil.copy2`.
+  gate's stage-best archive still copies with `shutil.copy2`. *(The
+  checkpoints are closed since: written atomically, entry above.)*
 
 ### PaddleTennis selects under `paddle-npoint@v3`: evaluation scores the task without its training aids — *implemented (unreleased, 2026-10-17); design L3, a selection-protocol era*
 `design_campaign_structure_20261016.md` finding S5 and step L3: the

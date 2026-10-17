@@ -15,10 +15,12 @@ a performance-gated run is refused (no protocol is its staged
 evaluation).
 
 Each run's summary lists the scored artifacts with the protocol's
-selection keys, and, when the snapshots were scored, the offline
-``select()`` pick next to the run's in-loop best
-(``best_model_meta.json``). Exit status 0, or 2 when the rescore is
-refused (an unbound pair, a missing normalizer, an unknown protocol).
+selection keys, and, when the snapshots were scored, any snapshot the
+run failed to save (a gap in the series) and the offline ``select()``
+pick next to the run's in-loop best (``best_model_meta.json``). Exit
+status 0, or 2 when the rescore is refused (an unbound pair, a missing
+normalizer, an unreadable model zip, an unknown protocol, an in-loop
+protocol of another device).
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from courtside_dynamics.experiments.harness import (
     BLOCKS,
     read_scores,
     rescore,
+    snapshot_gaps,
 )
 from courtside_dynamics.experiments.protocols import (
     INLOOP,
@@ -108,6 +111,9 @@ def _summarize(rows: Sequence[Mapping[str, Any]], run_dir: Path | None) -> None:
         )
         print(f"  {row['artifact']:<10} step {row['step']!s:>10}  {values}")
     snapshots = [row for row in rows if row["artifact"] == "snapshot"]
+    if snapshots and run_dir is not None:
+        for gap in snapshot_gaps(run_dir):
+            print(f"  note: {gap}")
     if rule is not None and snapshots:
         try:
             chosen = select(snapshots, rule)

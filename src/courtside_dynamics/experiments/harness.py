@@ -27,10 +27,13 @@ and M3; ``docs/design_campaign_structure_20261016.md`` step L2.
   recorded (``training.algos.load_run_model``). Before anything is
   scored, the best and snapshot pairs are checked against the sha256s
   that bind them (and the best model against the run record's
-  verdict), every model's zip against the run's recorded algorithm,
-  and checkpoints are hashed and recorded: nothing binds a checkpoint,
-  and SB3's ``CheckpointCallback`` writes it in place, so a checkpoint
-  torn by an interrupt fails only when it is loaded.
+  verdict), every model's zip is opened whole and checked against the
+  run's recorded algorithm, and checkpoints are hashed and recorded:
+  nothing binds a checkpoint. ``train()`` writes each one atomically
+  now; one torn by an interrupt before it did (or truncated by a sync)
+  is refused by name before anything is scored. A snapshot the run
+  failed to save is a gap in the series (:func:`snapshot_gaps`), which
+  the rescore CLI and the notebook print beside a ``select()`` pick.
 - ``experiments.select.select`` picks a best from those rows.
 
 CLI: ``python -m courtside_dynamics.experiments.rescore --protocol
@@ -57,6 +60,7 @@ from courtside_dynamics.experiments.protocols import (
     INLOOP,
     EvalProtocol,
     SeedBlock,
+    device_type,
     get_protocol,
     protocol_for_run,
     resolve_seed_block,
@@ -197,13 +201,13 @@ def score_model(
     from stable_baselines3.common.utils import check_for_correct_spaces
 
     from courtside_dynamics.callbacks.info_dict_eval import collect_episode_metrics
-    from courtside_dynamics.training.algos import load_run_model, recorded_run_algo
+    from courtside_dynamics.training.algos import (
+        load_run_model,
+        recorded_run_algo,
+        resolve_algo,
+    )
 
-    if device != protocol.device:
-        raise ValueError(
-            f"protocol {protocol.id} scores on {protocol.device!r}; a score on "
-            f"{device!r} is not this protocol's (float32 kernels differ by device)"
-        )
+    _check_device(protocol, device)
     unknown = [block for block in blocks if block not in BLOCKS]
     if unknown or not blocks:
         raise ValueError(f"blocks must be drawn from {BLOCKS}, got {list(blocks)}")
@@ -232,7 +236,10 @@ def score_model(
         )
     seeds = resolve_seed_block(protocol, run_config=run_config, seed_start=seed_start)
     model = load_run_model(model_path, algo=algo, device=device)
-    resolved_algo = (recorded_run_algo(model_path) or algo or "").upper()
+    # The class name config.json's algorithm.name records ("DemoSAC",
+    # not "DEMOSAC"), so a score row joins its run record on it.
+    named = recorded_run_algo(model_path) or algo
+    resolved_algo = resolve_algo(named).__name__ if named else ""
     metrics: dict[str, dict[str, float]] = {}
     for block in blocks:
         start = seeds.for_block(protocol, block)
@@ -254,6 +261,30 @@ def score_model(
             venv.close()
         metrics[block] = batch.metrics
     return ScoredModel(metrics=metrics, seed_block=seeds, algo=resolved_algo)
+
+
+def _device_problem(protocol: EvalProtocol, device: str) -> str | None:
+    """Why scoring on ``device`` would not be ``protocol``'s score, or ``None``."""
+    if device_type(device) == protocol.device:
+        return None
+    problem = (
+        f"protocol {protocol.id} scores on {protocol.device!r}; a score on "
+        f"{device!r} is not this protocol's (float32 kernels differ by device)"
+    )
+    if protocol.id.startswith(f"{INLOOP}:"):
+        problem += (
+            f": the run's in-loop evaluation ran on {protocol.device!r} (its "
+            f"config.json says so), so score it there, or under its recipe's "
+            f"registered protocol on {device!r} (comparability_key."
+            f"eval_protocol.nearest) for a comparable number"
+        )
+    return problem
+
+
+def _check_device(protocol: EvalProtocol, device: str) -> None:
+    problem = _device_problem(protocol, device)
+    if problem is not None:
+        raise ValueError(problem)
 
 
 def evaluate(
@@ -299,8 +330,9 @@ class RunArtifact:
     """One scorable model of a run, its normalizer and their digests.
 
     ``kind`` is ``"best"``, ``"snapshot"`` or ``"checkpoint"``; ``step``
-    the env steps it was saved at (``None`` for a reward-selected best,
-    which records no selection step). Paths are relative to the run.
+    the env steps it was saved at (``None`` for a best without a meta: a
+    reward-selected run from before the reward path wrote one). Paths
+    are relative to the run.
     """
 
     kind: str
@@ -339,6 +371,37 @@ def series_steps(run_dir: str | os.PathLike[str], kind: str) -> list[int]:
     raise ValueError(f"kind must be 'snapshots' or 'checkpoints', got {kind!r}")
 
 
+def snapshot_gaps(run_dir: str | os.PathLike[str]) -> list[str]:
+    """Notes on the evaluation snapshots a run's index lists as failed.
+
+    ``train()`` lists a snapshot whose save failed (a disk error) in
+    ``snapshots/index.json``'s ``failures`` and trains on, so the
+    snapshot series has a gap at that step that the in-loop evaluation
+    has no gap at: a ``select()`` over the series, compared with the
+    run's in-loop pick, must say so. One note per failure, naming the
+    step and the error; one for an index that cannot be read now; none
+    for a run without snapshots. Never raises.
+    """
+    root = Path(run_dir)
+    directory = root / SNAPSHOTS_DIR_NAME
+    if not (directory / SNAPSHOT_INDEX_NAME).is_file():
+        return []
+    try:
+        index = read_snapshot_index(directory)
+    except ValueError as error:
+        return [f"{root.name}: {error}, so its gaps are unknown"]
+    notes = []
+    for failure in index.failures:
+        step = failure.get("timestep")
+        where = f"{step:,} steps" if isinstance(step, int) else f"step {step!r}"
+        notes.append(
+            f"{root.name}: the snapshot at {where} failed during training "
+            f"({failure.get('error')}); the snapshot series has a gap there "
+            f"that the in-loop evaluation does not"
+        )
+    return notes
+
+
 def _needs_normalizer(config: Mapping[str, Any]) -> bool:
     train_config = config.get("train_config")
     return isinstance(train_config, Mapping) and bool(train_config.get("normalize_obs"))
@@ -363,8 +426,8 @@ def run_artifacts(
       ``best_model_meta.json``'s. A meta that does not bind the pair
       (``records.best_model_meta_unbound``) is a problem, as the loaders
       refuse it, and so is a run record whose selection is ``unbound``
-      (the trainer's own check, which also covers a reward-selected
-      pair, whose saves write no meta) or that cannot be read.
+      (the trainer's own check, which also covers a first save split
+      before its meta's rename) or that cannot be read.
     - ``snapshots``: ``snapshots/index.json``'s entries, each checked
       against its sha256s; a snapshot file the index does not bind, or
       a ``snapshots/`` holding files but no index (a snapshot interrupted
@@ -377,11 +440,17 @@ def run_artifacts(
     A kind the run does not have yields nothing (the August runs have
     no snapshots); a pair whose normalizer is missing although the run
     normalized observations is a problem, never a raw-observation score;
-    so is a model whose zip holds a policy of another algorithm family
-    than the run recorded (``algos.checkpoint_family_mismatch``: the
-    load would fail inside SB3).
+    so is a model whose zip cannot be read whole
+    (``algos.checkpoint_zip_problem``: a checkpoint torn by an interrupt
+    before ``train()`` staged them, or truncated by a sync), and one
+    whose zip holds a policy of another algorithm family than the run
+    recorded (``algos.checkpoint_family_mismatch``): either load would
+    fail inside SB3, mid-rescore.
     """
-    from courtside_dynamics.training.algos import checkpoint_family_mismatch
+    from courtside_dynamics.training.algos import (
+        checkpoint_family_mismatch,
+        checkpoint_zip_problem,
+    )
     from courtside_dynamics.training.artifacts import locate_artifact
 
     root = Path(run_dir)
@@ -436,6 +505,10 @@ def run_artifacts(
                 f"{root.name}: config.json records no train_config.algo, so "
                 f"{relative(model)} cannot load through its run's class"
             )
+            return
+        unreadable = checkpoint_zip_problem(model, label=relative(model))
+        if unreadable is not None:
+            problems.append(f"{root.name}: {unreadable}")
             return
         mismatch = checkpoint_family_mismatch(
             model, recorded_algo, label=relative(model)
@@ -668,6 +741,9 @@ def rescore(
         except (OSError, ValueError) as error:
             problems.append(f"{root.name}: {error}")
             continue
+        device_problem = _device_problem(resolved, device)
+        if device_problem is not None:
+            problems.append(f"{root.name}: {device_problem}")
         if blocks is not None and (
             "standard" not in blocks
             or any(block not in BLOCKS for block in blocks)

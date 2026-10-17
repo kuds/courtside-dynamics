@@ -674,6 +674,9 @@ def _record_row(
         verification: dict[str, Any] = {
             "manifest": result.manifest,
             "complete": result.complete,
+            # Complete, and the record reports nothing wrong with its
+            # files (its warnings are this row's problems too).
+            "clean": result.clean,
             "files_checked": result.files_checked,
             "problems": list(result.problems),
             "unlisted": list(result.unlisted),
@@ -682,6 +685,7 @@ def _record_row(
         verification = {
             "manifest": "not_checked",
             "complete": None,
+            "clean": None,
             "files_checked": 0,
             "problems": [],
             "unlisted": [],

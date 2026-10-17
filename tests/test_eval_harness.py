@@ -294,6 +294,57 @@ def test_rescore_reads_the_august_runs_legacy_layout(tmp_path, tiny_runs):
     ]
 
 
+def test_an_unreadable_model_zip_is_refused_before_scoring(tmp_path, tiny_runs):
+    """Phase-4 verifier r2 (minor): the family check swallowed an
+    unreadable zip, so a torn checkpoint passed the before-scoring check
+    and SB3 raised "wasn't a zip-file" mid-rescore, after the best model
+    and the earlier checkpoints had been scored (about an hour on an
+    August run), naming only that file. Every model's zip is opened
+    whole first, and every torn one is named."""
+    run_dir = _legacy_run(tmp_path, tiny_runs["SAC"])
+    checkpoints = run_dir / "checkpoints"
+    for step, size in ((768, 1_000), (1024, 900)):
+        torn = checkpoints / f"paddle_tennis_sac_{step}_steps.zip"
+        shutil.copyfile(checkpoints / "paddle_tennis_sac_512_steps.zip", torn)
+        with open(torn, "r+b") as handle:
+            handle.truncate(size)
+        shutil.copyfile(
+            checkpoints / "paddle_tennis_sac_vecnormalize_512_steps.pkl",
+            checkpoints / f"paddle_tennis_sac_vecnormalize_{step}_steps.pkl",
+        )
+    artifacts, problems = harness.run_artifacts(run_dir, ("best", "checkpoints"))
+    assert [(a.kind, a.step) for a in artifacts] == [("best", 25_000), ("checkpoint", 512)]
+    assert len(problems) == 2
+    for problem, step in zip(problems, (768, 1024), strict=True):
+        assert problem.startswith(
+            f"20260815_180815: checkpoints/paddle_tennis_sac_{step}_steps.zip is "
+            f"not a readable zip (BadZipFile: "
+        ), problem
+        assert problem.endswith("torn or truncated")
+    with pytest.raises(ValueError, match="refused before scoring anything"):
+        harness.rescore([run_dir], _legacy_protocol(), blocks=("standard",))
+    assert not (run_dir / "scores").exists()
+    from courtside_dynamics.training.algos import checkpoint_zip_problem
+
+    assert checkpoint_zip_problem(checkpoints / "paddle_tennis_sac_512_steps.zip") is None
+    assert checkpoint_zip_problem(checkpoints / "absent.zip", label="x") == "x is missing"
+
+
+def test_score_rows_name_the_algorithm_as_the_run_records_it(tmp_path, tiny_runs):
+    """Phase-4 verifier r2 (minor): a row's algo was upper-cased, so a
+    DemoSAC run's rows read "DEMOSAC" while its config.json reads
+    "DemoSAC" (train_config.algo and algorithm.name)."""
+    run_dir = _legacy_run(tmp_path, tiny_runs["SAC"])
+    config_path = run_dir / "config.json"
+    config = json.loads(config_path.read_text())
+    config["train_config"]["algo"] = "DemoSAC"
+    config_path.write_text(json.dumps(config, indent=2))
+    [path] = harness.rescore(
+        [run_dir], _legacy_protocol(), which=("checkpoints",), blocks=("standard",)
+    )
+    assert [row["algo"] for row in harness.read_scores(path)] == ["DemoSAC"]
+
+
 def test_rescore_scores_only_the_steps_asked_for(tmp_path, tiny_runs, capsys):
     """``steps`` (the notebook's QUICK, the CLI's --steps) keeps the
     snapshots and checkpoints at those steps, besides the best model,
@@ -519,6 +570,43 @@ def test_rescore_cli(tiny_runs, capsys, tmp_path):
     assert "unknown evaluation protocol" in capsys.readouterr().err
 
 
+def test_a_failed_snapshot_is_a_gap_the_rescore_names(tiny_runs, capsys, tmp_path):
+    """Phase-4 verifier r2 (minor): a snapshot listed in the index's
+    failures (a disk error during training) vanished from the series
+    without a word, and the CLI compared select() over the gapped series
+    with the in-loop pick, which evaluated that step."""
+    from courtside_dynamics.experiments.rescore import main
+
+    run_dir = tmp_path / "run"
+    shutil.copytree(tiny_runs["SAC"], run_dir)
+    shutil.rmtree(run_dir / "scores", ignore_errors=True)
+    index_path = run_dir / "snapshots" / "index.json"
+    index = json.loads(index_path.read_text())
+    [failed] = [entry for entry in index["snapshots"] if entry["timestep"] == 512]
+    index["snapshots"].remove(failed)
+    index["failures"] = [{"timestep": 512, "error": "OSError: No space left on device"}]
+    index_path.write_text(json.dumps(index, indent=2))
+    for entry in (failed["model"], failed["normalizer"]):
+        (run_dir / "snapshots" / entry["path"]).unlink()
+    gap = (
+        "run: the snapshot at 512 steps failed during training (OSError: No "
+        "space left on device); the snapshot series has a gap there that the "
+        "in-loop evaluation does not"
+    )
+    assert harness.snapshot_gaps(run_dir) == [gap]
+    assert main(["--protocol", INLOOP, "--which", "snapshots", str(run_dir)]) == 0
+    out = capsys.readouterr().out
+    assert f"  note: {gap}\n" in out
+    assert out.index(gap) < out.index("select() over the snapshots")
+    # No snapshots, no gaps; an index unreadable now says so.
+    assert harness.snapshot_gaps(tiny_runs["SAC"]) == []
+    assert harness.snapshot_gaps(tmp_path / "absent") == []
+    index_path.write_text("{not json")
+    [note] = harness.snapshot_gaps(run_dir)
+    assert note.startswith("run: snapshots/index.json is unreadable")
+    assert note.endswith("so its gaps are unknown")
+
+
 # -- protocols ------------------------------------------------------------------
 
 
@@ -601,10 +689,22 @@ def test_eval_protocol_record_names_the_registered_protocol_or_none():
     from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
 
     cfg = build_train_config("PaddleTennis", log_dir="x", seed=0)
-    assert protocols.eval_protocol_record(cfg) == {
+    assert protocols.eval_protocol_record(cfg, device="cpu") == {
         "id": "paddle-npoint@v3",
         "fingerprint": _V3_FINGERPRINT,
+        "device": "cpu",
     }
+    # Another episode count is no registered protocol: the record names
+    # the nearest one and what differs.
+    cfg.n_eval_episodes = 4
+    assert protocols.eval_protocol_record(cfg, device="cpu") == {
+        "id": None,
+        "fingerprint": from_train_config(cfg, id="x").fingerprint,
+        "device": "cpu",
+        "nearest": "paddle-npoint@v3",
+        "differs": ["n_episodes"],
+    }
+    cfg.n_eval_episodes = 30
     # An env whose constructor kwargs cannot be read: no record, said so.
     with pytest.warns(UserWarning, match="no evaluation protocol recorded"):
         assert (
@@ -615,6 +715,85 @@ def test_eval_protocol_record_names_the_registered_protocol_or_none():
         from_train_config(cfg, id="x", env_kwargs={"episode_len": 1500})
     cfg.info_dict_eval = False
     assert protocols.eval_protocol_record(cfg) is None
+
+
+def test_a_run_evaluating_on_cuda_claims_no_cpu_protocol(tmp_path, monkeypatch):
+    """Verifier r2 (phase 4, major): the in-loop protocol a run recorded
+    left the device out, so an SB3 "auto" run on a Colab GPU recorded
+    the CPU-pinned paddle-npoint@v3. The device the model is built on
+    (CUDA mocked here) is now part of the recorded protocol: such a run
+    records no id, names @v3 as nearest with the device as the one
+    difference, rebuilds a CUDA ``inloop`` protocol, and a CPU score of
+    it is refused before anything is scored."""
+    from courtside_dynamics.training.artifacts import write_run_config
+    from courtside_dynamics.training.train import inloop_eval_device
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    cfg = build_train_config("PaddleTennis", log_dir=str(tmp_path), seed=0)
+    assert inloop_eval_device(cfg) == "cuda"
+    cuda_v3 = get_protocol("paddle-npoint@v3").derive("cuda", device="cuda")
+    expected = {
+        "id": None,
+        "fingerprint": cuda_v3.fingerprint,
+        "device": "cuda",
+        "nearest": "paddle-npoint@v3",
+        "differs": ["device"],
+    }
+    assert cuda_v3.fingerprint != _V3_FINGERPRINT
+    assert protocols.eval_protocol_record(cfg) == expected
+    write_run_config(cfg, str(tmp_path))
+    config = json.loads((tmp_path / "config.json").read_text())
+    assert config["comparability_key"]["eval_protocol"] == expected
+    rebuilt = protocol_for_run(tmp_path)
+    assert (rebuilt.device, rebuilt.fingerprint) == ("cuda", cuda_v3.fingerprint)
+    with pytest.raises(ValueError, match="rescore refused before scoring") as refused:
+        harness.rescore([tmp_path], INLOOP)
+    assert "in-loop evaluation ran on 'cuda'" in str(refused.value)
+    # Under the registered protocol on CPU the device is no problem
+    # (the empty run is refused for having nothing to score).
+    with pytest.raises(ValueError) as cpu:
+        harness.rescore([tmp_path], "paddle-npoint@v3")
+    assert "not this protocol's" not in str(cpu.value)
+    assert "no best/snapshots/checkpoints artifact" in str(cpu.value)
+    # A run that asks for the CPU keeps @v3 on a GPU runtime.
+    cfg.model_kwargs = {**cfg.model_kwargs, "device": "cpu"}
+    assert protocols.eval_protocol_record(cfg)["id"] == "paddle-npoint@v3"
+
+
+def test_a_runs_recorded_device_rebuilds_its_protocol(tmp_path):
+    """An older config.json (no device in its eval_protocol) rebuilds
+    on the model's recorded device: an August Colab run's in-loop
+    evaluation ran on CUDA, so a CPU score is not its in-loop one."""
+    from courtside_dynamics.training.artifacts import write_run_config
+
+    cfg = build_train_config("PaddleTennis", log_dir=str(tmp_path), seed=0)
+    write_run_config(cfg, str(tmp_path))
+    config = json.loads((tmp_path / "config.json").read_text())
+    assert protocols.recorded_eval_device(config) == "cpu"
+    del config["comparability_key"]["eval_protocol"]["device"]
+    config["resolved_model"] = {"device": "cuda:0"}
+    assert protocols.recorded_eval_device(config) == "cuda"
+    assert from_run_config(config, id="x").device == "cuda"
+    del config["resolved_model"]
+    config["comparability_key"]["eval_protocol"] = None
+    assert protocols.recorded_eval_device(config) == "cpu"
+    assert protocols.device_type("CUDA:1") == "cuda"
+    with pytest.raises(ValueError, match="non-empty"):
+        protocols.device_type(" ")
+
+
+def test_a_model_built_off_the_recorded_device_is_refused():
+    from types import SimpleNamespace
+
+    from courtside_dynamics.training.train import _check_inloop_eval_device
+
+    _check_inloop_eval_device(
+        SimpleNamespace(device=torch.device("cpu")), "cpu"  # type: ignore[arg-type]
+    )
+    with pytest.raises(RuntimeError, match="never evaluated under"):
+        _check_inloop_eval_device(
+            SimpleNamespace(device=torch.device("cuda")), "cpu"  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize("recipe", sorted(protocols.GATED_RECIPES))

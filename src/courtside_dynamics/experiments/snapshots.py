@@ -24,8 +24,8 @@ so the index only ever names complete files; an interrupt leaves the
 previous index whole. An interrupt between the renames leaves complete
 snapshot files the index does not bind (and, at the first snapshot,
 no index at all): :func:`unindexed_files` names them, the run record's
-``snapshots`` block lists them, ``verify`` warns, and the harness
-refuses to score them. The offline harness
+``snapshots`` block lists them, ``verify`` calls the directory not
+clean, and the harness refuses to score them. The offline harness
 (``experiments.harness.rescore``) re-scores any of them under any
 protocol, so a new instrument means re-scoring, not retraining.
 

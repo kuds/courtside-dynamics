@@ -18,6 +18,76 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **The best model says which save it holds on both selection paths,
+  final saves are atomic, and a protocol pins its device (phase-4
+  verifier findings, round 2, 2026-10-17).** No env stream or training
+  change: golden digests 22/22, recipe snapshot unchanged (96), and the
+  trainer digest against `17befbf` matches 83 of 92 components (every
+  policy, normalizer, monitor, RNG, `resolved_model`, evaluation,
+  `eval_info.csv`, best-model weight and normalizer, checkpoint-name
+  and diagnosis component of the four jobs). The nine that differ are
+  the declared layout addition below, three per reward-selected
+  BallBalance job (SAC, DemoSAC off, PPO): `best_model_meta` (absent
+  before), `best_model_meta_bindings` (now "verified: best_model.zip,
+  best_vec_normalize.pkl") and `run_layout_artifacts` (gains
+  `best_model_meta`). The headline-selected PaddleTennis job matches
+  whole.
+  - **A run on CUDA no longer claims a CPU protocol.** The in-loop
+    protocol a run records left the device out, so every Colab GPU SAC
+    run (SB3's `"auto"`) recorded the CPU-pinned `paddle-npoint@v3`.
+    `comparability_key.eval_protocol` now records the `device` the
+    in-loop evaluation runs the policy on (`train.inloop_eval_device`,
+    checked against the built model), fingerprinted with it; a run whose
+    protocol matches no registered one records `id: null` with
+    `nearest` (the recipe's closest registered protocol) and `differs`
+    (the fields that differ: `["device"]` for a stock GPU run, so a CPU
+    re-score under `nearest` is its comparable number). `inloop`
+    rebuilds a run on its recorded device (`resolved_model.device` for
+    older runs), and `rescore` refuses an in-loop protocol of another
+    device before scoring anything.
+  - **The reward path writes `best_model_meta.json` (a layout
+    addition).** SB3 appends an evaluation to `evaluations.npz` before
+    its new-best save runs, so after an interrupt inside that save the
+    summary named the series' argmax ("Best Checkpoint Evaluation (step
+    1,000)", "deploy best_model.zip") for a `best_model.zip` holding step
+    500. Every reward-selected run now writes the meta beside its pair
+    (`"selected_by": "reward"`, the step, `mean_reward`, the pair's
+    sha256s; the meta renamed last), its record carries a `verified`
+    selection with keys `["mean_reward"]` (it was `null`), and the
+    summary, the notebooks' best-checkpoint marker and the harness read
+    the step from the bound meta; the summary notes a series peak whose
+    save did not complete, and suggests no deploy when no save did.
+  - **`verify` fails a complete directory that is not clean.** A
+    directory whose record marks the best model unbound, or lists
+    unindexed snapshot files, printed a `WARNING` and exited 0, so a
+    script checking the exit code passed it. It now prints `NOT CLEAN`
+    with the damage listed and exits 2 (1 stays "incomplete");
+    `--allow-warnings` accepts it (exit 0, for checking a faithful copy
+    of a damaged run), and `--strict` counts it as incomplete. The
+    Python API keeps `complete` and adds `RunDirVerification.clean`
+    (`--json` and the index's `verification` block carry it).
+  - **`final_model.zip`, `vec_normalize.pkl` and periodic checkpoints
+    are written atomically.** Each was written in place on the completed
+    path and both salvage paths (checkpoints by SB3's
+    `CheckpointCallback`), so an interrupt inside the write sealed a
+    torn file that the record listed and `verify` passed. Each now goes
+    to a temporary beside its target and is renamed into place
+    (`records.write_atomically`; `_AtomicCheckpointCallback`, the same
+    names and contents, a checkpoint's normalizer renamed before its
+    model).
+  - **Smaller.** The rescore CLI and the rescore notebook name a
+    snapshot the run failed to save (a gap in the series beside the
+    `select()` pick; `harness.snapshot_gaps`). An unreadable model zip
+    (a torn or truncated checkpoint) is refused by name before anything
+    is scored, every one of them, instead of raising SB3's "wasn't a
+    zip-file" an hour into a run. The notebook's resume and QUICK reads
+    sit inside its per-run refusal, so an unreadable snapshot index or
+    `config.json` refuses that run, not the cell. Score rows name the
+    algorithm as the run records it (`DemoSAC`, not `DEMOSAC`). The
+    summary's Artifacts section flags an unbound best's files. The
+    README's run layout tells `checkpoints/` from `snapshots/`, and the
+    PaddleTennis run file's header says evaluation runs without the
+    escrows.
 - **Offline evaluation fails loud where it cannot be faithful (phase-4
   verifier findings, 2026-10-17).** No env stream or training change:
   golden digests 22/22, recipe snapshot unchanged (96), and the trainer
@@ -75,7 +145,9 @@ supersedes it (see the ground-rules bullet).
   - **Open:** periodic checkpoints are hashed and recorded, never bound
     (SB3's `CheckpointCallback` writes them in place, so a torn one
     fails only when loaded); the docs now say so instead of claiming
-    every scored pair is checked against a binding.
+    every scored pair is checked against a binding. *(Closed since:
+    checkpoints are written atomically, and an unreadable zip is
+    refused before scoring; the round-2 bullet above.)*
 - **PaddleTennis selection moves to `paddle-npoint@v3`, the
   evaluation env without training aids (design L3, 2026-10-17): a
   selection-protocol era.** The recipe's `eval_env_overrides` set

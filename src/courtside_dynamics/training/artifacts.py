@@ -21,7 +21,10 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from courtside_dynamics.experiments.records import best_model_meta_unbound
+from courtside_dynamics.experiments.records import (
+    BEST_MODEL_ARTIFACTS,
+    best_model_meta_unbound,
+)
 
 if TYPE_CHECKING:
     from courtside_dynamics.training.train import TrainConfig
@@ -420,11 +423,14 @@ def comparability_key(
     algorithm family. ``task`` is the recipe name, else the training
     env's class.
     ``eval_protocol`` is the run's in-loop selection protocol
-    (``experiments.protocols.eval_protocol_record``: its fingerprint and
-    registered id, such as ``paddle-npoint@v3``), ``None`` for a run
-    without an info-dict evaluator and for every run recorded before
-    protocols were versioned; a versioned run never matches an
-    unversioned one. ``algo_family`` keeps SAC and PPO runs of one task
+    (``experiments.protocols.eval_protocol_record``: its fingerprint,
+    the device the evaluation runs the policy on, and its registered
+    id, such as ``paddle-npoint@v3``, or ``None`` with the nearest
+    registered protocol and the fields that differ: a run evaluating on
+    CUDA is not a CPU protocol's), ``None`` for a run without an
+    info-dict evaluator and for every run recorded before protocols
+    were versioned; a versioned run never matches an unversioned one.
+    ``algo_family`` keeps SAC and PPO runs of one task
     apart: a reader that groups or ranks runs on the task alone would
     rank an SAC campaign leg against a PPO probe without saying so, so
     it must key on this whole block.
@@ -456,7 +462,8 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
         cfg.eval_env_fn or cfg.env_fn
     )
     # The in-loop selection protocol (design L3), fingerprinted from the
-    # evaluation env just probed, so no further env is built.
+    # evaluation env just probed, so no further env is built, on the
+    # device train() will build the model on (train.inloop_eval_device).
     eval_protocol = None
     if evaluation_env_cls is not None:
         from courtside_dynamics.experiments.protocols import eval_protocol_record
@@ -1179,10 +1186,12 @@ def _read_eval_info_series(
 
 
 def _read_best_model_meta(log_dir: str) -> dict[str, Any] | None:
-    """Load ``best_model_meta.json`` (task-metric selection provenance).
+    """Load ``best_model_meta.json`` (the selection provenance of the best).
 
     Written by ``InfoDictEvalCallback`` when a headline metric owns
-    best-model selection; absent on reward-selected runs.
+    best-model selection, and by ``train._SaveBestOnNewBest``
+    (``"selected_by": "reward"``) under reward selection; absent on
+    reward-selected runs from before the reward path wrote one.
     """
     path = locate_artifact(log_dir, "best_model_meta")
     if path is None:
@@ -1197,6 +1206,14 @@ def _read_best_model_meta(log_dir: str) -> dict[str, Any] | None:
         )
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _meta_timestep(meta: Mapping[str, Any]) -> int | None:
+    """``best_model_meta.json``'s ``timestep`` when it is a step (an int >= 0)."""
+    value = meta.get("timestep")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 def _selecting_batch_metrics(
@@ -1492,9 +1509,14 @@ def write_run_summary(
     an evaluation inside the first rollout precedes every update.
     ``best_unbound`` is ``train()``'s verdict that the best-model files
     are not one save (``records.BestSaveLedger.unbound``, which covers a
-    reward-selected pair no meta binds); with it, or a meta that does
-    not bind the files beside it, the best model is reported unbound and
-    nothing suggests deploying it.
+    first save split before its meta's rename); with it, or a meta that
+    does not bind the files beside it, the best model is reported
+    unbound, its files are flagged under Artifacts, and nothing suggests
+    deploying it. Under reward selection the best evaluation reported
+    (and the Best Checkpoint Evaluation section) is the one
+    ``best_model.zip`` holds, by its bound meta's step: after an
+    interrupt inside a new-best save, ``evaluations.npz`` already lists
+    a better evaluation that no file holds, and the line says so.
     """
     env_name = _env_display_name(cfg)
     git_sha = _git_sha()
@@ -1669,6 +1691,20 @@ def write_run_summary(
         for reason in dict.fromkeys((best_unbound, meta_unbound))
         if reason is not None
     ) or None
+    # Reward selection: the step best_model.zip holds is its bound
+    # meta's. SB3 appends an evaluation to evaluations.npz before the
+    # new-best save runs, so after an interrupt inside that save the
+    # series' best is a step no file holds. A reward-selected best with
+    # no meta (from before the reward path wrote one) is the series'
+    # best; without a meta or a best_model.zip, no save completed.
+    held_step: int | None = None
+    reward_best_known = False
+    if not headline_selection and unbound is None:
+        if best_meta is not None:
+            held_step = _meta_timestep(best_meta)
+            reward_best_known = held_step is not None
+        else:
+            reward_best_known = locate_artifact(log_dir, "best_model") is not None
 
     eval_npz = locate_artifact(log_dir, "evaluations")
     best_step: int | None = None
@@ -1685,15 +1721,34 @@ def write_run_summary(
             eval_timesteps = timesteps
             eval_means = results.mean(axis=1)
             eval_stds = results.std(axis=1)
-            best_idx = int(eval_means.argmax())
+            peak_idx = best_idx = int(eval_means.argmax())
+            held_note = ""
+            if held_step is not None:
+                held = np.flatnonzero(timesteps == held_step)
+                if held.size:
+                    best_idx = int(held[0])
+                else:
+                    reward_best_known = False
+                    held_note = (
+                        f"  <-- best_model.zip holds the save at "
+                        f"{held_step:,} steps, which evaluations.npz does "
+                        f"not list"
+                    )
+            if best_idx != peak_idx:
+                held_note = (
+                    f"  <-- the series peaked at "
+                    f"{int(timesteps[peak_idx]):,} steps "
+                    f"({float(eval_means[peak_idx]):.3f}), whose best-model "
+                    f"save did not complete: best_model.zip holds this one"
+                )
             best_step = int(timesteps[best_idx])
             best_mean = float(eval_means[best_idx])
             best_std = float(eval_stds[best_idx])
             best_eval_updates = updates_at(best_step)
-            best_eval_note = ""
+            best_eval_note = held_note
             if best_eval_updates == 0 and not headline_selection:
                 untrained_best_step = best_step
-                best_eval_note = untrained_best_warning
+                best_eval_note += untrained_best_warning
             lines.append(
                 _kv(
                     "Best eval",
@@ -1720,6 +1775,11 @@ def write_run_summary(
                         "  <-- policy regressed after best; best_model.zip "
                         "is unbound (below)"
                     )
+                elif regressed and not headline_selection and not reward_best_known:
+                    note = (
+                        "  <-- policy regressed after best; no best_model.zip "
+                        "holds that evaluation"
+                    )
                 elif regressed:
                     note = (
                         "  <-- policy regressed after best; deploy best_model.zip"
@@ -1739,7 +1799,7 @@ def write_run_summary(
             )
         )
         best_meta = None
-    if best_meta is not None:
+    if best_meta is not None and headline_selection:
         try:
             selected_step = int(best_meta["timestep"])
         except (KeyError, TypeError, ValueError):
@@ -1870,10 +1930,16 @@ def write_run_summary(
         lines.append(f"  {key.ljust(key_width)}{value}")
 
     # The section describes the checkpoint that best_model.zip actually
-    # holds: the task-metric-selected step when meta exists, else the
-    # reward-best step; nothing when the meta is unbound (no step is
+    # holds: the task-metric-selected step, or under reward selection the
+    # step its meta binds (the series' best only for a pre-meta run);
+    # nothing when the best is unbound or no save completed (no step is
     # known to be the one on disk).
-    section_step = selected_step if selected_step is not None else best_step
+    if headline_selection:
+        section_step = selected_step if selected_step is not None else best_step
+    elif held_step is not None:
+        section_step = held_step
+    else:
+        section_step = best_step if reward_best_known else None
     if unbound is not None:
         section_step = None
     if section_step is not None:
@@ -2026,6 +2092,9 @@ def write_run_summary(
                 # folder made this section read "present"
                 # (repo_review_20261016 training-data-5).
                 relative += "  <-- EMPTY: no file was written (missing)"
+            elif unbound is not None and label in BEST_MODEL_ARTIFACTS:
+                # The run record leaves these out of its artifacts.
+                relative += "  <-- UNBOUND: not one save; do not deploy"
             artifact_lines.append(f"  {_kv(label, relative)}")
     if artifact_lines:
         lines.extend(_section("Artifacts"))

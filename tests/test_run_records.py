@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
+import numpy as np
 import pytest
 from stable_baselines3.common.callbacks import BaseCallback
 
@@ -600,12 +601,15 @@ def test_verify_cli_exits_zero_only_when_every_run_dir_is_complete(
     assert result.returncode == 0, result.stderr
 
 
-def test_verify_warns_about_what_the_sealed_record_reports_wrong(tmp_path, capsys):
+def test_verify_fails_what_the_sealed_record_reports_wrong(tmp_path, capsys):
     """Verifier r3: a run whose best-model save was split between its
-    renames sealed complete, and verify said nothing. The directory is
-    still exactly what train() left, so it stays complete, but verify
-    prints the record's unbound selection and unindexed snapshot files
-    as warnings, and --strict fails them."""
+    renames sealed complete, and verify said nothing. Phase-4 verifier
+    r2 (major): it then said so in a WARNING line and still exited 0, so
+    a script or CI step checking the exit code passed an unbound best.
+    The directory is still exactly what train() left, so it stays
+    complete, but it is not clean: the CLI lists the damage and exits 2
+    unless --allow-warnings accepts it, and --strict counts it as
+    incomplete (1)."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     (run_dir / "config.json").write_text("{}\n")
@@ -621,24 +625,51 @@ def test_verify_warns_about_what_the_sealed_record_reports_wrong(tmp_path, capsy
     write_sync_manifest(run_dir)
     result = verify_run_dir(run_dir)
     assert result.complete and result.problems == ()
-    assert result.warnings == (
+    assert not result.clean
+    warnings = (
         "the run record marks the best model unbound (the best-model files "
         "are not one save of this run: x): do not deploy best_model.zip",
         "1 snapshot file(s) that snapshots/index.json does not bind (a "
         "snapshot interrupted between its renames; never scored): "
         "snapshot_9_steps.zip",
     )
-    assert verify_main([str(run_dir)]) == 0
+    assert result.warnings == warnings
+    assert verify_main([str(run_dir)]) == 2
     out = capsys.readouterr().out
-    assert "complete (status interrupted" in out
+    assert f"{run_dir}: NOT CLEAN -- complete (status interrupted" in out
+    assert "--allow-warnings accepts a faithful copy of a damaged run" in out
+    for warning in warnings:
+        assert f"  - {warning}\n" in out
+    assert verify_main(["--allow-warnings", str(run_dir)]) == 0
+    out = capsys.readouterr().out
+    assert f"{run_dir}: complete (status interrupted" in out
     assert "  WARNING: the run record marks the best model unbound" in out
     assert "  WARNING: 1 snapshot file(s)" in out
     assert verify_main(["--strict", str(run_dir)]) == 1
     assert "(strict) the run record marks" in capsys.readouterr().out
-    assert verify_main(["--json", str(run_dir)]) == 0
-    assert len(json.loads(capsys.readouterr().out)["warnings"]) == 2
-    # A healthy sealed directory has none.
-    assert verify_run_dir(_sealed_run_dir(tmp_path / "good")).warnings == ()
+    with pytest.raises(SystemExit):
+        verify_main(["--strict", "--allow-warnings", str(run_dir)])
+    capsys.readouterr()
+    assert verify_main(["--json", str(run_dir)]) == 2
+    verdict = json.loads(capsys.readouterr().out)
+    assert (verdict["complete"], verdict["clean"]) == (True, False)
+    assert len(verdict["warnings"]) == 2
+    # One incomplete directory beside it: 1 wins over 2.
+    assert verify_main([str(run_dir), str(tmp_path / "absent")]) == 1
+    capsys.readouterr()
+    # A healthy sealed directory has none, and is clean.
+    good = verify_run_dir(_sealed_run_dir(tmp_path / "good"))
+    assert good.warnings == () and good.clean
+    assert good.to_dict()["clean"] is True
+    assert verify_main([str(tmp_path / "good")]) == 0
+    # The subprocess form exits 2 too: what a CI step sees.
+    completed = subprocess.run(
+        [sys.executable, "-m", "courtside_dynamics.experiments.verify", str(run_dir)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 2, completed.stderr
 
 
 def _ledger_save(
@@ -1171,6 +1202,160 @@ def test_keyboard_interrupt_is_recorded_and_sealed(tmp_path):
     assert "interrupted: KeyboardInterrupt" in summary
 
 
+def _tear_writes(monkeypatch, name: str, *, at: int = 1) -> None:
+    """Raise KeyboardInterrupt inside the ``at``-th write of file ``name``.
+
+    ``name`` is a target file name, or the ``_steps.zip`` /
+    ``_steps.pkl`` ending of a periodic checkpoint's. The write lands
+    half its bytes first, as a real interrupt inside it would. Only the
+    temporary a writer renames into place matches (``.<name>.tmp-``), so
+    a write in place -- the bug -- would go unnoticed here, and the test
+    asserts the target is never torn instead.
+    """
+    import stable_baselines3
+    from stable_baselines3.common.vec_env import VecNormalize
+
+    calls = {"n": 0}
+
+    def matches(path: Any) -> bool:
+        base = os.path.basename(str(path))
+        if ".tmp-" not in base:
+            return False
+        target = base[1:].split(".tmp-", 1)[0]
+        return target == name or (name.startswith("_steps") and target.endswith(name))
+
+    for owner in (stable_baselines3.SAC, VecNormalize):
+        real_save = owner.save
+
+        def save(self, path, *args, _real=real_save, **kwargs):
+            _real(self, path, *args, **kwargs)
+            if matches(path):
+                calls["n"] += 1
+                if calls["n"] == at:
+                    size = os.path.getsize(path)
+                    with open(path, "r+b") as handle:
+                        handle.truncate(size // 2)
+                    raise KeyboardInterrupt
+
+        monkeypatch.setattr(owner, "save", save)
+
+
+@pytest.mark.parametrize("name", ["final_model.zip", "vec_normalize.pkl"])
+@pytest.mark.parametrize("path", ["completed", "interrupt_salvage", "crash_salvage"])
+def test_an_interrupt_inside_a_final_save_never_seals_a_torn_file(
+    tmp_path, monkeypatch, name, path
+):
+    """Phase-4 verifier r2 (major): final_model.zip and vec_normalize.pkl
+    were written in place on the completed path and both salvage paths,
+    so a KeyboardInterrupt inside the write sealed a torn file that the
+    record listed and verify passed. Each is written to a temporary and
+    renamed into place: the interrupt leaves no file, and the record,
+    which never lists a file that is not on disk, says interrupted."""
+    callbacks: tuple[BaseCallback, ...] = ()
+    if path == "interrupt_salvage":
+        callbacks = (_RaiseAt(KeyboardInterrupt()),)
+    elif path == "crash_salvage":
+        callbacks = (_RaiseAt(RuntimeError("synthetic crash")),)
+    _tear_writes(monkeypatch, name)
+    log_dir = tmp_path / f"{path}_{name}"
+    with pytest.raises(KeyboardInterrupt):
+        train(_cfg(log_dir, extra_callbacks=callbacks))
+    record = _assert_sealed(log_dir, "interrupted")
+    assert record["stop_reason"].startswith("interrupted outside learn()")
+    assert _temporaries(log_dir) == []
+    target = log_dir / "model" / name
+    names = {artifact["name"] for artifact in record["artifacts"]}
+    if name == "final_model.zip":
+        # The model is saved first: nothing of this save is on disk.
+        assert not target.exists()
+        assert "final_model" not in names
+    else:
+        # The model before it is whole; the normalizer was never published.
+        from stable_baselines3 import SAC
+
+        SAC.load(log_dir / "model" / "final_model.zip", device="cpu")
+        assert not target.exists()
+        assert "vec_normalize" not in names
+
+
+@pytest.mark.parametrize("name", ["_steps.zip", "_steps.pkl"])
+def test_an_interrupt_inside_a_checkpoint_write_never_seals_a_torn_checkpoint(
+    tmp_path, monkeypatch, name
+):
+    """Phase-4 verifier r2 (major): SB3's CheckpointCallback wrote each
+    checkpoint in place, so an interrupt inside the write sealed a torn
+    zip that verify passed and only a load refused. The checkpoint pair
+    is now staged and renamed (model last): the interrupted checkpoint
+    leaves no file, the earlier one stands whole, and the harness scores
+    it without a problem."""
+    from stable_baselines3 import SAC
+
+    from courtside_dynamics.experiments.harness import run_artifacts
+
+    _tear_writes(monkeypatch, name, at=2)
+    log_dir = tmp_path / name.replace(".", "_")
+    model = train(_cfg(log_dir, checkpoint_freq=100))
+    assert model.num_timesteps == 200
+    _assert_sealed(log_dir, "interrupted")
+    assert _temporaries(log_dir) == []
+    assert sorted(path.name for path in (log_dir / "checkpoints").iterdir()) == [
+        "rl_model_100_steps.zip",
+        "rl_model_vecnormalize_100_steps.pkl",
+    ]
+    assert SAC.load(log_dir / "checkpoints" / "rl_model_100_steps.zip").num_timesteps == 100
+    artifacts, problems = run_artifacts(log_dir, ("checkpoints",))
+    assert problems == []
+    assert [artifact.step for artifact in artifacts] == [100]
+
+
+def test_the_atomic_checkpoint_callback_writes_what_sb3_wrote(tmp_path):
+    """The same file names, the same normalizer bytes and the same policy
+    as SB3's CheckpointCallback; only the write is staged."""
+    import torch
+    from stable_baselines3 import SAC
+    from stable_baselines3.common.callbacks import CheckpointCallback
+    from stable_baselines3.common.env_util import make_vec_env
+    from stable_baselines3.common.vec_env import VecNormalize
+
+    from courtside_dynamics.training.train import _AtomicCheckpointCallback
+
+    venv = VecNormalize(make_vec_env(lambda: BallBalanceEnv(episode_len=12), n_envs=1))
+    model = SAC("MlpPolicy", venv, learning_starts=8, buffer_size=64, seed=0)
+    model.learn(16)
+    outputs = {}
+    for label, cls in (("sb3", CheckpointCallback), ("atomic", _AtomicCheckpointCallback)):
+        callback = cls(
+            save_freq=1,
+            save_path=str(tmp_path / label),
+            name_prefix="paddle",
+            save_vecnormalize=True,
+            save_replay_buffer=True,
+        )
+        callback.init_callback(model)
+        callback.on_step()
+        outputs[label] = sorted(path.name for path in (tmp_path / label).iterdir())
+    assert outputs["atomic"] == outputs["sb3"] == [
+        "paddle_16_steps.zip",
+        "paddle_replay_buffer_16_steps.pkl",
+        "paddle_vecnormalize_16_steps.pkl",
+    ]
+    normalizer = "paddle_vecnormalize_16_steps.pkl"
+    assert (tmp_path / "atomic" / normalizer).read_bytes() == (
+        tmp_path / "sb3" / normalizer
+    ).read_bytes()
+    loaded = [
+        SAC.load(tmp_path / label / "paddle_16_steps.zip", device="cpu")
+        for label in ("sb3", "atomic")
+    ]
+    for left, right in zip(
+        loaded[0].policy.state_dict().values(),
+        loaded[1].policy.state_dict().values(),
+        strict=True,
+    ):
+        assert torch.equal(left, right)
+    venv.close()
+
+
 def test_crash_is_recorded_and_sealed_and_still_raises(tmp_path):
     log_dir = tmp_path / "crashed"
     with pytest.raises(RuntimeError, match="synthetic crash"):
@@ -1438,35 +1623,83 @@ def test_an_interrupt_at_each_best_save_boundary_never_seals_a_torn_best(
     SAC.load(log_dir / "model" / "best_model.zip", device="cpu")
 
 
-@pytest.mark.parametrize("boundary", ["model", "normalizer"])
-def test_an_interrupted_reward_path_best_save_leaves_the_previous_pair(
+def _reward_cfg(log_dir: Path) -> TrainConfig:
+    """Reward selection on rising evaluation rewards: every evaluation
+    is a new best, so every evaluation saves."""
+    return _cfg(
+        log_dir, env_fn=_improving_env, info_dict_eval=False, headline_key=None
+    )
+
+
+@pytest.mark.parametrize("boundary", ["model", "normalizer", "meta", "meta_renamed"])
+def test_an_interrupted_reward_path_best_save_leaves_a_bound_pair(
     tmp_path, monkeypatch, boundary
 ):
     """Reward selection: SB3's EvalCallback wrote best_model.zip in place,
     and a real SIGINT left a 16 kB zip that no loader could open, sealed
-    complete (verifier r2). The pair is now written atomically too."""
+    complete (verifier r2). The triple is written atomically, the meta
+    last. Phase-4 verifier r2 (major): SB3 appends the evaluation to
+    evaluations.npz before the new-best save runs, so after an interrupt
+    inside the second save the summary named its argmax (step 200) for a
+    best_model.zip that held step 100's policy, with a deploy hint. The
+    reward path's meta now records the step it holds, and the summary,
+    the record, the plot marker and the harness read it from there."""
     from stable_baselines3 import SAC
+
+    from courtside_dynamics.experiments.harness import run_artifacts
+    from courtside_dynamics.notebook_utils import (
+        _best_checkpoint_marker,
+        verify_best_checkpoint_pair,
+    )
 
     _interrupt_best_save(monkeypatch, boundary)
     log_dir = tmp_path / boundary
-    model = train(
-        _cfg(
-            log_dir,
-            env_fn=_improving_env,
-            info_dict_eval=False,
-            headline_key=None,
-        )
-    )
+    model = train(_reward_cfg(log_dir))
     assert model.num_timesteps == 200
     record = _assert_sealed(log_dir, "interrupted")
     assert _temporaries(log_dir) == []
-    assert record["selection"] is None
+    # Every save but an interrupted one committed whole: the second
+    # (step 200) only when the interrupt came after its last rename.
+    held = 200 if boundary == "meta_renamed" else 100
+    meta = json.loads((log_dir / "model" / "best_model_meta.json").read_text())
+    assert meta["selected_by"] == "reward"
+    assert meta["timestep"] == held
+    assert meta["selection_keys"] == ["mean_reward"]
+    selection = record["selection"]
+    assert selection["bindings"] == "verified"
+    assert selection["timestep"] == held
+    assert selection["keys"] == ["mean_reward"]
+    assert selection["values"]["mean_reward"] == meta["selection_values"]["mean_reward"]
     names = {artifact["name"] for artifact in record["artifacts"]}
-    assert {"best_model", "best_vec_normalize"} <= names
+    assert {"best_model", "best_vec_normalize", "best_model_meta"} <= names
     best = SAC.load(log_dir / "model" / "best_model.zip", device="cpu")
-    first = SAC.load(log_dir / "model" / "final_model.zip", device="cpu")
-    # The step-100 best, not the step-200 policy the salvage saved.
-    assert best.num_timesteps == 100 < first.num_timesteps
+    assert best.num_timesteps == held
+    assert verify_best_checkpoint_pair(log_dir)["pair_verification"] == (
+        "verified_by_best_model_meta_sha256"
+    )
+    evaluations = np.load(log_dir / "metrics" / "evaluations.npz")
+    assert evaluations["timesteps"].tolist() == [100, 200]
+    means = evaluations["results"].mean(axis=1)
+    assert means[1] > means[0]
+    summary = (log_dir / "stage_summary.txt").read_text()
+    best_line = next(
+        line for line in summary.splitlines() if line.startswith("Best eval:")
+    )
+    assert f"{means[held // 100 - 1]:.3f}" in best_line
+    assert f"(at {held:,} steps)" in best_line
+    assert f"Best Checkpoint Evaluation (step {held:,})" in summary
+    if held == 100:
+        assert (
+            f"the series peaked at 200 steps ({means[1]:.3f}), whose "
+            f"best-model save did not complete: best_model.zip holds this one"
+        ) in best_line
+        assert "Best Checkpoint Evaluation (step 200)" not in summary
+    else:
+        assert "peaked" not in summary
+    assert _best_checkpoint_marker(str(log_dir), evaluations)[0] == held
+    artifacts, problems = run_artifacts(log_dir, ("best",))
+    assert problems == []
+    assert [(artifact.kind, artifact.step) for artifact in artifacts] == [("best", held)]
 
 
 def _assert_unbound_best(log_dir: Path, *parts: str) -> dict[str, Any]:
@@ -1494,58 +1727,86 @@ def _assert_unbound_best(log_dir: Path, *parts: str) -> dict[str, Any]:
         verify_best_checkpoint_pair(log_dir)
     artifacts, problems = run_artifacts(log_dir, ("best",))
     assert artifacts == []
-    assert problems == [
-        f"{log_dir.name}: best model not scored: the run record marks it "
-        f"unbound ({reason})"
-    ]
+    # The harness checks a meta's bindings before the record's verdict.
+    [problem] = problems
+    prefix = f"{log_dir.name}: best model not scored: "
+    assert problem.startswith(prefix)
+    detail = problem[len(prefix):]
+    assert detail == f"the run record marks it unbound ({reason})" or (
+        detail.startswith("best_model_meta.json does not bind") and detail in reason
+    ), detail
     return record
 
 
 @pytest.mark.parametrize(
-    ("at_save", "parts"),
+    ("boundary", "at_save", "parts"),
     [
-        # The second save: its model beside the first save's normalizer,
-        # which no meta binds on this path.
+        # The second save: its model beside the first save's normalizer
+        # and meta, which no longer binds the model.
         (
+            "model_renamed",
             2,
             (
                 "best_model.zip from the interrupted save",
                 "best_vec_normalize.pkl from the last committed save",
+                "best_model_meta.json from the last committed save",
+                "best_model_meta.json does not bind the files beside it: "
+                "best_model.zip (sha256 differs)",
             ),
         ),
-        # The first save: a model with no normalizer at all.
+        # Its model and normalizer beside the first save's meta.
         (
+            "normalizer_renamed",
+            2,
+            (
+                "best_model.zip from the interrupted save",
+                "best_vec_normalize.pkl from the interrupted save",
+                "best_model_meta.json from the last committed save",
+                "best_model_meta.json does not bind the files beside it: "
+                "best_model.zip (sha256 differs), best_vec_normalize.pkl "
+                "(sha256 differs)",
+            ),
+        ),
+        # The first save: a model with no normalizer and no meta at all.
+        (
+            "model_renamed",
             1,
             (
                 "best_model.zip from the interrupted save",
                 "best_vec_normalize.pkl missing",
+                "best_model_meta.json missing",
             ),
         ),
     ],
 )
-def test_a_reward_path_pair_split_between_its_renames_is_sealed_unbound(
-    tmp_path, monkeypatch, at_save, parts
+def test_a_reward_path_save_split_between_its_renames_is_sealed_unbound(
+    tmp_path, monkeypatch, boundary, at_save, parts
 ):
-    """Verifier r3 (major): the reward path writes no meta, so an
-    interrupt between its two renames left a new model beside the
-    previous normalizer (or, at the first save, none) that the record
-    listed, verify certified and the harness scored. The run's own
-    ledger of committed saves now marks it unbound."""
-    _interrupt_best_save(monkeypatch, "model_renamed", at_save=at_save)
-    log_dir = tmp_path / f"reward_{at_save}"
-    model = train(
-        _cfg(
-            log_dir,
-            env_fn=_improving_env,
-            info_dict_eval=False,
-            headline_key=None,
-        )
-    )
+    """Verifier r3 (major): an interrupt between the reward path's renames
+    left a new model beside the previous normalizer (or, at the first
+    save, none) that the record listed, verify certified and the harness
+    scored. The run's own ledger of committed saves, and since phase-4
+    r2 the reward path's meta, mark it unbound."""
+    _interrupt_best_save(monkeypatch, boundary, at_save=at_save)
+    log_dir = tmp_path / f"reward_{boundary}_{at_save}"
+    model = train(_reward_cfg(log_dir))
     assert model.num_timesteps == 100 * at_save
     record = _assert_unbound_best(log_dir, *parts)
-    # No meta, so no selection keys: the block exists only to say so.
-    assert record["selection"]["keys"] == []
-    assert not (log_dir / "model" / "best_model_meta.json").exists()
+    meta = log_dir / "model" / "best_model_meta.json"
+    if at_save == 1:
+        # No meta was renamed into place, so none names the keys.
+        assert record["selection"]["keys"] == []
+        assert not meta.exists()
+    else:
+        assert record["selection"]["keys"] == ["mean_reward"]
+        assert json.loads(meta.read_text())["timestep"] == 100
+    summary = (log_dir / "stage_summary.txt").read_text()
+    assert "Best Checkpoint Evaluation" not in summary
+    # The Artifacts section flags the files the record leaves out.
+    assert (
+        "best_model:     model/best_model.zip  <-- UNBOUND: not one save; "
+        "do not deploy"
+    ) in summary
 
 
 @pytest.mark.parametrize(

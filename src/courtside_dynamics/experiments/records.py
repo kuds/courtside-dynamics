@@ -23,9 +23,10 @@ renamed over the target, so a reader never sees half of one. The
 best-model files are written the same way (:class:`ReplaceTogether`),
 and the record's ``selection`` says whether they are one save: whether
 ``best_model_meta.json``'s sha256s bind the files beside it
-(:func:`best_model_meta_unbound`), and whether the files on disk are
-a save ``train()`` committed (:class:`BestSaveLedger`, which covers the
-reward path, whose saves write no meta).
+(:func:`best_model_meta_unbound`; both selection paths write one), and
+whether the files on disk are a save ``train()`` committed
+(:class:`BestSaveLedger`, which also covers a first save split before
+its meta's rename).
 
 A run directory is **complete** when its manifest verifies, the run
 record it lists carries a terminal status, every file it does not list
@@ -36,7 +37,10 @@ ended -- a crashed or interrupted run included, its status says how it
 ended -- not that the run succeeded. Without a manifest (a SIGKILL, a
 dead Colab VM, a run still training, a directory from before run
 records), or with one that does not verify, it is incomplete by
-definition.
+definition. A complete directory is also **clean** when its record
+reports nothing wrong with the files it seals (:func:`record_warnings`:
+an unbound best model, unindexed snapshot files); the verify CLI fails
+a complete directory that is not clean unless told to accept it.
 
 Stable-Baselines3 and torch are never imported here.
 """
@@ -47,7 +51,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -184,8 +188,8 @@ class BestSaveLedger:
     is atomic, the set is not: an interrupt between two renames leaves
     a model of one save beside a normalizer (or meta) of another, and a
     first save interrupted after its model's rename leaves a model with
-    neither. A reward-path save writes no meta, so nothing on disk can
-    tell such a pair from a healthy one; :meth:`unbound` tells it from
+    neither. A first save has no meta on disk yet, so nothing there can
+    tell such a model from a healthy save; :meth:`unbound` tells it from
     what this run committed, when the run seals its record.
 
     ``directory`` holds the best-model files, ``names`` every file a
@@ -270,7 +274,7 @@ class ReplaceTogether:
     :func:`best_model_meta_unbound` catches such a split; with a
     ``ledger`` (:class:`BestSaveLedger`), :meth:`commit` also notes the
     staged files' digests before the renames and commits them after,
-    which catches a split pair that no meta binds.
+    which catches a split that no meta on disk binds (a first save).
     """
 
     def __init__(self, ledger: BestSaveLedger | None = None) -> None:
@@ -303,6 +307,24 @@ class ReplaceTogether:
                 temporary.unlink()
             except OSError:  # renamed already, or never written
                 pass
+
+
+def write_atomically(
+    target: str | os.PathLike[str], write: Callable[[str], object]
+) -> None:
+    """Write ``target`` through ``write(temporary)``, then rename it into place.
+
+    For a file a library writes by path (``model.save``,
+    ``VecNormalize.save``): the temporary sits beside the target
+    (:func:`temporary_path`), so the rename is a same-directory
+    ``os.replace`` and a reader, or a manifest sealing an interrupted
+    run, sees the previous file (or none) or the new one, never a torn
+    one. An exception or ``KeyboardInterrupt`` inside ``write`` removes
+    the temporary and propagates.
+    """
+    with ReplaceTogether() as staged:
+        write(staged.stage(target))
+        staged.commit()
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -352,6 +374,14 @@ def _warm_start_section(config: Mapping[str, Any]) -> dict[str, Any] | None:
 BINDINGS_VERIFIED = "verified"
 BINDINGS_UNBOUND = "unbound"
 BINDINGS_NOT_CHECKED = "not_checked"
+
+#: ``best_model_meta.json``'s ``selected_by`` when SB3's reward
+#: ``EvalCallback`` chose the save (``train._SaveBestOnNewBest``), with
+#: its one selection key. The headline evaluator's meta has no
+#: ``selected_by`` (and every meta written before the reward path wrote
+#: one is the headline evaluator's).
+REWARD_SELECTED = "reward"
+REWARD_SELECTION_KEY = "mean_reward"
 
 #: The best-model triple's ``training.artifacts.RUN_LAYOUT`` names (a
 #: test pins the agreement). An unbound selection leaves all three out
@@ -412,10 +442,12 @@ def selection_from_best_model_meta(
 ) -> dict[str, Any] | None:
     """The record's ``selection`` block from ``best_model_meta.json``.
 
-    ``None`` without a meta file: a reward-selected run's
-    ``best_model.zip`` is SB3's reward argmax, which records no
-    selection event. ``n_updates`` is the SB3 update count behind the
-    selecting evaluation (on-policy runs record it; ``None`` otherwise).
+    ``None`` without a meta file (no save committed, or a reward-selected
+    run from before the reward path wrote one). A reward-selected
+    save's meta gives ``keys`` ``["mean_reward"]`` (SB3's reward
+    evaluator chose it; :data:`REWARD_SELECTED`). ``n_updates`` is the
+    SB3 update count behind the selecting evaluation (on-policy runs
+    record it; ``None`` otherwise).
 
     With ``directory`` (the meta's own), the meta's sha256 bindings are
     checked against the files there (:func:`best_model_meta_unbound`).
@@ -464,9 +496,9 @@ def unbound_selection(
     The shape :func:`selection_from_best_model_meta` gives an unbound
     meta: no timestep, values or update count, the keys kept (they are
     the rule, not the result), and both reasons when the meta was
-    unbound already. A reward-selected run's unbound best (no meta, so
-    no selection) gets this block with no keys: the record must say its
-    best-model files are not one save.
+    unbound already. A best with no meta (a first save split before its
+    meta's rename, so no selection) gets this block with no keys: the
+    record must say its best-model files are not one save.
     """
     previous = None if selection is None else selection.get("unbound_reason")
     keys = [] if selection is None else selection.get("keys")
@@ -596,7 +628,7 @@ def build_run_record(
     disk, but they are not one save. ``best_unbound`` is the trainer's
     own verdict (:meth:`BestSaveLedger.unbound`): when set, the
     selection is unbound for that reason too (:func:`unbound_selection`),
-    a reward-selected run's included.
+    a best without a meta included.
 
     ``snapshots`` is ``experiments.snapshots.snapshot_summary``'s block
     (the evaluation snapshots ``snapshots/index.json`` binds), ``None``
@@ -790,6 +822,9 @@ class RunDirVerification:
     listed run record reports wrong inside a faithful directory (an
     unbound best model, snapshot files its index does not bind,
     :func:`record_warnings`); under ``strict`` they are problems too.
+    :attr:`clean` is complete with no warning: the verify CLI fails a
+    complete directory that is not clean unless ``--allow-warnings``
+    accepts it (a faithful copy of a damaged run).
     """
 
     run_dir: str
@@ -802,8 +837,15 @@ class RunDirVerification:
     problems: tuple[str, ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
+    @property
+    def clean(self) -> bool:
+        """Complete, and the record reports nothing wrong with its files."""
+        return self.complete and not self.warnings
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["clean"] = self.clean
+        return payload
 
 
 def _safe_relative(path: Any) -> str | None:
@@ -929,7 +971,9 @@ def verify_run_dir(
     What the listed record reports wrong inside the directory (an
     unbound best model, unindexed snapshot files: :func:`record_warnings`)
     is a warning, since the directory is still what ``train()`` left,
-    and a problem under ``strict``.
+    and a problem under ``strict``; a complete directory with a warning
+    is not :attr:`~RunDirVerification.clean`, which the verify CLI fails
+    by default.
     A mid-run Drive mirror whose manifest verifies is an intact snapshot
     of an unfinished run: its listed record says ``"running"``, so it is
     incomplete too. A directory whose record is terminal but which has

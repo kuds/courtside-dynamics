@@ -17,13 +17,17 @@ wrong).
 
 | File | Written | Says |
 |---|---|---|
-| `run_record.json` | By `train()` at start (`running`), rewritten on every terminal path | What ran and how it ended (`courtside-run-record/1`): status `completed`, `early_stop`, `interrupted` or `crashed` with a `stop_reason`; budget; algorithm; task fingerprints; comparability key; seeds; git; versions; warm start; selection, checked against `best_model_meta.json`'s sha256 bindings and the saves `train()` committed; the evaluation `snapshots`, unindexed files named; wall clock |
+| `run_record.json` | By `train()` at start (`running`), rewritten on every terminal path | What ran and how it ended (`courtside-run-record/1`): status `completed`, `early_stop`, `interrupted` or `crashed` with a `stop_reason`; budget; algorithm; task fingerprints; comparability key (its `eval_protocol` with the device the in-loop evaluation ran on); seeds; git; versions; warm start; selection (on both selection paths), checked against `best_model_meta.json`'s sha256 bindings and the saves `train()` committed; the evaluation `snapshots`, unindexed files named; wall clock |
 | `sync_manifest.json` | Last, after the final record | Path, size and sha256 of every other file (`courtside-sync-manifest/1`) |
 
 A directory is **complete** when its manifest verifies, the record it
 lists is terminal, and every file the manifest does not list is a
 post-training file (below). Complete means "exactly what `train()`
-left", a crashed run included; it does not mean the run succeeded.
+left", a crashed run included; it does not mean the run succeeded. A
+complete directory is **clean** when its record reports nothing wrong
+with the files it seals (an unbound best model, snapshot files the
+snapshot index does not bind); the verify CLI fails one that is not,
+unless told to accept it.
 Without a manifest (still training, killed, a dead runtime, or older
 than run records) a directory is incomplete by definition. A failure
 while the run closes after it ended (an env or the TensorBoard flush
@@ -32,36 +36,53 @@ read `crashed`, its stop reason quoting the outcome the run had
 reached.
 
 On both selection paths the best-model files (`best_model.zip`,
-`best_vec_normalize.pkl` and, under headline selection,
-`best_model_meta.json`) are written under temporary names and renamed
-into place, the meta last: an interrupt (a stopped Colab cell) inside a
-write leaves the previous best whole. One that lands between two
-renames leaves files of two saves: a meta whose sha256s no longer bind
-the files beside it, or, where no meta binds the pair (a reward-selected
-run's, a first headline save interrupted before its meta's rename), a
-model beside another save's normalizer or none. `train()` keeps the
-sha256s of every best-model save it committed
-(`records.BestSaveLedger`) and checks the files on disk against them
-when it seals the record, as well as the meta's bindings. Either check
-failing makes the record say so: `selection.bindings` is `unbound` with
-an `unbound_reason` naming which save each file is from, its timestep
-and values are `null` (never the previous best's; a reward-selected
-run, which has no selection otherwise, gets this block too), and the
-best-model files are left out of `artifacts`. `stage_summary.txt` says
-the same and suggests no deploy, `train()` prints a warning, `verify`
-warns, the index flags the row, and the loaders
-(`verify_best_checkpoint_pair`) and the harness refuse the pair.
-Otherwise `bindings` is `verified` (`not_checked` in rows the index
-backfills) under headline selection, and a reward-selected run's
-selection stays `null`.
+`best_vec_normalize.pkl` and `best_model_meta.json`, which binds the
+pair by sha256 and records the step it holds) are written under
+temporary names and renamed into place, the meta last: an interrupt (a
+stopped Colab cell) inside a write leaves the previous best whole. A
+reward-selected run's meta reads `"selected_by": "reward"`, with SB3's
+`mean_reward` as its one selection key; it is what says which
+evaluation `best_model.zip` holds, since SB3 appends an evaluation to
+`evaluations.npz` before its new-best save runs, so after an interrupt
+inside that save the series' best is a step no file holds (an older
+reward-selected run has no meta: its best step is the series' best). An
+interrupt that lands
+between two renames leaves files of two saves: a meta whose sha256s no
+longer bind the files beside it, or, where no meta is on disk yet (a
+first save interrupted before its meta's rename), a model beside no
+normalizer. `train()` keeps the sha256s of every best-model save it
+committed (`records.BestSaveLedger`) and checks the files on disk
+against them when it seals the record, as well as the meta's bindings.
+Either check failing makes the record say so: `selection.bindings` is
+`unbound` with an `unbound_reason` naming which save each file is
+from, its timestep and values are `null` (never the previous best's),
+and the best-model files are left out of `artifacts`.
+`stage_summary.txt` says the same (its Artifacts section flags the
+files) and suggests no deploy, `train()` prints a warning, `verify`
+fails the directory as not clean, the index flags the row, and the
+loaders (`verify_best_checkpoint_pair`) and the harness refuse the
+pair. Otherwise `bindings` is `verified` (`not_checked` in rows the
+index backfills), with the step the files hold; a reward-selected
+run's keys are `["mean_reward"]`. The summary's best evaluation and
+Best Checkpoint Evaluation section, the notebooks' best-checkpoint
+marker and the harness's best step all read the bound meta's step.
+
+The end-of-run `final_model.zip` and `vec_normalize.pkl` (the completed
+path's and both salvage paths') and every periodic checkpoint in
+`checkpoints/` are written the same way, a temporary renamed into place
+(a checkpoint's normalizer before its model), so an interrupt inside a
+write seals no torn file: the file is absent, and the record, which
+lists only what is on disk, says so.
 
 ```bash
 python -m courtside_dynamics.experiments.verify <run_dir> [<run_dir> ...]
 python -m courtside_dynamics.experiments.verify --strict --json <run_dir>
+python -m courtside_dynamics.experiments.verify --allow-warnings <run_dir>
 ```
 
-Exit 0 only when every directory is complete. Every file the manifest
-does not list is reported. Those at the post-training locations (the
+Exit 0 only when every directory is complete and clean; 1 when one is
+incomplete; 2 when every one is complete but one is not clean. Every
+file the manifest does not list is reported. Those at the post-training locations (the
 notebooks' plots, audits and gate reports under `reports/`, the
 harness's `scores/`, and the replay video `media/best_model.mp4`) fail
 only `--strict`; any other fails the directory. A writer's temporary leftover (`.x.tmp-<pid>`,
@@ -70,9 +91,16 @@ or not the manifest lists it: one listed was already there when the run
 was sealed. The writers remove their temporaries when a write fails or
 is interrupted. What the sealed record reports wrong inside a complete
 directory (an unbound best model, snapshot files the index does not
-bind) prints as a `WARNING` line (`warnings` in `--json`): the
-directory is still exactly what `train()` left, and `--strict` fails
-it. A directory whose record is terminal but which has no
+bind) makes it complete but not clean: it prints as `NOT CLEAN` with
+the damage listed (`warnings` and `"clean": false` in `--json`) and
+exits 2, so a script or CI step that checks the exit code never passes
+an unbound best. The directory is still exactly what `train()` left:
+`--allow-warnings` accepts it (the damage prints as `WARNING` lines,
+exit 0), for checking that a Drive copy of a damaged run is faithful,
+and `--strict` counts it as incomplete (exit 1). The Python API keeps
+the structured verdict (`RunDirVerification.complete`, `.clean`,
+`.warnings`), and the index's `verification` block carries `clean`
+too. A directory whose record is terminal but which has no
 manifest was never sealed: a mirror pass that did not finish (re-run
 `sync_run_dir`) or a run that died while sealing itself.
 
@@ -156,7 +184,8 @@ Every row has the run record's keys plus two:
   unexpected type (a string where an object belongs) is read as
   missing and named in the row's problems; it never fails the index.
   What a run record reports wrong (an `unbound` selection, unindexed
-  snapshot files: `verify`'s warnings) is a problem too.
+  snapshot files: what makes `verify` call a directory not clean) is a
+  problem too.
 
 Anything else is never parsed as a run: a directory holding files but
 no run marker, a `config.json` without a courtside `train_config`
@@ -194,8 +223,9 @@ run record's `snapshots` block lists their steps and any that failed
 `unindexed` the files the index does not bind: an interrupt between a
 snapshot's renames leaves complete files outside the index (at the
 first snapshot, no index at all, which the block reports as a
-`problem`). `verify` warns about them and the harness refuses to score
-them, never skipping them silently. The manifest hashes every file.
+`problem`). `verify` fails the directory as not clean for them and the
+harness refuses to score them, never skipping them silently. A snapshot
+that failed to save is a gap the rescore names, not a problem (below). The manifest hashes every file.
 Saving reads the model only: the trainer digest's training components
 are unchanged. A PaddleTennis SAC snapshot is about 3.5 MB.
 
@@ -203,8 +233,9 @@ are unchanged. A PaddleTennis SAC snapshot is about 3.5 MB.
 everything an evaluation batch measures besides the policy: the eval
 env (class and every constructor argument), episodes, the paired seed
 block and reset options, the info keys and aggregates, the selection
-keys and per-key deltas, the confirmation block, and the device (CPU).
-Its fingerprint is the sha256 of that content. Registered protocols
+keys and per-key deltas, the confirmation block, and the device (every
+registered protocol pins CPU; float32 kernels differ by device). Its
+fingerprint is the sha256 of that content. Registered protocols
 score on the run's own seed block (its recorded paired block, else its
 `eval_seed`, else `seed + 1,000,000`); a score row records the block it
 used. `inloop` stands for each run's own in-loop evaluation, rebuilt
@@ -243,14 +274,24 @@ headline, success and k=1 compare as they are.
 
 **What a run records.** `config.json`'s `comparability_key.eval_protocol`
 (and the run record's `task.eval_protocol`, copied from it) is
-`{"id", "fingerprint"}`: the fingerprint of the run's in-loop selection
-protocol, the one `--protocol inloop` rebuilds from `config.json`, and
-the id of the registered protocol of the run's recipe with that
-fingerprint. A stock PaddleTennis run records `paddle-npoint@v3`; one
-whose `[eval_env]` table restores the escrows records
-`paddle-npoint@v2`; a quick test, or a run file that changes the
-evaluation episodes or env, records `id: null` with its fingerprint,
-so two runs compare only when both fields match. A performance-gated
+`{"id", "fingerprint", "device"}`: the fingerprint of the run's in-loop
+selection protocol, the one `--protocol inloop` rebuilds from
+`config.json`, on the device the in-loop evaluation runs the policy on
+(the model's: SB3's `"auto"` is CUDA on a GPU runtime), and the id of
+the registered protocol of the run's recipe with that fingerprint. A
+stock PaddleTennis run on CPU records `paddle-npoint@v3`; one whose
+`[eval_env]` table restores the escrows records `paddle-npoint@v2`. A
+run that evaluates on CUDA (a Colab GPU SAC run) is no registered
+protocol's, since each pins CPU: it records `id: null` with its CUDA
+fingerprint, `"nearest": "paddle-npoint@v3"` and `"differs":
+["device"]`, and its comparable number is a CPU re-score under
+`nearest`. A quick test, or a run file that changes the evaluation
+episodes or env, records `id: null` too, naming the nearest registered
+protocol and the fields that differ (`["env_kwargs", "n_episodes"]`),
+so two runs compare only when both id and fingerprint match. A run
+recorded before the device was rebuilds its in-loop protocol on its
+`resolved_model.device`, so `inloop` for an August Colab run is a CUDA
+protocol, refused on CPU before anything is scored. A performance-gated
 run records both as `null`, with `"reason": "performance_gate"`.
 `eval_protocol` is `null` for a run without an info-dict evaluator and
 for runs recorded before 2026-10-17. A run file's `[env]` contact,
@@ -274,12 +315,18 @@ August runs' `checkpoints/paddle_tennis_sac_<N>_steps.zip` with
 `paddle_tennis_sac_vecnormalize_<N>_steps.pkl` included), loaded through
 the algorithm the run recorded. Before anything is scored, the best and
 snapshot pairs are checked against the sha256s that bind them (the best
-model against its run record's verdict too), every model's zip against
-the run's recorded algorithm family, and an unindexed snapshot file is
-named; checkpoints are hashed and recorded, since nothing binds them
-(SB3's `CheckpointCallback` writes them in place, so a checkpoint torn
-by an interrupt seals and fails only when it is loaded). One problem
-anywhere refuses the whole rescore before anything is scored. Rows go to `<run_dir>/scores/<protocol>.jsonl`
+model against its run record's verdict too), every model's zip is
+opened whole (every member's CRC) and checked against the run's
+recorded algorithm family, an unindexed snapshot file is named, and an
+in-loop protocol on another device than the scoring one is refused;
+checkpoints are hashed and recorded, since nothing binds them
+(`train()` writes them atomically now; one torn by an interrupt before
+it did, or truncated by a sync, is named as unreadable). One problem
+anywhere refuses the whole rescore before anything is scored. A
+snapshot the run failed to save (listed in the index's `failures`) is
+a gap in the series, not a problem: the CLI prints it as a `note`
+before the `select()` pick, and the notebook beside its verdict
+(`harness.snapshot_gaps`). Rows go to `<run_dir>/scores/<protocol>.jsonl`
 (`courtside-score/1`: artifact, step, sha256s, protocol fingerprint,
 seed block, `metrics` and `confirm_metrics`), or one combined file under
 `--out`. `--steps` scores only the snapshots and checkpoints at those
@@ -309,8 +356,8 @@ scores each run's best model and every checkpoint under
 beside `training_runs/`, never inside it: the run directories stay
 exactly what `train()` left, and the index of `training_runs/` never
 meets a score file. Each run is scored whole or refused with its
-reasons (a placeholder or unbound file, a missing normalizer) while the
-others go on; its file is written when the run is done, and re-running
+reasons (a placeholder, torn or unbound file, a missing normalizer, an
+unreadable snapshot index or `config.json`) while the others go on; its file is written when the run is done, and re-running
 skips a run already scored for the same files (every model's and
 normalizer's sha256). It then prints the per-checkpoint k≥2 headline
 and k=1 (each point's first confirmed return:

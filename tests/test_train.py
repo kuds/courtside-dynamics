@@ -2743,6 +2743,9 @@ def test_run_summary_labels_final_counters_as_last_episode(tmp_path):
     def env_fn():
         raise RuntimeError("no env needed; probe degrades gracefully")
 
+    # A reward-selected best from before the reward path wrote a meta:
+    # the series' best is the one best_model.zip holds.
+    (tmp_path / "best_model.zip").write_bytes(b"policy")
     write_run_summary(
         TrainConfig(env_fn=env_fn, log_dir=str(tmp_path)),
         str(tmp_path),
@@ -4773,6 +4776,82 @@ def _write_eval_artifacts(log_dir, rows) -> None:
             writer.writerow([step, "n_updates", float(updates)])
 
 
+def _write_reward_best(log_dir, step: int) -> None:
+    """A reward-path best save at ``step``: a placeholder best_model.zip
+    and the meta binding it, as ``_SaveBestOnNewBest`` writes them."""
+    from courtside_dynamics.experiments.records import sha256_file
+    from courtside_dynamics.training.artifacts import artifact_path
+
+    model_path = artifact_path(str(log_dir), "best_model")
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+    with open(model_path, "wb") as stream:
+        stream.write(f"policy at {step}".encode())
+    meta = {
+        "selected_by": "reward",
+        "timestep": step,
+        "selection_keys": ["mean_reward"],
+        "selection_values": {"mean_reward": 0.0},
+        "artifacts": {"best_model.zip": {"sha256": sha256_file(model_path)}},
+    }
+    with open(artifact_path(str(log_dir), "best_model_meta"), "w") as stream:
+        json.dump(meta, stream)
+
+
+def test_run_summary_reads_the_reward_best_from_its_meta(tmp_path):
+    """Phase-4 verifier r2 (major): SB3 appends an evaluation to
+    evaluations.npz before the new-best save runs, so after an interrupt
+    inside that save the summary named the series' argmax for a
+    best_model.zip holding an earlier save, with a deploy hint. The best
+    reported is the one the reward path's bound meta names; with no
+    completed save, nothing suggests deploying a file that is not
+    there."""
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=8),
+        log_dir=str(tmp_path),
+        total_timesteps=1_000,
+    )
+
+    def summary() -> str:
+        write_run_summary(
+            cfg,
+            str(tmp_path),
+            final_mean_reward=112.0,
+            final_std_reward=0.0,
+            duration_seconds=1.0,
+            status="interrupted",
+            actual_timesteps=1_000,
+        )
+        return (tmp_path / "stage_summary.txt").read_text()
+
+    _write_eval_artifacts(tmp_path, [(500, 500.0, 0), (1_000, 1_000.0, 0)])
+    # No save completed: the series' best is reported, no file holds it.
+    text = summary()
+    assert "Best eval:      1000.000 +/- 0.000 (at 1,000 steps)" in text
+    assert "no best_model.zip holds that evaluation" in text
+    assert "deploy best_model.zip" not in text
+    assert "Best Checkpoint Evaluation" not in text
+    # The first save committed, the second was interrupted.
+    _write_reward_best(tmp_path, 500)
+    text = summary()
+    assert (
+        "Best eval:      500.000 +/- 0.000 (at 500 steps)  [periodic eval "
+        "series]  <-- the series peaked at 1,000 steps (1000.000), whose "
+        "best-model save did not complete: best_model.zip holds this one\n"
+    ) in text
+    assert "Final vs best:  -388.000  <-- policy regressed after best; deploy" in text
+    assert "Best Checkpoint Evaluation (step 500)" in text
+    assert "Reward:         500.000 +/- 0.000" in text
+    assert "step 1,000" not in text
+    # Both saves committed: the series' best is the one on disk.
+    _write_reward_best(tmp_path, 1_000)
+    text = summary()
+    assert "(at 1,000 steps)  [periodic eval series]\n" in text
+    assert "peaked" not in text
+    assert "Best Checkpoint Evaluation (step 1,000)" in text
+
+
 def test_run_summary_flags_a_best_model_selected_before_any_update(
     tmp_path, capsys
 ):
@@ -4809,6 +4888,7 @@ def test_run_summary_flags_a_best_model_selected_before_any_update(
     _write_eval_artifacts(
         tmp_path, [(4_096, 438.0, 0), (8_192, 312.3, 10), (12_288, 183.7, 20)]
     )
+    _write_reward_best(tmp_path, 4_096)
     text = summary()
     assert (
         "Best eval:      438.000 +/- 0.000 (at 4,096 steps, SB3 n_updates 0)"
@@ -4828,6 +4908,7 @@ def test_run_summary_flags_a_best_model_selected_before_any_update(
     _write_eval_artifacts(
         tmp_path, [(4_096, 312.3, 0), (8_192, 438.0, 10), (12_288, 183.7, 20)]
     )
+    _write_reward_best(tmp_path, 8_192)
     text = summary()
     assert "(at 8,192 steps, SB3 n_updates 10)  [periodic eval series]\n" in text
     assert "WARNING: selected before" not in text
@@ -4836,6 +4917,7 @@ def test_run_summary_flags_a_best_model_selected_before_any_update(
 
     # The SAC family (n_updates None) reads as before.
     _write_eval_artifacts(tmp_path, [(4_096, 438.0, 0), (8_192, 312.3, 10)])
+    _write_reward_best(tmp_path, 4_096)
     text = summary(n_updates=None)
     assert "(at 4,096 steps)  [periodic eval series]\n" in text
     assert "WARNING" not in text
@@ -5047,7 +5129,14 @@ def test_config_json_records_algorithm_and_comparability_key(
     fingerprint = from_train_config(cfg, id="x").fingerprint
     assert payload["comparability_key"] == {
         "task": "BallBalanceEnv",
-        "eval_protocol": {"id": None, "fingerprint": fingerprint},
+        "eval_protocol": {
+            "id": None,
+            "fingerprint": fingerprint,
+            "device": "cpu",
+            # No recipe, so no registered protocol to be near.
+            "nearest": None,
+            "differs": None,
+        },
         "algo_family": family,
     }
     # The recorded fingerprint is the one a rescore of the run rebuilds.
@@ -5099,7 +5188,17 @@ def test_config_json_records_the_in_loop_evaluation_protocol(
     recorded = json.loads((tmp_path / "config.json").read_text())
     protocol = recorded["comparability_key"]["eval_protocol"]
     fingerprint = protocol_for_run(tmp_path).fingerprint
-    assert protocol == {"id": expected, "fingerprint": fingerprint}
+    if expected is None:
+        # Another episode length: @v3 is nearest, its env kwargs differ.
+        assert protocol == {
+            "id": None,
+            "fingerprint": fingerprint,
+            "device": "cpu",
+            "nearest": "paddle-npoint@v3",
+            "differs": ["env_kwargs"],
+        }
+    else:
+        assert protocol == {"id": expected, "fingerprint": fingerprint, "device": "cpu"}
     if expected is not None:
         assert get_protocol(expected).fingerprint == fingerprint
     # A run without an info-dict evaluator has no in-loop protocol.

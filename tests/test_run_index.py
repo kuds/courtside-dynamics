@@ -551,6 +551,8 @@ def test_an_unbound_selection_in_a_run_record_is_a_row_problem(tmp_path):
     write_sync_manifest(run)
     (row,) = build_index(tmp_path, legacy_levers={}).rows
     assert row["index"]["verification"]["complete"] is True
+    # Faithful, but not clean: verify's CLI fails it by default.
+    assert row["index"]["verification"]["clean"] is False
     (problem,) = row["index"]["problems"]
     assert problem.startswith(
         "the run record marks the best model unbound (best_model_meta.json "
@@ -691,6 +693,7 @@ def test_a_run_record_is_taken_as_written_with_its_manifest_verdict(tmp_path):
     assert row["index"]["verification"] == {
         "manifest": "verified",
         "complete": True,
+        "clean": True,
         "files_checked": len(records.run_files(run_dir)),
         "problems": [],
         "unlisted": [],
@@ -710,6 +713,7 @@ def test_a_run_record_is_taken_as_written_with_its_manifest_verdict(tmp_path):
     skipped = build_index(tmp_path, verify=False).rows[0]["index"]["verification"]
     assert skipped["manifest"] == "not_checked"
     assert skipped["complete"] is None
+    assert skipped["clean"] is None
 
 
 @pytest.mark.parametrize("verify", [True, False])

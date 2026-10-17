@@ -1739,6 +1739,31 @@ def test_rescore_notebook_scores_august_layout_runs_outside_their_folders(
     capsys.readouterr()
     plt.close("all")
 
+    # Phase-4 verifier r2: an unreadable snapshot index (QUICK reads the
+    # series' steps before scoring) refuses that run, not the cell, so
+    # the run after it is still scored.
+    index_path = runs / "20261017_101500" / "snapshots" / "index.json"
+    index_bytes = index_path.read_bytes()
+    index_path.write_text("{not json")
+    quick_snapshots = _exec_rescore_notebook(
+        {},
+        settings=(
+            ("RUN_IDS = None", f'RUN_IDS = ["20261017_101500", "{registered}"]'),
+            ('SERIES = "checkpoints"', 'SERIES = "snapshots"'),
+            ("QUICK = False", "QUICK = True"),
+        ),
+    )
+    assert list(quick_snapshots["REFUSED"]) == ["20261017_101500"]
+    assert "snapshots/index.json is unreadable" in (
+        quick_snapshots["REFUSED"]["20261017_101500"]
+    )
+    # The August-layout run has no snapshots: its best model alone.
+    assert list(quick_snapshots["SCORED"]) == [registered]
+    assert quick_snapshots["VERDICTS"][registered]["gaps"] == []
+    index_path.write_bytes(index_bytes)
+    assert _tree_digest(runs) == before
+    capsys.readouterr()
+
     # Refusals before any scoring: an unknown protocol, a missing run.
     with pytest.raises(ValueError, match="bump REPO_REF"):
         _exec_rescore_notebook(

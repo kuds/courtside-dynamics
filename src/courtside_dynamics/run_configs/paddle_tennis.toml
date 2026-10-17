@@ -9,7 +9,10 @@
 # escrowed contact and reach shapings at 0.25 each; the serve is the
 # P3-measured band (origin 3.25 m, 9 m/s, 21° — 100% legal). These
 # [env] values live in the recipe, not here: see recipes.py's
-# PaddleTennis env_kwargs. Selection and success follow the policy's
+# PaddleTennis env_kwargs. Evaluation runs without the escrows: the
+# recipe's eval env sets contact, reach and hold shaping to 0
+# (paddle-npoint@v3, docs/experiments.md), so evaluation reward is task
+# reward. Selection and success follow the policy's
 # own k>=2 conversions (docs/repo_review_20261005.md §7.2):
 # episode_rally_returns_a counts side-A confirmed returns that were not
 # side A's first of their point, over the whole episode; success is

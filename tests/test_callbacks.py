@@ -13,6 +13,7 @@ their bounce/hit-count diagnostics "for free". These tests verify:
 from __future__ import annotations
 
 import csv
+import json
 import os
 
 import numpy as np
@@ -540,17 +541,33 @@ def test_video_callback_preserves_selective_normalizer_contract(
 
 
 class TestSaveBestOnNewBest:
-    """The reward path's new-best save: the model and its paired stats.
+    """The reward path's new-best save: the model, its paired stats, a meta.
 
     The stats snapshot is what makes ``best_model.zip`` replayable:
     without it, ``vec_normalize.pkl`` is only written at end of training,
     so its running stats reflect the final train_env state — not the
     moment best_model was saved. ``record_best_model_video`` would then
-    feed best_model obs normalized by mismatched stats. Both files are
-    written under temporary names and renamed together, so an interrupt
-    inside a write never leaves a torn file (verifier r2: a real SIGINT
-    left a 16 kB ``best_model.zip`` the run directory then sealed).
+    feed best_model obs normalized by mismatched stats. Every file is
+    written under a temporary name and the set renamed together, the
+    meta last, so an interrupt inside a write never leaves a torn file
+    (verifier r2: a real SIGINT left a 16 kB ``best_model.zip`` the run
+    directory then sealed). The meta binds the pair and records the
+    save's step (phase-4 verifier r2: after an interrupted save, the
+    summary named the evaluations.npz argmax, a step no file held).
     """
+
+    @staticmethod
+    def _callback(model_path, normalizer_path, meta_path, **kwargs):
+        from types import SimpleNamespace
+
+        from courtside_dynamics.training.train import _SaveBestOnNewBest
+
+        cb = _SaveBestOnNewBest(
+            str(model_path), str(normalizer_path), meta_path=str(meta_path), **kwargs
+        )
+        # EvalCallback sets itself as the parent, best_mean_reward updated.
+        cb.parent = SimpleNamespace(best_mean_reward=2.5)  # type: ignore[assignment]
+        return cb
 
     @staticmethod
     def _build_vec_normalize():
@@ -569,7 +586,6 @@ class TestSaveBestOnNewBest:
         )
 
         from courtside_dynamics.envs import BallBalanceEnv
-        from courtside_dynamics.training.train import _SaveBestOnNewBest
 
         vec_norm = self._build_vec_normalize()
         # Step a few times so obs_rms has a non-default running mean —
@@ -583,15 +599,34 @@ class TestSaveBestOnNewBest:
 
         model_path = tmp_path / "model" / "best_model.zip"
         save_path = tmp_path / "model" / "best_vec_normalize.pkl"
-        cb = _SaveBestOnNewBest(str(model_path), str(save_path))
+        meta_path = tmp_path / "model" / "best_model_meta.json"
+        cb = self._callback(model_path, save_path, meta_path)
         cb.init_callback(model)  # type: ignore[arg-type]
         assert cb._on_step() is True
         assert model_path.read_bytes() == b"fake-model"
         assert save_path.exists()
         assert sorted(path.name for path in model_path.parent.iterdir()) == [
             "best_model.zip",
+            "best_model_meta.json",
             "best_vec_normalize.pkl",
         ]
+        from courtside_dynamics.experiments.records import (
+            best_model_meta_unbound,
+            sha256_file,
+        )
+
+        meta = json.loads(meta_path.read_text())
+        assert meta == {
+            "selected_by": "reward",
+            "timestep": 0,
+            "selection_keys": ["mean_reward"],
+            "selection_values": {"mean_reward": 2.5},
+            "artifacts": {
+                "best_model.zip": {"sha256": sha256_file(model_path)},
+                "best_vec_normalize.pkl": {"sha256": sha256_file(save_path)},
+            },
+        }
+        assert best_model_meta_unbound(meta, model_path.parent) is None
 
         # Loading should reconstruct an equivalent VecNormalize. obs_rms
         # mean must match the one we just trained, not the default zeros.
@@ -610,22 +645,33 @@ class TestSaveBestOnNewBest:
         model.get_vec_normalize_env = lambda: None  # type: ignore[attr-defined]
 
         save_path = tmp_path / "best_vec_normalize.pkl"
-        cb = _SaveBestOnNewBest(str(tmp_path / "best_model.zip"), str(save_path))
+        meta_path = tmp_path / "best_model_meta.json"
+        cb = self._callback(tmp_path / "best_model.zip", save_path, meta_path)
         cb.init_callback(model)  # type: ignore[arg-type]
         assert cb._on_step() is True
         assert not save_path.exists()
         assert sorted(path.name for path in tmp_path.iterdir()) == [
+            "best_model.zip",
+            "best_model_meta.json",
+        ]
+        assert list(json.loads(meta_path.read_text())["artifacts"]) == [
             "best_model.zip"
         ]
+        # Outside an EvalCallback there is no reward to record: refused.
+        orphan = _SaveBestOnNewBest(
+            str(tmp_path / "best_model.zip"), None, meta_path=str(meta_path)
+        )
+        orphan.init_callback(model)  # type: ignore[arg-type]
+        with pytest.raises(RuntimeError, match="callback_on_new_best"):
+            orphan._on_step()
 
-    @pytest.mark.parametrize("torn", ["model", "normalizer"])
+    @pytest.mark.parametrize("torn", ["model", "normalizer", "meta"])
     def test_an_interrupted_write_leaves_the_previous_pair_whole(
-        self, tmp_path, torn
+        self, tmp_path, torn, monkeypatch
     ):
-        """A KeyboardInterrupt inside either write (half the bytes
-        written) leaves the previous best pair untouched and no
+        """A KeyboardInterrupt inside any write (half the bytes
+        written) leaves the previous best triple untouched and no
         temporary file behind."""
-        from courtside_dynamics.training.train import _SaveBestOnNewBest
 
         class TearingModel(_FakeSavableModel):
             tear = False
@@ -652,16 +698,31 @@ class TestSaveBestOnNewBest:
         model.get_vec_normalize_env = lambda: normalizer  # type: ignore[attr-defined]
         model_path = tmp_path / "best_model.zip"
         save_path = tmp_path / "best_vec_normalize.pkl"
-        cb = _SaveBestOnNewBest(str(model_path), str(save_path))
+        meta_path = tmp_path / "best_model_meta.json"
+        cb = self._callback(model_path, save_path, meta_path)
         cb.init_callback(model)  # type: ignore[arg-type]
         assert cb._on_step() is True
+        first_meta = meta_path.read_bytes()
         model.tear = normalizer.tear = True
+        if torn == "meta":
+            real_dump = json.dump
+
+            def dump(payload, stream, *args, **kwargs):
+                stream.write('{"selected_by": ')
+                raise KeyboardInterrupt
+
+            monkeypatch.setattr(json, "dump", dump)
+            model.tear = normalizer.tear = False
         with pytest.raises(KeyboardInterrupt):
             cb._on_step()
+        if torn == "meta":
+            monkeypatch.setattr(json, "dump", real_dump)
         assert model_path.read_bytes() == b"fake-model"
         assert save_path.read_bytes() == b"normalizer-1"
+        assert meta_path.read_bytes() == first_meta
         assert sorted(path.name for path in tmp_path.iterdir()) == [
             "best_model.zip",
+            "best_model_meta.json",
             "best_vec_normalize.pkl",
         ]
 

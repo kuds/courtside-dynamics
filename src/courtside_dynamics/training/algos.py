@@ -494,6 +494,37 @@ def _check_checkpoint_policy_family(
     )
 
 
+def checkpoint_zip_problem(
+    path: str | os.PathLike[str], *, label: str | None = None
+) -> str | None:
+    """Why ``path`` is not a whole SB3 model zip, or ``None``.
+
+    Opens the archive, checks every member's CRC (``testzip``) and
+    that it holds the ``data`` entry SB3's ``load`` reads first: a
+    checkpoint torn by an interrupt (SB3 wrote them in place before
+    ``train()`` staged them) or truncated by a sync fails here, named,
+    instead of raising SB3's "wasn't a zip-file" mid-rescore. ``label``
+    names the file in the message (default: ``path``).
+    """
+    name = label or os.fspath(path)
+    zip_path = _checkpoint_zip_path(path)
+    if zip_path is None:
+        return f"{name} is missing"
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            corrupt = archive.testzip()
+            if corrupt is not None:
+                return f"{name} is a damaged zip ({corrupt} fails its CRC check)"
+            if "data" not in archive.namelist():
+                return f"{name} holds no SB3 'data' entry, so it is no SB3 model"
+    except (OSError, zipfile.BadZipFile, EOFError) as error:
+        return (
+            f"{name} is not a readable zip ({type(error).__name__}: {error}): "
+            f"torn or truncated"
+        )
+    return None
+
+
 def checkpoint_family_mismatch(
     path: str | os.PathLike[str], algo: str, *, label: str | None = None
 ) -> str | None:

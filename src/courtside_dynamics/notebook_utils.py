@@ -307,19 +307,31 @@ def _read_monitor_logs(monitor_dir: str) -> tuple[np.ndarray, np.ndarray]:
 def _best_checkpoint_marker(log_dir: str, eval_data) -> tuple[int | None, str]:
     """Timestep and legend label of the checkpoint ``best_model.zip`` holds.
 
-    Under headline selection ``InfoDictEvalCallback`` saves
-    ``best_model.zip`` by the task metric and records the save's
-    timestep in ``best_model_meta.json``; the argmax of the mean eval
-    reward is then a different checkpoint, and marking it would point
-    at a model nobody saved. Only runs without the meta file
-    (reward-selected recipes, where SB3's ``EvalCallback`` saved the
-    reward argmax) fall back to that argmax. A meta file without a
-    usable timestep gets no marker rather than the wrong one.
+    Both selection paths record the save's timestep in
+    ``best_model_meta.json``. Under headline selection the argmax of the
+    mean eval reward is a different checkpoint, and marking it would
+    point at a model nobody saved; under reward selection it is a step
+    no file holds after an interrupt inside the new-best save (SB3
+    appends the evaluation before the save runs). Only runs without the
+    meta file (reward-selected runs from before the reward path wrote
+    one) fall back to that argmax. A meta file without a usable
+    timestep, or one that does not bind the files beside it (a save
+    split between its renames), gets no marker rather than the wrong
+    one.
     """
+    from courtside_dynamics.experiments.records import best_model_meta_unbound
     from courtside_dynamics.training.artifacts import _read_best_model_meta
 
-    if locate_artifact(log_dir, "best_model_meta") is not None:
+    meta_path = locate_artifact(log_dir, "best_model_meta")
+    if meta_path is not None:
         meta = _read_best_model_meta(log_dir) or {}
+        unbound = best_model_meta_unbound(meta, os.path.dirname(meta_path))
+        if unbound is not None:
+            print(
+                f"[notebook_utils] {unbound}; the eval panels omit the "
+                f"best-checkpoint marker"
+            )
+            return None, ""
         timestep = meta.get("timestep")
         if (
             isinstance(timestep, bool)
@@ -358,9 +370,10 @@ def plot_learning_curve(
     (mean +/- std) from ``metrics/evaluations.npz`` (written by SB3's
     ``EvalCallback``). Both are resolved through ``locate_artifact`` so
     legacy flat-layout runs plot identically. The eval panels mark the
-    checkpoint ``best_model.zip`` actually holds: the timestep
-    ``best_model_meta.json`` records under headline selection, else the
-    reward argmax (see :func:`_best_checkpoint_marker`).
+    checkpoint ``best_model.zip`` actually holds: the timestep its bound
+    ``best_model_meta.json`` records (either selection path), else, for
+    a reward-selected run from before that meta, the reward argmax (see
+    :func:`_best_checkpoint_marker`).
     """
     import matplotlib.pyplot as plt
 
@@ -400,9 +413,10 @@ def plot_learning_curve(
     eval_npz = locate_artifact(log_dir, "evaluations")
     eval_data = np.load(eval_npz) if eval_npz is not None else None
 
-    # Best-checkpoint step (the save best_model.zip holds: the headline
-    # selection's timestep from best_model_meta.json, else EvalCallback's
-    # reward argmax). Marked on the eval panels so a post-best collapse
+    # Best-checkpoint step (the save best_model.zip holds: the timestep
+    # its bound best_model_meta.json records, else, for a pre-meta
+    # reward-selected run, EvalCallback's reward argmax). Marked on the
+    # eval panels so a post-best collapse
     # -- curve falling away right of the marker -- is visible at a glance.
     best_step, best_label = _best_checkpoint_marker(log_dir, eval_data)
 
@@ -475,9 +489,9 @@ _ARTIFACT_HINTS: dict[str, str] = {
     RUN_LAYOUT["progress_csv"]: "written by the CSV logger train() wires up; appears after SB3's first metric dump",
     RUN_LAYOUT["evaluations"]: "written by the reward eval stream; check eval_freq <= total_timesteps",
     RUN_LAYOUT["eval_info_csv"]: "written by InfoDictEvalCallback each eval; requires info_dict_eval=True",
-    RUN_LAYOUT["best_model"]: "saved on the first completed evaluation -- by InfoDictEvalCallback (with best_model_meta.json) when the recipe selects by a headline metric, else by the reward EvalCallback",
+    RUN_LAYOUT["best_model"]: "saved on the first completed evaluation, with best_model_meta.json -- by InfoDictEvalCallback when the recipe selects by a headline metric, else by the reward EvalCallback's new-best save",
     RUN_LAYOUT["best_vec_normalize"]: "needs VecNormalize enabled plus at least one new-best eval",
-    RUN_LAYOUT["best_model_meta"]: "written only under headline (task-metric) selection, beside best_model.zip; absent is expected for reward-selected recipes",
+    RUN_LAYOUT["best_model_meta"]: "written beside best_model.zip with every best save (reward-selected runs' carry \"selected_by\": \"reward\"); absent is expected only for reward-selected runs from before the reward path wrote one",
     RUN_LAYOUT["checkpoints_dir"]: "requires checkpoint_freq > 0 and a run long enough to reach the first checkpoint",
     RUN_LAYOUT["videos_dir"]: "requires record_video=True, video_freq > 0, and moviepy installed",
     RUN_LAYOUT["final_model"]: "written when learn() finishes, is interrupted, or raises (salvaged before the error re-raises); absent means the process died hard",
@@ -1507,8 +1521,8 @@ def _verify_pair_against_meta(
     where the verification reads ``"verified_by_best_model_meta_sha256"``
     (both digests match), ``"same_run_directory_legacy_metadata"`` (a
     meta written before the digests were bound), or
-    ``"unverified_no_best_model_meta"`` (``best_meta`` is ``None``:
-    reward-selected runs write no meta).
+    ``"unverified_no_best_model_meta"`` (``best_meta`` is ``None``: a
+    reward-selected run from before the reward path wrote a meta).
     """
     model_sha256 = _sha256(model_path)
     normalizer_sha256 = _sha256(normalizer_path)
@@ -1552,7 +1566,8 @@ def verify_best_checkpoint_pair(run_dir: str | Path) -> dict[str, Any]:
     source digests only against pins the plan names. A run whose
     ``run_record.json`` marks its selection ``unbound`` raises
     ``ValueError`` too: ``train()`` found the best-model files are not
-    one save, which no meta can show for a reward-selected pair.
+    one save, which no meta can show for a first save split before its
+    meta's rename.
 
     Returns ``{"model_path", "normalizer_path", "model_sha256",
     "normalizer_sha256", "pair_verification", "best_model_meta"}``.

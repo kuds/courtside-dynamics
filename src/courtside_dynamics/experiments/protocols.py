@@ -77,9 +77,15 @@ block is a fresh block with no in-loop counterpart.
 
 **What a run records.** ``config.json``'s ``comparability_key`` and the
 run record's ``task`` carry ``eval_protocol`` (:func:`eval_protocol_record`):
-the in-loop selection protocol's fingerprint and, when it is a
-registered protocol of the run's recipe, its id (both ``None``, with
-the reason, for a performance-gated run).
+the in-loop selection protocol's fingerprint, the device the in-loop
+evaluation ran the policy on and, when the protocol is a registered
+protocol of the run's recipe, its id (both ``None``, with the reason,
+for a performance-gated run). A protocol pins its device, so a run that
+evaluated on CUDA never claims a CPU protocol's id: its record names
+the registered protocol it is otherwise nearest to and which fields
+differ (``{"id": None, "nearest": "paddle-npoint@v3", "differs":
+["device"], ...}``), and a CPU re-score under that protocol is the
+comparable number.
 
 Building a protocol imports MuJoCo (the env classes), never
 Stable-Baselines3 or torch; :func:`from_train_config` and the derived
@@ -528,6 +534,19 @@ class GatedEvaluationError(ValueError):
     """A performance-gated run's in-loop evaluation, which no protocol is."""
 
 
+def device_type(device: Any) -> str:
+    """A torch device's type as a protocol pins it: ``"cuda:0"`` -> ``"cuda"``.
+
+    A protocol pins where the policy runs (float32 kernels differ by
+    device), not which card of a kind; ``str`` of a ``torch.device``
+    is accepted as well.
+    """
+    name = str(device).strip().lower()
+    if not name:
+        raise ValueError(f"device must be a non-empty string: {device!r}")
+    return name.split(":", 1)[0]
+
+
 def _refuse_gated(settings: Mapping[str, Any]) -> None:
     """Raise :class:`GatedEvaluationError` when ``settings`` set a gate."""
     if settings.get("performance_gate"):
@@ -552,6 +571,7 @@ def _inloop_protocol(
     settings: Mapping[str, Any],
     paired: bool,
     description: str,
+    device: str = "cpu",
 ) -> EvalProtocol:
     """The protocol of the info-dict evaluator ``train()`` wires for ``settings``.
 
@@ -561,7 +581,8 @@ def _inloop_protocol(
     evaluator rolls ``n_eval_episodes`` and selects
     (``train._selection_metric_keys``, the per-key deltas, the
     confirmation block); otherwise it reports on a quarter of them and
-    selects nothing.
+    selects nothing. ``device`` is where the evaluator ran the policy:
+    the model's device (:func:`device_type`).
     """
     if not settings.get("info_dict_eval", True):
         raise ValueError(
@@ -617,6 +638,7 @@ def _inloop_protocol(
         selection_keys=keys,
         min_deltas=deltas,
         confirm=bool(headline_key) and bool(settings.get("confirm_best_eval", False)),
+        device=device_type(device),
         description=description,
     )
 
@@ -649,6 +671,7 @@ def from_train_config(
     description: str = "",
     env_cls: type | None = None,
     env_kwargs: Mapping[str, Any] | None = None,
+    device: str = "cpu",
 ) -> EvalProtocol:
     """The in-loop selection protocol ``train(cfg)`` would evaluate under.
 
@@ -657,9 +680,12 @@ def from_train_config(
     ``config.json`` records them; a caller that already built one
     (``write_run_config``) passes its ``env_cls`` and ``env_kwargs``
     instead. Pairing follows ``train.resolve_eval_seed``. The seed
-    block stays the run's own. Raises :class:`GatedEvaluationError` (a
-    ``ValueError``) for a config with a performance gate (see the module
-    docstring), before any env is built.
+    block stays the run's own. ``device`` is where the evaluation runs
+    the policy (``train.inloop_eval_device(cfg)`` for the run itself;
+    the registry derives its CPU protocols with the default). Raises
+    :class:`GatedEvaluationError` (a ``ValueError``) for a config with a
+    performance gate (see the module docstring), before any env is
+    built.
     """
     from courtside_dynamics.training.train import resolve_eval_seed
 
@@ -687,6 +713,7 @@ def from_train_config(
         settings={name: getattr(cfg, name) for name in _INLOOP_FIELDS},
         paired=resolve_eval_seed(cfg) is not None,
         description=description,
+        device=device,
     )
 
 
@@ -728,9 +755,12 @@ def from_run_config(
     recorded ``train_config`` and ``evaluation_env`` blocks (the env's
     class by name, its recorded constructor kwargs with JSON arrays
     read as tuples). Pairing is the recorded ``evaluation_seeding``,
-    else ``train.resolve_eval_seed``'s rule on the recorded fields. A
-    field an older ``config.json`` lacks takes ``TrainConfig``'s
-    default. Raises ``ValueError`` for a record it cannot rebuild, and
+    else ``train.resolve_eval_seed``'s rule on the recorded fields. The
+    device is the one the run's in-loop evaluation ran on
+    (:func:`recorded_eval_device`): a run that evaluated on CUDA
+    rebuilds a CUDA protocol, which a CPU score is not. A field an
+    older ``config.json`` lacks takes ``TrainConfig``'s default. Raises
+    ``ValueError`` for a record it cannot rebuild, and
     :class:`GatedEvaluationError` for a performance-gated run.
     """
     train_config = config.get("train_config")
@@ -768,7 +798,28 @@ def from_run_config(
         settings=settings,
         paired=paired,
         description=description,
+        device=recorded_eval_device(config),
     )
+
+
+def recorded_eval_device(config: Mapping[str, Any]) -> str:
+    """The device a run's in-loop evaluation ran the policy on.
+
+    ``comparability_key.eval_protocol.device`` (recorded since the
+    protocol device was), else the model's device
+    (``resolved_model.device``: every run since resolved-model records,
+    the August Colab runs included), else ``"cpu"`` for a record that
+    says neither.
+    """
+    key = config.get("comparability_key")
+    recorded = key.get("eval_protocol") if isinstance(key, Mapping) else None
+    device = recorded.get("device") if isinstance(recorded, Mapping) else None
+    if not isinstance(device, str) or not device.strip():
+        resolved = config.get("resolved_model")
+        device = resolved.get("device") if isinstance(resolved, Mapping) else None
+    if not isinstance(device, str) or not device.strip():
+        return "cpu"
+    return device_type(device)
 
 
 def protocol_for_run(run_dir: str | os.PathLike[str]) -> EvalProtocol:
@@ -1095,29 +1146,45 @@ def _registered_for_recipe(recipe: str | None) -> list[str]:
     return ids
 
 
+def differing_fields(protocol: EvalProtocol, other: EvalProtocol) -> list[str]:
+    """The fingerprinted fields on which ``protocol`` and ``other`` differ, sorted."""
+    mine, theirs = protocol.canonical(), other.canonical()
+    return sorted(name for name in mine if mine[name] != theirs.get(name))
+
+
 def eval_protocol_record(
     cfg: Any,
     *,
     env_cls: type | None = None,
     env_kwargs: Mapping[str, Any] | None = None,
+    device: str | None = None,
 ) -> dict[str, Any] | None:
     """``config.json``'s ``eval_protocol``: what ``train(cfg)`` selects under.
 
-    ``{"id": ..., "fingerprint": ...}``. The fingerprint is the in-loop
-    selection protocol's (:func:`from_train_config`, which takes
-    ``env_cls`` and ``env_kwargs`` the same way). The id is the
-    registered protocol of the run's recipe with that fingerprint:
-    ``paddle-npoint@v3`` for a stock PaddleTennis run,
-    ``paddle-npoint@v2`` for one whose ``[eval_env]`` table restores
-    the escrows. It is ``None`` when no registered protocol is this
-    evaluation (a quick test, other episodes or env settings, an env
-    outside the recipes); the fingerprint still names it, so two runs
-    compare only when both fields match. A performance-gated run has no
-    in-loop protocol (its evaluation is staged): ``{"id": None,
-    "fingerprint": None, "reason": "performance_gate"}``, so no reader
-    takes it for a protocol's. The whole record is ``None`` for a run
-    without an info-dict evaluator, and, with a warning, for one whose
-    evaluation env records no constructor kwargs a fingerprint can read.
+    ``{"id": ..., "fingerprint": ..., "device": ...}``. The fingerprint
+    is the in-loop selection protocol's (:func:`from_train_config`,
+    which takes ``env_cls`` and ``env_kwargs`` the same way), on
+    ``device``: where the in-loop evaluation runs the policy, by default
+    the device ``train(cfg)`` builds the model on
+    (``train.inloop_eval_device``; SB3's ``"auto"`` is CUDA on a GPU
+    runtime). The id is the registered protocol of the run's recipe
+    with that fingerprint: ``paddle-npoint@v3`` for a stock PaddleTennis
+    run on CPU, ``paddle-npoint@v2`` for one whose ``[eval_env]`` table
+    restores the escrows. It is ``None`` when no registered protocol is
+    this evaluation (a run that evaluates on CUDA, while every
+    registered protocol pins CPU; a quick test, other episodes or env
+    settings; an env outside the recipes); the fingerprint still names
+    it, so two runs compare only when both fields match, and
+    ``nearest`` names the recipe's registered protocol with the fewest
+    differing fields, ``differs`` those fields (``["device"]`` for a
+    stock run on CUDA: re-score it under ``nearest`` on CPU for the
+    comparable number). Both are ``None`` when the recipe registers no
+    protocol. A performance-gated run has no in-loop protocol (its
+    evaluation is staged): ``{"id": None, "fingerprint": None,
+    "reason": "performance_gate"}``, so no reader takes it for a
+    protocol's. The whole record is ``None`` for a run without an
+    info-dict evaluator, and, with a warning, for one whose evaluation
+    env records no constructor kwargs a fingerprint can read.
     """
     import warnings
 
@@ -1125,16 +1192,21 @@ def eval_protocol_record(
         return None
     if cfg.performance_gate:
         return {"id": None, "fingerprint": None, "reason": "performance_gate"}
+    if device is None:
+        from courtside_dynamics.training.train import inloop_eval_device
+
+        device = inloop_eval_device(cfg)
     try:
-        fingerprint = from_train_config(
-            cfg, id="in-loop", env_cls=env_cls, env_kwargs=env_kwargs
-        ).fingerprint
+        protocol = from_train_config(
+            cfg, id="in-loop", env_cls=env_cls, env_kwargs=env_kwargs, device=device
+        )
     except (TypeError, ValueError) as error:
         warnings.warn(
             f"no evaluation protocol recorded for this run: {error}", stacklevel=2
         )
         return None
-    registered: str | None = None
+    fingerprint = protocol.fingerprint
+    candidates: list[EvalProtocol] = []
     for protocol_id in _registered_for_recipe(cfg.recipe_name):
         try:
             candidate = get_protocol(protocol_id)
@@ -1143,6 +1215,18 @@ def eval_protocol_record(
             warnings.warn(str(error), stacklevel=2)
             continue
         if candidate.fingerprint == fingerprint:
-            registered = protocol_id
-            break
-    return {"id": registered, "fingerprint": fingerprint}
+            return {"id": protocol_id, "fingerprint": fingerprint, "device": protocol.device}
+        candidates.append(candidate)
+    nearest: str | None = None
+    differs: list[str] | None = None
+    for candidate in candidates:
+        fields = differing_fields(protocol, candidate)
+        if differs is None or len(fields) < len(differs):
+            nearest, differs = candidate.id, fields
+    return {
+        "id": None,
+        "fingerprint": fingerprint,
+        "device": protocol.device,
+        "nearest": nearest,
+        "differs": differs,
+    }

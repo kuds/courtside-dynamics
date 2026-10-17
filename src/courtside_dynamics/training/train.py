@@ -122,17 +122,18 @@ from courtside_dynamics.training.demo_sac import DemoSAC
 
 
 class _SaveBestOnNewBest(BaseCallback):
-    """Save ``best_model.zip`` and its ``VecNormalize`` stats on a new best.
+    """Save ``best_model.zip``, its ``VecNormalize`` stats and a meta on a new best.
 
     Wired in via ``EvalCallback(best_model_save_path=None,
     callback_on_new_best=...)`` under reward selection, so it runs where
     SB3's own best-model save did, on the same model. SB3 wrote
     ``best_model.zip`` in place: a ``KeyboardInterrupt`` (a stopped Colab
     cell) inside that write left a torn zip that no loader could open
-    and that the run directory then sealed. Here both files are written
-    under temporary names and renamed into place together
-    (``experiments.records.ReplaceTogether``), so an interrupt inside a
-    write leaves the previous pair whole and nothing behind.
+    and that the run directory then sealed. Here every file is written
+    under a temporary name and the set is renamed into place together,
+    the meta last (``experiments.records.ReplaceTogether``), so an
+    interrupt inside a write leaves the previous save whole and nothing
+    behind.
 
     The paired stats snapshot: without it, ``vec_normalize.pkl`` is only
     written at the very end of training, so its running stats reflect
@@ -141,42 +142,152 @@ class _SaveBestOnNewBest(BaseCallback):
     obs-distribution mismatch. ``normalizer_path`` is ``None`` for a run
     without ``VecNormalize``; a model without one writes no stats either.
 
-    No meta binds the pair, so an interrupt between its two renames
-    would leave a new model beside the previous normalizer that nothing
-    on disk can tell from a healthy pair: ``ledger`` (the run's
-    ``records.BestSaveLedger``) keeps every save's digests, and the run
-    record seals such a pair as unbound.
+    ``best_model_meta.json`` (``meta_path``) binds the pair by sha256
+    and records the save's step, as the headline evaluator's meta does,
+    marked ``"selected_by": "reward"`` with SB3's ``mean_reward`` as its
+    one selection key (and, with ``record_n_updates``, an on-policy
+    run's SB3 update count). SB3 appends the evaluation to
+    ``evaluations.npz`` before it calls this callback, so after an
+    interrupt inside a save the series' best is a step no file holds:
+    the summary, the run record and the harness read the step
+    ``best_model.zip`` holds from this meta. ``ledger`` (the run's
+    ``records.BestSaveLedger``) keeps every save's digests, so the run
+    record also catches a set split between its renames that the meta
+    alone could not (a first save with no meta yet).
     """
 
     def __init__(
         self,
         model_path: str,
         normalizer_path: str | None,
+        *,
+        meta_path: str,
         ledger: run_records.BestSaveLedger | None = None,
+        record_n_updates: bool = False,
     ) -> None:
         super().__init__()
         self.model_path = model_path
         self.normalizer_path = normalizer_path
+        self.meta_path = meta_path
         self.ledger = ledger
+        self.record_n_updates = record_n_updates
 
     def _init_callback(self) -> None:
         # Where EvalCallback created its best_model_save_path.
         os.makedirs(os.path.dirname(self.model_path) or ".", exist_ok=True)
 
     def _on_step(self) -> bool:
+        # EvalCallback updates best_mean_reward before it calls back.
+        mean_reward = getattr(self.parent, "best_mean_reward", None)
+        if isinstance(mean_reward, bool) or not isinstance(mean_reward, (int, float)):
+            raise RuntimeError(
+                "_SaveBestOnNewBest runs as an EvalCallback's "
+                "callback_on_new_best, whose best_mean_reward its meta "
+                f"records; its parent holds {mean_reward!r}"
+            )
         get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
         vec_norm = get_vec_norm() if get_vec_norm is not None else None
         with run_records.ReplaceTogether(self.ledger) as staged:
             # SB3 appends ".zip" only to a path without a suffix; the
             # temporary's ".tmp-<pid>" keeps it as given.
-            self.model.save(staged.stage(self.model_path))
+            written = {os.path.basename(self.model_path): staged.stage(self.model_path)}
+            self.model.save(written[os.path.basename(self.model_path)])
             if vec_norm is not None and self.normalizer_path is not None:
                 os.makedirs(
                     os.path.dirname(self.normalizer_path) or ".", exist_ok=True
                 )
-                vec_norm.save(staged.stage(self.normalizer_path))
+                name = os.path.basename(self.normalizer_path)
+                written[name] = staged.stage(self.normalizer_path)
+                vec_norm.save(written[name])
+            n_updates = getattr(self.model, "_n_updates", None)
+            if self.record_n_updates and (
+                isinstance(n_updates, bool) or not isinstance(n_updates, int)
+            ):
+                raise TypeError(
+                    f"record_n_updates: the model's _n_updates is "
+                    f"{n_updates!r}, not an SB3 update count"
+                )
+            meta = {
+                "selected_by": run_records.REWARD_SELECTED,
+                "timestep": int(self.num_timesteps),
+                "selection_keys": [run_records.REWARD_SELECTION_KEY],
+                "selection_values": {
+                    run_records.REWARD_SELECTION_KEY: float(mean_reward)
+                },
+                **({"n_updates": n_updates} if self.record_n_updates else {}),
+                # Hashed from the temporaries: the bytes the renames publish.
+                "artifacts": {
+                    name: {"sha256": run_records.sha256_file(path)}
+                    for name, path in written.items()
+                },
+            }
+            with open(staged.stage(self.meta_path), "w") as stream:
+                json.dump(meta, stream, indent=2)
+                stream.write("\n")
             staged.commit()
         return True
+
+
+class _AtomicCheckpointCallback(CheckpointCallback):
+    """SB3's ``CheckpointCallback``, each checkpoint written atomically.
+
+    The same files at the same steps with the same contents
+    (``<prefix>_<N>_steps.zip``, ``<prefix>_vecnormalize_<N>_steps.pkl``
+    and, when asked, the replay buffer), but each is written under a
+    temporary name beside its target and renamed into place
+    (``experiments.records.ReplaceTogether``), the model last. SB3 wrote
+    them in place, so a ``KeyboardInterrupt`` (a stopped Colab cell)
+    inside a write left a torn checkpoint that the run then sealed and
+    that failed only when loaded. Now an interrupt inside a write leaves
+    no file of that checkpoint, and one between the renames leaves its
+    normalizer without a model, which no reader pairs with anything
+    (the harness enumerates checkpoints by their model files).
+    """
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.save_freq != 0:
+            return True
+        model_path = self._checkpoint_path(extension="zip")
+        saved: list[tuple[str, str]] = []
+        with run_records.ReplaceTogether() as staged:
+            # SB3's own save calls on the temporaries: each keeps the
+            # ".tmp-<pid>" suffix it is given (no ".zip"/".pkl" added).
+            if (
+                self.save_replay_buffer
+                and getattr(self.model, "replay_buffer", None) is not None
+            ):
+                buffer_path = self._checkpoint_path("replay_buffer_", extension="pkl")
+                self.model.save_replay_buffer(staged.stage(buffer_path))  # type: ignore[attr-defined]
+                saved.append(("model replay buffer checkpoint", buffer_path))
+            vec_normalize = (
+                self.model.get_vec_normalize_env() if self.save_vecnormalize else None
+            )
+            if vec_normalize is not None:
+                normalizer_path = self._checkpoint_path("vecnormalize_", extension="pkl")
+                vec_normalize.save(staged.stage(normalizer_path))
+                saved.append(("model VecNormalize", normalizer_path))
+            self.model.save(staged.stage(model_path))
+            saved.insert(0, ("model checkpoint", model_path))
+            staged.commit()
+        if self.verbose >= 2:
+            for label, path in saved:
+                print(f"Saving {label} to {path}")
+        return True
+
+
+def _save_final_model(model: BaseAlgorithm, log_dir: str) -> None:
+    """``model/final_model.zip``, written atomically.
+
+    Under a temporary name, then renamed into place
+    (``records.write_atomically``): ``model.save`` in place left a torn
+    zip when an interrupt landed inside it, which the run then sealed.
+    """
+    run_records.write_atomically(artifact_path(log_dir, "final_model"), model.save)
+
+
+def _save_final_normalizer(train_env: VecNormalize, log_dir: str) -> None:
+    """``model/vec_normalize.pkl``, written atomically (see :func:`_save_final_model`)."""
+    run_records.write_atomically(artifact_path(log_dir, "vec_normalize"), train_env.save)
 
 
 class _SnapshotOnEvaluation(BaseCallback):
@@ -477,8 +588,8 @@ class _RunLifecycle:
             progress=progress,
             snapshots=snapshot_summary(self.log_dir),
             # The files on disk against the saves this run committed:
-            # the only check of a reward-path pair (no meta binds it) and
-            # of a first save interrupted before its meta's rename.
+            # the only check of a first save interrupted before its
+            # meta's rename (no meta is on disk to bind it).
             best_unbound=self.best_ledger.unbound(),
         )
         selection = record["selection"]
@@ -1791,6 +1902,41 @@ def _device_request(cfg: TrainConfig) -> tuple[str, str]:
     return "auto", "sb3_default"
 
 
+def inloop_eval_device(cfg: TrainConfig) -> str:
+    """The device type ``train(cfg)`` builds the model on: ``"cpu"`` or ``"cuda"``.
+
+    The in-loop evaluators run the policy there, so it is the device of
+    the run's in-loop evaluation protocol (``config.json``'s
+    ``comparability_key.eval_protocol``, written before the model
+    exists). Resolved as SB3 resolves it (``get_device``: ``"auto"`` is
+    CUDA when torch sees a GPU, and a CUDA request without one falls
+    back to the CPU) from :func:`_device_request`; ``train()`` checks
+    the built model against it (:func:`_check_inloop_eval_device`).
+    """
+    from stable_baselines3.common.utils import get_device
+
+    device, _source = _device_request(cfg)
+    return get_device(device).type
+
+
+def _check_inloop_eval_device(model: BaseAlgorithm, recorded: str) -> None:
+    """The built model's device must be the one ``config.json`` recorded.
+
+    ``recorded`` is :func:`inloop_eval_device`'s answer, which
+    ``write_run_config`` fingerprinted the in-loop protocol on before
+    the model existed; a model elsewhere would leave the run claiming a
+    protocol it never evaluated under.
+    """
+    device = getattr(model, "device", None)
+    built = getattr(device, "type", None)
+    if built != recorded:
+        raise RuntimeError(
+            f"config.json records the in-loop evaluation protocol on "
+            f"{recorded!r}, but the model was built on {device}: the run "
+            f"would claim a protocol it never evaluated under"
+        )
+
+
 def _rollout_env_steps(cfg: TrainConfig) -> int | None:
     """An on-policy run's rollout, ``n_steps * n_envs``; ``None`` otherwise."""
     if not _is_on_policy(cfg):
@@ -2877,18 +3023,13 @@ def _salvage_crashed_run(
     verdict (``records.BestSaveLedger.unbound``), for the summary.
     """
     steps: list[tuple[str, Callable[[], object]]] = [
-        (
-            "final_model",
-            lambda: model.save(artifact_path(cfg.log_dir, "final_model")),
-        )
+        ("final_model", lambda: _save_final_model(model, cfg.log_dir))
     ]
     if isinstance(train_env, VecNormalize):
         steps.append(
             (
                 "vec_normalize",
-                lambda: train_env.save(
-                    artifact_path(cfg.log_dir, "vec_normalize")
-                ),
+                lambda: _save_final_normalizer(train_env, cfg.log_dir),
             )
         )
     if gate_callback is not None:
@@ -2987,10 +3128,7 @@ def _salvage_interrupted_run(
         print(f"Mean reward: {closing['mean']:.2f} +/- {closing['std']:.2f}")
 
     steps: list[tuple[str, Callable[[], object]]] = [
-        (
-            "final_model",
-            lambda: model.save(artifact_path(cfg.log_dir, "final_model")),
-        )
+        ("final_model", lambda: _save_final_model(model, cfg.log_dir))
     ]
     if _is_on_policy(cfg):
         steps.append(
@@ -3005,9 +3143,7 @@ def _salvage_interrupted_run(
         steps.append(
             (
                 "vec_normalize",
-                lambda: train_env.save(
-                    artifact_path(cfg.log_dir, "vec_normalize")
-                ),
+                lambda: _save_final_normalizer(train_env, cfg.log_dir),
             )
         )
     if gate_callback is not None:
@@ -3704,7 +3840,9 @@ def _train_in_log_dir(
                     if use_vec_normalize
                     else None
                 ),
+                meta_path=artifact_path(cfg.log_dir, "best_model_meta"),
                 ledger=run.best_ledger,
+                record_n_updates=_is_on_policy(cfg),
             )
 
         # PPO plan Step 6: an on-policy run's early stops wait until its
@@ -3793,7 +3931,7 @@ def _train_in_log_dir(
         gate_callback: PerformanceGatedEnvStagesCallback | None = None
         if cfg.checkpoint_freq > 0:
             callbacks.append(
-                CheckpointCallback(
+                _AtomicCheckpointCallback(
                     save_freq=_calls(cfg.checkpoint_freq),
                     save_path=artifact_path(cfg.log_dir, "checkpoints_dir"),
                     name_prefix=cfg.name_prefix,
@@ -4128,6 +4266,8 @@ def _train_in_log_dir(
         )
         run.model = model
         _check_model_device(model, cfg.require_device)
+        if cfg.info_dict_eval and not cfg.performance_gate:
+            _check_inloop_eval_device(model, inloop_eval_device(cfg))
         if normalizer_gamma is not None:
             # The normalizer was built before the model it serves; fail
             # rather than train on a horizon the model does not use.
@@ -4413,7 +4553,7 @@ def _train_in_log_dir(
                 return model
             if _is_on_policy(cfg):
                 _dump_final_update_logs(model)
-            model.save(artifact_path(cfg.log_dir, "final_model"))
+            _save_final_model(model, cfg.log_dir)
             if _is_on_policy(cfg):
                 # The training progress (SB3 n_updates, env steps trained
                 # against the budget) exists only now; the off-policy
@@ -4421,7 +4561,7 @@ def _train_in_log_dir(
                 update_run_config_with_model(model, cfg.log_dir, progress=True)
             if use_vec_normalize:
                 assert isinstance(train_env, VecNormalize)
-                train_env.save(artifact_path(cfg.log_dir, "vec_normalize"))
+                _save_final_normalizer(train_env, cfg.log_dir)
                 # EvalCallback last synced eval_env's running stats up to
                 # eval_freq steps ago; re-sync so the final eval normalizes
                 # observations with the end-of-training statistics.

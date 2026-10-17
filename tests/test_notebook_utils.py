@@ -436,7 +436,9 @@ def test_check_run_artifacts_explains_a_missing_selection_record(
     meta_line = next(
         line for line in out.splitlines() if line.startswith("best_model_meta:")
     )
-    assert "reward-selected recipes" in meta_line
+    # Both selection paths write it now; only older reward runs lack it.
+    assert "with every best save" in meta_line
+    assert "reward-selected runs from before" in meta_line
     best_line = next(
         line for line in out.splitlines() if line.startswith("best_model:")
     )
@@ -2117,13 +2119,17 @@ def test_score_paddle_stage_scores_a_real_ppo_checkpoint(tmp_path):
     )
     from courtside_dynamics.experiments.protocols import protocol_for_run
 
-    # A 40-step evaluation is no registered protocol: its fingerprint,
-    # the one a rescore of the leg rebuilds, names it.
+    # A 40-step evaluation of one episode is no registered protocol: its
+    # fingerprint, the one a rescore of the leg rebuilds, names it, beside
+    # the registered protocol it is nearest to.
     assert payload["comparability_key"] == {
         "task": "PaddleTennis",
         "eval_protocol": {
             "id": None,
             "fingerprint": protocol_for_run(tmp_path / "leg").fingerprint,
+            "device": "cpu",
+            "nearest": "paddle-npoint@v3",
+            "differs": ["env_kwargs", "n_episodes"],
         },
         "algo_family": "PPO",
     }
