@@ -65,12 +65,18 @@ def test_built_configs_do_not_alias_recipe_dicts(tmp_path):
     ``cfg.model_kwargs`` per leg, and a shallow copy leaked the edit
     into every later build of the same recipe."""
     first = build_train_config("PaddleTennis", log_dir=str(tmp_path / "a"))
-    assert first.model_kwargs is not RECIPES["PaddleTennis"].extra_cfg["model_kwargs"]
+    assert (
+        first.model_kwargs
+        is not RECIPES["PaddleTennis"].algo_cfg["SAC"]["model_kwargs"]
+    )
     first.model_kwargs["learning_rate"] = 1e-4
+    # Nor may an edit of a key the recipe's SAC block sets.
+    first.model_kwargs["train_freq"] = (1, "step")
     first.checkpoint_diagnosis["episodes"] = 1
 
     second = build_train_config("PaddleTennis", log_dir=str(tmp_path / "b"))
     assert "learning_rate" not in second.model_kwargs
+    assert second.model_kwargs["train_freq"] == (64, "step")
     assert second.checkpoint_diagnosis["episodes"] == 30
 
 
@@ -759,6 +765,12 @@ def test_curriculum_recipe_allows_explicit_sac_despite_ppo_default(tmp_path):
     )
     assert cfg.algo == "SAC"
     assert cfg.name_prefix.endswith("_sac")
+    # The PPO exploration bundle is PPO's block alone (PPO plan Step 2):
+    # an explicit SAC run keeps SB3's SAC defaults (auto entropy)
+    # instead of inheriting a fixed PPO ent_coef. The shared settings
+    # (no return normalization on the sparse reward) still apply.
+    assert cfg.model_kwargs == {}
+    assert cfg.normalize_reward is False
 
 
 def test_build_train_config_rejects_unknown_algo_before_env_work(tmp_path):
@@ -766,14 +778,217 @@ def test_build_train_config_rejects_unknown_algo_before_env_work(tmp_path):
         build_train_config("BallBalance", algo="PPPO", log_dir=str(tmp_path))
 
 
+def test_sac_bundle_stays_out_of_a_ppo_build(tmp_path):
+    # WallBallBootstrap's SAC bundle (learning_starts, buffer_size,
+    # target_entropy, auto ent_coef) used to be flat, so flipping the
+    # algo was refused; it is the recipe's SAC block now, and PPO gets
+    # only the family-neutral gamma.
+    cfg = build_train_config(
+        "WallBallBootstrap", algo="PPO", log_dir=str(tmp_path)
+    )
+    assert cfg.algo == "PPO"
+    assert cfg.model_kwargs["gamma"] == 0.995
+    assert not {"learning_starts", "buffer_size", "target_entropy"} & set(
+        cfg.model_kwargs
+    )
+    assert cfg.model_kwargs.get("ent_coef") != "auto_0.02"
+    # SAC and DemoSAC still resolve the whole bundle, gamma included.
+    for algo in ("SAC", "DemoSAC"):
+        sac = build_train_config(
+            "WallBallBootstrap", algo=algo, log_dir=str(tmp_path)
+        )
+        assert sac.model_kwargs == {
+            "gamma": 0.995,
+            "ent_coef": "auto_0.02",
+            "target_entropy": -1.5,
+            "learning_starts": 10_000,
+            "buffer_size": 500_000,
+        }
+
+
 def test_build_train_config_rejects_cross_algo_model_kwargs(tmp_path):
-    # WallBallBootstrap's recipe bundle carries SAC-only keys
-    # (learning_starts, buffer_size, target_entropy); flipping the algo
-    # must fail here, not inside train() after the env fleet is built.
+    # An explicit cross-algorithm key must fail here, not inside
+    # train() after the env fleet is built.
     with pytest.raises(ValueError, match="not accepted by PPO"):
         build_train_config(
-            "WallBallBootstrap", algo="PPO", log_dir=str(tmp_path)
+            "WallBallBootstrap",
+            algo="PPO",
+            log_dir=str(tmp_path),
+            model_kwargs={"buffer_size": 10_000},
         )
+
+
+@pytest.mark.parametrize("env_name", sorted(RECIPES))
+def test_every_recipe_builds_under_every_algorithm(env_name, tmp_path):
+    for algo in ("SAC", "DemoSAC", "PPO"):
+        cfg = build_train_config(
+            env_name, algo=algo, log_dir=str(tmp_path), seed=0
+        )
+        assert cfg.algo == algo
+
+
+def test_recipe_algo_blocks_are_keyed_by_family(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from courtside_dynamics.training.algos import FAMILIES
+
+    for name, recipe in RECIPES.items():
+        assert set(recipe.algo_cfg) <= FAMILIES, name
+    monkeypatch.setitem(
+        RECIPES,
+        "BallBalance",
+        replace(RECIPES["BallBalance"], algo_cfg={"DEMOSAC": {"n_envs": 2}}),
+    )
+    with pytest.raises(ValueError, match="DemoSAC runs read the SAC block"):
+        build_train_config("BallBalance", log_dir=str(tmp_path))
+
+
+def test_algo_block_merges_model_kwargs_one_level_and_replaces_the_rest(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+
+    base = RECIPES["BallBalance"]
+    monkeypatch.setitem(
+        RECIPES,
+        "BallBalance",
+        replace(
+            base,
+            extra_cfg={
+                **base.extra_cfg,
+                "model_kwargs": {"gamma": 0.98, "policy_kwargs": {"a": 1}},
+            },
+            algo_cfg={
+                "PPO": {
+                    "n_envs": 2,
+                    "model_kwargs": {"n_epochs": 3, "policy_kwargs": {"b": 2}},
+                },
+                "SAC": {"early_stop_patience": 7},
+            },
+        ),
+    )
+    ppo = build_train_config("BallBalance", algo="PPO", log_dir=str(tmp_path))
+    assert ppo.n_envs == 2
+    assert ppo.early_stop_patience == base.extra_cfg["early_stop_patience"]
+    # One level: the block's policy_kwargs replaces the flat one.
+    assert ppo.model_kwargs == {
+        "gamma": 0.98,
+        "n_epochs": 3,
+        "policy_kwargs": {"b": 2},
+    }
+    sac = build_train_config("BallBalance", algo="SAC", log_dir=str(tmp_path))
+    assert sac.n_envs == base.extra_cfg["n_envs"]
+    assert sac.early_stop_patience == 7
+    assert sac.model_kwargs == {"gamma": 0.98, "policy_kwargs": {"a": 1}}
+    # The registry is never mutated by a build.
+    assert RECIPES["BallBalance"].algo_cfg["PPO"]["model_kwargs"] == {
+        "n_epochs": 3,
+        "policy_kwargs": {"b": 2},
+    }
+
+
+class TestDivergentSharedKwargs:
+    """PPO plan Step 2: a flat key SAC and PPO read differently is
+    refused under the family the recipe does not default to."""
+
+    @staticmethod
+    def _toml(tmp_path, text):
+        path = tmp_path / "run.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_flat_file_key_is_refused_under_the_other_family(self, tmp_path):
+        path = self._toml(tmp_path, "[train.model_kwargs]\nbatch_size = 512\n")
+        with pytest.raises(ValueError) as error:
+            build_train_config(
+                "PaddleTennis",
+                algo="PPO",
+                log_dir=str(tmp_path),
+                seed=0,
+                config_file=path,
+            )
+        message = str(error.value)
+        assert "['batch_size']" in message
+        assert "[train.algo.sac]" in message and "[train.algo.ppo]" in message
+        assert "replaces the whole merged bundle" in message
+
+    def test_same_family_and_family_tables_pass(self, tmp_path):
+        path = self._toml(
+            tmp_path,
+            "[train.model_kwargs]\nbatch_size = 512\n"
+            "[train.algo.ppo.model_kwargs]\nbatch_size = 256\n",
+        )
+        # The recipe's default family (SAC) and DemoSAC, its family
+        # member, keep the flat key.
+        for algo in ("SAC", "DemoSAC"):
+            cfg = build_train_config(
+                "PaddleTennis",
+                algo=algo,
+                log_dir=str(tmp_path),
+                seed=0,
+                config_file=path,
+            )
+            assert cfg.model_kwargs["batch_size"] == 512
+        # A family table is never refused.
+        family_only = self._toml(
+            tmp_path, "[train.algo.ppo.model_kwargs]\nbatch_size = 256\n"
+        )
+        cfg = build_train_config(
+            "PaddleTennis",
+            algo="PPO",
+            log_dir=str(tmp_path),
+            seed=0,
+            config_file=family_only,
+        )
+        assert cfg.model_kwargs["batch_size"] == 256
+
+    def test_explicit_model_kwargs_are_exempt(self, tmp_path):
+        path = self._toml(tmp_path, "[train.model_kwargs]\nn_steps = 64\n")
+        cfg = build_train_config(
+            "PaddleTennis",
+            algo="PPO",
+            log_dir=str(tmp_path),
+            seed=0,
+            config_file=path,
+            model_kwargs={"n_steps": 128},
+        )
+        # The explicit argument replaced every lower layer.
+        assert cfg.model_kwargs == {"n_steps": 128}
+
+    def test_flat_recipe_key_is_refused_under_the_other_family(
+        self, tmp_path, monkeypatch
+    ):
+        from dataclasses import replace
+
+        base = RECIPES["HumanoidTennisStage0Intercept"]
+        monkeypatch.setitem(
+            RECIPES,
+            "HumanoidTennisStage0Intercept",
+            replace(
+                base,
+                extra_cfg={**base.extra_cfg, "model_kwargs": {"ent_coef": 0.01}},
+            ),
+        )
+        # The recipe defaults to PPO: its own family keeps the key.
+        build_train_config("HumanoidTennisStage0Intercept", log_dir=str(tmp_path))
+        with pytest.raises(ValueError, match=r"extra_cfg\['model_kwargs'\]"):
+            build_train_config(
+                "HumanoidTennisStage0Intercept",
+                algo="DemoSAC",
+                log_dir=str(tmp_path),
+            )
+
+    def test_the_set_is_shared_by_both_constructors(self):
+        import inspect
+
+        from stable_baselines3 import PPO, SAC
+
+        from courtside_dynamics.training.algos import DIVERGENT_SHARED_KWARGS
+
+        for cls in (SAC, PPO):
+            assert DIVERGENT_SHARED_KWARGS <= set(
+                inspect.signature(cls.__init__).parameters
+            )
 
 
 def test_build_train_config_rejects_string_ent_coef_for_ppo(tmp_path):
@@ -986,7 +1201,7 @@ def test_wall_ball_bootstrap_recipe_gates_nested_serve_distributions():
     assert recipe.env_kwargs["early_touch_penalty"] == 0.25
     assert recipe.env_kwargs["recovery_reset_probability"] == 0.0
     assert recipe.extra_cfg["final_info_eval"] is True
-    assert recipe.extra_cfg["model_kwargs"]["ent_coef"] == "auto_0.02"
+    assert recipe.algo_cfg["SAC"]["model_kwargs"]["ent_coef"] == "auto_0.02"
 
 
 @pytest.mark.parametrize(

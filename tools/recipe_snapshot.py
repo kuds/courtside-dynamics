@@ -2,10 +2,12 @@
 
 Part 1 of the SAC freeze (docs/design_ppo_first_class_20261016.md,
 Step 0). For every recipe in ``RECIPES`` x {its default algo, ``"SAC"``,
-``"DEMOSAC"``} x ``quick_test`` {False, True}, the ``TrainConfig`` that
-``build_train_config`` resolves is serialized canonically and compared
-with ``tests/golden/recipe_snapshot.json``. The PPO-default recipes (the
-humanoid curricula) therefore record their PPO resolution too. A
+``"DEMOSAC"``, ``"PPO"``} x ``quick_test`` {False, True}, the
+``TrainConfig`` that ``build_train_config`` resolves is serialized
+canonically and compared with ``tests/golden/recipe_snapshot.json``.
+The SAC-family entries freeze the SAC paths; the PPO entries (every
+recipe's, since per-family config blocks gave each recipe a PPO
+resolution) make each deliberate PPO change a reviewable diff. A
 combination ``build_train_config`` refuses is recorded as its refusal,
 so a recipe that stops building is a diff, never a silent skip.
 
@@ -72,7 +74,7 @@ SNAPSHOT_FORMAT = "courtside-recipe-snapshot/1"
 _DROPPED_FIELDS = frozenset({"log_dir"})
 
 #: The algorithms every recipe is resolved under, besides its default.
-_ALGOS = ("SAC", "DEMOSAC")
+_ALGOS = ("SAC", "DEMOSAC", "PPO")
 
 
 def _qualname(obj: Any) -> str:
@@ -274,11 +276,11 @@ def compare(recorded: Mapping[str, Any], live: Mapping[str, Any]) -> list[str]:
 #: Printed with every snapshot diff, by the tool and the test.
 DIFF_EXPLANATION = (
     "The resolved TrainConfig of a recipe changed. Every SAC training path "
-    "must stay bit-identical unless the change is declared: if it is "
-    "intended, name it in the CHANGELOG (and docs/DECISIONS.md for a "
-    "design decision) and re-record in the same commit with "
-    "`python tools/recipe_snapshot.py --write`. Never re-record to make "
-    "this check pass."
+    "must stay bit-identical, and a PPO path may change only where a step "
+    "declares it: if it is intended, name it in the CHANGELOG (and "
+    "docs/DECISIONS.md for a design decision) and re-record in the same "
+    "commit with `python tools/recipe_snapshot.py --write`. Never "
+    "re-record to make this check pass."
 )
 
 

@@ -718,6 +718,47 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### Recipes and run files configure each algorithm family separately — *implemented (unreleased, 2026-10-17)*
+PPO plan Step 2 (`design_ppo_first_class_20261016.md`, tests-gaps-1,
+static-1, empirical-9). A recipe carried one flat
+`extra_cfg["model_kwargs"]`, written for its default algorithm. PPO was
+therefore refused on PaddleTennis and WallBallBootstrap (their SAC
+bundles hold SAC-only keys), got SB3 defaults everywhere else, and an
+explicit SAC run of a humanoid stage inherited the PPO bundle's fixed
+`ent_coef`. SB3 2.9's SAC also accepts `n_steps`, so
+`validate_model_kwargs` cannot catch a shared key whose meaning differs
+between the two.
+- **Decision.** `Recipe.algo_cfg` maps a family (`algo_family`) to a
+  block of `TrainConfig` fields applied over `extra_cfg`, with
+  `model_kwargs` merged one level deep. Blocks are keyed by family,
+  not algorithm, so DemoSAC inherits SAC's calibration. `extra_cfg`
+  keeps only what both families share (WallBall's `gamma`, the
+  humanoid stages' `normalize_reward=False`). Run files get matching
+  `[train.algo.sac]` / `[train.algo.ppo]` tables, merged after `[train]`
+  for the run's family only, so one file can carry both profiles.
+- **Divergent shared keys are refused, not reinterpreted.**
+  `DIVERGENT_SHARED_KWARGS` lists the keys both constructors accept
+  with different meanings. A flat key from it (recipe or file) is
+  written for the recipe's default family, so under the other family
+  `build_train_config` refuses it and points to the family tables.
+  Warning instead would let a SAC `batch_size=512` silently become a
+  PPO minibatch. An explicit `model_kwargs=` argument is exempt: it
+  replaces every lower layer, flat keys included, and the hint says so.
+- **The one intended SAC-family change** is the humanoid Stage 0–2 ×
+  {SAC, DemoSAC} resolution: the gSDE + `ent_coef=0.01` bundle was
+  chosen and measured under PPO, and those recipes default to PPO. An
+  explicit SAC run now gets SB3's SAC defaults. It is off the campaign
+  path; every other SAC-family snapshot entry is byte-identical, and
+  the trainer digest matches.
+- **The snapshot records PPO too.** With every recipe now resolving
+  under PPO, `tools/recipe_snapshot.py` adds PPO to its matrix (96
+  resolutions), so each later PPO step's change is a reviewed diff
+  rather than an unrecorded one.
+- **Readers of the old location.** The campaign notebook and the
+  trainer digest's PaddleTennis job read the SAC bundle through
+  `build_train_config` rather than from `extra_cfg` or `algo_cfg`, so
+  they work against both the pinned `REPO_REF` and this package.
+
 ### Algorithm-dependent code tests families derived from the registry — *implemented (unreleased, 2026-10-17)*
 PPO plan Step 1 (`design_ppo_first_class_20261016.md`, static-7). The
 trainer and the notebooks decided algorithm-dependent behaviour with

@@ -107,6 +107,21 @@ def algo_family(name: str) -> str:
     return ALGO_FAMILIES[name.upper()]
 
 
+#: Constructor arguments SAC and PPO both accept but read differently,
+#: so ``validate_model_kwargs`` cannot catch one carried from one family
+#: to the other: ``n_steps`` (SAC 2.9's n-step returns vs PPO's rollout
+#: length), ``batch_size`` (a replay sample vs a rollout minibatch),
+#: ``ent_coef`` (SAC's ``"auto"`` temperature vs PPO's fixed loss
+#: weight), ``use_sde`` and ``sde_sample_freq`` (gSDE noise reset per
+#: off-policy ``train_freq`` collection vs per on-policy rollout). A
+#: flat recipe or run-file key from this set is refused under the
+#: family the recipe does not default to
+#: (``recipes._refuse_divergent_flat_kwargs``).
+DIVERGENT_SHARED_KWARGS = frozenset(
+    {"n_steps", "batch_size", "ent_coef", "use_sde", "sde_sample_freq"}
+)
+
+
 #: Constructor arguments the trainer supplies itself (``train._build_algo``
 #: passes ``policy`` and ``env`` positionally and ``tensorboard_log``
 #: explicitly), so a recipe/config value for them would collide at

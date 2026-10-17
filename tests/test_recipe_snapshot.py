@@ -2,7 +2,7 @@
 
 ``tests/golden/recipe_snapshot.json`` records the ``TrainConfig`` that
 ``build_train_config`` resolves for every recipe x {default algo, SAC,
-DEMOSAC} x quick_test, canonically serialized by
+DEMOSAC, PPO} x quick_test, canonically serialized by
 ``tools/recipe_snapshot.py`` (env kwargs recovered from the factories,
 callables by qualified name). A diff here means a recipe's training path
 changed: declare it and re-record with ``--write`` in the same commit,
@@ -41,14 +41,14 @@ def test_live_resolutions_match_the_recorded_snapshot(monkeypatch):
 def test_snapshot_spans_the_matrix():
     entries = recipe_snapshot.load_snapshot(recipe_snapshot.SNAPSHOT_PATH)["entries"]
     for name, recipe in RECIPES.items():
-        algos = {recipe.default_algo.upper(), "SAC", "DEMOSAC"}
+        algos = {recipe.default_algo.upper(), "SAC", "DEMOSAC", "PPO"}
         for algo in algos:
             for quick_test in (False, True):
                 assert f"{name}|{algo}|quick_test={quick_test}" in entries
-    # The PPO-default recipes record their PPO resolution.
+    # Every recipe records its PPO resolution, the PPO-default ones too.
     ppo_default = [n for n, r in RECIPES.items() if r.default_algo.upper() == "PPO"]
     assert ppo_default
-    for name in ppo_default:
+    for name in RECIPES:
         entry = entries[f"{name}|PPO|quick_test=False"]
         assert entry["train_config"]["algo"] == "PPO"
     # Paired evaluation survives only a seeded build, so it is recorded.

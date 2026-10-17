@@ -1141,7 +1141,10 @@ class TestRecipeExplorationPackage:
     def test_model_kwargs_pin(self):
         from courtside_dynamics.recipes import RECIPES
 
-        assert RECIPES["PaddleTennis"].extra_cfg["model_kwargs"] == {
+        # SAC's own block (Recipe.algo_cfg): the package is SAC
+        # exploration, so it reaches SAC and DemoSAC runs only.
+        assert "model_kwargs" not in RECIPES["PaddleTennis"].extra_cfg
+        assert RECIPES["PaddleTennis"].algo_cfg["SAC"]["model_kwargs"] == {
             "use_sde": True,
             "ent_coef": "auto_0.02",
             "target_entropy": -1.5,

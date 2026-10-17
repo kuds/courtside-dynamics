@@ -58,6 +58,13 @@ class Recipe:
     # videos, and post-training endurance audits. Curriculum recipes use this
     # to force canonical full-episode resets without changing training.
     eval_env_overrides: dict[str, Any] = field(default_factory=dict)
+    # Per-algorithm-family TrainConfig fields, keyed by family ("SAC" for
+    # SAC and DemoSAC, "PPO"; ``training.algos.algo_family``). The block
+    # of the run's family is applied over ``extra_cfg`` (its
+    # ``model_kwargs`` merge one level deep; everything else replaces),
+    # so a calibrated SAC exploration bundle never reaches a PPO run and
+    # vice versa. ``extra_cfg`` keeps what both families share.
+    algo_cfg: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _ball_bounce_info_row(
@@ -398,17 +405,7 @@ def _tennis_curriculum_extra_cfg(
         # rare success toward the clip_reward ceiling exactly when
         # learning begins (humanoid_env_review.md I-F5).
         "normalize_reward": False,
-        # Stock iid per-step Gaussian exploration at 100 Hz averages to a
-        # near-still arm (0 contacts in 264 random episodes, while a
-        # *constant* random action held all episode succeeds ~15% —
-        # humanoid_env_review.md C2 / DECISIONS.md). gSDE gives temporally
-        # correlated exploration; the small entropy floor guards against
-        # std collapse onto the repeatable "safe non-swing" −1 while the
-        # success reward is still unsampled.
-        "model_kwargs": {
-            "use_sde": True,
-            "ent_coef": 0.01,
-        },
+        # The exploration bundle is PPO's (_tennis_curriculum_algo_cfg).
         "eval_freq": 25_000,
         "checkpoint_freq": 100_000,
         "video_freq": 100_000,
@@ -457,6 +454,31 @@ def _tennis_curriculum_extra_cfg(
             1: "awaiting_return",
             2: "return_in_flight",
             3: "terminal",
+        },
+    }
+
+
+def _tennis_curriculum_algo_cfg() -> dict[str, dict[str, Any]]:
+    """Per-family blocks for Stages 0–2 (``Recipe.algo_cfg``).
+
+    The stages default to PPO, and this exploration bundle was chosen
+    and measured under PPO, so it is PPO's alone: an explicit SAC run
+    keeps SB3's SAC defaults (auto entropy) instead of inheriting a
+    fixed PPO ``ent_coef``.
+    """
+    return {
+        "PPO": {
+            # Stock iid per-step Gaussian exploration at 100 Hz averages
+            # to a near-still arm (0 contacts in 264 random episodes,
+            # while a *constant* random action held all episode succeeds
+            # ~15% — humanoid_env_review.md C2 / DECISIONS.md). gSDE gives
+            # temporally correlated exploration; the small entropy floor
+            # guards against std collapse onto the repeatable "safe
+            # non-swing" −1 while the success reward is still unsampled.
+            "model_kwargs": {
+                "use_sde": True,
+                "ent_coef": 0.01,
+            },
         },
     }
 
@@ -819,23 +841,30 @@ RECIPES: dict[str, Recipe] = {
                 ),
             },
             "final_info_eval": True,
-            # Exploration package the failed runs never tried: entropy
-            # auto-tuning from a safe floor (the historical collapse to
-            # 0.0005 was measured on the legacy 5-action env), real
-            # warm-up before gradient steps, and a buffer small enough
-            # to evict stale early data within a stage's lifetime.
-            "model_kwargs": {
-                "ent_coef": "auto_0.02",
-                "target_entropy": -1.5,
-                "learning_starts": 10_000,
-                "buffer_size": 500_000,
-                "gamma": 0.995,
-            },
+            # gamma is family-neutral; the rest of the bundle is SAC's
+            # (algo_cfg below).
+            "model_kwargs": {"gamma": 0.995},
             "phase_key": "rally_phase",
             "phase_labels": {
                 0: "await_bounce",
                 1: "await_paddle",
                 2: "await_wall",
+            },
+        },
+        algo_cfg={
+            "SAC": {
+                # Exploration package the failed runs never tried:
+                # entropy auto-tuning from a safe floor (the historical
+                # collapse to 0.0005 was measured on the legacy 5-action
+                # env), real warm-up before gradient steps, and a buffer
+                # small enough to evict stale early data within a
+                # stage's lifetime.
+                "model_kwargs": {
+                    "ent_coef": "auto_0.02",
+                    "target_entropy": -1.5,
+                    "learning_starts": 10_000,
+                    "buffer_size": 500_000,
+                },
             },
         },
         description=(
@@ -1203,34 +1232,7 @@ RECIPES: dict[str, Recipe] = {
             # this env steps the same physics at the same rates).
             "n_envs": 8,
             "early_stop_patience": 20,
-            # Exploration package, from the ground-era pilot diagnosis
-            # (docs/paddle_tennis_diagnosis_20260808.md; provenance
-            # and pre-registered pilot in
-            # docs/paddle_tennis_exploration_20260808.md). The raised
-            # target is the actual entropy floor: SB3's dual update
-            # anneals the multiplier low when entropy meets the
-            # target and raises it when entropy sags below -- the
-            # stock run's 5e-5 coefficient was the tuner resting at
-            # the too-low default target (-3.0), so the fix is the
-            # target, not the coefficient. auto_0.02/-1.5 is the
-            # WallBall bootstrap *design* (DECISIONS.md 0.11.0 --
-            # never trained; adopted as design precedent, and pinning
-            # a float instead is a measured poison per
-            # lessons_learned.md's ent_coef x episode_len budget).
-            # gSDE (humanoid C2, measured under PPO) needs train_freq
-            # here to work at all under SAC: the off-policy collector
-            # resets the gSDE noise matrix every rollout, and at the
-            # default train_freq=1 that is every single step -- iid
-            # noise in a gSDE costume. 64 vec-steps holds one matrix
-            # through a coherent approach (half the 126-step exchange
-            # cadence); gradient_steps=-1 (set by train()) keeps the
-            # 1:1 update-per-transition ratio.
-            "model_kwargs": {
-                "use_sde": True,
-                "ent_coef": "auto_0.02",
-                "target_entropy": -1.5,
-                "train_freq": (64, "step"),
-            },
+            # The exploration package is per family (algo_cfg below).
             "normalize_obs_excluded_indices": (_PADDLE_TENNIS_NORMALIZATION_EXCLUSIONS),
             "csv_header": _PADDLE_TENNIS_CSV_HEADER,
             "info_row_fn": _paddle_tennis_info_row,
@@ -1359,6 +1361,39 @@ RECIPES: dict[str, Recipe] = {
                 3: "terminal",
             },
         },
+        algo_cfg={
+            "SAC": {
+                # Exploration package, from the ground-era pilot
+                # diagnosis (docs/paddle_tennis_diagnosis_20260808.md;
+                # provenance and pre-registered pilot in
+                # docs/paddle_tennis_exploration_20260808.md). The raised
+                # target is the actual entropy floor: SB3's dual update
+                # anneals the multiplier low when entropy meets the
+                # target and raises it when entropy sags below -- the
+                # stock run's 5e-5 coefficient was the tuner resting at
+                # the too-low default target (-3.0), so the fix is the
+                # target, not the coefficient. auto_0.02/-1.5 is the
+                # WallBall bootstrap *design* (DECISIONS.md 0.11.0 --
+                # never trained; adopted as design precedent, and
+                # pinning a float instead is a measured poison per
+                # lessons_learned.md's ent_coef x episode_len budget).
+                # gSDE (humanoid C2, measured under PPO) needs
+                # train_freq here to work at all under SAC: the
+                # off-policy collector resets the gSDE noise matrix
+                # every rollout, and at the default train_freq=1 that is
+                # every single step -- iid noise in a gSDE costume. 64
+                # vec-steps holds one matrix through a coherent approach
+                # (half the 126-step exchange cadence);
+                # gradient_steps=-1 (set by train()) keeps the 1:1
+                # update-per-transition ratio.
+                "model_kwargs": {
+                    "use_sde": True,
+                    "ent_coef": "auto_0.02",
+                    "target_entropy": -1.5,
+                    "train_freq": (64, "step"),
+                },
+            },
+        },
         description=(
             "Two-sided paddle rally on the probe-frozen 13 m court "
             "under ground rules (pre-bounce returns fault; "
@@ -1386,6 +1421,7 @@ RECIPES: dict[str, Recipe] = {
         name_prefix="humanoid_tennis_stage0_intercept",
         # patience 8 of a 20-eval budget: earliest stop at eval 16.
         extra_cfg=_tennis_curriculum_extra_cfg(video_length=150, early_stop_patience=8),
+        algo_cfg=_tennis_curriculum_algo_cfg(),
         description=(
             "Experimental fixed-pelvis, two-shoulder physical intercept task. "
             "Success is the first legal racket contact; convergence is not "
@@ -1415,6 +1451,7 @@ RECIPES: dict[str, Recipe] = {
         extra_cfg=_tennis_curriculum_extra_cfg(
             video_length=300, early_stop_patience=12
         ),
+        algo_cfg=_tennis_curriculum_algo_cfg(),
         description=(
             "Experimental fixed-pelvis right-arm return into a generous "
             "physical target region; convergence is not claimed."
@@ -1436,6 +1473,7 @@ RECIPES: dict[str, Recipe] = {
         extra_cfg=_tennis_curriculum_extra_cfg(
             video_length=300, early_stop_patience=20
         ),
+        algo_cfg=_tennis_curriculum_algo_cfg(),
         description=(
             "Experimental fixed-pelvis target return with bounded seeded "
             "launch randomization; convergence is not claimed."
@@ -1840,6 +1878,82 @@ def _drop_unpairable_recipe_reset_options(
     )
 
 
+def _apply_algo_block(
+    cfg_kwargs: dict[str, Any], block: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Apply a recipe's per-family block (``Recipe.algo_cfg[family]``).
+
+    ``model_kwargs`` merges one level deep, so the block adds its
+    family's hyperparameters to the shared ones in ``extra_cfg``
+    (WallBall's ``gamma``); every other field replaces.
+    """
+    merged = dict(cfg_kwargs)
+    for key, value in block.items():
+        if key == "model_kwargs" and isinstance(merged.get(key), Mapping):
+            merged[key] = {**merged[key], **value}
+        else:
+            merged[key] = value
+    return merged
+
+
+def _refuse_divergent_flat_kwargs(
+    env_name: str,
+    recipe: Recipe,
+    family: str,
+    file_config: Any,
+    overrides: Mapping[str, Any],
+) -> None:
+    """Refuse a flat key whose meaning differs between the families.
+
+    SAC and PPO both accept ``DIVERGENT_SHARED_KWARGS`` but read them
+    differently (SB3 2.9's SAC even takes ``n_steps``), so
+    ``validate_model_kwargs`` cannot catch one carried across. A flat
+    ``model_kwargs`` key -- the recipe's ``extra_cfg`` or a run file's
+    ``[train.model_kwargs]`` -- was written for the recipe's default
+    family; under the other family it is refused rather than silently
+    reinterpreted. An explicit ``model_kwargs=`` argument is exempt: it
+    replaces every lower layer, flat keys included.
+    """
+    from courtside_dynamics.training.algos import (
+        DIVERGENT_SHARED_KWARGS,
+        algo_family,
+    )
+
+    default_family = algo_family(recipe.default_algo)
+    if family == default_family or "model_kwargs" in overrides:
+        return
+    layers: list[tuple[str, Mapping[str, Any]]] = [
+        (
+            f"recipe {env_name}'s extra_cfg['model_kwargs']",
+            recipe.extra_cfg.get("model_kwargs") or {},
+        )
+    ]
+    if file_config is not None:
+        layers.append(
+            (
+                f"{file_config.path} [train.model_kwargs]",
+                file_config.train.get("model_kwargs") or {},
+            )
+        )
+    for label, flat in layers:
+        divergent = sorted(DIVERGENT_SHARED_KWARGS & set(flat))
+        if divergent:
+            raise ValueError(
+                f"{env_name} under {family}: {label} sets {divergent}, keys "
+                f"both SAC and PPO accept but read differently. A flat key "
+                f"is written for the recipe's default family "
+                f"({default_family}), so it is refused rather than "
+                f"reinterpreted under {family}. Put it in "
+                f"[train.algo.{default_family.lower()}] (recipe: "
+                f"algo_cfg[{default_family!r}]) to keep it for "
+                f"{default_family} runs, and set the {family} value in "
+                f"[train.algo.{family.lower()}]. An explicit model_kwargs= "
+                f"argument skips this check, but it replaces the whole "
+                f"merged bundle (recipe, algo block and file), not just "
+                f"these keys."
+            )
+
+
 def build_train_config(
     env_name: str,
     *,
@@ -1857,9 +1971,15 @@ def build_train_config(
     env_name:
         Key into :data:`RECIPES` (e.g. ``"WallBall"``).
     algo:
-        ``"SAC"`` or ``"PPO"``. When omitted, uses the recipe's default;
-        the masked humanoid-tennis curricula default to PPO so SAC does not
-        auto-tune entropy against 51–56 inactive action dimensions.
+        ``"SAC"``, ``"DemoSAC"`` or ``"PPO"``. When omitted, uses the
+        recipe's default; the masked humanoid-tennis curricula default to
+        PPO so SAC does not auto-tune entropy against 51–56 inactive
+        action dimensions. The recipe's ``algo_cfg`` block for the run's
+        family (``training.algos.algo_family``: DemoSAC is SAC family)
+        applies over its ``extra_cfg``, ``model_kwargs`` merged one level
+        deep. A flat ``model_kwargs`` key from
+        ``algos.DIVERGENT_SHARED_KWARGS`` (recipe or file) is refused when
+        the run's family is not the recipe default's.
     log_dir:
         Directory for monitor logs, TensorBoard, checkpoints, videos.
     total_timesteps:
@@ -1872,7 +1992,8 @@ def build_train_config(
         capped at :data:`_QUICK_TEST_DIAGNOSIS_EPISODES` episodes too.
     config_file:
         Optional path to a TOML run-configuration file
-        (docs/run_config_file_spec.md). Its ``[train]`` table sits
+        (docs/run_config_file_spec.md). Its ``[train]`` table, then its
+        ``[train.algo.<family>]`` table for the run's family, sit
         between the recipe and the ``quick_test`` presets (mapping
         fields like ``model_kwargs`` deep-merge one level; everything
         else replaces); its ``[env]`` table reaches both the training
@@ -1891,6 +2012,8 @@ def build_train_config(
     """
     from courtside_dynamics.training import TrainConfig
     from courtside_dynamics.training.algos import (
+        FAMILIES,
+        algo_family,
         resolve_algo,
         validate_model_kwargs,
     )
@@ -1918,6 +2041,14 @@ def build_train_config(
     # (train() would otherwise only hit the registry after the eager
     # env probe below has built and torn down real environments).
     resolve_algo(resolved_algo)
+    family = algo_family(resolved_algo)
+    unknown_families = sorted(set(recipe.algo_cfg) - FAMILIES)
+    if unknown_families:
+        raise ValueError(
+            f"recipe {env_name}'s algo_cfg has unknown family key(s) "
+            f"{unknown_families}; families are {sorted(FAMILIES)} (DemoSAC "
+            f"runs read the SAC block)"
+        )
 
     file_config = None
     if config_file is not None:
@@ -1947,11 +2078,21 @@ def build_train_config(
     # cfg.model_kwargs would silently retune every later build of the
     # same recipe in that process.
     cfg_kwargs.update(deepcopy(recipe.extra_cfg))
+    # The run's own family block: a SAC exploration bundle never reaches
+    # a PPO run, nor a PPO profile a SAC one.
+    cfg_kwargs = _apply_algo_block(
+        cfg_kwargs, deepcopy(recipe.algo_cfg.get(family, {}))
+    )
 
     if file_config is not None:
         from courtside_dynamics.run_config import merge_train_overrides
 
+        # The flat [train] table, then the run family's
+        # [train.algo.<family>] table (the other family's is ignored).
         cfg_kwargs = merge_train_overrides(cfg_kwargs, file_config.train)
+        cfg_kwargs = merge_train_overrides(
+            cfg_kwargs, file_config.train_algo.get(family, {})
+        )
         cfg_kwargs["run_config_file"] = file_config
 
     if quick_test:
@@ -1977,6 +2118,9 @@ def build_train_config(
 
     _drop_unpairable_recipe_reset_options(
         env_name, cfg_kwargs, recipe, file_config, overrides
+    )
+    _refuse_divergent_flat_kwargs(
+        env_name, recipe, family, file_config, overrides
     )
 
     # Validate the merged model_kwargs (recipe extra_cfg, TOML deep-merge,

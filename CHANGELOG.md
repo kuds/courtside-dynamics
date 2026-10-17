@@ -18,6 +18,44 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **Per-algorithm config blocks (PPO plan Step 2, 2026-10-17).** No env
+  stream changes. SAC and DemoSAC training paths are unchanged except
+  an explicit SAC run of the humanoid stages (below); the trainer
+  digest against `f920d8f` matches on every job.
+  - `Recipe.algo_cfg[family]` holds `TrainConfig` fields for one
+    algorithm family (`"SAC"` covers DemoSAC). Merge order:
+    `extra_cfg`, then the run family's block (`model_kwargs` merged
+    one level deep), then the run file, `quick_test`, and explicit
+    arguments.
+  - The PaddleTennis and WallBallBootstrap SAC exploration bundles move
+    into `algo_cfg["SAC"]` (Bootstrap's family-neutral `gamma=0.995`
+    stays shared). Every recipe now builds under `algo="PPO"`; both
+    used to refuse it ("'target_entropy' is not accepted by PPO").
+  - The humanoid stages' `{use_sde: True, ent_coef: 0.01}` bundle
+    moves into `algo_cfg["PPO"]`. **Intended change:** an explicit
+    `algo="SAC"` or `"DemoSAC"` run of Stages 0–2 now gets SB3's SAC
+    defaults (auto entropy, no gSDE) instead of a fixed `ent_coef` of
+    0.01 with gSDE. The stages default to PPO, whose resolution is
+    unchanged, so no campaign path moves.
+  - Run files gain `[train.algo.sac]` and `[train.algo.ppo]` tables,
+    validated like `[train]` and merged after it only for runs of that
+    family (DemoSAC reads `sac`). An unknown family table is refused;
+    `RunFileConfig.train_algo` carries the tables. The WallBallBootstrap
+    starter's `ent_coef` moves to `[train.algo.sac.model_kwargs]`.
+  - `algos.DIVERGENT_SHARED_KWARGS` (`n_steps`, `batch_size`,
+    `ent_coef`, `use_sde`, `sde_sample_freq`), which SAC and PPO both
+    accept but read differently: a flat recipe or file `model_kwargs`
+    key from the set is refused when the run's family is not the
+    recipe default's. The hint names the family tables and says that
+    an explicit `model_kwargs=` (exempt) replaces the whole bundle.
+  - The recipe snapshot also records every recipe's PPO resolution
+    (96 entries, was 70). Re-recorded: the 12 humanoid Stage 0–2 ×
+    {SAC, DEMOSAC} entries, plus 26 new PPO entries. Every other entry
+    is byte-identical.
+  - The campaign notebook and the trainer digest's PaddleTennis job
+    read the recipe's SAC bundle through `build_train_config` instead
+    of `extra_cfg["model_kwargs"]`, so both work against the pinned
+    package and this one.
 - **Algorithm families (PPO plan Step 1, 2026-10-17).** No env stream
   or training path changes: the recipe snapshot is unchanged and the
   trainer digest against `f920d8f` matches on every job.

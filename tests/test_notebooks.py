@@ -516,7 +516,10 @@ def test_campaign_notebook_resumes_and_branches_via_helpers() -> None:
     # The warm-started legs merge learning_starts INTO the recipe's
     # calibrated SAC bundle -- a bare {"learning_starts": ...} override
     # would silently drop use_sde / auto-entropy / train_freq.
-    assert '**RECIPES[RECIPE].extra_cfg["model_kwargs"],' in source
+    assert "**recipe_model_kwargs," in source
+    # ...read through the builder, wherever the recipe keeps the bundle.
+    assert "recipe_model_kwargs = build_train_config(" in source
+    assert 'extra_cfg["model_kwargs"]' not in source
     assert '"learning_starts": WARM_START_LEARNING_STARTS,' in source
     # Interrupted legs cannot gate; the retry lands in a fresh attempt.
     assert "cannot be gated or branched" in source
@@ -616,8 +619,7 @@ def test_campaign_notebook_plumbs_algo_and_model_kwargs() -> None:
     # never replace it wholesale.
     assert "if model_kwargs:" in source
     assert (
-        '**overrides.get(\n                "model_kwargs", '
-        'RECIPES[RECIPE].extra_cfg["model_kwargs"]\n            ),\n'
+        '**overrides.get("model_kwargs", recipe_model_kwargs),\n'
         "            **model_kwargs,"
     ) in source
     assert 'expected["model_kwargs"] = dict(model_kwargs)' in source
@@ -733,7 +735,7 @@ def test_campaign_default_plan_is_unchanged_by_the_algo_knobs(tmp_path) -> None:
     )
     assert set(adopted) == _LATE_FINGERPRINT_KEYS
     assert ns["RESOLVED_ALGO"] == "SAC"
-    recipe_bundle = RECIPES["PaddleTennis"].extra_cfg["model_kwargs"]
+    recipe_bundle = RECIPES["PaddleTennis"].algo_cfg["SAC"]["model_kwargs"]
 
     scratch = ns["make_leg_config"](
         log_dir=tmp_path / "leg1",
@@ -788,7 +790,7 @@ def test_campaign_demosac_plan_builds_and_validates(tmp_path) -> None:
     assert ns["FINGERPRINT"]["algo"] == "DemoSAC"
     assert ns["FINGERPRINT"]["leg1_model_kwargs"] == _DEMO_LEG_KWARGS
     assert "leg2_model_kwargs" not in ns["FINGERPRINT"]
-    recipe_bundle = RECIPES["PaddleTennis"].extra_cfg["model_kwargs"]
+    recipe_bundle = RECIPES["PaddleTennis"].algo_cfg["SAC"]["model_kwargs"]
 
     cfg = ns["make_leg_config"](
         log_dir=tmp_path / "leg1",

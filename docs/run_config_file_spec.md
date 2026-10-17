@@ -1,6 +1,6 @@
 # Spec: TOML run-configuration files
 
-Status: implemented (v1.1). Decisions: `warm_start` deferred to v2; one
+Status: implemented (v1.2). Decisions: `warm_start` deferred to v2; one
 file per experiment. v1 required the config path to always be explicit
 (never auto-discovered); v1.1 (0.13.0) softens this to
 *assisted-explicit* for the notebook only: `CONFIG_FILE = "auto"` calls
@@ -9,6 +9,9 @@ recipe's packaged starter into the Drive `configs/` root on first use,
 reuses the user's edited copy afterwards, and prints the resolved path +
 sha256 every run. `build_train_config` itself still never discovers
 anything -- it only receives the path the notebook visibly resolved.
+v1.2 (PPO plan Step 2, 2026-10-17) adds per-algorithm-family tables,
+`[train.algo.sac]` and `[train.algo.ppo]` (see Format and Merge
+semantics).
 
 ## Motivation
 
@@ -45,8 +48,14 @@ n_envs = 8
 early_stop_patience = 20
 
 [train.model_kwargs]         # DEEP-MERGED onto the recipe's model_kwargs
+gamma = 0.995                # shared by both algorithm families
+
+[train.algo.sac.model_kwargs]  # SAC and DemoSAC runs only
 ent_coef = "auto_0.05"       # tweak one key; the recipe's learning_starts,
                              # buffer_size, gamma etc. survive untouched
+
+[train.algo.ppo]             # PPO runs only; any [train] field
+eval_freq = 32_768
 
 [env]                        # merged into the recipe's env_kwargs
 serve_vy_max = 1.1
@@ -84,6 +93,13 @@ serve_vy_max = 1.1
   are documented.
 - Nested tables under `[train]` (e.g. `performance_gate`) follow the merge
   rules below.
+- `[train.algo.<family>]` tables hold `[train]` fields for one algorithm
+  family (`training.algos.algo_family`): `sac` for SAC and DemoSAC, `ppo`
+  for PPO. Each is validated exactly like `[train]` (same rejected keys,
+  sentinels and nested-table checks). `algo` itself stays builder-owned:
+  a scalar `algo = "PPO"` is rejected as before, and an unknown family
+  table (`[train.algo.demosac]`, `[train.algo.td3]`) is rejected rather
+  than silently never matching.
 
 ## Precedence
 
@@ -94,6 +110,11 @@ recipe defaults  <  TOML file  <  quick_test presets  <  explicit
                                                          build_train_config
                                                          keyword arguments
 ```
+
+Within a layer, the family-specific part wins: the recipe's `extra_cfg`,
+then its `algo_cfg[<family>]` block; the file's `[train]` table, then
+its `[train.algo.<family>]` table for the run's family. The other
+family's table is ignored, so one file can carry both profiles.
 
 Rationale: `quick_test=True` is an explicit in-code declaration of "smoke
 test" and must shrink whatever the file asked for; explicit keyword
@@ -113,6 +134,16 @@ The layer-vs-layer footgun is *replacement*; the file layer fixes it:
 | `performance_gate` | Replace **wholesale** — stage ladders are ordered lists whose element-wise merging would be ambiguous; a file that touches the gate must state the whole gate |
 | `ladder_certification` | Replace **wholesale**, same reasoning (`oracle_probes` is stage-ordered). A file that replaces the gate with fewer stages should also restate matching probes — or set `ladder_certification = "none"`; a probe/stage count mismatch at startup records a skipped certification report rather than training uncertified silently |
 | `[env]` / `[eval_env]` tables | `[env]` merges into the kwargs of **both** the training and evaluation environments (a physics tweak must not silently split the two); the recipe's `eval_env_overrides` then re-assert the canonical evaluation setup, and `[eval_env]` wins last for evaluation |
+| `[train.algo.<family>]` | Merged after `[train]` with the same rules, for runs of that family only |
+
+A flat `model_kwargs` key that SAC and PPO both accept but read
+differently (`algos.DIVERGENT_SHARED_KWARGS`: `n_steps`, `batch_size`,
+`ent_coef`, `use_sde`, `sde_sample_freq`) is written for the recipe's
+default family. In the recipe's `extra_cfg` or the file's
+`[train.model_kwargs]`, such a key is **refused** when the run's family
+is not the recipe default's (`build_train_config`); put it in the
+family's table instead. An explicit `model_kwargs=` argument is exempt,
+since it replaces the whole merged bundle anyway.
 
 Explicit keyword arguments keep today's replace-wholesale semantics (no
 behavior change for existing code); the file is the recommended layer for
@@ -132,6 +163,8 @@ therefore fails loudly on everything:
   field names (`difflib.get_close_matches`).
 - A rejected field (`env_fn`, ...) → `ValueError` explaining why.
 - Unknown top-level table → `ValueError` (only `train`, `env`, `eval_env`).
+- Unknown family table under `[train.algo]`, or a non-table there →
+  `ValueError` naming the families (`sac`, `ppo`).
 - `[train.performance_gate]` is validated structurally at load: the four
   required keys (`metric_key`, `threshold`, `sustain_evals`, `stages`)
   must all be present with sane types; the optional keys
@@ -211,6 +244,7 @@ class RunFileConfig:
     env: dict[str, Any]
     eval_env: dict[str, Any]
     raw: dict[str, Any]
+    train_algo: dict[str, dict[str, Any]]  # family ("SAC"/"PPO") -> table
 
 def load_run_config(path: str | Path) -> RunFileConfig: ...
 ```

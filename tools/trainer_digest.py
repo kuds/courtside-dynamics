@@ -132,15 +132,20 @@ def _job_sac_paddle_tennis_quick(log_dir: str) -> Any:
     on 300-step episodes and a 20k replay buffer.
     """
     from courtside_dynamics.recipes import (
-        RECIPES,
         build_train_config,
         make_env_fn,
         make_eval_env_fn,
     )
 
     short = {"episode_len": 300}
+    # The recipe's resolved SAC bundle, read through the builder rather
+    # than from where the recipe keeps it (extra_cfg before the PPO
+    # plan's Step 2, algo_cfg["SAC"] after), so both sides train the
+    # kwargs their own recipe resolves.
     model_kwargs = {
-        **RECIPES["PaddleTennis"].extra_cfg["model_kwargs"],
+        **build_train_config(
+            "PaddleTennis", algo="SAC", log_dir=log_dir, seed=0
+        ).model_kwargs,
         "buffer_size": 20_000,
     }
     return build_train_config(

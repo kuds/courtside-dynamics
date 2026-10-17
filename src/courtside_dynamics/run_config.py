@@ -12,14 +12,21 @@ optional top-level tables:
   mapping have no element-wise merge, and a partial merge would keep
   deltas for keys the file may have dropped); everything else
   replaces.
+- ``[train.algo.sac]`` / ``[train.algo.ppo]``: the same fields for one
+  algorithm family only (``training.algos.algo_family``; DemoSAC runs
+  read ``sac``). The run family's table merges after the flat
+  ``[train]`` table, with the same rules; the other family's table is
+  ignored, so one file can carry both profiles.
 - ``[env]``: environment constructor kwargs, applied to the training
   AND evaluation environments (like the recipe's own ``env_kwargs``
   layer, so a physics tweak cannot silently split the two).
 - ``[eval_env]``: evaluation-only kwargs, applied after the recipe's
   ``eval_env_overrides`` re-assert the canonical evaluation setup.
 
-Precedence overall: recipe < file < ``quick_test`` presets < explicit
-``build_train_config`` keyword arguments.
+Precedence overall: recipe (``extra_cfg``, then its ``algo_cfg``
+block) < file (``[train]``, then ``[train.algo.<family>]``) <
+``quick_test`` presets < explicit ``build_train_config`` keyword
+arguments.
 
 TOML has no ``None``; the sentinel string ``"none"`` (any case) converts
 to ``None`` recursively throughout every table (including nested tables
@@ -46,7 +53,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import tomllib
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -72,7 +79,8 @@ _REJECTED_TRAIN_KEYS = {
     "explicitly, which would silently beat a file value; set SEED at "
     "the call site instead",
     "algo": "pass algo= to build_train_config; the recipe's name_prefix "
-    "derives from it before the file merges",
+    "derives from it before the file merges (per-family settings go in "
+    "[train.algo.sac] / [train.algo.ppo] tables)",
     "log_dir": "pass log_dir= to build_train_config; a file must not "
     "silently redirect run artifacts",
     "reuse_log_dir": "pass reuse_log_dir= alongside log_dir=; whether a "
@@ -102,6 +110,9 @@ class RunFileConfig:
     env: dict[str, Any]
     eval_env: dict[str, Any]
     raw: dict[str, Any]
+    #: The ``[train.algo.<family>]`` tables, parsed like ``train`` and
+    #: keyed by family name (``"SAC"``, ``"PPO"``).
+    train_algo: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _convert_none_sentinels(value: Any) -> Any:
@@ -515,13 +526,15 @@ def _optional_train_fields() -> frozenset[str]:
     return frozenset(optional)
 
 
-def _validate_train_table(table: dict[str, Any], path: str) -> None:
+def _validate_train_table(
+    table: dict[str, Any], path: str, context: str = "train"
+) -> None:
     valid = _train_field_names()
     settable = [name for name in valid if name not in _REJECTED_TRAIN_KEYS]
     for key in table:
         if key in _REJECTED_TRAIN_KEYS:
             raise ValueError(
-                f"{path}: [train] key '{key}' is not file-configurable "
+                f"{path}: [{context}] key '{key}' is not file-configurable "
                 f"({_REJECTED_TRAIN_KEYS[key]})"
             )
         if key not in valid:
@@ -532,9 +545,106 @@ def _validate_train_table(table: dict[str, Any], path: str) -> None:
                 else ""
             )
             raise ValueError(
-                f"{path}: unknown [train] key '{key}'{hint} (valid keys "
+                f"{path}: unknown [{context}] key '{key}'{hint} (valid keys "
                 f"are TrainConfig fields)"
             )
+
+
+def _split_algo_tables(
+    train: dict[str, Any], path: str
+) -> dict[str, dict[str, Any]]:
+    """Pop the ``[train.algo.<family>]`` tables out of ``[train]``.
+
+    ``algo`` itself stays builder-owned: a scalar ``algo = "PPO"`` is
+    left in place for :func:`_validate_train_table` to refuse. A table
+    may only hold family tables named by
+    ``training.algos.FAMILIES``, lowercase (``sac``, ``ppo``); an
+    unknown family would otherwise be a silent no-op that never matches
+    any run.
+    """
+    tables = train.get("algo")
+    if not isinstance(tables, dict):
+        return {}
+    del train["algo"]
+    from courtside_dynamics.training.algos import FAMILIES
+
+    names = sorted(family.lower() for family in FAMILIES)
+    parsed: dict[str, dict[str, Any]] = {}
+    for name, table in tables.items():
+        if name not in names:
+            suggestions = difflib.get_close_matches(name.lower(), names, n=1)
+            hint = f"; did you mean '{suggestions[0]}'?" if suggestions else ""
+            raise ValueError(
+                f"{path}: unknown algorithm family table "
+                f"[train.algo.{name}]{hint} (families: {names}; DemoSAC "
+                f"runs read [train.algo.sac])"
+            )
+        if not isinstance(table, dict):
+            raise ValueError(f"{path}: [train.algo.{name}] must be a table")
+        parsed[name.upper()] = dict(table)
+    return parsed
+
+
+def _parse_train_table(
+    train: dict[str, Any], resolved: Path, context: str
+) -> dict[str, Any]:
+    """Validate and convert one ``[train]``-shaped table.
+
+    ``context`` names the table in messages (``train``, or
+    ``train.algo.ppo`` for a family table); validators of nested tables
+    get the table in their location prefix.
+    """
+    where = str(resolved) if context == "train" else f"{resolved} [{context}]"
+    _validate_train_table(train, str(resolved), context)
+    # phase_labels is handled apart from the recursive passes: its
+    # values are display text, exempt from both the sentinel and the
+    # quoted-boolean rejection.
+    has_phase_labels = "phase_labels" in train
+    phase_labels = train.pop("phase_labels", None)
+    train = _convert_none_sentinels(train)
+    _reject_quoted_booleans(train, str(resolved), context)
+    optional_fields = _optional_train_fields()
+    for key, value in train.items():
+        if value is None and key not in optional_fields:
+            raise ValueError(
+                f'{resolved}: [{context}] {key} = "none" is not supported: '
+                f"TrainConfig.{key} is never None, so the smuggled None "
+                f"would only crash or silently misconfigure "
+                f"mid-train(); omit the key to keep the recipe's value"
+            )
+    for key in DEEP_MERGE_TRAIN_KEYS:
+        if key == "phase_labels" or key not in train:
+            continue
+        if not isinstance(train[key], dict):
+            raise ValueError(f"{resolved}: [{context}.{key}] must be a table")
+    thresholds = train.get("info_eval_survival_thresholds")
+    if isinstance(thresholds, dict):
+        for tkey, tval in thresholds.items():
+            if tval is None:
+                # A threshold value is a sequence of step counts; None
+                # cannot remove a recipe key under deep-merge and would
+                # only fail inside train().
+                raise ValueError(
+                    f"{resolved}: [{context}.info_eval_survival_thresholds] "
+                    f'{tkey} = "none" is not supported; thresholds are '
+                    f"step-count arrays"
+                )
+    if has_phase_labels:
+        if (
+            isinstance(phase_labels, str)
+            and phase_labels.lower() == "none"
+        ):
+            train["phase_labels"] = None
+        else:
+            train["phase_labels"] = _convert_phase_labels(phase_labels, where)
+    _validate_evaluation_fields(train, where)
+    gate = train.get("performance_gate")
+    if gate is not None:
+        _validate_performance_gate(gate, where)
+    ladder_cert = train.get("ladder_certification")
+    if ladder_cert is not None:
+        _validate_ladder_certification(ladder_cert, where)
+    return train
 
 
 def load_run_config(path: str | Path) -> RunFileConfig:
@@ -573,57 +683,14 @@ def load_run_config(path: str | Path) -> RunFileConfig:
             raise ValueError(f"{resolved}: [{name}] must be a table")
 
     train = dict(raw.get("train", {}))
-    _validate_train_table(train, str(resolved))
-    # phase_labels is handled apart from the recursive passes: its
-    # values are display text, exempt from both the sentinel and the
-    # quoted-boolean rejection.
-    has_phase_labels = "phase_labels" in train
-    phase_labels = train.pop("phase_labels", None)
-    train = _convert_none_sentinels(train)
-    _reject_quoted_booleans(train, str(resolved), "train")
-    optional_fields = _optional_train_fields()
-    for key, value in train.items():
-        if value is None and key not in optional_fields:
-            raise ValueError(
-                f'{resolved}: [train] {key} = "none" is not supported: '
-                f"TrainConfig.{key} is never None, so the smuggled None "
-                f"would only crash or silently misconfigure "
-                f"mid-train(); omit the key to keep the recipe's value"
-            )
-    for key in DEEP_MERGE_TRAIN_KEYS:
-        if key == "phase_labels" or key not in train:
-            continue
-        if not isinstance(train[key], dict):
-            raise ValueError(f"{resolved}: [train.{key}] must be a table")
-    thresholds = train.get("info_eval_survival_thresholds")
-    if isinstance(thresholds, dict):
-        for tkey, tval in thresholds.items():
-            if tval is None:
-                # A threshold value is a sequence of step counts; None
-                # cannot remove a recipe key under deep-merge and would
-                # only fail inside train().
-                raise ValueError(
-                    f"{resolved}: [train.info_eval_survival_thresholds] "
-                    f'{tkey} = "none" is not supported; thresholds are '
-                    f"step-count arrays"
-                )
-    if has_phase_labels:
-        if (
-            isinstance(phase_labels, str)
-            and phase_labels.lower() == "none"
-        ):
-            train["phase_labels"] = None
-        else:
-            train["phase_labels"] = _convert_phase_labels(
-                phase_labels, str(resolved)
-            )
-    _validate_evaluation_fields(train, str(resolved))
-    gate = train.get("performance_gate")
-    if gate is not None:
-        _validate_performance_gate(gate, str(resolved))
-    ladder_cert = train.get("ladder_certification")
-    if ladder_cert is not None:
-        _validate_ladder_certification(ladder_cert, str(resolved))
+    algo_tables = _split_algo_tables(train, str(resolved))
+    train = _parse_train_table(train, resolved, "train")
+    train_algo = {
+        family: _parse_train_table(
+            table, resolved, f"train.algo.{family.lower()}"
+        )
+        for family, table in algo_tables.items()
+    }
 
     env = _convert_none_sentinels(dict(raw.get("env", {})))
     _reject_quoted_booleans(env, str(resolved), "env")
@@ -638,6 +705,7 @@ def load_run_config(path: str | Path) -> RunFileConfig:
         env=env,
         eval_env=eval_env,
         raw=raw,
+        train_algo=train_algo,
     )
 
 
