@@ -55,6 +55,9 @@ from courtside_dynamics.callbacks._info import _scalar_info_keys
 #: ``n_eval_episodes`` so the two batches never share a feed.
 CONFIRMATION_SEED_OFFSET = 100_000
 
+#: The ``csv_path`` row ``record_n_updates`` adds to every evaluation.
+N_UPDATES_METRIC = "n_updates"
+
 
 def _sha256_file(path: str) -> str:
     digest = hashlib.sha256()
@@ -340,6 +343,16 @@ class InfoDictEvalCallback(BaseCallback):
         across evaluations. Options without a seed are refused -- they
         are only applied by the paired resets, so they would be a
         silent no-op.
+    record_n_updates:
+        When ``True`` (``train()`` sets it for on-policy runs, PPO plan
+        Step 6), every evaluation's ``csv_path`` rows include
+        ``n_updates``: the model's SB3 ``_n_updates`` when the
+        evaluation ran, the count ``progress.csv`` logs as
+        ``train/n_updates`` (optimization epochs: ``n_epochs`` per
+        rollout, fewer when ``target_kl`` ends a rollout's epochs
+        early). An evaluation at ``0`` scored the initial policy. The
+        row is written to the CSV only: it is not an evaluation
+        metric, so selection, the gate and TensorBoard never see it.
     """
 
     def __init__(
@@ -373,6 +386,7 @@ class InfoDictEvalCallback(BaseCallback):
         degenerate_flat_keys: Sequence[str] | None = None,
         eval_seed: int | None = None,
         eval_reset_options: Sequence[Mapping[str, Any]] | None = None,
+        record_n_updates: bool = False,
     ) -> None:
         super().__init__(verbose)
         # The rollout loop reads infos[0]/rewards[0] and counts episodes
@@ -443,6 +457,9 @@ class InfoDictEvalCallback(BaseCallback):
                         f"info_keys, so they would never be collected"
                     )
         self.csv_path = csv_path
+        if not isinstance(record_n_updates, bool):
+            raise TypeError("record_n_updates must be a bool")
+        self.record_n_updates = record_n_updates
         self.evaluations_npz_path = evaluations_npz_path
         # Rows for ``evaluations.npz``: SB3's EvalCallback schema, so
         # notebook_utils' learning plots and stage_summary's reward block
@@ -636,11 +653,33 @@ class InfoDictEvalCallback(BaseCallback):
                 logger.record("eval/mean_ep_length", metrics["episode_length"])
 
         if self.csv_path is not None:
-            self._append_csv(metrics, self.num_timesteps)
+            self._append_csv(self._csv_rows(metrics), self.num_timesteps)
         if self.evaluations_npz_path is not None:
             self._append_evaluations_npz(self.num_timesteps)
 
         return self._update_best_and_maybe_stop(metrics)
+
+    def _csv_rows(self, metrics: Mapping[str, float]) -> Mapping[str, float]:
+        """``metrics``, plus the ``n_updates`` row under ``record_n_updates``.
+
+        A collected metric of the same name would make the row
+        ambiguous, so it fails loudly at the first evaluation, like a
+        context-metric collision.
+        """
+        if not self.record_n_updates:
+            return metrics
+        if N_UPDATES_METRIC in metrics:
+            raise ValueError(
+                f"record_n_updates: an evaluation metric is already named "
+                f"'{N_UPDATES_METRIC}'"
+            )
+        n_updates = getattr(self.model, "_n_updates", None)
+        if isinstance(n_updates, bool) or not isinstance(n_updates, int):
+            raise TypeError(
+                f"record_n_updates: the model's _n_updates is "
+                f"{n_updates!r}, not an SB3 update count"
+            )
+        return {**metrics, N_UPDATES_METRIC: float(n_updates)}
 
     def _append_evaluations_npz(self, timestep: int) -> None:
         """Append this evaluation to ``evaluations.npz`` and rewrite it.

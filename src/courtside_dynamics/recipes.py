@@ -474,7 +474,9 @@ def _tennis_curriculum_extra_cfg(
 # - No early stop can fire before about 20 policy updates at the
 #   profile's worker count. An evaluation that ends rollout k runs
 #   before rollout k's update, so evaluation e sees e * (rollouts per
-#   evaluation) - 1 updates.
+#   evaluation) - 1 updates. Since PPO plan Step 6, train() also floors
+#   both stop warm-ups at TrainConfig.min_policy_updates_before_stop
+#   (20) updates at any worker count, on top of these sizes.
 
 
 def _ppo_ball_profile() -> dict[str, Any]:
@@ -2267,7 +2269,10 @@ def build_train_config(
         resolve_algo,
         validate_model_kwargs,
     )
-    from courtside_dynamics.training.train import _validate_on_policy_config
+    from courtside_dynamics.training.train import (
+        _validate_on_policy_config,
+        _validate_worker_and_stop_config,
+    )
 
     if env_name not in RECIPES:
         raise KeyError(f"Unknown env '{env_name}'. Choose one of {sorted(RECIPES)}.")
@@ -2398,7 +2403,9 @@ def build_train_config(
     cfg = TrainConfig(**cfg_kwargs)
     # On-policy rollout geometry (cadences in whole rollouts, the budget,
     # minibatching, SAC-only gate levers) fails here, before the env
-    # probe; train() repeats the check for a hand-built config.
+    # probe; train() repeats the check for a hand-built config. So do
+    # the worker kind and an update floor set for an off-policy run.
+    _validate_worker_and_stop_config(cfg)
     _validate_on_policy_config(cfg)
     if file_config is not None:
         # Fail on a typo'd [env]/[eval_env] kwarg now, in seconds,

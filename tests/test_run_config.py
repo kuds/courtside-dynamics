@@ -876,6 +876,36 @@ class TestBuildTrainConfig:
         }
 
 
+    def test_update_floor_and_worker_kind_load_per_family(self, tmp_path):
+        """PPO plan Steps 6 and 13: both fields are file-settable; the
+        update floor belongs in [train.algo.ppo], and a flat one is
+        refused at build time under the SAC family."""
+        path = _write(
+            tmp_path,
+            '[train]\nvec_env = "subproc"\n'
+            "[train.algo.ppo]\nmin_policy_updates_before_stop = 30\n",
+        )
+        ppo = build_train_config(
+            "BallBalance", algo="PPO", log_dir=str(tmp_path), config_file=path
+        )
+        sac = build_train_config(
+            "BallBalance", algo="SAC", log_dir=str(tmp_path), config_file=path
+        )
+        assert ppo.vec_env == sac.vec_env == "subproc"
+        assert ppo.min_policy_updates_before_stop == 30
+        assert sac.min_policy_updates_before_stop == 20
+        flat = _write(
+            tmp_path, "[train]\nmin_policy_updates_before_stop = 30\n", "flat.toml"
+        )
+        with pytest.raises(ValueError, match="applies to on-policy runs only"):
+            build_train_config(
+                "BallBalance", algo="SAC", log_dir=str(tmp_path), config_file=flat
+            )
+        bad = _write(tmp_path, '[train]\nvec_env = "threads"\n', "bad.toml")
+        with pytest.raises(ValueError, match="vec_env must be one of"):
+            build_train_config("BallBalance", log_dir=str(tmp_path), config_file=bad)
+
+
 class TestEvaluationFields:
     """Contract C3's new TrainConfig fields load from TOML and fail at load
     on the wrong shape (train() re-checks the semantics)."""

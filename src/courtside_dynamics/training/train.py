@@ -27,12 +27,14 @@ import json
 import math
 import os
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from gymnasium import spaces
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.callbacks import (
     BaseCallback,
@@ -48,10 +50,12 @@ from stable_baselines3.common.logger import Logger, make_output_format
 from stable_baselines3.common.running_mean_std import RunningMeanStd
 from stable_baselines3.common.utils import check_for_correct_spaces
 from stable_baselines3.common.vec_env import (
+    SubprocVecEnv,
     VecEnv,
     VecNormalize,
     sync_envs_normalization,
 )
+from stable_baselines3.common.vec_env.util import dict_to_obs, obs_space_info
 
 from courtside_dynamics.callbacks.env_attr_schedule import (
     LinearEnvAttrScheduleCallback,
@@ -177,8 +181,22 @@ class WarmStartConfig:
     the target's own ``ent_coef`` init (e.g. ``auto_0.02``) stands -- the
     "temperature-skip" warm start the PaddleTennis campaign routed to
     (``paddle_tennis_postswing_targets_20260822.md`` section 6). The
-    auto-vs-fixed mismatch still fails loudly either way; for PPO (no
-    temperature on either side) the flag is a documented no-op.
+    auto-vs-fixed mismatch still fails loudly either way. An on-policy
+    run has no temperature on either side, so ``False`` there is
+    refused rather than ignored: its exploration lives in
+    ``policy.log_std``, which ``reset_log_std`` restarts.
+
+    ``reset_log_std=True`` (on-policy only, PPO plan Step 9) refills the
+    transferred ``policy.log_std`` with the target policy's own
+    ``log_std_init`` after the weights load, so a stage starts from its
+    configured exploration noise instead of the source's: the source's
+    std is whatever its own entropy bonus drifted it to (under
+    ``ent_coef`` 0.01 every humanoid action column's log std rose by
+    0.04 to 0.18 within 26.6k steps, and masked dimensions feel only
+    that term, so the drift accumulates stage over stage). Every other
+    transferred tensor is untouched. The SAC family refuses it: its log
+    std is a network output, not a parameter, and its exploration
+    restart is ``transfer_log_ent_coef=False``.
 
     ``expected_artifact_sha256`` pins source artifacts by content: a mapping
     from artifact name (``best_model.zip``, ``best_vec_normalize.pkl``,
@@ -193,6 +211,7 @@ class WarmStartConfig:
     reset_observation_indices: tuple[int, ...] = ()
     transfer_log_ent_coef: bool = True
     expected_artifact_sha256: Mapping[str, str] | None = None
+    reset_log_std: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_run_dir, (str, os.PathLike)):
@@ -211,6 +230,8 @@ class WarmStartConfig:
         object.__setattr__(self, "reset_observation_indices", tuple(sorted(indices)))
         if not isinstance(self.transfer_log_ent_coef, bool):
             raise TypeError("transfer_log_ent_coef must be a bool")
+        if not isinstance(self.reset_log_std, bool):
+            raise TypeError("reset_log_std must be a bool")
         if self.expected_artifact_sha256 is not None:
             if not isinstance(self.expected_artifact_sha256, Mapping):
                 raise TypeError(
@@ -318,6 +339,71 @@ class SelectiveVecNormalize(VecNormalize):
         return result
 
 
+class DummyDtypeSubprocVecEnv(SubprocVecEnv):
+    """``SubprocVecEnv`` that returns exactly what ``DummyVecEnv`` returns.
+
+    ``DummyVecEnv`` writes every step into preallocated buffers: rewards
+    into a float32 array, observations into arrays of the observation
+    space's dtype. ``SubprocVecEnv`` stacks what the workers send back,
+    so an env returning Python-float rewards yields float64 rewards
+    there. Training does not round those away: ``VecNormalize`` updates
+    its return statistics from the raw vector rewards, so a stock
+    subprocess run drifts from the identical in-process run from its
+    first step (measured on BallBalance, BallBounce, WallBall,
+    PaddleTennis and humanoid Stage 0: the reward dtype differs at
+    step 1). This class casts both through the same buffer assignment
+    ``DummyVecEnv`` uses, so ``TrainConfig.vec_env`` changes where the
+    envs step, never what training sees.
+    """
+
+    def __init__(
+        self,
+        env_fns: list[Callable[[], Any]],
+        start_method: str | None = None,
+    ) -> None:
+        super().__init__(env_fns, start_method)
+        self._obs_keys, self._obs_shapes, self._obs_dtypes = obs_space_info(
+            self.observation_space
+        )
+
+    def _as_dummy_obs(self, obs: Any) -> Any:
+        # The same buffers DummyVecEnv allocates, filled by the same
+        # numpy assignment cast.
+        buffers = OrderedDict(
+            (
+                key,
+                np.zeros(
+                    (self.num_envs, *tuple(self._obs_shapes[key])),
+                    dtype=self._obs_dtypes[key],
+                ),
+            )
+            for key in self._obs_keys
+        )
+        for key in self._obs_keys:
+            buffers[key][...] = obs if key is None else obs[key]
+        return dict_to_obs(self.observation_space, buffers)
+
+    def reset(self) -> Any:
+        return self._as_dummy_obs(super().reset())
+
+    def step_wait(self) -> Any:
+        obs, rewards, dones, infos = super().step_wait()
+        return (
+            self._as_dummy_obs(obs),
+            np.asarray(rewards, dtype=np.float32),
+            np.asarray(dones, dtype=bool),
+            list(infos),
+        )
+
+
+#: ``TrainConfig.vec_env`` values: the training workers' VecEnv.
+VEC_ENV_KINDS = ("dummy", "subproc")
+
+#: ``TrainConfig.min_policy_updates_before_stop``'s default, and the
+#: only value an off-policy run may carry.
+DEFAULT_MIN_POLICY_UPDATES_BEFORE_STOP = 20
+
+
 @dataclass
 class TrainConfig:
     """All knobs for a single training run.
@@ -390,7 +476,9 @@ class TrainConfig:
         at the final scheduled distribution (run 20260714_211111's
         schedule endpoint coincided exactly with its earliest
         reachable stop, guaranteeing zero time at the target
-        distribution). ``None`` (default) trains for the full budget.
+        distribution). An on-policy run also floors the warm-up at
+        ``min_policy_updates_before_stop`` policy updates (see there).
+        ``None`` (default) trains for the full budget.
         Motivation: the first real WallBall run kept training for 10+
         GPU-hours after its best checkpoint while the policy
         collapsed; run 20260712_190054 then spent 525k steps
@@ -411,6 +499,12 @@ class TrainConfig:
         normalization on/off. ``None`` (default) picks the per-algo
         default: on for PPO (stabilizes value-function learning), off
         for SAC (interacts poorly with auto-tuned entropy temperature).
+        An on-policy run that normalizes rewards discounts the
+        normalizer's running return with the model's own ``gamma``
+        (SB3's ``VecNormalize`` otherwise uses 0.99 whatever the model
+        discounts at, PPO plan Step 7); every other run keeps
+        VecNormalize's default. ``config.json``'s ``resolved_training``
+        block records the resolved choice and the normalizer's gamma.
     clip_obs / clip_reward:
         Forwarded to ``VecNormalize``. Defaults match SB3 (10.0 each).
     normalize_obs_excluded_indices:
@@ -520,7 +614,9 @@ class TrainConfig:
         Declarative linear schedules for numeric attributes on every training
         environment. Each mapping is forwarded to
         ``LinearEnvAttrScheduleCallback`` and is driven by SB3's global
-        timestep count. Evaluation environments are never modified.
+        timestep count. Evaluation environments are never modified. An
+        on-policy run moves the value only at rollout starts, so no
+        rollout (and no GAE estimate) mixes two settings.
     best_metric_keys:
         Optional override of the lexicographic selection score used when
         ``headline_key`` owns model selection. ``None`` (default) keeps
@@ -612,7 +708,9 @@ class TrainConfig:
         ladder advances one stage each time the metric holds the
         threshold for the sustained number of consecutive evaluations.
         Requires ``info_dict_eval``. Unlike ``env_attr_schedules`` this
-        is earned progression, not a timestep clock.
+        is earned progression, not a timestep clock. An on-policy run
+        applies an earned advance at the end of the rollout its
+        evaluation landed in, never inside one.
     ladder_certification:
         Optional startup certification for the ``performance_gate``
         ladder (wall-ball recipes only), a mapping with keys
@@ -683,7 +781,9 @@ class TrainConfig:
         patience window. ``degenerate_min_evals`` warms the guard up;
         when ``None`` (default) and ``env_attr_schedules`` exist, it
         is derived to cover the longest schedule's hold phase, where a
-        dead full-difficulty eval is still expected by design.
+        dead full-difficulty eval is still expected by design. An
+        on-policy run floors it at ``min_policy_updates_before_stop``
+        policy updates either way.
         Defaults (0 / empty) disable the guard.
     require_device:
         Opt-in device assertion. ``"cuda"`` makes ``train()`` fail in
@@ -695,7 +795,39 @@ class TrainConfig:
         to CPU: runs ``20260828_114038`` and ``20260828_114815`` were
         shape-conformant launches on a CPU-only runtime (a ``+cpu``
         torch build passes the ``nvidia-smi`` check ``setup_colab``
-        makes) that could not finish in wall-clock.
+        makes) that could not finish in wall-clock. One exception
+        (PPO plan Step 8): an on-policy run with SB3's MLP
+        actor-critic policy and no ``model_kwargs["device"]`` trains
+        on the CPU, where SB3 itself says it belongs (its MLP updates
+        are too small to use a GPU, so ``"auto"`` on a GPU runtime only
+        adds transfers). ``config.json``'s ``resolved_training`` block
+        records the device asked for and why.
+    min_policy_updates_before_stop:
+        On-policy runs only (PPO plan Step 6). An on-policy model
+        updates once per rollout of ``n_steps * n_envs`` env steps, so
+        an early stop sized in evaluations can fire after almost no
+        updates: WallBall's degenerate stop at 5 evaluations of 25k fired
+        after 0 to 7 updates at 8 workers x 2,048 steps, and a quick
+        test could stop "completed" with none. ``train()`` floors the
+        early-stop warm-up (``early_stop_patience``'s ``min_evals``) and
+        ``degenerate_min_evals`` at
+        ``ceil(K * n_steps * n_envs / eval_freq)`` evaluations for
+        ``K = min_policy_updates_before_stop``, so no early stop can fire
+        before the policy has had K updates (whole-rollout cadences
+        make evaluation ``e`` see ``e * rollouts_per_eval - 1``). ``0``
+        disables the floor. Off-policy runs update every step and must
+        leave the default (20); any other value is refused.
+    vec_env:
+        The training workers' VecEnv: ``"dummy"`` (default; every worker
+        steps in this process) or ``"subproc"`` (one process per worker,
+        :class:`DummyDtypeSubprocVecEnv`), which scales env collection
+        with cores -- collection, not the update, bounds CPU training
+        (632-832 steps/s measured on 4 shared cores). Both return
+        identical arrays for the same seeds, so a run trains the same
+        either way. Evaluation, video and diagnosis envs stay
+        single-worker and in-process. The factory is pickled to the
+        workers (cloudpickle), and ``check_env`` runs on a throwaway
+        instance in this process instead of on worker 0.
     """
 
     env_fn: Callable
@@ -771,6 +903,8 @@ class TrainConfig:
     eval_reset_options: Sequence[Mapping[str, Any]] | None = None
     monitor_info_keywords: Sequence[str] = field(default_factory=tuple)
     reuse_log_dir: bool = False
+    min_policy_updates_before_stop: int = DEFAULT_MIN_POLICY_UPDATES_BEFORE_STOP
+    vec_env: str = "dummy"
 
 
 #: Offset of the derived paired-evaluation seed block from ``cfg.seed``
@@ -949,6 +1083,145 @@ def _resolved_norm_reward(cfg: TrainConfig) -> bool:
         if cfg.normalize_reward is not None
         else _algo_family(cfg.algo) == "PPO"
     )
+
+
+def _is_on_policy(cfg: TrainConfig) -> bool:
+    return cfg.algo.upper() in _ON_POLICY_ALGOS
+
+
+def _algo_setting(cfg: TrainConfig, key: str) -> Any:
+    """The constructor setting ``key`` that ``cfg.algo`` will be built with.
+
+    ``model_kwargs[key]`` when given, else the algorithm constructor's
+    default (``inspect.signature``), else ``None`` (no such argument).
+    """
+    if key in cfg.model_kwargs:
+        return cfg.model_kwargs[key]
+    parameters = inspect.signature(_resolve_algo(cfg.algo).__init__).parameters
+    parameter = parameters.get(key)
+    if parameter is None or parameter.default is inspect.Parameter.empty:
+        return None
+    return parameter.default
+
+
+def _reward_normalizer_gamma(cfg: TrainConfig) -> float | None:
+    """The discount the training ``VecNormalize`` must use, or ``None``.
+
+    PPO plan Step 7 (static-4). VecNormalize normalizes rewards by the
+    running std of a return it discounts with its own ``gamma``, 0.99
+    unless told otherwise, so a 0.995 run scaled its rewards by the
+    statistics of a 100-step horizon instead of its 200-step one. An
+    on-policy run that normalizes rewards gets the model's own gamma.
+    ``None`` keeps VecNormalize's default for every other run: SB3
+    updates the return statistics even with ``norm_reward=False``, so
+    passing the model's gamma to an SAC run would change its pickled
+    normalizer, and those paths stay bit-identical.
+    """
+    if not (_is_on_policy(cfg) and _resolved_norm_reward(cfg)):
+        return None
+    gamma = _algo_setting(cfg, "gamma")
+    if isinstance(gamma, bool) or not isinstance(gamma, (int, float)):
+        raise ValueError(
+            f"{cfg.algo}'s gamma must be a number to discount the reward "
+            f"normalizer with, got {gamma!r}"
+        )
+    return float(gamma)
+
+
+def _device_request(cfg: TrainConfig) -> tuple[str, str]:
+    """The ``device`` ``train()`` builds the model with, and why.
+
+    PPO plan Step 8 (static-5). Returns ``(device, source)``: the
+    caller's ``model_kwargs["device"]`` (``"model_kwargs"``); ``"cpu"``
+    for an on-policy run with SB3's MLP actor-critic policy when
+    ``require_device`` is ``None`` (``"on_policy_mlp_cpu_default"``);
+    else SB3's ``"auto"`` (``"sb3_default"``). SB3 itself warns that
+    PPO/A2C with ``ActorCriticPolicy`` belong on the CPU (its
+    ``_maybe_recommend_cpu`` checks that exact class name, so CNN and
+    multi-input policies keep ``"auto"``); a GPU runtime only adds
+    host-device copies to updates this small. The off-policy family
+    always keeps ``"auto"``.
+    """
+    if "device" in cfg.model_kwargs:
+        return str(cfg.model_kwargs["device"]), "model_kwargs"
+    if _is_on_policy(cfg) and cfg.require_device is None:
+        policy_class: Any = cfg.policy
+        if isinstance(policy_class, str):
+            policy_class = _resolve_algo(cfg.algo).policy_aliases.get(policy_class)
+        if (
+            isinstance(policy_class, type)
+            and policy_class.__name__ == "ActorCriticPolicy"
+        ):
+            return "cpu", "on_policy_mlp_cpu_default"
+    return "auto", "sb3_default"
+
+
+def _rollout_env_steps(cfg: TrainConfig) -> int | None:
+    """An on-policy run's rollout, ``n_steps * n_envs``; ``None`` otherwise."""
+    if not _is_on_policy(cfg):
+        return None
+    n_steps = _algo_setting(cfg, "n_steps")
+    if not _positive_int(n_steps):
+        return None
+    return int(n_steps) * cfg.n_envs
+
+
+def _policy_update_floor_evals(cfg: TrainConfig) -> int:
+    """Evaluations an on-policy run must complete before an early stop.
+
+    PPO plan Step 6 (static-3, empirical-1):
+    ``ceil(K * n_steps * n_envs / eval_freq)`` for
+    ``K = cfg.min_policy_updates_before_stop``. Both stop warm-ups are
+    floored at it, and each stop needs at least one evaluation past its
+    warm-up, so with the whole-rollout cadences the pre-flight enforces
+    (``R = eval_freq / rollout`` rollouts per evaluation; evaluation
+    ``e`` runs before its rollout's update and so sees ``e * R - 1``
+    updates) the earliest stop sees at least
+    ``(ceil(K / R) + 1) * R - 1 >= K`` updates. ``0`` for the off-policy
+    family, for ``K = 0``, and for a run without a rollout length.
+    """
+    rollout = _rollout_env_steps(cfg)
+    updates = cfg.min_policy_updates_before_stop
+    if rollout is None or updates <= 0 or cfg.eval_freq <= 0:
+        return 0
+    return math.ceil(updates * rollout / cfg.eval_freq)
+
+
+def resolved_training_settings(cfg: TrainConfig) -> dict[str, Any]:
+    """What ``train()`` resolves from ``cfg`` beyond its fields.
+
+    ``config.json``'s ``resolved_training`` block (the ``train_config``
+    block records the fields as configured, and ``resolved_model`` what
+    the built model reports): the reward normalization and the
+    discount of the normalizer's return statistics (``None`` without a
+    VecNormalize), the device asked of SB3 and why, and, for an
+    on-policy run, the rollout and the evaluation floor the early stops
+    get from ``min_policy_updates_before_stop``.
+    """
+    norm_reward = _resolved_norm_reward(cfg)
+    use_vec_normalize = bool(cfg.normalize_obs or norm_reward)
+    matched_gamma = _reward_normalizer_gamma(cfg)
+    gamma: float | None = None
+    gamma_source: str | None = None
+    if matched_gamma is not None:
+        gamma, gamma_source = matched_gamma, "model_gamma"
+    elif use_vec_normalize:
+        # VecNormalize's own default: what every other run pickles.
+        default = inspect.signature(VecNormalize.__init__).parameters["gamma"]
+        gamma, gamma_source = float(default.default), "vec_normalize_default"
+    device, device_source = _device_request(cfg)
+    return {
+        "normalize_reward_resolved": norm_reward,
+        "vec_normalize": use_vec_normalize,
+        "vec_normalize_gamma": gamma,
+        "vec_normalize_gamma_source": gamma_source,
+        "device_request": device,
+        "device_request_source": device_source,
+        "rollout_env_steps": _rollout_env_steps(cfg),
+        "policy_update_floor_evals": (
+            _policy_update_floor_evals(cfg) if _is_on_policy(cfg) else None
+        ),
+    }
 
 
 #: Devices ``TrainConfig.require_device`` can demand (``None`` disables).
@@ -1192,6 +1465,34 @@ def _validate_callback_config(cfg: TrainConfig) -> None:
             )
 
 
+def _validate_worker_and_stop_config(cfg: TrainConfig) -> None:
+    """Refuse a malformed ``vec_env`` or ``min_policy_updates_before_stop``.
+
+    Config-only, so it runs with the checks above, before any output.
+    ``min_policy_updates_before_stop`` acts on on-policy runs only; an
+    off-policy run updates every step, so any value but the default
+    there would be a silent no-op and is refused instead.
+    """
+    if cfg.vec_env not in VEC_ENV_KINDS:
+        raise ValueError(
+            f"vec_env must be one of {list(VEC_ENV_KINDS)}, got {cfg.vec_env!r}"
+        )
+    updates = cfg.min_policy_updates_before_stop
+    if isinstance(updates, bool) or not isinstance(updates, int) or updates < 0:
+        raise ValueError(
+            f"min_policy_updates_before_stop must be a nonnegative integer "
+            f"(0 disables the floor), got {updates!r}"
+        )
+    if not _is_on_policy(cfg) and updates != DEFAULT_MIN_POLICY_UPDATES_BEFORE_STOP:
+        raise ValueError(
+            f"min_policy_updates_before_stop={updates} applies to on-policy "
+            f"runs only: {cfg.algo} updates at every step, so its early "
+            f"stops are not counted in rollouts. Leave the default "
+            f"({DEFAULT_MIN_POLICY_UPDATES_BEFORE_STOP}); a run file sets "
+            f"it in [train.algo.ppo]"
+        )
+
+
 def _on_policy_updates(cfg: TrainConfig, model: BaseAlgorithm) -> int | None:
     """A PPO-family model's SB3 ``_n_updates`` for the run summary.
 
@@ -1244,21 +1545,16 @@ def _validate_on_policy_config(cfg: TrainConfig) -> None:
       stops, or a checkpoint, would land between a rollout's data and
       the update that consumes it;
     - ``policy_kwargs`` the policy class does not accept
-      (``algos.validate_policy_kwargs``).
+      (``algos.validate_policy_kwargs``);
+    - a non-numeric ``gamma`` when rewards are normalized (the
+      normalizer discounts with it, :func:`_reward_normalizer_gamma`).
     """
     name = cfg.algo.upper()
     if name not in _ON_POLICY_ALGOS:
         return
-    cls = _resolve_algo(name)
-    defaults = inspect.signature(cls.__init__).parameters
 
     def setting(key: str) -> Any:
-        if key in cfg.model_kwargs:
-            return cfg.model_kwargs[key]
-        parameter = defaults.get(key)
-        if parameter is None or parameter.default is inspect.Parameter.empty:
-            return None
-        return parameter.default
+        return _algo_setting(cfg, key)
 
     if isinstance(cfg.performance_gate, Mapping):
         levers = [
@@ -1344,6 +1640,9 @@ def _validate_on_policy_config(cfg: TrainConfig) -> None:
     policy_kwargs = cfg.model_kwargs.get("policy_kwargs")
     if policy_kwargs:
         _validate_policy_kwargs(name, cfg.policy, policy_kwargs)
+    # The reward normalizer's discount (Step 7): a gamma it cannot use
+    # fails here, not inside write_run_config's record of it.
+    _reward_normalizer_gamma(cfg)
 
 
 def _validate_monitor_info_keywords(cfg: TrainConfig) -> tuple[str, ...]:
@@ -1744,6 +2043,26 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
             "policy-only warm start currently supports PPO and the SAC "
             f"family ({', '.join(sorted(_OFF_POLICY_ALGOS))}) only"
         )
+    # Each family's exploration restart (PPO plan Step 9): an option of
+    # the other family would be a silent no-op, so it is refused here,
+    # before any output.
+    if algo in _ON_POLICY_ALGOS:
+        if not warm_start.transfer_log_ent_coef:
+            raise ValueError(
+                f"transfer_log_ent_coef=False skips an entropy temperature "
+                f"{algo} does not have; its exploration noise is the "
+                f"policy's own log_std, which transfers with the weights. "
+                f"To restart exploration at the target's log_std_init, set "
+                f"WarmStartConfig(reset_log_std=True) and leave "
+                f"transfer_log_ent_coef at True"
+            )
+    elif warm_start.reset_log_std:
+        raise ValueError(
+            f"reset_log_std applies to on-policy warm starts only: {algo}'s "
+            f"log std is an output of the actor network, not a parameter "
+            f"to refill. The SAC family restarts exploration with "
+            f"transfer_log_ent_coef=False"
+        )
     if not cfg.normalize_obs:
         raise ValueError("policy-only warm start requires normalize_obs=True")
 
@@ -1831,6 +2150,14 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
         target_class = type(target_env).__name__
         target_observation_shape = list(target_env.observation_space.shape or ())
         target_action_shape = list(target_env.action_space.shape or ())
+        if warm_start.reset_log_std and not isinstance(
+            target_env.action_space, spaces.Box
+        ):
+            raise ValueError(
+                f"reset_log_std needs a continuous (Box) action space, whose "
+                f"Gaussian policy carries a log_std; the target's is "
+                f"{target_env.action_space}"
+            )
         target_observation_names = env_observation_names(target_env)
         target_curriculum_value = getattr(target_env, "curriculum_metadata", None)
         target_curriculum = (
@@ -1941,8 +2268,15 @@ def _load_warm_start_normalizer(
     cfg: TrainConfig,
     *,
     norm_reward: bool,
+    gamma: float | None = None,
 ) -> VecNormalize:
-    """Attach source observation statistics and reset target-task state."""
+    """Attach source observation statistics and reset target-task state.
+
+    ``gamma`` (:func:`_reward_normalizer_gamma`; ``None`` keeps the
+    pickled value) replaces the source normalizer's return discount, so
+    the target's fresh return statistics accumulate at the target
+    model's horizon rather than whatever the source pickled.
+    """
     normalizer = VecNormalize.load(str(artifacts.normalizer_path), base_env)
     if normalizer.norm_obs is not True:
         raise ValueError("warm-start normalizer must have norm_obs=True")
@@ -1987,7 +2321,34 @@ def _load_warm_start_normalizer(
     normalizer.old_reward = np.array([])
     normalizer.old_obs = np.array([])
     normalizer.training = True
+    if gamma is not None:
+        normalizer.gamma = gamma
     return normalizer
+
+
+def _reset_policy_log_std(model: BaseAlgorithm) -> float:
+    """Refill a warm-started on-policy policy's ``log_std`` from its init.
+
+    SB3's Gaussian and gSDE action distributions create ``log_std`` as
+    ``ones(shape) * log_std_init`` (the policy's ``policy_kwargs``
+    value); the transferred state dict replaced it with the source's.
+    The refill is in place (``detach`` shares storage), so the
+    optimizer's param group keeps pointing at the same parameter. gSDE
+    resamples its exploration matrix from the new std at the next
+    rollout start. Returns the value written.
+    """
+    import torch
+
+    policy: Any = model.policy
+    log_std = getattr(policy, "log_std", None)
+    log_std_init = getattr(policy, "log_std_init", None)
+    if not isinstance(log_std, torch.nn.Parameter) or log_std_init is None:
+        raise ValueError(
+            f"reset_log_std: the {type(policy).__name__} policy has no "
+            f"log_std parameter (and log_std_init) to refill"
+        )
+    log_std.detach().fill_(float(log_std_init))
+    return float(log_std_init)
 
 
 def train(cfg: TrainConfig) -> BaseAlgorithm:
@@ -2016,6 +2377,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     _check_required_device(cfg)
     _validate_evaluation_config(cfg)
     _validate_callback_config(cfg)
+    _validate_worker_and_stop_config(cfg)
     _validate_on_policy_config(cfg)
     env_attr_schedule_callbacks = tuple(
         LinearEnvAttrScheduleCallback(**dict(schedule))
@@ -2034,12 +2396,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     # Last pre-output check: a refusal leaves the directory untouched,
     # and an opted-in rotation only happens once every config-only check
     # above passed (algo, model kwargs, device, evaluation, eval-stream,
-    # diagnosis and gate settings, on-policy rollout geometry, warm
-    # start, monitor keys, reset options), so a misconfigured retry
-    # cannot strand the previous attempt. Checks that need the
-    # constructed evaluators (the selection-metric probe, the gate
-    # callback's value checks) and the ladder certification still run
-    # after config.json is written.
+    # diagnosis and gate settings, worker kind and update floor,
+    # on-policy rollout geometry, warm start, monitor keys, reset
+    # options), so a misconfigured retry cannot strand the previous
+    # attempt. Checks that need the constructed evaluators (the
+    # selection-metric probe, the gate callback's value checks) and the
+    # ladder certification still run after config.json is written.
     _check_log_dir_reuse(cfg)
 
     os.makedirs(cfg.log_dir, exist_ok=True)
@@ -2092,20 +2454,41 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     opened_envs: list[VecEnv] = []
     sb3_logger: Logger | None = None
     try:
-        train_env = make_vec_env(
-            checked_train_env_fn,
-            n_envs=cfg.n_envs,
-            seed=cfg.seed,
-            monitor_dir=artifact_path(cfg.log_dir, "monitor_dir"),
-            # Extra per-episode columns (e.g. episode-cumulative
-            # counters) in every worker's monitor CSV; None keeps
-            # SB3's plain r,l,t rows.
-            monitor_kwargs=(
-                {"info_keywords": monitor_info_keywords}
-                if monitor_info_keywords
-                else None
-            ),
+        # Extra per-episode columns (e.g. episode-cumulative counters)
+        # in every worker's monitor CSV; None keeps SB3's plain r,l,t
+        # rows.
+        train_monitor_kwargs = (
+            {"info_keywords": monitor_info_keywords}
+            if monitor_info_keywords
+            else None
         )
+        if cfg.vec_env == "subproc":
+            # The workers build their envs in their own processes, so
+            # the one-time check runs here on a throwaway instance (a
+            # seeded reset fully re-initializes every shipped env, so
+            # the workers' streams match the in-process run's, whose
+            # worker 0 is the checked instance).
+            probe_env = cfg.env_fn()
+            try:
+                check_env(probe_env)
+            finally:
+                probe_env.close()
+            train_env = make_vec_env(
+                cfg.env_fn,
+                n_envs=cfg.n_envs,
+                seed=cfg.seed,
+                monitor_dir=artifact_path(cfg.log_dir, "monitor_dir"),
+                monitor_kwargs=train_monitor_kwargs,
+                vec_env_cls=DummyDtypeSubprocVecEnv,
+            )
+        else:
+            train_env = make_vec_env(
+                checked_train_env_fn,
+                n_envs=cfg.n_envs,
+                seed=cfg.seed,
+                monitor_dir=artifact_path(cfg.log_dir, "monitor_dir"),
+                monitor_kwargs=train_monitor_kwargs,
+            )
         opened_envs.append(train_env)
         eval_env = make_vec_env(
             checked_eval_env_fn,
@@ -2119,6 +2502,16 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         # per-algo default; True/False forces the choice.
         norm_reward = _resolved_norm_reward(cfg)
         use_vec_normalize = cfg.normalize_obs or norm_reward
+        # An on-policy run that normalizes rewards discounts the
+        # normalizer's return at the model's gamma (PPO plan Step 7);
+        # every other run keeps VecNormalize's default, so the SAC
+        # family's pickled statistics are untouched. All four
+        # normalizers get it, so a synced evaluation normalizer never
+        # disagrees with the one it copies.
+        normalizer_gamma = _reward_normalizer_gamma(cfg)
+        gamma_kwargs: dict[str, Any] = (
+            {} if normalizer_gamma is None else {"gamma": normalizer_gamma}
+        )
         if use_vec_normalize:
             if warm_start_artifacts is not None:
                 train_env = _load_warm_start_normalizer(
@@ -2126,6 +2519,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     warm_start_artifacts,
                     cfg,
                     norm_reward=norm_reward,
+                    gamma=normalizer_gamma,
                 )
             else:
                 train_env = SelectiveVecNormalize(
@@ -2135,6 +2529,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     clip_obs=cfg.clip_obs,
                     clip_reward=cfg.clip_reward,
                     normalize_obs_excluded_indices=(cfg.normalize_obs_excluded_indices),
+                    **gamma_kwargs,
                 )
             # Eval envs always read the env's true reward (norm_reward=False)
             # and freeze the running stats (training=False); SB3's EvalCallback
@@ -2146,6 +2541,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 clip_obs=cfg.clip_obs,
                 training=False,
                 normalize_obs_excluded_indices=(cfg.normalize_obs_excluded_indices),
+                **gamma_kwargs,
             )
 
         def _calls(env_steps: int) -> int:
@@ -2211,6 +2607,23 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 artifact_path(cfg.log_dir, "best_vec_normalize")
             )
 
+        # PPO plan Step 6: an on-policy run's early stops wait until its
+        # policy has had min_policy_updates_before_stop updates. 0 for
+        # the off-policy family, whose warm-ups stay exactly as wired.
+        update_floor_evals = _policy_update_floor_evals(cfg)
+
+        def _floored_warmup(label: str, evals: int) -> int:
+            if evals >= update_floor_evals:
+                return evals
+            print(
+                f"[train] {label} raised from {evals} to "
+                f"{update_floor_evals} evaluations: no early stop may fire "
+                f"before {cfg.min_policy_updates_before_stop} policy "
+                f"updates (rollouts of {_rollout_env_steps(cfg):,} env "
+                f"steps, an evaluation every {cfg.eval_freq:,})"
+            )
+            return update_floor_evals
+
         after_eval: BaseCallback | None = None
         if (
             not headline_selection
@@ -2223,7 +2636,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             # reason is visible in the Colab cell output.
             after_eval = StopTrainingOnNoModelImprovement(
                 max_no_improvement_evals=cfg.early_stop_patience,
-                min_evals=cfg.early_stop_patience,
+                min_evals=_floored_warmup(
+                    "early_stop_patience's warm-up (min_evals)",
+                    cfg.early_stop_patience,
+                ),
                 verbose=1,
             )
 
@@ -2322,6 +2738,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     clip_obs=cfg.clip_obs,
                     training=False,
                     normalize_obs_excluded_indices=(cfg.normalize_obs_excluded_indices),
+                    **gamma_kwargs,
                 )
             if headline_selection:
                 # Selection duty: full episode count (a //4 sample
@@ -2362,7 +2779,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                             / cfg.eval_freq
                         )
                     selection_kwargs["degenerate_min_evals"] = (
-                        degenerate_min_evals or 0
+                        _floored_warmup(
+                            "degenerate_min_evals", degenerate_min_evals or 0
+                        )
                     )
                 if (
                     cfg.early_stop_patience is not None
@@ -2386,7 +2805,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                             min_evals,
                             math.ceil(schedule_end / cfg.eval_freq),
                         )
-                    selection_kwargs["early_stop_min_evals"] = min_evals
+                    selection_kwargs["early_stop_min_evals"] = (
+                        _floored_warmup(
+                            "early_stop_patience's warm-up (min_evals)",
+                            min_evals,
+                        )
+                    )
             else:
                 # Reporting only: a quarter of the eval budget keeps
                 # the extra rollout pass cheap.
@@ -2418,6 +2842,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 # resolve_eval_seed) keeps the legacy unpaired stream.
                 eval_seed=resolved_eval_seed,
                 eval_reset_options=cfg.eval_reset_options,
+                # On-policy runs: SB3's update count behind each
+                # evaluation, an eval_info.csv row (PPO plan Step 6).
+                record_n_updates=_is_on_policy(cfg),
                 **selection_kwargs,
             )
             if headline_selection or cfg.success_key is not None:
@@ -2502,6 +2929,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                         normalize_obs_excluded_indices=(
                             cfg.normalize_obs_excluded_indices
                         ),
+                        **gamma_kwargs,
                     )
                 callbacks.append(
                     InfoDictEvalCallback(
@@ -2582,6 +3010,11 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 source_model.action_space,
             )
 
+        # PPO plan Step 8: an on-policy MLP run with no device asked for
+        # trains on the CPU (recorded in config.json's resolved_training).
+        device, device_source = _device_request(cfg)
+        if device_source == "on_policy_mlp_cpu_default":
+            model_kwargs["device"] = device
         model = _build_algo(
             cfg.algo,
             train_env,
@@ -2590,6 +3023,17 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             **model_kwargs,
         )
         _check_model_device(model, cfg.require_device)
+        if normalizer_gamma is not None:
+            # The normalizer was built before the model it serves; fail
+            # rather than train on a horizon the model does not use.
+            assert isinstance(train_env, VecNormalize)
+            model_gamma = float(getattr(model, "gamma", float("nan")))
+            if train_env.gamma != model_gamma:
+                raise RuntimeError(
+                    f"the reward normalizer discounts at gamma "
+                    f"{train_env.gamma}, but the built model uses "
+                    f"{model_gamma}"
+                )
         transferred_log_ent_coef: float | None = None
         if source_model is not None:
             if type(source_model.policy) is not type(model.policy):
@@ -2613,6 +3057,13 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             # critic target networks, so the transfer resumes from a
             # self-consistent TD state rather than fresh random targets.
             model.policy.load_state_dict(source_model.policy.state_dict(), strict=True)
+            assert cfg.warm_start is not None
+            # PPO plan Step 9: an on-policy target may restart its
+            # exploration noise at its own log_std_init (refused for the
+            # SAC family by _prepare_warm_start).
+            log_std_reset_to: float | None = None
+            if cfg.warm_start.reset_log_std:
+                log_std_reset_to = _reset_policy_log_std(model)
             # SAC's auto-tuned entropy temperature lives on the algorithm,
             # not the policy. A fresh "auto" restarts at ent_coef=1.0 --
             # a huge entropy bonus that would churn a converged policy
@@ -2627,7 +3078,6 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     "warm-start source and target entropy configurations "
                     "differ (auto-tuned vs fixed ent_coef)"
                 )
-            assert cfg.warm_start is not None
             log_ent_coef_skipped = False
             if source_log_ent is not None and target_log_ent is not None:
                 if cfg.warm_start.transfer_log_ent_coef:
@@ -2648,6 +3098,14 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             source_env = warm_start_artifacts.source_config["env"]
             source_curriculum = source_env.get("curriculum")
             assert not isinstance(train_env.obs_rms, dict)
+            # An on-policy policy's exploration noise is its log_std
+            # parameter: named apart from the rest of the state dict as
+            # transferred or reset (PPO plan Step 9).
+            on_policy_log_std: dict[str, Any] = {}
+            if _is_on_policy(cfg):
+                on_policy_log_std["reset_log_std"] = cfg.warm_start.reset_log_std
+                if log_std_reset_to is not None:
+                    on_policy_log_std["log_std_reset_value"] = log_std_reset_to
             initialization = {
                 "mode": "policy_and_observation_stats",
                 "source_run_dir": str(warm_start_artifacts.source_run_dir),
@@ -2686,6 +3144,11 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 },
                 "transferred": [
                     "policy.state_dict",
+                    *(
+                        ["policy.log_std"]
+                        if on_policy_log_std and log_std_reset_to is None
+                        else []
+                    ),
                     "vec_normalize.obs_rms",
                     *(
                         ["log_ent_coef"]
@@ -2706,12 +3169,14 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     "vec_normalize.returns",
                     "logger_and_callback_state",
                     *(["log_ent_coef"] if log_ent_coef_skipped else []),
+                    *(["policy.log_std"] if log_std_reset_to is not None else []),
                 ],
                 "transfer_log_ent_coef": (
                     cfg.warm_start.transfer_log_ent_coef
                     if cfg.warm_start is not None
                     else True
                 ),
+                **on_policy_log_std,
                 **(
                     {"transferred_ent_coef": transferred_log_ent_coef}
                     if transferred_log_ent_coef is not None

@@ -134,7 +134,17 @@ def test_humanoid_notebook_warm_starts_only_after_canonical_promotion() -> None:
     assert 'stage_dir / "promotion_report.json"' in notebook_source
     assert "report.eligible_for_manual_promotion and not extra_failures" in notebook_source
     assert "if not automatic_eligible:" in notebook_source
-    assert 'warm_start = WarmStartConfig(source_run_dir=str(stage_dir))' in notebook_source
+    # Each advance restarts exploration at the next stage's own
+    # log_std_init (PPO plan Step 9), and a package without the option
+    # is refused before any stage trains.
+    assert (
+        "warm_start = WarmStartConfig(source_run_dir=str(stage_dir), "
+        "reset_log_std=True)" in notebook_source
+    )
+    assert (
+        'if AUTO_ADVANCE and "reset_log_std" not in '
+        "WarmStartConfig.__dataclass_fields__:" in notebook_source
+    )
     assert "while " not in notebook_source
     assert "one_shot_canonical_evaluation" in notebook_source
     assert "Interrupted training was saved for recovery but cannot auto-promote" in (

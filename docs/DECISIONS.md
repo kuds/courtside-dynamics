@@ -718,6 +718,97 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### PPO's stops count updates, and its task changes only between rollouts — *implemented (unreleased, 2026-10-17)*
+PPO plan Steps 6–9 and 13 (`design_ppo_first_class_20261016.md`,
+static-3/4/5, empirical-1/4, tests-gaps-8). The runtime still treated
+an on-policy run like SAC in five places: stops sized in evaluations,
+stage and schedule changes at any step, a reward normalizer
+discounting at 0.99 whatever the model's gamma, SB3's `"auto"` device,
+and a warm start that carried the source's exploration noise.
+- **Stops wait for K updates.** `TrainConfig.min_policy_updates_before_stop`
+  (K = 20) floors both early-stop warm-ups and `degenerate_min_evals`
+  at ceil(K · rollout / eval_freq) evaluations, as the plan specifies.
+  Each stop needs at least one evaluation past its warm-up, and
+  evaluation e sees e · R − 1 updates (R rollouts per evaluation), so
+  the earliest stop sees ≥ K + R − 1 ≥ K. A test reproduces the
+  audit's stop at `_n_updates == 0` with K = 0 and shows K = 3 moving
+  it to the 4th evaluation, 3 updates in. The floor adds to the
+  degenerate window rather than replacing it, so on PaddleTennis,
+  WallBallBootstrap, GoalRally and TrueBaseline the 6-evaluation
+  window (Step 3's sizing for ~20 updates) now first fires at 43
+  updates at 8 workers instead of 23; at 16 workers it fired at 11,
+  below the target, and fires at 31 now. WallBallBaseline's
+  schedule-derived warm-up already exceeds the floor at 8 workers (55
+  updates, unchanged) and moves from 27 to 31 at 16. Patience never
+  binds on a shipped profile. Retuning the windows now that the floor
+  exists is left to the profile work. An off-policy run that sets K to
+  anything but the default is refused: the field would otherwise be a
+  silent no-op there.
+- **`n_updates` means SB3's count.** The new `eval_info.csv` row is
+  SB3's `_n_updates`, the counter `progress.csv` logs as
+  `train/n_updates` and the summary as "SB3 n_updates" (optimization
+  epochs), not the rollout count K is measured in; with `n_epochs` E
+  and no `target_kl` cut it reads E × rollouts trained. A second row
+  for rollouts was left out: it follows from the timestep. The row is
+  written to the CSV only, not added to the metrics, so selection,
+  the gate, TensorBoard and `best_model_meta.json` are unchanged.
+- **Rollout boundaries, detected not configured.** The gate and the
+  schedule callback check `isinstance(model, OnPolicyAlgorithm)` at
+  training start; there is no knob that could put a PPO run back on
+  per-step changes. A gate advance earned mid-rollout waits for
+  `_on_rollout_end`. Under `train()` the pre-flight already makes every
+  evaluation end a rollout, so no step separates the two; the deferral
+  makes the callback correct by construction, also when it is wired by
+  hand. When another callback stops the run at the earning
+  evaluation, `finalize` applies the pending advance (failures are
+  reported, not raised: the crash salvage calls it too), so
+  `curriculum_stages.json` reads as an off-policy run's would.
+  Schedules apply `value_at(start)` at each rollout start.
+- **Normalizer gamma, on-policy with reward normalization only.** SB3
+  updates `ret_rms` whenever the normalizer trains, even with
+  `norm_reward=False`, so giving every run its model's gamma would
+  change SAC's pickled statistics. The four `SelectiveVecNormalize`
+  constructions all get the gamma, so a synced evaluation normalizer
+  never disagrees with its source, and `train()` checks the
+  normalizer's gamma against the built model.
+- **CPU by default** when SB3 itself would warn: its
+  `_maybe_recommend_cpu` compares the policy class name with
+  `ActorCriticPolicy`, so CNN and multi-input policies keep `"auto"`.
+  An explicit device or `require_device` wins. PaddleTennis's PPO
+  profile keeps its explicit `device="cpu"`, recorded as
+  `model_kwargs`.
+- **`reset_log_std`** refills `policy.log_std` in place (the optimizer
+  keeps its parameter) from the target policy's own `log_std_init`,
+  after the strict state-dict load. On-policy
+  `transfer_log_ent_coef=False`, a documented no-op until now, is
+  refused because it reads like an exploration restart and is not one.
+  The humanoid notebook needs the option, and its pinned `REPO_REF`
+  (`b9585e2`) predates it, so AUTO_ADVANCE refuses that package at
+  configuration time rather than at the first advance hours in. The
+  week-1 pin bump lifts that.
+- **Subprocess workers must not change the run.** Stock
+  `SubprocVecEnv` returns float64 rewards where `DummyVecEnv`'s buffers
+  hold float32, so VecNormalize's return statistics, and with them a
+  normalized PPO run, drift from step 1. Measured on BallBalance,
+  BallBounce, WallBall TrueBaseline, PaddleTennis and humanoid Stage 0
+  (2 workers, 600 to 1,700 steps, random actions): the stock streams
+  differ at step 1, and `DummyDtypeSubprocVecEnv`, which fills
+  DummyVecEnv's buffers by the same assignment, matches every
+  observation, reward, done and terminal observation. `check_env` runs
+  on a throwaway parent instance instead of worker 0; the same
+  measurement shows the streams match with that difference. A tiny
+  PPO run trains bit-identically on both (weights, normalizer,
+  monitors).
+- **Where the records go.** `config.json`'s `train_config` stays
+  exactly the configured fields (a test forbids derived keys), and the
+  trainer digest compares `resolved_model`, so new derived values go to
+  a new top-level `resolved_training` block. That also keeps the SAC
+  jobs' `resolved_model` identical.
+- **Snapshot.** Two new `TrainConfig` fields add a key to every resolved
+  entry, SAC ones included. The re-record was checked to be purely
+  additive: 184 inserted lines, two per entry, with every
+  pre-existing field byte-identical.
+
 ### PPO runs are configured and checked in whole rollouts — *implemented (unreleased, 2026-10-17)*
 PPO plan Steps 3–5 (`design_ppo_first_class_20261016.md`, static-2,
 static-3(1), static-8, empirical-2). PPO updates once per rollout of

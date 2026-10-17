@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.vec_env import VecEnv
 
 from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
@@ -83,6 +84,18 @@ def _configured_ent_coef_init(model: Any) -> float:
 
 class PerformanceGatedEnvStagesCallback(BaseCallback):
     """Advance env attributes through stages as eval performance allows.
+
+    Under an off-policy model an earned advance applies at once, at the
+    step of the evaluation that earned it. Under an on-policy model
+    (PPO plan Step 6) it waits for the end of the rollout that
+    evaluation landed in: the rollout's update estimates advantages
+    over all of its steps (GAE), so a stage change inside it would mix
+    two tasks into one estimate. With the whole-rollout evaluation
+    cadences ``train()`` requires there, no step falls between the two.
+    An advance still waiting when training ends (another callback
+    stopped the run at that evaluation) is applied by :meth:`finalize`,
+    so ``curriculum_stages.json`` reads as it would for an off-policy
+    run. Detected from the model at training start.
 
     Parameters
     ----------
@@ -403,6 +416,10 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         # True once the current stage has exhausted stage_eval_budget
         # (recorded on the history row either way; drives the stop).
         self._budget_exhausted: bool = False
+        # On-policy models (set at training start): an earned advance
+        # waits in _pending_advance (its reason) for the rollout's end.
+        self._rollout_boundaries: bool = False
+        self._pending_advance: str | None = None
 
     @property
     def stage_index(self) -> int:
@@ -508,8 +525,14 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
                     else _configured_ent_coef_init(self.model)
                 )
             )
+        self._rollout_boundaries = isinstance(self.model, OnPolicyAlgorithm)
         self._stage_entry_timestep = int(self.num_timesteps)
         self._apply_stage()
+
+    @property
+    def advances_at_rollout_ends(self) -> bool:
+        """Whether advances wait for the rollout's end (on-policy model)."""
+        return self._rollout_boundaries
 
     def _close_stage_record(
         self, *, promoted: bool, advance_reason: str | None = None
@@ -615,6 +638,19 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         if self._finalized:
             return
         self._finalized = True
+        # An advance earned by the run's last evaluation but stopped
+        # before its rollout ended: an off-policy run would already
+        # have applied it, so apply it now for the same history. Only
+        # the history depends on it at this point, so a failure (the
+        # crash salvage path calls this too) is reported, not raised.
+        try:
+            self._apply_pending_advance()
+        except Exception as error:
+            print(
+                f"[PerformanceGatedEnvStagesCallback] could not apply the "
+                f"advance pending at training end: {error!r}; closing the "
+                f"stage history without it"
+            )
         self._close_stage_record(promoted=False)
         self._write_stage_history()
 
@@ -769,6 +805,29 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         )
         self._record()
 
+    def _request_advance(self, reason: str) -> None:
+        """Advance now (off-policy) or at the rollout's end (on-policy)."""
+        if not self._rollout_boundaries:
+            self._advance_stage(reason)
+            return
+        self._pending_advance = reason
+        if self.verbose:
+            print(
+                f"[PerformanceGatedEnvStagesCallback] stage "
+                f"{self._stage_index + 1} earned at {self.num_timesteps} "
+                f"steps ({reason}); applied at the end of this rollout."
+            )
+        self._record()
+
+    def _apply_pending_advance(self) -> None:
+        if self._pending_advance is None:
+            return
+        reason, self._pending_advance = self._pending_advance, None
+        self._advance_stage(reason)
+
+    def _on_rollout_end(self) -> None:
+        self._apply_pending_advance()
+
     def _on_step(self) -> bool:
         self._maybe_resume_updates()
         if self.info_eval.completed_evals == self._seen_evals:
@@ -777,9 +836,16 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         self._stage_eval_count += 1
         metrics = self.info_eval.last_metrics or {}
         promotion = self._promotion_earned(metrics)
+        if self._pending_advance is not None:
+            # A second evaluation inside the rollout an advance waits
+            # on (a cadence under one rollout, which train() refuses
+            # for on-policy runs) still measured the departing stage:
+            # it counts there, but the advance is already decided.
+            self._record()
+            return True
         on_final_stage = self._stage_index >= len(self.stages) - 1
         if promotion and not on_final_stage:
-            self._advance_stage("gate")
+            self._request_advance("gate")
             return True
         if (
             not on_final_stage
@@ -788,7 +854,7 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         ):
             self._budget_exhausted = True
             if self.stage_eval_budget_action == "advance":
-                self._advance_stage("stage_eval_budget")
+                self._request_advance("stage_eval_budget")
                 return True
             self.stop_reason = (
                 f"stage_eval_budget: stage {self._stage_index} recorded "

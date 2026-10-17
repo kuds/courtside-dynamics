@@ -335,6 +335,14 @@ def _evaluation_seeding(cfg: TrainConfig) -> dict[str, Any]:
     return seeding
 
 
+def _resolved_training(cfg: TrainConfig) -> dict[str, Any]:
+    """``config.json``'s ``resolved_training`` block (see
+    ``train.resolved_training_settings``, its single source)."""
+    from courtside_dynamics.training.train import resolved_training_settings
+
+    return resolved_training_settings(cfg)
+
+
 def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
     """Snapshot the resolved cfg + provenance to ``log_dir/config.json``.
 
@@ -406,6 +414,7 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
                         cfg.warm_start.reset_observation_indices
                     ),
                     "transfer_log_ent_coef": cfg.warm_start.transfer_log_ent_coef,
+                    "reset_log_std": cfg.warm_start.reset_log_std,
                     "expected_artifact_sha256": (
                         dict(cfg.warm_start.expected_artifact_sha256)
                         if cfg.warm_start.expected_artifact_sha256 is not None
@@ -524,7 +533,14 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             ),
             "final_info_eval": cfg.final_info_eval,
             "require_device": cfg.require_device,
+            "min_policy_updates_before_stop": cfg.min_policy_updates_before_stop,
+            "vec_env": cfg.vec_env,
         },
+        # What train() resolves beyond the configured fields: the reward
+        # normalization and the normalizer's return discount, the device
+        # asked of SB3 and why, an on-policy run's rollout and the
+        # evaluation floor of its early stops.
+        "resolved_training": _resolved_training(cfg),
     }
     out = artifact_path(log_dir, "config")
     with open(out, "w") as f:

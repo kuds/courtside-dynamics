@@ -1963,7 +1963,9 @@ def _plan_run_config(*, transfer_log_ent_coef=False, algo="sac"):
     ``algo="ppo"`` models the no-temperature warm start ``train()``
     records: the flag verbatim, ``log_ent_coef`` in neither
     ``transferred`` nor ``reset``, and no ``transferred_ent_coef``
-    (the flag is a documented no-op there).
+    (the flag was a documented no-op there; since PPO plan Step 9
+    ``train()`` refuses ``False`` for PPO, so only older runs record
+    it, and the validator must still read them).
     """
     transferred = ["policy.state_dict", "vec_normalize.obs_rms"]
     reset = [

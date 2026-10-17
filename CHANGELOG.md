@@ -18,6 +18,77 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **PPO runtime: stops counted in updates, matched normalizer gamma,
+  CPU default, warm-start exploration, subprocess workers (PPO plan
+  Steps 6–9 and 13, 2026-10-17).** No env stream changes, and every SAC
+  and DemoSAC training path is unchanged: the trainer digest against
+  `f920d8f` matches on the SAC, DemoSAC and PaddleTennis-SAC jobs.
+  The PPO job differs only in `eval_info.csv`, which gains its
+  `n_updates` rows.
+  - **Stops in policy updates (Step 6).** New
+    `TrainConfig.min_policy_updates_before_stop` (K, default 20). An
+    on-policy run floors the early-stop warm-ups (the headline
+    evaluator's patience warm-up, SB3's `StopTrainingOnNoModelImprovement`
+    `min_evals`, and `degenerate_min_evals`) at
+    ceil(K · n_steps · n_envs / eval_freq) evaluations, so no early stop
+    fires before K updates; a raised warm-up is printed, and 0 disables
+    the floor. Off-policy runs must leave the default (any other value
+    is refused). On the shipped PPO profiles only the degenerate stop
+    moves: on PaddleTennis, WallBallBootstrap, GoalRally and
+    TrueBaseline it first fires at evaluation 11 (43 updates) instead
+    of 6 (23) at 8 workers, and at 16 (31) instead of 6 (11) at 16;
+    WallBallBaseline's moves only at 16 workers (27 to 31 updates).
+  - **Rollout boundaries (Step 6).** Under an on-policy model,
+    `PerformanceGatedEnvStagesCallback` applies an earned advance at the
+    end of the rollout its evaluation landed in (`finalize` applies one
+    a stop left pending, so the stage history matches an off-policy
+    run's), and `LinearEnvAttrScheduleCallback` moves its value only at
+    rollout starts. Both detect the model at training start; off-policy
+    runs are unchanged.
+  - **`eval_info.csv` `n_updates` (Step 6).** On-policy runs write one
+    `n_updates` row per evaluation: SB3's `_n_updates` (the
+    `train/n_updates` count) behind the evaluated policy. CSV only, so
+    selection, the gate and TensorBoard never see it.
+  - **Normalizer gamma (Step 7).** An on-policy run that normalizes
+    rewards passes the model's gamma to all four `SelectiveVecNormalize`
+    constructions and sets it on a warm-start normalizer; the
+    pre-flight refuses a non-numeric gamma, and train() checks the
+    normalizer's against the built model. Every other run keeps
+    VecNormalize's 0.99 (SB3 updates `ret_rms` even with reward
+    normalization off, so an SAC run's pickled stats would move).
+  - **CPU by default (Step 8).** An on-policy run with SB3's MLP
+    actor-critic policy, no `model_kwargs["device"]` and
+    `require_device=None` is built with `device="cpu"`. CNN and
+    multi-input policies, explicit devices and the SAC family keep
+    their device.
+  - **Warm-start exploration (Step 9).** New
+    `WarmStartConfig.reset_log_std` (default False): an on-policy
+    target refills the transferred `policy.log_std` from its own
+    `log_std_init`. On-policy `transfer_log_ent_coef=False` (a no-op
+    before) is refused with a pointer to `reset_log_std`; the SAC
+    family refuses `reset_log_std`. On-policy provenance lists
+    `policy.log_std` as transferred or reset and records
+    `reset_log_std` (and `log_std_reset_value`). The humanoid notebook's
+    AUTO_ADVANCE passes `reset_log_std=True` and refuses, before any
+    stage trains, a package without it, which includes the pinned
+    `REPO_REF` until its bump.
+  - **Subprocess workers (Step 13).** New `TrainConfig.vec_env`
+    (`"dummy"` default, or `"subproc"`) for the training workers only.
+    `"subproc"` uses `train.DummyDtypeSubprocVecEnv`, which returns
+    DummyVecEnv's float32 rewards and observation-space dtypes (stock
+    `SubprocVecEnv` returns float64 rewards, which VecNormalize's return
+    statistics would see), and runs `check_env` on a throwaway instance
+    in the parent. A PPO run trains bit-identically either way.
+  - **`config.json`.** `train_config` records the two new fields and
+    `warm_start.reset_log_std`. A new top-level `resolved_training`
+    block records the resolved reward normalization, the normalizer's
+    gamma and its source, the device asked of SB3 and why, and an
+    on-policy run's rollout and evaluation floor. `resolved_model` is
+    unchanged.
+  - Snapshot: each of the 92 resolved entries gains the two new fields
+    at their defaults (`min_policy_updates_before_stop: 20`,
+    `vec_env: "dummy"`); nothing else changes, and the 4 refusals are
+    untouched.
 - **PPO starting profiles, on-policy pre-flight and quick test (PPO
   plan Steps 3–5, 2026-10-17).** No env stream or SAC-family change:
   every SAC and DemoSAC snapshot entry is byte-identical, and the

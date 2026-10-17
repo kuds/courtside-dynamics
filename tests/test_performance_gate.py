@@ -1173,3 +1173,107 @@ def test_stage_eval_budget_configuration_is_validated(overrides, match):
     finally:
         train_env.close()
         eval_env.close()
+
+
+# -- PPO plan Step 6: on-policy advances wait for the rollout's end ----------
+
+
+def _on_policy_model(train_env):
+    """A real (tiny) PPO on the gate's training env: the gate detects an
+    on-policy model by type."""
+    from stable_baselines3 import PPO
+
+    return PPO("MlpPolicy", train_env, n_steps=8, batch_size=16, device="cpu")
+
+
+def test_gate_applies_an_on_policy_advance_at_the_rollout_end():
+    train_env = make_vec_env(_StagedEnv, n_envs=2)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(train_env, info_eval, sustain_evals=1)
+        gate.model = _on_policy_model(train_env)  # type: ignore[assignment]
+        gate._on_training_start()
+        assert gate.advances_at_rollout_ends is True
+
+        # Earned at an evaluation inside the rollout: nothing moves yet.
+        info_eval.finish_eval({"bounce_count_ep_mean": 2.0})
+        assert gate._on_step() is True
+        for _ in range(3):  # the rollout's remaining steps
+            assert gate._on_step() is True
+        assert gate.stage_index == 0
+        assert _stage_values(train_env, "serve_vy_max") == [1.1, 1.1]
+        assert _stage_values(eval_env, "serve_vy_max") == [1.1]
+        assert info_eval.selection_resets == 0
+
+        # A second evaluation before the boundary measured the departing
+        # stage: counted there, but it cannot advance twice.
+        info_eval.finish_eval({"bounce_count_ep_mean": 2.0})
+        assert gate._on_step() is True
+        assert gate.stage_index == 0
+
+        gate._on_rollout_end()
+        assert gate.stage_index == 1
+        assert _stage_values(train_env, "serve_vy_max") == [1.4, 1.4]
+        assert _stage_values(eval_env, "serve_vy_max") == [1.4]
+        assert info_eval.selection_resets == 1
+        assert info_eval.context_metrics["curriculum_stage_index"] == 1.0
+        gate._on_rollout_end()  # nothing pending
+        assert gate.stage_index == 1
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_off_policy_gate_still_advances_at_the_evaluation_step():
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(train_env, info_eval, sustain_evals=1)
+        gate._on_training_start()
+        assert gate.advances_at_rollout_ends is False
+        info_eval.finish_eval({"bounce_count_ep_mean": 2.0})
+        gate._on_step()
+        assert gate.stage_index == 1
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def _history_after_stop(tmp_path, *, on_policy: bool) -> list[dict]:
+    """The last evaluation earns stage 1 and the run stops before the
+    rollout ends (no _on_rollout_end); training end finalizes."""
+    train_env = make_vec_env(_StagedEnv, n_envs=2)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        history = tmp_path / ("on" if on_policy else "off") / "stages.json"
+        gate = _gate(
+            train_env,
+            info_eval,
+            sustain_evals=1,
+            stage_history_path=str(history),
+        )
+        if on_policy:
+            gate.model = _on_policy_model(train_env)  # type: ignore[assignment]
+        gate._on_training_start()
+        info_eval.finish_eval({"bounce_count_ep_mean": 2.0})
+        gate._on_step()
+        gate._on_training_end()
+        assert gate.stage_index == 1
+        return json.loads(history.read_text())["stages"]
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_gate_finalize_applies_an_advance_the_stop_left_pending(tmp_path):
+    """Same history as an off-policy run, which applies the advance at
+    the very evaluation that earned it."""
+    on_policy = _history_after_stop(tmp_path, on_policy=True)
+    off_policy = _history_after_stop(tmp_path, on_policy=False)
+    assert [row["stage_index"] for row in on_policy] == [0, 1]
+    assert on_policy[0]["promoted"] is True
+    assert on_policy[0]["advance_reason"] == "gate"
+    assert on_policy == off_policy

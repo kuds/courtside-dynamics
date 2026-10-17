@@ -14,6 +14,7 @@ and hard to notice from a training curve alone:
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import importlib
 import json
@@ -3094,6 +3095,11 @@ def test_on_policy_preflight_accepts_whole_rollout_geometry(tmp_path):
             "must be a positive integer",
             id="non-integer-n-steps",
         ),
+        pytest.param(
+            {"model_kwargs": {"gamma": "0.995"}},
+            "gamma must be a number",
+            id="non-numeric-gamma",
+        ),
     ],
 )
 def test_on_policy_preflight_refuses_before_any_output(tmp_path, overrides, match):
@@ -3223,3 +3229,726 @@ def test_ppo_run_stopped_inside_its_first_rollout_reports_zero_updates(tmp_path)
     train(sac)
     # (Its Training Health section still lists train/n_updates.)
     assert "SB3 n_updates:" not in (sac_dir / "stage_summary.txt").read_text()
+
+
+# -- PPO plan Step 6: guards counted in policy updates ------------------------
+
+
+class _Untouched(gym.Wrapper):
+    """BallBalance plus a ``touches`` counter that never moves.
+
+    A provably dead task metric: headline selection on it is flat and
+    its guard key is always exactly zero, so an armed degenerate-signal
+    stop fires at the first evaluation it is allowed to.
+    """
+
+    difficulty = 0.0
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        return obs, {**info, "touches": 0}
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return obs, reward, terminated, truncated, {**info, "touches": 0}
+
+
+def _untouched_env() -> gym.Env:
+    return _Untouched(BallBalanceEnv(episode_len=12))
+
+
+def _dead_signal_cfg(log_dir, **overrides) -> TrainConfig:
+    """A PPO run whose degenerate stop is armed to fire at once: one
+    flat, guard-zero evaluation suffices, an evaluation ends every
+    8-step rollout (one worker), and the budget allows 20 of them."""
+    fields: dict[str, Any] = {
+        "env_fn": _untouched_env,
+        "algo": "PPO",
+        "log_dir": str(log_dir),
+        "n_envs": 1,
+        "seed": 0,
+        "total_timesteps": 160,
+        "eval_freq": 8,
+        "checkpoint_freq": 0,
+        "n_eval_episodes": 1,
+        "record_video": False,
+        "headline_key": "touches",
+        "best_metric_keys": ("touches_ep_mean",),
+        "early_stop_degenerate_evals": 1,
+        "degenerate_guard_keys": ("touches_ep_mean",),
+        "model_kwargs": {"n_steps": 8, "batch_size": 8, "n_epochs": 1},
+    }
+    fields.update(overrides)
+    return TrainConfig(**fields)
+
+
+def _eval_info_series(log_dir, metric) -> list[tuple[int, float]]:
+    with open(os.path.join(log_dir, "metrics", "eval_info.csv")) as stream:
+        rows = list(csv.DictReader(stream))
+    return [
+        (int(row["timestep"]), float(row["value"]))
+        for row in rows
+        if row["metric"] == metric
+    ]
+
+
+def test_policy_update_floor_counts_whole_rollouts(tmp_path):
+    from courtside_dynamics.training.train import _policy_update_floor_evals
+
+    # Rollout 4 x 64 = 256 env steps, an evaluation every 2 rollouts:
+    # 20 updates take ceil(20 * 256 / 512) = 10 evaluations.
+    assert _policy_update_floor_evals(_on_policy_cfg(tmp_path)) == 10
+    assert (
+        _policy_update_floor_evals(
+            _on_policy_cfg(tmp_path, min_policy_updates_before_stop=3)
+        )
+        == 2
+    )
+    assert (
+        _policy_update_floor_evals(
+            _on_policy_cfg(tmp_path, min_policy_updates_before_stop=0)
+        )
+        == 0
+    )
+    # SB3's default rollout (2,048 per worker) when n_steps is not given.
+    default_rollout = _on_policy_cfg(
+        tmp_path, model_kwargs={}, eval_freq=8_192, n_envs=4
+    )
+    default_rollout.model_kwargs.pop("n_steps")
+    assert _policy_update_floor_evals(default_rollout) == 20
+    # The off-policy family has no rollout to count in.
+    assert _policy_update_floor_evals(_on_policy_cfg(tmp_path, algo="SAC")) == 0
+
+
+@pytest.mark.parametrize(
+    "floor_updates, stop_eval, updates_at_stop",
+    [
+        # The audit's reproduction: with no floor the stop fires at the
+        # first evaluation, before any update ran, and the run still
+        # reports "completed".
+        pytest.param(0, 1, 0, id="no-floor"),
+        # Floored at 3 updates (3 evaluations at one rollout each): the
+        # guard counts from evaluation 4, which follows the 3rd update.
+        pytest.param(3, 4, 3, id="floor-3"),
+    ],
+)
+def test_ppo_degenerate_guard_cannot_fire_before_k_policy_updates(
+    tmp_path, capsys, floor_updates, stop_eval, updates_at_stop
+):
+    log_dir = tmp_path / "run"
+    model = train(
+        _dead_signal_cfg(log_dir, min_policy_updates_before_stop=floor_updates)
+    )
+    # n_epochs=1 without target_kl: SB3's count is one per rollout.
+    assert model._n_updates == updates_at_stop >= floor_updates
+    summary = (log_dir / "stage_summary.txt").read_text()
+    assert "degenerate_signal" in summary
+    # Every evaluation records the update count behind it; the last one
+    # is the stopping evaluation.
+    n_updates = _eval_info_series(log_dir, "n_updates")
+    assert [step for step, _ in n_updates] == [
+        8 * index for index in range(1, stop_eval + 1)
+    ]
+    assert [value for _, value in n_updates] == [
+        float(index) for index in range(stop_eval)
+    ]
+    assert n_updates[-1][1] >= floor_updates
+    config = json.loads((log_dir / "config.json").read_text())
+    assert config["train_config"]["min_policy_updates_before_stop"] == floor_updates
+    assert config["resolved_training"]["rollout_env_steps"] == 8
+    assert config["resolved_training"]["policy_update_floor_evals"] == floor_updates
+    raised = "degenerate_min_evals raised from 0 to 3 evaluations"
+    assert (raised in capsys.readouterr().out) is (floor_updates > 0)
+
+
+def _recorded_selection_kwargs(monkeypatch, cfg) -> dict[str, Any]:
+    """The kwargs train() builds the selecting evaluator with (the run
+    is stopped at its first step: only the wiring matters)."""
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+
+    train_module = importlib.import_module("courtside_dynamics.training.train")
+    built: list[dict[str, Any]] = []
+
+    class _Recording(InfoDictEvalCallback):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            built.append(kwargs)
+
+    monkeypatch.setattr(train_module, "InfoDictEvalCallback", _Recording)
+    train(cfg)
+    return built[0]
+
+
+def test_sac_stop_warmups_are_wired_as_before(tmp_path, monkeypatch):
+    """The floor is on-policy only: an SAC run's warm-ups are today's,
+    including the ones derived from a schedule, and its evaluations
+    record no update count."""
+    cfg = _dead_signal_cfg(
+        tmp_path / "run",
+        algo="SAC",
+        eval_freq=100,
+        total_timesteps=1_000,
+        early_stop_degenerate_evals=2,
+        early_stop_patience=3,
+        env_attr_schedules=(
+            {
+                "attr_name": "difficulty",
+                "start_value": 0.0,
+                "end_value": 1.0,
+                "hold_until_timesteps": 250,
+                "end_timesteps": 650,
+            },
+        ),
+        model_kwargs={"learning_starts": 4, "buffer_size": 64},
+        extra_callbacks=(_StopAtFirstStep(),),
+    )
+    kwargs = _recorded_selection_kwargs(monkeypatch, cfg)
+    assert kwargs["degenerate_stop_evals"] == 2
+    # ceil(hold 250 / eval 100) = 3; patience max(3, ceil(650 / 100)) = 7.
+    assert kwargs["degenerate_min_evals"] == 3
+    assert kwargs["early_stop_patience"] == 3
+    assert kwargs["early_stop_min_evals"] == 7
+    assert kwargs["record_n_updates"] is False
+    config = json.loads((tmp_path / "run" / "config.json").read_text())
+    assert config["resolved_training"]["policy_update_floor_evals"] is None
+
+
+def test_ppo_stop_warmups_are_floored_in_policy_updates(tmp_path, monkeypatch):
+    # Rollout 8, an evaluation per rollout: 20 updates = 20 evaluations,
+    # above both the schedule-derived and the configured warm-ups.
+    cfg = _dead_signal_cfg(
+        tmp_path / "run",
+        early_stop_patience=3,
+        env_attr_schedules=(
+            {
+                "attr_name": "difficulty",
+                "start_value": 0.0,
+                "end_value": 1.0,
+                "hold_until_timesteps": 24,
+                "end_timesteps": 64,
+            },
+        ),
+        extra_callbacks=(_StopAtFirstStep(),),
+    )
+    kwargs = _recorded_selection_kwargs(monkeypatch, cfg)
+    assert kwargs["degenerate_min_evals"] == 20
+    assert kwargs["early_stop_min_evals"] == 20
+    assert kwargs["record_n_updates"] is True
+
+
+def test_reward_selected_ppo_patience_warmup_is_floored(tmp_path, monkeypatch):
+    """Without headline selection SB3's StopTrainingOnNoModelImprovement
+    owns the patience; its min_evals is floored the same way, an SAC
+    run's is the patience itself."""
+    train_module = importlib.import_module("courtside_dynamics.training.train")
+    built: list[dict[str, Any]] = []
+
+    class _Recording(train_module.StopTrainingOnNoModelImprovement):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            built.append(kwargs)
+
+    monkeypatch.setattr(train_module, "StopTrainingOnNoModelImprovement", _Recording)
+    for algo, model_kwargs in (
+        ("PPO", {"n_steps": 8, "batch_size": 8, "n_epochs": 1}),
+        ("SAC", {"learning_starts": 4, "buffer_size": 64}),
+    ):
+        train(
+            _dead_signal_cfg(
+                tmp_path / algo,
+                algo=algo,
+                headline_key=None,
+                best_metric_keys=None,
+                early_stop_degenerate_evals=0,
+                degenerate_guard_keys=(),
+                info_dict_eval=False,
+                early_stop_patience=2,
+                model_kwargs=model_kwargs,
+                extra_callbacks=(_StopAtFirstStep(),),
+            )
+        )
+    ppo, sac = built
+    assert ppo["min_evals"] == 20
+    assert sac["min_evals"] == 2
+    assert ppo["max_no_improvement_evals"] == sac["max_no_improvement_evals"] == 2
+
+
+def test_sac_eval_info_csv_has_no_update_rows(tmp_path):
+    train(_merged_eval_cfg(tmp_path, total_timesteps=200))
+    assert _eval_info_series(tmp_path, "steps_alive_ep_mean")
+    assert not _eval_info_series(tmp_path, "n_updates")
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        pytest.param(
+            {"min_policy_updates_before_stop": -1},
+            "must be a nonnegative integer",
+            id="negative",
+        ),
+        pytest.param(
+            {"min_policy_updates_before_stop": True},
+            "must be a nonnegative integer",
+            id="bool",
+        ),
+        pytest.param(
+            {"algo": "SAC", "min_policy_updates_before_stop": 5},
+            "applies to on-policy runs only",
+            id="sac-non-default",
+        ),
+        pytest.param({"vec_env": "threads"}, "vec_env must be one of", id="vec-env"),
+    ],
+)
+def test_worker_and_update_floor_settings_refuse_before_any_output(
+    tmp_path, overrides, match
+):
+    log_dir = tmp_path / "run"
+    cfg = _on_policy_cfg(log_dir, **overrides)
+    if cfg.algo != "PPO":
+        cfg.model_kwargs = {}
+    with pytest.raises(ValueError, match=match):
+        train(cfg)
+    assert not log_dir.exists()
+
+
+def test_schedules_move_only_at_ppo_rollout_starts(tmp_path):
+    """End to end: every 8-step rollout trains at one scheduled value,
+    and the values still follow the schedule's clock."""
+    seen: list[tuple[int, float]] = []
+
+    class _Recorder(BaseCallback):
+        def _on_step(self) -> bool:
+            value = self.training_env.env_method(
+                "get_wrapper_attr", "difficulty"
+            )[0]
+            seen.append((self.num_timesteps, float(value)))
+            return True
+
+    log_dir = tmp_path / "run"
+    train(
+        _dead_signal_cfg(
+            log_dir,
+            total_timesteps=48,
+            eval_freq=48,
+            early_stop_degenerate_evals=0,
+            degenerate_guard_keys=(),
+            env_attr_schedules=(
+                {
+                    "attr_name": "difficulty",
+                    "start_value": 0.0,
+                    "end_value": 1.0,
+                    "hold_until_timesteps": 0,
+                    "end_timesteps": 40,
+                },
+            ),
+            extra_callbacks=(_Recorder(),),
+        )
+    )
+    rollouts = [seen[index : index + 8] for index in range(0, 48, 8)]
+    values = [{value for _, value in rollout} for rollout in rollouts]
+    assert all(len(rollout_values) == 1 for rollout_values in values)
+    # The value at each rollout start: value_at(start timestep).
+    assert [rollout_values.pop() for rollout_values in values] == [
+        0.0,
+        0.2,
+        0.4,
+        0.6,
+        0.8,
+        1.0,
+    ]
+
+
+# -- PPO plan Step 7: the reward normalizer discounts at the model's gamma ----
+
+
+def _pickled_gamma(path) -> float:
+    import pickle
+
+    with open(path, "rb") as stream:
+        return float(pickle.load(stream).gamma)
+
+
+@pytest.mark.parametrize(
+    "algo, normalize_reward, expected_gamma, source",
+    [
+        pytest.param("PPO", True, 0.995, "model_gamma", id="ppo-normalized"),
+        # Return statistics unused: VecNormalize's default stands.
+        pytest.param("PPO", False, 0.99, "vec_normalize_default", id="ppo-raw"),
+        # SB3 updates ret_rms even without reward normalization, so the
+        # SAC family's pickled normalizer must keep its 0.99.
+        pytest.param("SAC", None, 0.99, "vec_normalize_default", id="sac"),
+    ],
+)
+def test_reward_normalizer_gamma_follows_an_on_policy_model(
+    tmp_path, algo, normalize_reward, expected_gamma, source
+):
+    model_kwargs = (
+        {"n_steps": 8, "batch_size": 8, "n_epochs": 1, "gamma": 0.995}
+        if algo == "PPO"
+        else {"learning_starts": 4, "buffer_size": 64, "gamma": 0.995}
+    )
+    log_dir = tmp_path / "run"
+    train(
+        _dead_signal_cfg(
+            log_dir,
+            algo=algo,
+            total_timesteps=16,
+            eval_freq=8,
+            early_stop_degenerate_evals=0,
+            degenerate_guard_keys=(),
+            normalize_reward=normalize_reward,
+            model_kwargs=model_kwargs,
+        )
+    )
+    assert _pickled_gamma(log_dir / "model" / "vec_normalize.pkl") == expected_gamma
+    assert (
+        _pickled_gamma(log_dir / "model" / "best_vec_normalize.pkl")
+        == expected_gamma
+    )
+    resolved = json.loads((log_dir / "config.json").read_text())["resolved_training"]
+    assert resolved["normalize_reward_resolved"] is (algo == "PPO" and normalize_reward)
+    assert resolved["vec_normalize"] is True
+    assert resolved["vec_normalize_gamma"] == expected_gamma
+    assert resolved["vec_normalize_gamma_source"] == source
+
+
+def test_warm_start_normalizer_takes_the_target_gamma(tmp_path):
+    source_dir, env_fn, _ = _make_ppo_warm_start_source(tmp_path)
+    target_cfg = TrainConfig(
+        env_fn=env_fn,
+        algo="PPO",
+        log_dir=str(tmp_path / "target"),
+        n_envs=1,
+        normalize_reward=True,
+        normalize_obs_excluded_indices=(0,),
+        warm_start=WarmStartConfig(source_dir),
+    )
+    artifacts = _prepare_warm_start(target_cfg)
+    assert artifacts is not None
+    for gamma, expected in ((0.995, 0.995), (None, 0.99)):
+        loaded = _load_warm_start_normalizer(
+            make_vec_env(env_fn, n_envs=1, seed=3),
+            artifacts,
+            target_cfg,
+            norm_reward=True,
+            gamma=gamma,
+        )
+        try:
+            # None keeps what the source pickled (VecNormalize's 0.99).
+            assert loaded.gamma == expected
+        finally:
+            loaded.close()
+
+
+# -- PPO plan Step 8: on-policy MLP runs train on the CPU ---------------------
+
+
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        pytest.param({}, ("cpu", "on_policy_mlp_cpu_default"), id="ppo-mlp"),
+        pytest.param(
+            {"policy": "CnnPolicy"}, ("auto", "sb3_default"), id="ppo-cnn"
+        ),
+        pytest.param(
+            {"policy": "MultiInputPolicy"},
+            ("auto", "sb3_default"),
+            id="ppo-multi-input",
+        ),
+        pytest.param(
+            {"require_device": "cuda"}, ("auto", "sb3_default"), id="ppo-require-cuda"
+        ),
+        pytest.param(
+            {"model_kwargs": {"device": "cuda:1"}},
+            ("cuda:1", "model_kwargs"),
+            id="ppo-explicit",
+        ),
+        pytest.param({"algo": "SAC"}, ("auto", "sb3_default"), id="sac"),
+        pytest.param({"algo": "DEMOSAC"}, ("auto", "sb3_default"), id="demosac"),
+    ],
+)
+def test_device_request_defaults_on_policy_mlp_runs_to_cpu(
+    tmp_path, overrides, expected
+):
+    from courtside_dynamics.training.train import _device_request
+
+    assert _device_request(_on_policy_cfg(tmp_path, **overrides)) == expected
+
+
+def test_ppo_trains_on_cpu_when_cuda_is_available(tmp_path, monkeypatch):
+    """With CUDA reported available, SB3's "auto" would place the policy
+    on the GPU (on this CPU-only build, it would crash moving there):
+    the on-policy MLP default keeps PPO on the CPU, while an SAC run
+    still asks SB3 for "auto"."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    train_module = importlib.import_module("courtside_dynamics.training.train")
+    built_kwargs: dict[str, dict[str, Any]] = {}
+    real_build = train_module._build_algo
+
+    class _BuildStopped(Exception):
+        pass
+
+    def recording_build(name, env, log_dir, *, policy="MlpPolicy", **kwargs):
+        built_kwargs[name.upper()] = dict(kwargs)
+        if name.upper() == "SAC":
+            # SB3's "auto" would now pick the (absent) GPU: stop here.
+            raise _BuildStopped
+        return real_build(name, env, log_dir, policy=policy, **kwargs)
+
+    monkeypatch.setattr(train_module, "_build_algo", recording_build)
+    log_dir = tmp_path / "ppo"
+    model = train(
+        _dead_signal_cfg(
+            log_dir,
+            total_timesteps=8,
+            early_stop_degenerate_evals=0,
+            degenerate_guard_keys=(),
+        )
+    )
+    assert model.device.type == "cpu"
+    assert built_kwargs["PPO"]["device"] == "cpu"
+    config = json.loads((log_dir / "config.json").read_text())
+    assert config["resolved_training"]["device_request"] == "cpu"
+    assert (
+        config["resolved_training"]["device_request_source"]
+        == "on_policy_mlp_cpu_default"
+    )
+    assert config["resolved_model"]["device"] == "cpu"
+    # The caller's model_kwargs are recorded as given.
+    assert "device" not in config["train_config"]["model_kwargs"]
+
+    with pytest.raises(_BuildStopped):
+        train(
+            _dead_signal_cfg(
+                tmp_path / "sac",
+                algo="SAC",
+                total_timesteps=8,
+                early_stop_degenerate_evals=0,
+                degenerate_guard_keys=(),
+                model_kwargs={"learning_starts": 4, "buffer_size": 64},
+            )
+        )
+    assert "device" not in built_kwargs["SAC"]
+
+
+# -- PPO plan Step 9: warm-start exploration ---------------------------------
+
+
+def test_warm_start_config_validates_reset_log_std(tmp_path):
+    assert WarmStartConfig(tmp_path).reset_log_std is False
+    with pytest.raises(TypeError, match="reset_log_std must be a bool"):
+        WarmStartConfig(tmp_path, reset_log_std=1)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("reset_log_std", [False, True])
+def test_ppo_warm_start_transfers_or_resets_log_std(tmp_path, reset_log_std):
+    source_dir, env_fn, source_state = _make_ppo_warm_start_source(tmp_path)
+    # The fixture moved the policy's first parameter, log_std, to 0.125.
+    assert torch.equal(
+        source_state["log_std"], torch.full_like(source_state["log_std"], 0.125)
+    )
+    capture = _CaptureWarmStart()
+    target_dir = tmp_path / "target"
+    train(
+        TrainConfig(
+            env_fn=env_fn,
+            algo="PPO",
+            total_timesteps=8,
+            log_dir=str(target_dir),
+            n_envs=1,
+            seed=13,
+            eval_freq=8,
+            checkpoint_freq=0,
+            record_video=False,
+            info_dict_eval=False,
+            n_eval_episodes=1,
+            normalize_reward=True,
+            normalize_obs_excluded_indices=(0,),
+            warm_start=WarmStartConfig(source_dir, reset_log_std=reset_log_std),
+            model_kwargs={
+                "n_steps": 8,
+                "batch_size": 4,
+                "n_epochs": 1,
+                "policy_kwargs": {"log_std_init": -1.5},
+            },
+            extra_callbacks=(capture,),
+        )
+    )
+    assert capture.policy_state is not None
+    expected_log_std = (
+        torch.full_like(source_state["log_std"], -1.5)
+        if reset_log_std
+        else source_state["log_std"]
+    )
+    torch.testing.assert_close(capture.policy_state["log_std"], expected_log_std)
+    # Every other tensor is the source's.
+    for name, expected in source_state.items():
+        if name != "log_std":
+            torch.testing.assert_close(capture.policy_state[name], expected)
+
+    config = json.loads((target_dir / "config.json").read_text())
+    assert config["train_config"]["warm_start"]["reset_log_std"] is reset_log_std
+    initialization = config["initialization"]
+    assert initialization["reset_log_std"] is reset_log_std
+    assert ("policy.log_std" in initialization["reset"]) is reset_log_std
+    assert ("policy.log_std" in initialization["transferred"]) is not reset_log_std
+    if reset_log_std:
+        assert initialization["log_std_reset_value"] == -1.5
+    else:
+        assert "log_std_reset_value" not in initialization
+
+
+def test_ppo_warm_start_refuses_a_temperature_skip(tmp_path):
+    """PPO has no temperature: transfer_log_ent_coef=False used to be a
+    silent no-op; it is refused, pointing at reset_log_std."""
+    log_dir = tmp_path / "run"
+    cfg = _on_policy_cfg(
+        log_dir,
+        warm_start=WarmStartConfig(tmp_path / "missing", transfer_log_ent_coef=False),
+    )
+    with pytest.raises(ValueError, match=r"reset_log_std=True"):
+        train(cfg)
+    assert not log_dir.exists()
+
+
+@pytest.mark.parametrize("algo", ["SAC", "DEMOSAC"])
+def test_sac_family_warm_start_refuses_reset_log_std(tmp_path, algo):
+    log_dir = tmp_path / "run"
+    cfg = _on_policy_cfg(
+        log_dir,
+        algo=algo,
+        warm_start=WarmStartConfig(tmp_path / "missing", reset_log_std=True),
+    )
+    cfg.model_kwargs = {}
+    with pytest.raises(ValueError, match="reset_log_std applies to on-policy"):
+        train(cfg)
+    assert not log_dir.exists()
+
+
+# -- PPO plan Step 13: opt-in subprocess training workers --------------------
+
+
+def _rollout(vec_env, steps: int, seed: int) -> list[tuple[Any, ...]]:
+    rng = np.random.default_rng(seed)
+    out: list[tuple[Any, ...]] = [(vec_env.reset(),)]
+    for _ in range(steps):
+        actions = rng.uniform(
+            -1.0, 1.0, size=(vec_env.num_envs, *vec_env.action_space.shape)
+        ).astype(np.float32)
+        obs, rewards, dones, infos = vec_env.step(actions)
+        terminal = [info.get("terminal_observation") for info in infos]
+        out.append((obs, rewards, dones, terminal))
+    return out
+
+
+def test_subproc_workers_return_exactly_what_dummy_workers_return():
+    """Observations, rewards (float32, as DummyVecEnv's buffers hold
+    them), dones and terminal observations are identical step for step,
+    across episode ends and auto-resets."""
+    from stable_baselines3.common.vec_env import SubprocVecEnv
+
+    from courtside_dynamics.training.train import DummyDtypeSubprocVecEnv
+
+    def env_fn():
+        return BallBalanceEnv(episode_len=12)
+
+    dummy = make_vec_env(env_fn, n_envs=2, seed=0)
+    try:
+        expected = _rollout(dummy, 40, seed=1)
+    finally:
+        dummy.close()
+    subproc = make_vec_env(
+        env_fn, n_envs=2, seed=0, vec_env_cls=DummyDtypeSubprocVecEnv
+    )
+    try:
+        actual = _rollout(subproc, 40, seed=1)
+    finally:
+        subproc.close()
+    assert sum(bool(np.any(step[2])) for step in expected[1:]) >= 3
+    (reset_expected,), (reset_actual,) = expected[0], actual[0]
+    assert reset_actual.dtype == reset_expected.dtype
+    np.testing.assert_array_equal(reset_actual, reset_expected)
+    for (obs, rewards, dones, terminal), (obs2, rewards2, dones2, terminal2) in zip(
+        expected[1:], actual[1:], strict=True
+    ):
+        assert obs2.dtype == obs.dtype and rewards2.dtype == rewards.dtype
+        np.testing.assert_array_equal(obs2, obs)
+        np.testing.assert_array_equal(rewards2, rewards)
+        np.testing.assert_array_equal(dones2, dones)
+        for left, right in zip(terminal, terminal2, strict=True):
+            assert (left is None) == (right is None)
+            if left is not None:
+                np.testing.assert_array_equal(right, left)
+    # Why the subclass exists: stock SubprocVecEnv stacks the workers'
+    # Python-float rewards as float64, which VecNormalize's return
+    # statistics would then see.
+    stock = make_vec_env(env_fn, n_envs=2, seed=0, vec_env_cls=SubprocVecEnv)
+    try:
+        stock_rewards = _rollout(stock, 1, seed=1)[1][1]
+    finally:
+        stock.close()
+    assert stock_rewards.dtype == np.float64
+    np.testing.assert_array_equal(stock_rewards.astype(np.float32), expected[1][1])
+
+
+def test_ppo_trains_identically_on_subproc_workers(tmp_path):
+    """A whole PPO run (reward normalization on) on subprocess workers
+    equals the in-process run: policy, normalizer and monitor logs."""
+    import pickle
+
+    class _WorkerKind(BaseCallback):
+        def _on_training_start(self) -> None:
+            self.kind = type(self.training_env.unwrapped).__name__
+
+        def _on_step(self) -> bool:
+            return True
+
+    runs = {}
+    kinds = {}
+    for vec_env in ("dummy", "subproc"):
+        log_dir = tmp_path / vec_env
+        worker_kind = _WorkerKind()
+        model = train(
+            _dead_signal_cfg(
+                log_dir,
+                n_envs=2,
+                total_timesteps=64,
+                eval_freq=32,
+                early_stop_degenerate_evals=0,
+                degenerate_guard_keys=(),
+                vec_env=vec_env,
+                model_kwargs={"n_steps": 16, "batch_size": 16, "n_epochs": 2},
+                extra_callbacks=(worker_kind,),
+            )
+        )
+        kinds[vec_env] = worker_kind.kind
+        with open(log_dir / "model" / "vec_normalize.pkl", "rb") as stream:
+            normalizer = pickle.load(stream)
+        monitors = {}
+        for path in sorted((log_dir / "metrics" / "monitor").glob("*.monitor.csv")):
+            with open(path) as stream:
+                stream.readline()
+                monitors[path.name] = [
+                    {k: v for k, v in row.items() if k != "t"}
+                    for row in csv.DictReader(stream)
+                ]
+        runs[vec_env] = (
+            {k: v.detach().clone() for k, v in model.policy.state_dict().items()},
+            normalizer,
+            monitors,
+            json.loads((log_dir / "config.json").read_text()),
+        )
+    dummy_state, dummy_norm, dummy_monitors, _ = runs["dummy"]
+    sub_state, sub_norm, sub_monitors, config = runs["subproc"]
+    assert dummy_state.keys() == sub_state.keys()
+    for name in dummy_state:
+        assert torch.equal(dummy_state[name], sub_state[name]), name
+    for stats in ("obs_rms", "ret_rms"):
+        left, right = getattr(dummy_norm, stats), getattr(sub_norm, stats)
+        np.testing.assert_array_equal(left.mean, right.mean)
+        np.testing.assert_array_equal(left.var, right.var)
+        assert left.count == right.count
+    assert dummy_monitors and dummy_monitors == sub_monitors
+    assert kinds == {"dummy": "DummyVecEnv", "subproc": "DummyDtypeSubprocVecEnv"}
+    assert config["train_config"]["vec_env"] == "subproc"
