@@ -718,6 +718,78 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### The PPO verifier pass: a deployable best states its updates, and nothing fails quietly — *implemented (unreleased, 2026-10-17)*
+Verifiers re-ran the phase-2 PPO commits (since `f920d8f`). The fixes
+keep every env stream and SAC-family training path unchanged (trainer
+digest: the SAC, DemoSAC and PaddleTennis-SAC jobs match).
+- **empirical-2, the other half.** Step 5 ended zero-update runs, but
+  `best_model.zip` could still be the untrained initial policy: an
+  evaluation runs before its rollout's update, and the quick test
+  evaluated every rollout, so evaluation 1 scored the initial
+  weights. On BallBalance that was the best score (438 at 4,096 steps,
+  then down to 206), and the summary said "deploy best_model.zip".
+  Two changes. The record and the warning: `best_model_meta.json`
+  carries the selecting evaluation's SB3 `n_updates` (top level, so
+  selection, the gate and TensorBoard still never see it), the
+  summary's "Best eval" and "Best model" lines print it, and a
+  `best_model.zip` selected at 0 is flagged on its line and printed.
+  Which checkpoint `best_model.zip` holds follows the selector:
+  `best_model_meta.json` under headline selection, the reward
+  stream's best otherwise (read from `eval_info.csv`'s `n_updates` row
+  at that step). And the cause: the quick test fits `n_steps` to
+  `eval_freq // (2 · n_envs)` and rounds its preset evaluation cadence
+  to at least two rollouts, so evaluation 1 follows one update (256 at
+  8 workers, 128 at 16; one worker unchanged at 2,048). Halving the
+  rollout, rather than doubling the cadence, keeps the quick test's
+  six evaluations and doubles its updates. Measured here: the
+  BallBalance quick test trains 13 rollouts (SB3 n_updates 130), its
+  best is evaluation 1 at 10 updates (385), and it still regresses
+  after it (to 133), which the summary now reports without the
+  untrained caveat; WallBallTrueBaseline selects at 10 updates.
+- **The last update reaches progress.csv.** SB3's on-policy `learn()`
+  dumps the logger before each `train()`, so every update's `train/*`
+  row is written with the next rollout's, and the final update's never
+  is. `train()` dumps once more after `learn()` returns (not after an
+  interrupt or crash) when a `train/*` value is pending, with
+  `time/total_timesteps` as the row's x value, as SB3's EvalCallback
+  does. Labelling the block "as of the last logged update" was the
+  alternative; the dump makes the health block, the flags and
+  `train/n_updates` agree with SB3's count instead.
+- **Epochs per update.** With gSDE, `target_kl` ended every update
+  inside its first epoch (PaddleTennis: one SB3 update per rollout at
+  `n_epochs` 10; humanoid Stage 0: 13 over 13 at 5) while the mean
+  approx_kl, averaged only over the minibatches that ran, sat under
+  the flag. The steps of the cumulative `train/n_updates` series are
+  the per-update epoch counts; a last-quarter mean below half of
+  `n_epochs` is flagged. The PaddleTennis quick test on the new
+  geometry raises it: 23 SB3 updates over 13 rollouts, 1.77 epochs per
+  update of 10. Calibrating these profiles' learning rate against
+  `target_kl` joins the plan's open probing item.
+- **Fail loud, by family.** A negative `degenerate_min_evals` used to
+  crash an SAC run inside the update-floor print (`f"{None:,}"`) after
+  `config.json`, and a PPO run accepted it; the callback-config
+  pre-flight now refuses a non-integer or negative value, and the floor
+  helper passes a warm-up through untouched when there is no floor.
+  `finalize(salvage=False)`: a pending advance that fails on a normal
+  training end raises after the stage history is written, while the
+  interrupt and crash salvage (which still have a model to save) only
+  report it. The gate's `stage_eval_budget` stop counts a stage's own
+  evaluations with no warm-up the floor could raise, so the pre-flight
+  refuses a stop budget at or below the floor on a multi-stage gate
+  (narrowing the docstring's "no early stop before K updates" was the
+  alternative). An actor-critic `net_arch` dict may name only `pi` and
+  `vf`. A checkpoint outside any run is checked against its zip's
+  recorded policy class (deserialized with SB3's own `json_to_data`)
+  before loading.
+- **Accepted as documented, no change.** Steps 6 and 13 added two
+  `TrainConfig` fields at their defaults to every snapshot entry, SAC
+  ones included; the verifier confirmed the change is purely additive
+  (no removed or changed value outside the documented humanoid SAC
+  entries). The humanoid notebook's default run refuses the pinned
+  `REPO_REF` (`b9585e2`, before `reset_log_std`) by design until the
+  week-1 pin bump, which is now a merge prerequisite in the plan's
+  Open list.
+
 ### PPO is first-class: loaders follow the record, runs carry their family, and two learning bars guard it — *implemented (unreleased, 2026-10-17)*
 PPO plan Steps 10–12 and 14 (`design_ppo_first_class_20261016.md`,
 static-6/9/10/11, empirical-3, tests-gaps-9/13), which close the plan.
@@ -873,7 +945,8 @@ and a warm start that carried the source's exploration noise.
   and no `target_kl` cut it reads E × rollouts trained. A second row
   for rollouts was left out: it follows from the timestep. The row is
   written to the CSV only, not added to the metrics, so selection,
-  the gate, TensorBoard and `best_model_meta.json` are unchanged.
+  the gate and TensorBoard are unchanged (`best_model_meta.json`
+  gained a top-level `n_updates` in the verifier pass).
 - **Rollout boundaries, detected not configured.** The gate and the
   schedule callback check `isinstance(model, OnPolicyAlgorithm)` at
   training start; there is no knob that could put a PPO run back on
@@ -882,8 +955,9 @@ and a warm start that carried the source's exploration noise.
   evaluation end a rollout, so no step separates the two; the deferral
   makes the callback correct by construction, also when it is wired by
   hand. When another callback stops the run at the earning
-  evaluation, `finalize` applies the pending advance (failures are
-  reported, not raised: the crash salvage calls it too), so
+  evaluation, `finalize` applies the pending advance (a failure
+  raises on a normal training end and is only reported under the
+  salvage paths, since the verifier pass), so
   `curriculum_stages.json` reads as an off-policy run's would.
   Schedules apply `value_at(start)` at each rollout start.
 - **Normalizer gamma, on-policy with reward normalization only.** SB3

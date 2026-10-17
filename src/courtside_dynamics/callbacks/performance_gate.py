@@ -618,15 +618,16 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
             stream.write("\n")
         os.replace(temporary, self.stage_history_path)
 
-    def finalize(self) -> None:
+    def finalize(self, *, salvage: bool = False) -> None:
         """Close out the current stage and write the history -- once.
 
         Called from ``_on_training_end`` on a normal ``learn()`` exit
-        and from train()'s KeyboardInterrupt salvage path (SB3 does not
-        run ``on_training_end`` when an exception propagates out of the
-        training loop, and the whole point of the salvage path is that
-        the run dir stays self-describing). Idempotent so the interrupt
-        path plus a later normal close cannot append a duplicate row.
+        and from train()'s KeyboardInterrupt and crash salvage paths
+        (SB3 does not run ``on_training_end`` when an exception
+        propagates out of the training loop, and the whole point of the
+        salvage path is that the run dir stays self-describing), which
+        pass ``salvage=True``. Idempotent so the interrupt path plus a
+        later normal close cannot append a duplicate row.
 
         The final stage's best is also the run-level canonical best;
         duplicating it under ``stage_bests/`` keeps the per-stage index
@@ -640,12 +641,16 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         self._finalized = True
         # An advance earned by the run's last evaluation but stopped
         # before its rollout ended: an off-policy run would already
-        # have applied it, so apply it now for the same history. Only
-        # the history depends on it at this point, so a failure (the
-        # crash salvage path calls this too) is reported, not raised.
+        # have applied it, so apply it now for the same history. If it
+        # fails, the history is still closed and written without it;
+        # then a normal training end raises (a stage application that
+        # fails is a broken run, not a footnote), while a salvage
+        # reports it and carries on saving what it can.
+        failure: Exception | None = None
         try:
             self._apply_pending_advance()
         except Exception as error:
+            failure = error
             print(
                 f"[PerformanceGatedEnvStagesCallback] could not apply the "
                 f"advance pending at training end: {error!r}; closing the "
@@ -653,6 +658,8 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
             )
         self._close_stage_record(promoted=False)
         self._write_stage_history()
+        if failure is not None and not salvage:
+            raise failure
 
     def _on_training_end(self) -> None:
         self.finalize()

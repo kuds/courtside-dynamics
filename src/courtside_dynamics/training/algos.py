@@ -11,6 +11,8 @@ import difflib
 import inspect
 import json
 import os
+import warnings
+import zipfile
 from collections.abc import Mapping
 from typing import Any
 
@@ -18,6 +20,8 @@ from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
+from stable_baselines3.common.policies import ActorCriticPolicy
+from stable_baselines3.common.save_util import json_to_data
 
 from courtside_dynamics.training.artifacts import RUN_LAYOUT, locate_artifact
 from courtside_dynamics.training.demo_sac import DemoSAC
@@ -183,6 +187,10 @@ _RESERVED_POLICY_KWARGS = frozenset(
     {"observation_space", "action_space", "lr_schedule", "use_sde"}
 )
 
+#: The ``net_arch`` dict keys SB3's actor-critic policies read (the
+#: policy and value networks); anything else is silently ignored.
+_ACTOR_CRITIC_NET_ARCH_KEYS = frozenset({"pi", "vf"})
+
 
 def validate_policy_kwargs(
     algo_name: str, policy: Any, policy_kwargs: Any
@@ -193,7 +201,9 @@ def validate_policy_kwargs(
     ``_setup_model`` -- after the env fleet is built and ``config.json``
     is written -- so an unknown key (a typo, or ``ortho_init`` meant for
     PPO's ``ActorCriticPolicy``) used to fail there. ``policy`` is one
-    of the algorithm's aliases (``"MlpPolicy"``) or a policy class.
+    of the algorithm's aliases (``"MlpPolicy"``) or a policy class. An
+    actor-critic policy's ``net_arch`` dict may only name ``"pi"`` and
+    ``"vf"``: SB3 ignores any other key, SAC's ``"qf"`` included.
     """
     cls = resolve_algo(algo_name)
     if not isinstance(policy_kwargs, Mapping):
@@ -217,18 +227,39 @@ def validate_policy_kwargs(
             f"algorithm's model_kwargs['use_sde'])"
         )
     accepted, open_ended = _accepted_parameters(policy_class)
-    if open_ended:
-        return
-    accepted = accepted - _RESERVED_POLICY_KWARGS
-    for key in policy_kwargs:
-        if key in accepted:
-            continue
-        suggestions = difflib.get_close_matches(key, sorted(accepted), n=1)
-        hint = f"; did you mean '{suggestions[0]}'?" if suggestions else ""
-        raise ValueError(
-            f"policy_kwargs key '{key}' is not accepted by "
-            f"{policy_class.__name__}{hint}"
-        )
+    if not open_ended:
+        accepted = accepted - _RESERVED_POLICY_KWARGS
+        for key in policy_kwargs:
+            if key in accepted:
+                continue
+            suggestions = difflib.get_close_matches(key, sorted(accepted), n=1)
+            hint = f"; did you mean '{suggestions[0]}'?" if suggestions else ""
+            raise ValueError(
+                f"policy_kwargs key '{key}' is not accepted by "
+                f"{policy_class.__name__}{hint}"
+            )
+    net_arch = policy_kwargs.get("net_arch")
+    if (
+        isinstance(policy_class, type)
+        and issubclass(policy_class, ActorCriticPolicy)
+        and isinstance(net_arch, Mapping)
+    ):
+        # SB3's MlpExtractor reads only "pi" and "vf" and ignores every
+        # other key, so SAC's {"pi": ..., "qf": ...} built a PPO value
+        # network with no hidden layer and said nothing.
+        unknown = sorted(set(net_arch) - _ACTOR_CRITIC_NET_ARCH_KEYS)
+        if unknown:
+            qf_hint = (
+                " ('qf' is SAC's critic key; the actor-critic's value "
+                "network is 'vf')"
+                if "qf" in unknown
+                else ""
+            )
+            raise ValueError(
+                f"policy_kwargs net_arch keys {unknown} are not read by "
+                f"{policy_class.__name__}, which builds its networks from "
+                f"'pi' and 'vf' only{qf_hint}"
+            )
 
 
 def _accepted_parameters(cls: type) -> tuple[set[str], bool]:
@@ -366,6 +397,90 @@ def recorded_run_algo(path: str | os.PathLike[str]) -> str | None:
     return algo.upper()
 
 
+def _checkpoint_zip_path(path: str | os.PathLike[str]) -> str | None:
+    """The file SB3's ``load`` would open for ``path`` (``.zip`` optional)."""
+    target = os.fspath(path)
+    for candidate in (target, f"{target}.zip"):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _checkpoint_policy_class(
+    path: str | os.PathLike[str],
+    custom_objects: Mapping[str, Any] | None = None,
+) -> type | None:
+    """The policy class an SB3 model zip records in its ``data`` entry.
+
+    Deserialized the way SB3's ``load`` does it (``json_to_data``, so a
+    ``custom_objects["policy_class"]`` replaces the stored one).
+    ``None`` when the file, its ``data`` entry or the class cannot be
+    read: ``load`` then reports the problem itself.
+    """
+    zip_path = _checkpoint_zip_path(path)
+    if zip_path is None:
+        return None
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            data = json.loads(archive.read("data"))
+        entry = data["policy_class"]
+        with warnings.catch_warnings():
+            # SB3 warns (and drops the key) when an object does not
+            # deserialize; returning None leaves that to load().
+            warnings.simplefilter("ignore")
+            decoded = json_to_data(
+                json.dumps({"policy_class": entry}),
+                custom_objects=dict(custom_objects) if custom_objects else None,
+            )
+    except Exception:
+        # Unreadable here is unreadable for load() too, which raises
+        # its own (more specific) error; this check only adds one.
+        return None
+    policy_class = decoded.get("policy_class")
+    return policy_class if isinstance(policy_class, type) else None
+
+
+def _policy_family(policy_class: type) -> str | None:
+    """The registered family whose policies ``policy_class`` subclasses."""
+    for family in sorted(FAMILIES):
+        bases = tuple(set(resolve_algo(family).policy_aliases.values()))
+        if issubclass(policy_class, bases):
+            return family
+    return None
+
+
+def _check_checkpoint_policy_family(
+    path: str | os.PathLike[str],
+    algo: str,
+    custom_objects: Mapping[str, Any] | None,
+) -> None:
+    """Refuse an explicit ``algo`` the checkpoint's own policy contradicts.
+
+    A checkpoint outside any run has no ``config.json`` to check the
+    caller's ``algo`` against, but its zip records the policy class:
+    ``SAC.load`` of a PPO checkpoint used to fail deep inside SB3
+    (``'ActorCriticPolicy' object has no attribute 'actor'``).
+    """
+    policy_class = _checkpoint_policy_class(path, custom_objects)
+    if policy_class is None:
+        return
+    expected = algo_family(algo)
+    found = _policy_family(policy_class)
+    if found == expected:
+        return
+    trained_by = (
+        f"a {found}-family policy"
+        if found is not None
+        else "a policy of no registered algorithm family"
+    )
+    raise ValueError(
+        f"{os.fspath(path)} holds a {policy_class.__module__}."
+        f"{policy_class.__qualname__}, {trained_by}, so it cannot load as "
+        f"{algo.upper()} (family {expected}); pass the algorithm that "
+        f"trained it"
+    )
+
+
 def load_run_model(
     path: str | os.PathLike[str],
     algo: str | None = None,
@@ -387,6 +502,9 @@ def load_run_model(
     not exist), and PPO through ``PPO.load``. Loaders used to
     hard-code ``SAC.load``, which cannot read a PPO checkpoint.
     ``load_kwargs`` go to ``load`` unchanged (``device="cpu"``, say).
+    Without a run configuration, the policy class the zip itself
+    records must belong to ``algo``'s family
+    (:func:`_check_checkpoint_policy_family`).
     """
     recorded = recorded_run_algo(path)
     if recorded is None:
@@ -397,6 +515,9 @@ def load_run_model(
                 f"explicitly (algo=..., or the tool's --algo)"
             )
         name = algo
+        _check_checkpoint_policy_family(
+            path, name, load_kwargs.get("custom_objects")
+        )
     else:
         if algo is not None and algo.upper() != recorded:
             raise ValueError(

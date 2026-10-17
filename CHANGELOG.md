@@ -18,6 +18,70 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **Verifier fixes on the PPO commits (2026-10-17).** No env stream or
+  SAC-family training change: the trainer digest against `f920d8f`
+  matches every component of the SAC, DemoSAC and PaddleTennis-SAC
+  jobs, and the PPO job is unchanged from the previous commit. Every
+  change below is on-policy only unless it says otherwise.
+  - **The deployable best states its updates.** An evaluation runs
+    before its rollout's update, so a best selected at the first
+    evaluation of a one-rollout cadence was the untrained initial
+    policy, and the BallBalance quick test kept it (438 at 4,096
+    steps, 0 updates) while its summary advised deploying it.
+    `best_model_meta.json` gains a top-level `n_updates` (SB3's count
+    behind the selecting evaluation); the summary's "Best eval" and
+    "Best model" lines give the count, a `best_model.zip` selected at 0
+    is flagged on its line and printed, and "Final vs best" no longer
+    advises deploying such a best.
+  - **Quick test: two rollouts per evaluation.** A PPO quick test
+    sizes `n_steps` by `eval_freq // (2 · n_envs)` (was
+    `// n_envs`) and rounds its preset evaluation cadence to at least
+    two rollouts, so evaluation 1 follows an update: 256 at 8 workers
+    (was 512), 128 at 16 (was 256), 2,048 on one worker (unchanged).
+    BallBalance's quick test now trains 13 rollouts (SB3 n_updates
+    130) and selects its best after one update. Snapshot: the 10 PPO
+    quick-test entries at 8 workers are re-recorded (`n_steps` 512 →
+    256); nothing else changes.
+  - **The last update is logged.** SB3 dumps an update's `train/*`
+    metrics with the next rollout's row, so the final update's never
+    reached `progress.csv` (the BallBalance quick test read
+    `train/n_updates` 60 against SB3's 70). `train()` now dumps the
+    logger once after `learn()` returns when they are pending, so
+    TensorBoard, Training Health and the flags include it.
+  - **Epochs per update.** Training Health gains an "Epochs per
+    update" line (the steps of `train/n_updates`) and a flag when the
+    last-quarter mean is below half of `n_epochs`: the gSDE profiles'
+    `target_kl` ended every update in its first epoch while their mean
+    approx_kl looked healthy (the PaddleTennis quick test now reads
+    1.77 of 10, flagged). New `artifacts.epochs_per_update`;
+    `on_policy_health_flags` takes `n_epochs` (optional).
+  - **Resolved reward normalization in the summary.** Hyperparameters
+    list `reward_norm` (the resolved switch, the configured value, and
+    the normalizer's gamma and its source) from `config.json`'s
+    `resolved_training`.
+  - **Refused, not silent.** `degenerate_min_evals` must be `None` or
+    a nonnegative integer, checked before any output for every
+    family (an SAC run with −1 used to fail after `config.json` with a
+    `TypeError` from the update-floor print, and a PPO run accepted
+    it). The performance gate's `finalize` raises a pending advance
+    that fails on a normal training end, after writing the stage
+    history, and only reports it under the interrupt and crash
+    salvage (`finalize(salvage=True)`). The on-policy pre-flight
+    refuses a gate `stage_eval_budget` stop at or below the update
+    floor (it has no warm-up to raise), and an actor-critic `net_arch`
+    dict with keys other than `pi` and `vf` (SAC's `qf` built a PPO
+    value network with no hidden layer). Without a run record,
+    `load_run_model` refuses an `algo` whose family the zip's own
+    policy class contradicts (`SAC.load` of a PPO checkpoint failed
+    inside SB3).
+  - **Docs.** `TrainConfig.vec_env` and the run-config spec say a
+    plain script using `"subproc"` needs an `if __name__ ==
+    "__main__":` guard. README's CI learning bar reads about 11 s, as
+    elsewhere. The plan's Open list adds the gSDE profiles' learning
+    rate against `target_kl`, the humanoid profile's move to 8
+    subprocess workers × 512, and the humanoid notebook's `REPO_REF`
+    bump, a merge prerequisite: until it lands, the notebook's default
+    `AUTO_ADVANCE` refuses the pinned package before any stage trains.
 - **PPO is first-class: loaders, provenance, health flags, learning
   bars, notebooks and docs (PPO plan Steps 10–12 and 14,
   2026-10-17).** No env stream or SAC-family training change: the

@@ -181,14 +181,19 @@ run's algorithm does not accept is refused for every run
 | `eval_freq`, `checkpoint_freq` | any env-step count | whole rollouts, with `eval_freq // n_envs >= n_steps`; anything else is refused, naming the nearest whole-rollout value |
 | `total_timesteps` | the budget | the budget, at least one rollout; PPO trains whole rollouts, so the last can run past it (the summary says by how much) |
 | `n_envs` | worker count | worker count, and with `n_steps` the rollout every cadence above is counted in |
-| `min_policy_updates_before_stop` | must stay at its default, 20 (refused otherwise) | K: every early stop waits ceil(K · rollout / `eval_freq`) evaluations |
+| `min_policy_updates_before_stop` | must stay at its default, 20 (refused otherwise) | K: every early stop waits ceil(K · rollout / `eval_freq`) evaluations; a `performance_gate` `stage_eval_budget` stop at or below that many is refused |
 | `normalize_reward` (unset) | off | on, with the model's gamma as the normalizer's discount |
 | `performance_gate` levers `advance_update_pause_steps`, `clear_replay_buffer_on_advance`, `reset_entropy_on_advance` | available | refused; a PPO gate advances between rollouts instead |
 | device (`model_kwargs["device"]`, `require_device` unset) | SB3's `"auto"` | the CPU, for SB3's MLP actor-critic |
 | `warm_start` (`TrainConfig` only, not file-configurable) | `transfer_log_ent_coef = False` skips the entropy temperature | `reset_log_std = True` restarts the exploration noise; `transfer_log_ent_coef = False` is refused |
 
 `vec_env` (`"dummy"` or `"subproc"`) and every other field mean the same
-for both families.
+for both families. A plain Python script that trains with `"subproc"`
+must call `train()` under `if __name__ == "__main__":`: SB3 starts the
+workers with `forkserver` (or `spawn`), which re-imports the main
+module, and an unguarded script fails with `EOFError` after
+`config.json` and `run_config.toml` are written. Notebooks need no
+guard.
 
 ## Validation and failure behavior
 

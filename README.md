@@ -165,7 +165,7 @@ and a comparability key (task, evaluation protocol, algorithm family)
 that keeps SAC and PPO runs of one task apart. A PPO run's
 `stage_summary.txt` also flags trust-region and exploration trouble
 under Training Health. Two learning bars guard PPO: a CI test learns a
-1-D reach through `train()` in about 15 s, and
+1-D reach through `train()` in about 11 s, and
 `tools/ppo_learning_probe.py` (minutes; run by hand or nightly) must
 balance BallBalance for at least 700 of 750 steps on 20 held-out
 seeds. See [`docs/design_ppo_first_class_20261016.md`](docs/design_ppo_first_class_20261016.md).

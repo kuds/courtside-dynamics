@@ -297,7 +297,7 @@
      "gae_lambda": 0.95,
      "learning_rate": 0.0003,
      "n_epochs": 10,
-     "n_steps": 512,
+     "n_steps": 256,
      "policy_kwargs": {
       "log_std_init": -1.0
      },
@@ -923,7 +923,7 @@
      "gae_lambda": 0.95,
      "learning_rate": 0.0003,
      "n_epochs": 10,
-     "n_steps": 512,
+     "n_steps": 256,
      "policy_kwargs": {
       "log_std_init": -1.0
      },
@@ -10043,7 +10043,7 @@
      "gae_lambda": 0.95,
      "learning_rate": 0.0003,
      "n_epochs": 10,
-     "n_steps": 512,
+     "n_steps": 256,
      "policy_kwargs": {
       "log_std_init": -2.0,
       "ortho_init": false
@@ -10311,7 +10311,7 @@
      "gae_lambda": 0.95,
      "learning_rate": 0.0003,
      "n_epochs": 10,
-     "n_steps": 512,
+     "n_steps": 256,
      "policy_kwargs": {
       "log_std_init": -2.0,
       "ortho_init": false
@@ -11990,7 +11990,7 @@
      "gae_lambda": 0.95,
      "learning_rate": 0.0003,
      "n_epochs": 10,
-     "n_steps": 512,
+     "n_steps": 256,
      "policy_kwargs": {
       "log_std_init": -1.0
      },
@@ -12964,7 +12964,7 @@
      "gamma": 0.995,
      "learning_rate": 0.0003,
      "n_epochs": 10,
-     "n_steps": 512,
+     "n_steps": 256,
      "policy_kwargs": {
       "log_std_init": -1.0
      },
@@ -15849,7 +15849,7 @@
      "gamma": 0.995,
      "learning_rate": 0.0003,
      "n_epochs": 10,
-     "n_steps": 512,
+     "n_steps": 256,
      "policy_kwargs": {
       "log_std_init": -1.0
      },
@@ -16915,7 +16915,7 @@
      "gamma": 0.995,
      "learning_rate": 0.0003,
      "n_epochs": 10,
-     "n_steps": 512,
+     "n_steps": 256,
      "policy_kwargs": {
       "log_std_init": -1.0
      },
@@ -17746,7 +17746,7 @@
      "gae_lambda": 0.95,
      "learning_rate": 0.0003,
      "n_epochs": 10,
-     "n_steps": 512,
+     "n_steps": 256,
      "policy_kwargs": {
       "log_std_init": -1.0
      },
@@ -18382,7 +18382,7 @@
      "gae_lambda": 0.95,
      "learning_rate": 0.0003,
      "n_epochs": 10,
-     "n_steps": 512,
+     "n_steps": 256,
      "policy_kwargs": {
       "log_std_init": -1.0
      },

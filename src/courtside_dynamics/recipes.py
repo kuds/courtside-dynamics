@@ -551,10 +551,11 @@ def _tennis_curriculum_algo_cfg(*, episode_len: int) -> dict[str, dict[str, Any]
     fixed PPO ``ent_coef``.
 
     The PPO profile (PPO plan Step 3) on the single training env
-    (``extra_cfg``; 8 workers at n_steps 512 once PPO plan Step 13 adds
-    subprocess workers): one rollout is 2,048 env steps, so an
-    evaluation every 12 rollouts. The per-stage patience 8/12/20 first
-    stops at evaluation 16/24/40, after 191/287/479 updates.
+    (``extra_cfg``): one rollout is 2,048 env steps, so an evaluation
+    every 12 rollouts. The per-stage patience 8/12/20 first stops at
+    evaluation 16/24/40, after 191/287/479 updates. The design's 8
+    workers at n_steps 512 (``vec_env="subproc"``, which PPO plan Step
+    13 added) wait on a probe; the plan lists it as open.
     """
     return {
         "PPO": {
@@ -2082,13 +2083,19 @@ def _fit_quick_test_rollouts(
     update -- zero, with an early stop inside the first rollout -- and
     still reported "completed". Unless the explicit ``model_kwargs``
     set ``n_steps``, it becomes the largest power of two <= min(current,
-    total_timesteps // (4 * n_envs), eval_freq // n_envs): at least four
-    rollouts, and one per evaluation. SB3's 2,048 becomes 512 at 8
-    workers and 256 at 16; one worker keeps 2,048. The quick test's own
-    evaluation and checkpoint cadences (unless set explicitly) then
-    round down to whole rollouts, as the on-policy pre-flight requires.
-    Mutates ``cfg_kwargs``; a caller's ``model_kwargs`` dict is copied,
-    never edited.
+    total_timesteps // (4 * n_envs), eval_freq // (2 * n_envs)): at
+    least four rollouts, and two per evaluation. An evaluation runs
+    before its rollout's update, so at one rollout per evaluation the
+    first one scored the initial policy, and a quick test whose initial
+    policy scored best (BallBalance, where the near-zero initial action
+    balances) kept the untrained policy as ``best_model.zip``; at two,
+    every evaluation follows at least one update. SB3's 2,048 becomes
+    256 at 8 workers and 128 at 16; one worker keeps 2,048. The quick
+    test's own evaluation and checkpoint cadences (unless set
+    explicitly) then round down to whole rollouts, as the on-policy
+    pre-flight requires, the evaluation to at least two. Mutates
+    ``cfg_kwargs``; a caller's ``model_kwargs`` dict is copied, never
+    edited.
     """
 
     def resolved(key: str) -> Any:
@@ -2113,18 +2120,20 @@ def _fit_quick_test_rollouts(
         bound = min(
             n_steps,
             int(resolved("total_timesteps")) // (4 * n_envs),
-            int(resolved("eval_freq")) // n_envs,
+            int(resolved("eval_freq")) // (2 * n_envs),
         )
         fitted = 1 << (max(bound, 1).bit_length() - 1)
         if fitted != n_steps:
             n_steps = fitted
             cfg_kwargs["model_kwargs"] = {**model_kwargs, "n_steps": n_steps}
     rollout = n_steps * n_envs
-    for key in ("eval_freq", "checkpoint_freq"):
+    for key, min_rollouts in (("eval_freq", 2), ("checkpoint_freq", 1)):
         cadence = resolved(key)
-        if key in overrides or cadence <= 0 or cadence % rollout == 0:
+        if key in overrides or cadence <= 0:
             continue
-        cfg_kwargs[key] = max(rollout, cadence // rollout * rollout)
+        fitted_cadence = max(min_rollouts * rollout, cadence // rollout * rollout)
+        if fitted_cadence != cadence:
+            cfg_kwargs[key] = fitted_cadence
 
 
 def _apply_algo_block(

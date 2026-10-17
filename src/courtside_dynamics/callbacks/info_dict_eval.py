@@ -353,6 +353,8 @@ class InfoDictEvalCallback(BaseCallback):
         early). An evaluation at ``0`` scored the initial policy. The
         row is written to the CSV only: it is not an evaluation
         metric, so selection, the gate and TensorBoard never see it.
+        ``best_model_meta.json`` records the selecting evaluation's
+        count as a top-level ``n_updates`` (outside its ``metrics``).
     """
 
     def __init__(
@@ -673,13 +675,17 @@ class InfoDictEvalCallback(BaseCallback):
                 f"record_n_updates: an evaluation metric is already named "
                 f"'{N_UPDATES_METRIC}'"
             )
+        return {**metrics, N_UPDATES_METRIC: float(self._model_n_updates())}
+
+    def _model_n_updates(self) -> int:
+        """The model's SB3 ``_n_updates`` (``record_n_updates`` only)."""
         n_updates = getattr(self.model, "_n_updates", None)
         if isinstance(n_updates, bool) or not isinstance(n_updates, int):
             raise TypeError(
                 f"record_n_updates: the model's _n_updates is "
                 f"{n_updates!r}, not an SB3 update count"
             )
-        return {**metrics, N_UPDATES_METRIC: float(n_updates)}
+        return n_updates
 
     def _append_evaluations_npz(self, timestep: int) -> None:
         """Append this evaluation to ``evaluations.npz`` and rewrite it.
@@ -1464,6 +1470,15 @@ class InfoDictEvalCallback(BaseCallback):
             **(
                 {"eval_seed": self.eval_seed}
                 if self.eval_seed is not None
+                else {}
+            ),
+            # On-policy runs: the SB3 update count behind the saved
+            # policy. An evaluation runs before its rollout's update, so
+            # a best selected at 0 is the untrained initial policy, and
+            # the run summary says so.
+            **(
+                {N_UPDATES_METRIC: self._model_n_updates()}
+                if self.record_n_updates
                 else {}
             ),
             # Present only when confirm_best re-sampled the candidate:

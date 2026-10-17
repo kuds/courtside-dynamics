@@ -21,6 +21,7 @@ The helper builds vectorized train / eval envs, wires ``EvalCallback`` and
 from __future__ import annotations
 
 import difflib
+import functools
 import hashlib
 import inspect
 import json
@@ -825,9 +826,12 @@ class TrainConfig:
         ``ceil(K * n_steps * n_envs / eval_freq)`` evaluations for
         ``K = min_policy_updates_before_stop``, so no early stop can fire
         before the policy has had K updates (whole-rollout cadences
-        make evaluation ``e`` see ``e * rollouts_per_eval - 1``). ``0``
-        disables the floor. Off-policy runs update every step and must
-        leave the default (20); any other value is refused.
+        make evaluation ``e`` see ``e * rollouts_per_eval - 1``). A
+        performance gate's ``stage_eval_budget`` stop has no warm-up to
+        floor, so the pre-flight refuses a budget at or below that many
+        evaluations instead. ``0`` disables the floor. Off-policy runs
+        update every step and must leave the default (20); any other
+        value is refused.
     vec_env:
         The training workers' VecEnv: ``"dummy"`` (default; every worker
         steps in this process) or ``"subproc"`` (one process per worker,
@@ -838,7 +842,13 @@ class TrainConfig:
         either way. Evaluation, video and diagnosis envs stay
         single-worker and in-process. The factory is pickled to the
         workers (cloudpickle), and ``check_env`` runs on a throwaway
-        instance in this process instead of on worker 0.
+        instance in this process instead of on worker 0. A plain script
+        that calls ``train()`` with ``"subproc"`` must do so under
+        ``if __name__ == "__main__":``: SB3 starts the workers with
+        ``forkserver`` (``spawn`` where that is unavailable), which
+        re-imports the main module, and an unguarded script fails in
+        the VecEnv constructor (``EOFError``) after ``config.json`` is
+        written. Notebooks need no guard.
     """
 
     env_fn: Callable
@@ -1397,6 +1407,23 @@ def _validate_callback_config(cfg: TrainConfig) -> None:
     moved its logs before failing.
     """
     headline_selection = bool(cfg.info_dict_eval and cfg.headline_key)
+    if cfg.degenerate_min_evals is not None:
+        # InfoDictEvalCallback refuses these too, but only once train()
+        # has written config.json -- and an on-policy run's update floor
+        # used to accept a negative value silently, printing it as
+        # "raised from -1".
+        if isinstance(cfg.degenerate_min_evals, bool) or not isinstance(
+            cfg.degenerate_min_evals, int
+        ):
+            raise TypeError(
+                f"degenerate_min_evals must be None or an integer, got "
+                f"{cfg.degenerate_min_evals!r}"
+            )
+        if cfg.degenerate_min_evals < 0:
+            raise ValueError(
+                f"degenerate_min_evals must be nonnegative, got "
+                f"{cfg.degenerate_min_evals}"
+            )
     if cfg.reward_eval_episodes is not None:
         if not _positive_int(cfg.reward_eval_episodes):
             raise ValueError("reward_eval_episodes must be a positive integer")
@@ -1516,6 +1543,28 @@ def _on_policy_updates(cfg: TrainConfig, model: BaseAlgorithm) -> int | None:
     return int(getattr(model, "_n_updates", 0))
 
 
+def _dump_final_update_logs(model: BaseAlgorithm) -> None:
+    """Write an on-policy run's last update metrics to its logger.
+
+    SB3's on-policy ``learn()`` dumps the logger before each
+    ``train()``, so an update's ``train/*`` metrics reach
+    ``progress.csv`` with the next rollout's row, and the last update's
+    never do. The summary's Training Health block and on-policy flags
+    then missed the final update, and its ``train/n_updates`` read one
+    rollout behind SB3's count (a BallBalance PPO quick test: 60
+    against 70). ``train()`` calls this once ``learn()`` has returned
+    (not after an interrupt or a crash); nothing is written when no
+    ``train/*`` value is pending (an evaluation's dump already flushed
+    them).
+    """
+    logger = model.logger
+    if not any(key.startswith("train/") for key in logger.name_to_value):
+        return
+    # Same x value an evaluation's dump gives its row (SB3 EvalCallback).
+    logger.record("time/total_timesteps", model.num_timesteps, exclude="tensorboard")
+    logger.dump(step=model.num_timesteps)
+
+
 #: Performance-gate levers that act on state only an off-policy model
 #: has: the update pause sets ``gradient_steps``, the wipe clears the
 #: replay buffer, and the reset restores an auto-tuned entropy
@@ -1555,6 +1604,9 @@ def _validate_on_policy_config(cfg: TrainConfig) -> None:
       the evaluation that selects ``best_model.zip`` and drives the
       stops, or a checkpoint, would land between a rollout's data and
       the update that consumes it;
+    - a performance gate whose ``stage_eval_budget`` stop would fire
+      before ``min_policy_updates_before_stop`` updates (a budget at or
+      below :func:`_policy_update_floor_evals`);
     - ``policy_kwargs`` the policy class does not accept
       (``algos.validate_policy_kwargs``);
     - a non-numeric ``gamma`` when rewards are normalized (the
@@ -1647,6 +1699,35 @@ def _validate_on_policy_config(cfg: TrainConfig) -> None:
                 f"rollout, between a rollout's data and the update that "
                 f"consumes it. Use a multiple of {rollout:,}, e.g. "
                 f"{nearest:,}"
+            )
+    if isinstance(cfg.performance_gate, Mapping):
+        # The gate's budget stop counts a stage's own evaluations, with
+        # no warm-up for the update floor to raise: a stage-0 budget at
+        # or below the floor would stop the run before K updates. Each
+        # other stop fires at least one evaluation past the floor, so
+        # the budget must exceed it too. (The final stage has no budget,
+        # so a one-stage gate's never fires.)
+        budget = cfg.performance_gate.get("stage_eval_budget")
+        stages = cfg.performance_gate.get("stages")
+        floor_evals = _policy_update_floor_evals(cfg)
+        if (
+            cfg.performance_gate.get("stage_eval_budget_action", "stop") == "stop"
+            and isinstance(stages, Sequence)
+            and len(stages) > 1
+            and isinstance(budget, int)
+            and _positive_int(budget)
+            and budget <= floor_evals
+        ):
+            raise ValueError(
+                f"performance_gate stage_eval_budget {budget} would stop the "
+                f"run at evaluation {budget}, before "
+                f"min_policy_updates_before_stop="
+                f"{cfg.min_policy_updates_before_stop} policy updates "
+                f"(rollouts of {rollout:,} env steps, an evaluation every "
+                f"{cfg.eval_freq:,}: the other early stops wait "
+                f"{floor_evals} evaluations and fire after one more). Use a "
+                f"budget of at least {floor_evals + 1}, the 'advance' "
+                f"action, or a lower min_policy_updates_before_stop"
             )
     policy_kwargs = cfg.model_kwargs.get("policy_kwargs")
     if policy_kwargs:
@@ -1985,7 +2066,12 @@ def _salvage_crashed_run(
             )
         )
     if gate_callback is not None:
-        steps.append(("performance-gate stage history", gate_callback.finalize))
+        steps.append(
+            (
+                "performance-gate stage history",
+                functools.partial(gate_callback.finalize, salvage=True),
+            )
+        )
     if _is_on_policy(cfg):
         steps.append(
             (
@@ -2633,7 +2719,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         update_floor_evals = _policy_update_floor_evals(cfg)
 
         def _floored_warmup(label: str, evals: int) -> int:
-            if evals >= update_floor_evals:
+            # No floor (the off-policy family, K = 0): the warm-up goes
+            # to its callback untouched, which validates it as before.
+            if update_floor_evals == 0 or evals >= update_floor_evals:
                 return evals
             print(
                 f"[train] {label} raised from {evals} to "
@@ -3285,9 +3373,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 # SB3 only calls on_training_end after a clean training
                 # loop, so an interrupt would otherwise lose the gate's
                 # in-flight stage row and final-stage archive; finalize
-                # is idempotent, so a duplicate close cannot occur.
+                # is idempotent, so a duplicate close cannot occur. As
+                # a salvage, a pending advance that fails to apply is
+                # reported rather than raised: the model is not saved
+                # yet.
                 if gate_callback is not None:
-                    gate_callback.finalize()
+                    gate_callback.finalize(salvage=True)
             except Exception as error:
                 # Any other exception out of learn() -- an I/O error on
                 # the Drive mount, an env or callback bug -- used to skip
@@ -3307,6 +3398,8 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     error=error,
                 )
                 raise
+            if _is_on_policy(cfg) and not interrupted:
+                _dump_final_update_logs(model)
             model.save(artifact_path(cfg.log_dir, "final_model"))
             if _is_on_policy(cfg):
                 # The training progress (SB3 n_updates, env steps trained

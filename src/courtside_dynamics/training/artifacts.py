@@ -878,6 +878,12 @@ ON_POLICY_CLIP_FRACTION_MAX = 0.3
 #: How far, in nats, the policy's log std may move from its
 #: ``log_std_init`` before the exploration noise counts as drifted.
 ON_POLICY_LOG_STD_DRIFT_MAX = 1.0
+#: Below this fraction of ``n_epochs`` completed per update (SB3 ends an
+#: update's epochs once approx_kl passes 1.5 * target_kl), the configured
+#: ``n_epochs`` barely acts: the gSDE profiles' first quick tests ended
+#: every update inside its first epoch while their mean approx_kl looked
+#: healthy, because it only averages the minibatches that ran.
+ON_POLICY_EPOCH_FRACTION_MIN = 0.5
 
 
 def _last_quarter(values: Sequence[float]) -> list[float]:
@@ -885,11 +891,29 @@ def _last_quarter(values: Sequence[float]) -> list[float]:
     return list(values[-math.ceil(len(values) / 4) :])
 
 
+def epochs_per_update(series: Mapping[str, Sequence[float]]) -> list[float]:
+    """Optimization epochs each logged on-policy update completed.
+
+    SB3 logs its cumulative ``_n_updates`` (one per epoch, the epoch a
+    ``target_kl`` cut ends included) as ``train/n_updates``, one row per
+    update, so its steps are the per-update counts; ``train()`` starts
+    every model at 0. Empty when the series was not logged.
+    """
+    counts = series.get("train/n_updates") or []
+    epochs: list[float] = []
+    previous = 0.0
+    for count in counts:
+        epochs.append(count - previous)
+        previous = count
+    return epochs
+
+
 def on_policy_health_flags(
     series: Mapping[str, Sequence[float]],
     *,
     target_kl: float | None,
     log_std_init: float | None,
+    n_epochs: int | None = None,
 ) -> list[str]:
     """Training Health flags for an on-policy run's ``train/*`` series.
 
@@ -904,11 +928,16 @@ def on_policy_health_flags(
       returns worse than their mean, so the advantages are noise;
     - the final ``train/std`` more than 1 nat from ``log_std_init``
       (``train/std`` is SB3's mean of ``exp(log_std)``, so the drift is
-      read on the log of that mean).
+      read on the log of that mean);
+    - mean epochs completed per update (:func:`epochs_per_update`)
+      below half of ``n_epochs``: ``target_kl`` ends the updates so
+      early that the configured epochs never act, while approx_kl,
+      averaged over the minibatches that ran, can look healthy.
 
     A non-finite value in a window is flagged too, never averaged
-    away. A metric the run did not log, or a ``log_std_init`` that is
-    unknown (``None``), skips its flag. Returns one line per flag.
+    away. A metric the run did not log, or a ``log_std_init`` or
+    ``n_epochs`` that is unknown (``None``), skips its flag. Returns
+    one line per flag.
     """
     flags: list[str] = []
 
@@ -960,42 +989,62 @@ def on_policy_health_flags(
                     f"{float(log_std_init):+.3g}: drifted {drift:+.3g} nats "
                     f"(limit {ON_POLICY_LOG_STD_DRIFT_MAX})"
                 )
+    epochs = epochs_per_update(series)
+    if epochs and n_epochs is not None and n_epochs > 0:
+        recent = _last_quarter(epochs)
+        mean_epochs = statistics.fmean(recent)
+        if mean_epochs < ON_POLICY_EPOCH_FRACTION_MIN * n_epochs:
+            flags.append(
+                f"epochs per update {mean_epochs:.3g} of n_epochs "
+                f"{n_epochs}: target_kl {target_kl} ends the updates early, "
+                "so the configured epochs barely act (calibrate the "
+                "learning rate against target_kl)"
+            )
     return flags
 
 
-def _on_policy_health_reference(log_dir: str) -> tuple[float | None, float | None]:
-    """``(target_kl, log_std_init)`` from ``config.json``'s ``resolved_model``.
-
-    The flags read the run's own record of the model it built
-    (:func:`_model_info`); ``(None, None)`` when it is unreadable or
-    absent, which leaves the KL flag at its floor and skips the drift
-    flag.
-    """
+def _read_run_config_payload(log_dir: str) -> dict[str, Any] | None:
+    """The run's ``config.json`` as a dict; ``None`` when absent or unreadable."""
     path = locate_artifact(log_dir, "config")
     if path is None:
-        return None, None
+        return None
     try:
         with open(path) as f:
             payload = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return None, None
-    resolved = payload.get("resolved_model") if isinstance(payload, dict) else None
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _on_policy_health_reference(
+    log_dir: str,
+) -> tuple[float | None, float | None, int | None]:
+    """``(target_kl, log_std_init, n_epochs)`` from ``config.json``.
+
+    The flags read the run's own record of the model it built
+    (``resolved_model``, :func:`_model_info`); ``None`` for each value
+    that is unreadable or absent, which leaves the KL flag at its floor
+    and skips the drift and epoch flags.
+    """
+    payload = _read_run_config_payload(log_dir)
+    resolved = payload.get("resolved_model") if payload is not None else None
     if not isinstance(resolved, dict):
-        return None, None
+        return None, None, None
     hyperparameters = resolved.get("hyperparameters")
-    target_kl = (
-        hyperparameters.get("target_kl")
-        if isinstance(hyperparameters, dict)
-        else None
-    )
+    if not isinstance(hyperparameters, dict):
+        hyperparameters = {}
+    target_kl = hyperparameters.get("target_kl")
     log_std_init = resolved.get("log_std_init")
+    n_epochs = hyperparameters.get("n_epochs")
 
     def number(value: Any) -> float | None:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
         return float(value)
 
-    return number(target_kl), number(log_std_init)
+    if isinstance(n_epochs, bool) or not isinstance(n_epochs, int):
+        n_epochs = None
+    return number(target_kl), number(log_std_init), n_epochs
 
 
 def _read_eval_info_at_step(log_dir: str, target_step: int) -> dict[str, float]:
@@ -1250,6 +1299,31 @@ def _mean_std(values: Sequence[float]) -> tuple[float, float]:
     return mean, std
 
 
+def _resolved_reward_norm_line(log_dir: str, configured: Any) -> str | None:
+    """The summary's ``reward_norm`` value from ``config.json``.
+
+    Reads ``resolved_training`` (the reward normalization ``train()``
+    resolved and the discount of the normalizer's return statistics);
+    ``None`` when the block is missing or unreadable.
+    """
+    payload = _read_run_config_payload(log_dir)
+    resolved = payload.get("resolved_training") if payload is not None else None
+    if not isinstance(resolved, dict):
+        return None
+    enabled = resolved.get("normalize_reward_resolved")
+    if not isinstance(enabled, bool):
+        return None
+    text = f"{'on' if enabled else 'off'} (normalize_reward={configured!r})"
+    gamma = resolved.get("vec_normalize_gamma")
+    if enabled and isinstance(gamma, (int, float)) and not isinstance(gamma, bool):
+        source = {
+            "model_gamma": "the model's gamma",
+            "vec_normalize_default": "VecNormalize's default",
+        }.get(str(resolved.get("vec_normalize_gamma_source")), "source unknown")
+        text += f", normalizer gamma {gamma:g} ({source})"
+    return text
+
+
 def _kv(label: str, value: str, label_width: int = 16) -> str:
     return f"{(label + ':').ljust(label_width)}{value}"
 
@@ -1295,9 +1369,13 @@ def write_run_summary(
     end exactly so). An on-policy run (``n_updates`` given) also gets
     its timesteps read against the budget even when it finished (PPO
     trains whole rollouts, so the last one can run past the budget),
-    and :func:`on_policy_health_flags` under Training Health, checked
-    against the ``target_kl`` and ``log_std_init`` its ``config.json``
-    recorded; flags are printed too.
+    the SB3 update count behind its best evaluation and its
+    ``best_model.zip`` (flagged and printed when that is 0: the
+    untrained initial policy), its resolved reward normalization under
+    Hyperparameters, its epochs per update, and
+    :func:`on_policy_health_flags` under Training Health, checked
+    against the ``target_kl``, ``log_std_init`` and ``n_epochs`` its
+    ``config.json`` recorded; flags are printed too.
     """
     env_name = _env_display_name(cfg)
     git_sha = _git_sha()
@@ -1404,6 +1482,32 @@ def write_run_summary(
             _kv("Avg ep length", f"{ep_mean:.1f} +/- {ep_std:.1f} steps")
         )
 
+    # On-policy runs: the SB3 update count behind an evaluated policy
+    # (eval_info.csv's n_updates row; best_model_meta.json's n_updates
+    # under headline selection). An evaluation runs before its
+    # rollout's update, so a best chosen at 0 updates is the untrained
+    # initial policy, however much the run trained after it: a PPO
+    # quick test on BallBalance, whose near-zero initial action
+    # balances well, deployed exactly that while its summary read
+    # "SB3 n_updates 70" and "deploy best_model.zip".
+    def updates_at(step: int) -> int | None:
+        if n_updates is None:
+            return None
+        value = _read_eval_info_at_step(log_dir, step).get("n_updates")
+        return None if value is None else int(value)
+
+    def updates_note(updates: int | None) -> str:
+        return "" if updates is None else f", SB3 n_updates {updates:,}"
+
+    untrained_best_warning = (
+        "  <-- WARNING: selected before any update; best_model.zip is "
+        "the untrained initial policy"
+    )
+    # Which checkpoint best_model.zip holds: the headline evaluator's
+    # selection (best_model_meta.json) or the reward EvalCallback's.
+    headline_selection = bool(cfg.info_dict_eval and cfg.headline_key)
+    untrained_best_step: int | None = None
+
     eval_npz = locate_artifact(log_dir, "evaluations")
     best_step: int | None = None
     best_mean: float | None = None
@@ -1423,11 +1527,17 @@ def write_run_summary(
             best_step = int(timesteps[best_idx])
             best_mean = float(eval_means[best_idx])
             best_std = float(eval_stds[best_idx])
+            best_eval_updates = updates_at(best_step)
+            best_eval_note = ""
+            if best_eval_updates == 0 and not headline_selection:
+                untrained_best_step = best_step
+                best_eval_note = untrained_best_warning
             lines.append(
                 _kv(
                     "Best eval",
                     f"{best_mean:.3f} +/- {best_std:.3f} "
-                    f"(at {best_step:,} steps)  [periodic eval series]",
+                    f"(at {best_step:,} steps{updates_note(best_eval_updates)})"
+                    f"  [periodic eval series]{best_eval_note}",
                 )
             )
             # Make post-best collapse impossible to miss: the first
@@ -1437,11 +1547,16 @@ def write_run_summary(
             if final_mean_reward is not None:
                 delta = final_mean_reward - best_mean
                 regressed = delta < -max(2 * best_std, 0.2 * abs(best_mean))
-                note = (
-                    "  <-- policy regressed after best; deploy best_model.zip"
-                    if regressed
-                    else ""
-                )
+                note = ""
+                if regressed and best_eval_updates == 0:
+                    note = (
+                        "  <-- policy regressed after best, but the best "
+                        "scored the untrained initial policy (SB3 n_updates 0)"
+                    )
+                elif regressed:
+                    note = (
+                        "  <-- policy regressed after best; deploy best_model.zip"
+                    )
                 lines.append(_kv("Final vs best", f"{delta:+.3f}{note}"))
 
     # Task-metric selection provenance: when best_model.zip was chosen
@@ -1459,6 +1574,15 @@ def write_run_summary(
             values = best_meta.get("selection_values") or {}
             primary = keys[0] if keys else None
             desc = f"step {selected_step:,}"
+            selected_updates: int | None = None
+            if n_updates is not None:
+                recorded = best_meta.get("n_updates")
+                selected_updates = (
+                    recorded
+                    if isinstance(recorded, int) and not isinstance(recorded, bool)
+                    else updates_at(selected_step)
+                )
+            desc += updates_note(selected_updates)
             if primary is not None and primary in values:
                 desc += f" ({primary} {float(values[primary]):.2f})"
             # Curriculum context: a matched-stage score is meaningless
@@ -1469,6 +1593,9 @@ def write_run_summary(
             if isinstance(stage, (int, float)):
                 desc += f" [at curriculum stage {int(stage)}]"
             desc += "  [task-metric selection]"
+            if selected_updates == 0:
+                untrained_best_step = selected_step
+                desc += untrained_best_warning
             lines.append(_kv("Best model", desc))
 
     # Headline task metric. Eval reward can be a poor progress measure
@@ -1554,6 +1681,13 @@ def write_run_summary(
         ("total_timesteps", cfg.total_timesteps),
         ("n_envs", cfg.n_envs),
     ]
+    if n_updates is not None:
+        # What the run resolved, not the configured field: PPO's
+        # normalize_reward=None means on, discounted at the model's
+        # gamma (config.json's resolved_training block).
+        reward_norm = _resolved_reward_norm_line(log_dir, cfg.normalize_reward)
+        if reward_norm is not None:
+            hp_items.append(("reward_norm", reward_norm))
     for key, value in (cfg.model_kwargs or {}).items():
         hp_items.append((key, value))
     key_width = max((len(k) for k, _ in hp_items), default=0) + 4
@@ -1669,10 +1803,25 @@ def write_run_summary(
         for key in sorted(health):
             lines.append(f"  {(key + ':').ljust(hw)}{health[key]:.4g}")
         if n_updates is not None:
-            target_kl, log_std_init = _on_policy_health_reference(log_dir)
-            health_flags = on_policy_health_flags(
-                health_series, target_kl=target_kl, log_std_init=log_std_init
+            target_kl, log_std_init, n_epochs = _on_policy_health_reference(
+                log_dir
             )
+            health_flags = on_policy_health_flags(
+                health_series,
+                target_kl=target_kl,
+                log_std_init=log_std_init,
+                n_epochs=n_epochs,
+            )
+            epochs = epochs_per_update(health_series)
+            if epochs:
+                of_configured = (
+                    "" if n_epochs is None else f" of n_epochs {n_epochs}"
+                )
+                lines.append(
+                    f"  Epochs per update: "
+                    f"{statistics.fmean(epochs):.2f}{of_configured} "
+                    f"(mean over {len(epochs):,} logged updates)"
+                )
             lines.append("  On-policy flags (means over the last quarter):")
             lines.extend(f"    FLAG {flag}" for flag in health_flags)
             if not health_flags:
@@ -1706,6 +1855,13 @@ def write_run_summary(
             f"[train] WARNING: {cfg.algo} ran no update (SB3 n_updates 0) "
             f"in {steps_trained:,} env steps; every saved model is the "
             f"untrained initial policy (see {out})"
+        )
+    if untrained_best_step is not None:
+        print(
+            f"[train] WARNING: best_model.zip was selected at "
+            f"{untrained_best_step:,} steps, before any {cfg.algo} update "
+            f"(SB3 n_updates 0): it is the untrained initial policy "
+            f"(see {out})"
         )
     for flag in health_flags:
         print(f"[train] WARNING: on-policy training health: {flag}")

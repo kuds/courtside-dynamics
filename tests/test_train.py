@@ -3100,6 +3100,30 @@ def test_on_policy_preflight_accepts_whole_rollout_geometry(tmp_path):
             "gamma must be a number",
             id="non-numeric-gamma",
         ),
+        pytest.param(
+            {
+                "model_kwargs": {
+                    "policy_kwargs": {"net_arch": {"pi": [8], "qf": [8]}}
+                }
+            },
+            r"net_arch keys \['qf'\] .* \('qf' is SAC's critic key",
+            id="sac-net-arch-key",
+        ),
+        pytest.param(
+            # The floor is ceil(20 * 256 / 512) = 10 evaluations.
+            {
+                "performance_gate": {
+                    "stages": ({}, {}),
+                    "metric_key": "m",
+                    "threshold": 1.0,
+                    "sustain_evals": 1,
+                    "stage_eval_budget": 10,
+                },
+            },
+            r"stage_eval_budget 10 would stop the run at evaluation 10, "
+            r"before min_policy_updates_before_stop=20 .* at least 11",
+            id="gate-budget-inside-the-update-floor",
+        ),
     ],
 )
 def test_on_policy_preflight_refuses_before_any_output(tmp_path, overrides, match):
@@ -3146,6 +3170,98 @@ def test_validate_policy_kwargs_resolves_the_policy_alias():
         validate_policy_kwargs("PPO", "MlpPolicyy", {"ortho_init": False})
     with pytest.raises(TypeError, match="must be a mapping"):
         validate_policy_kwargs("PPO", "MlpPolicy", [("ortho_init", False)])
+
+
+def test_actor_critic_net_arch_names_only_pi_and_vf(tmp_path):
+    """SB3's MlpExtractor reads "pi" and "vf" and ignores other keys, so
+    SAC's net_arch dict built a PPO value network with no hidden layer;
+    it is refused instead. SAC's own pi/qf dict stays valid for SAC."""
+    from courtside_dynamics.recipes import build_train_config
+    from courtside_dynamics.training.algos import validate_policy_kwargs
+
+    validate_policy_kwargs("PPO", "MlpPolicy", {"net_arch": {"pi": [64], "vf": [32]}})
+    validate_policy_kwargs("PPO", "MlpPolicy", {"net_arch": {"pi": [64]}})
+    validate_policy_kwargs("PPO", "MlpPolicy", {"net_arch": [64, 64]})
+    validate_policy_kwargs("SAC", "MlpPolicy", {"net_arch": {"pi": [64], "qf": [64]}})
+    with pytest.raises(ValueError, match=r"\['critic'\] are not read by"):
+        validate_policy_kwargs("PPO", "MlpPolicy", {"net_arch": {"critic": [64]}})
+    # The audit's case: refused when the config is built.
+    with pytest.raises(ValueError, match="'qf' is SAC's critic key"):
+        build_train_config(
+            "BallBalance",
+            algo="PPO",
+            log_dir=str(tmp_path),
+            model_kwargs={
+                "n_steps": 512,
+                "batch_size": 256,
+                "policy_kwargs": {
+                    "log_std_init": -1.0,
+                    "net_arch": {"pi": [256, 256], "qf": [256, 256]},
+                },
+            },
+        )
+
+
+def _budget_gate(budget: int, **extra: Any) -> dict[str, Any]:
+    return {
+        "stages": ({}, {}),
+        "metric_key": "m",
+        "threshold": 1.0,
+        "sustain_evals": 1,
+        "stage_eval_budget": budget,
+        **extra,
+    }
+
+
+def test_on_policy_gate_budget_must_outlast_the_update_floor(tmp_path):
+    """The budget stop has no warm-up for the floor to raise, so a
+    budget at or below the floor (10 evaluations here) is refused; one
+    past it, a forced advance, a one-stage gate (the final stage has no
+    budget) and K = 0 are not. SAC keeps any budget."""
+    from courtside_dynamics.training.train import _validate_on_policy_config
+
+    def check(**overrides: Any) -> None:
+        _validate_on_policy_config(_on_policy_cfg(tmp_path / "run", **overrides))
+
+    with pytest.raises(ValueError, match="stage_eval_budget 1 would stop"):
+        check(performance_gate=_budget_gate(1))
+    check(performance_gate=_budget_gate(11))
+    check(
+        performance_gate=_budget_gate(1, stage_eval_budget_action="advance")
+    )
+    check(performance_gate={**_budget_gate(1), "stages": ({},)})
+    check(performance_gate=_budget_gate(1), min_policy_updates_before_stop=0)
+    check(
+        algo="SAC",
+        eval_freq=100,
+        model_kwargs={"n_steps": 1, "batch_size": 1},
+        performance_gate=_budget_gate(1),
+    )
+
+
+@pytest.mark.parametrize("algo", ["SAC", "PPO"])
+@pytest.mark.parametrize(
+    "value, error, match",
+    [
+        pytest.param(-1, ValueError, "must be nonnegative, got -1", id="negative"),
+        pytest.param(2.5, TypeError, "None or an integer, got 2.5", id="float"),
+        pytest.param(True, TypeError, "None or an integer, got True", id="bool"),
+    ],
+)
+def test_malformed_degenerate_min_evals_is_refused_before_output(
+    tmp_path, algo, value, error, match
+):
+    """An SAC run used to fail inside the update-floor print with a
+    TypeError on None (after config.json), a PPO run to accept -1 as
+    "raised from -1": both now refuse it with the other config-only
+    checks, before the log_dir exists."""
+    log_dir = tmp_path / "run"
+    overrides: dict[str, Any] = {"degenerate_min_evals": value, "algo": algo}
+    if algo == "SAC":
+        overrides["model_kwargs"] = {"learning_starts": 4, "buffer_size": 64}
+    with pytest.raises(error, match=match):
+        train(_dead_signal_cfg(log_dir, **overrides))
+    assert not log_dir.exists()
 
 
 # -- PPO plan Step 5: zero policy updates are flagged -------------------------
@@ -4074,6 +4190,21 @@ def test_load_run_model_loads_each_family_through_its_root_class(
     with pytest.raises(FileNotFoundError, match="pass the algorithm"):
         load_run_model(loose)
     assert type(load_run_model(loose, "PPO", device="cpu")) is PPO
+    # Outside any run, the zip's own policy class still refuses a
+    # wrong family (SAC.load used to fail inside SB3 with an
+    # AttributeError on 'actor'), with or without the .zip suffix.
+    for path in (loose, str(loose)[: -len(".zip")]):
+        with pytest.raises(
+            ValueError,
+            match=r"ActorCriticPolicy, a PPO-family policy, so it cannot load "
+            r"as SAC \(family SAC\)",
+        ):
+            load_run_model(path, "SAC")
+    loose_sac = tmp_path / "loose_sac.zip"
+    loose_sac.write_bytes(sac_path.read_bytes())
+    with pytest.raises(ValueError, match="a SAC-family policy, so it cannot load as PPO"):
+        load_run_model(loose_sac, "PPO")
+    assert type(load_run_model(loose_sac, "DemoSAC", device="cpu")) is SAC
 
 
 def test_notebook_best_model_loader_follows_the_record(tmp_path):
@@ -4270,6 +4401,208 @@ def test_run_summary_flags_on_policy_health_against_the_record(tmp_path, capsys)
     assert "train/approx_kl:" in text
 
 
+def test_epochs_per_update_flag_catches_a_target_kl_cut_in_epoch_one():
+    """The gSDE profiles' quick tests ended every update in its first
+    epoch (SB3 n_updates one per rollout at n_epochs 10) while the mean
+    approx_kl looked healthy; the per-update epochs say so."""
+    from courtside_dynamics.training.artifacts import (
+        epochs_per_update,
+        on_policy_health_flags,
+    )
+
+    cut = {"train/n_updates": [1.0, 2.0, 3.0, 4.0], "train/approx_kl": [0.013] * 4}
+    assert epochs_per_update(cut) == [1.0, 1.0, 1.0, 1.0]
+    flags = on_policy_health_flags(cut, target_kl=0.02, log_std_init=None, n_epochs=10)
+    assert flags == [
+        "epochs per update 1 of n_epochs 10: target_kl 0.02 ends the updates "
+        "early, so the configured epochs barely act (calibrate the learning "
+        "rate against target_kl)"
+    ]
+    # Every epoch ran (BallBalance's 70 over 7 rollouts), or only early
+    # updates were cut (the last quarter decides), or n_epochs unknown.
+    full = {"train/n_updates": [10.0, 20.0, 30.0, 40.0]}
+    assert on_policy_health_flags(full, target_kl=0.03, log_std_init=None, n_epochs=10) == []
+    late = {"train/n_updates": [1.0, 2.0, 3.0, 13.0]}
+    assert epochs_per_update(late) == [1.0, 1.0, 1.0, 10.0]
+    assert on_policy_health_flags(late, target_kl=0.02, log_std_init=None, n_epochs=10) == []
+    assert on_policy_health_flags(cut, target_kl=0.02, log_std_init=None) == []
+    assert epochs_per_update({}) == []
+
+
+def _write_eval_artifacts(log_dir, rows) -> None:
+    """evaluations.npz and eval_info.csv for (step, mean reward, SB3
+    n_updates) evaluations, as the reward and info streams write them."""
+    from courtside_dynamics.training.artifacts import artifact_path
+
+    npz_path = artifact_path(str(log_dir), "evaluations")
+    os.makedirs(os.path.dirname(npz_path), exist_ok=True)
+    results = np.array([[reward, reward] for _, reward, _ in rows])
+    np.savez(
+        npz_path,
+        timesteps=np.array([step for step, _, _ in rows]),
+        results=results,
+        ep_lengths=np.ones_like(results),
+    )
+    with open(artifact_path(str(log_dir), "eval_info_csv"), "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["timestep", "metric", "value"])
+        for step, reward, updates in rows:
+            writer.writerow([step, "episode_reward_mean", reward])
+            writer.writerow([step, "n_updates", float(updates)])
+
+
+def test_run_summary_flags_a_best_model_selected_before_any_update(
+    tmp_path, capsys
+):
+    """An evaluation runs before its rollout's update, so a best chosen
+    at SB3 n_updates 0 is the untrained initial policy: the BallBalance
+    PPO quick test kept it (438 at 4,096 steps, then down to 206) and
+    its summary advised deploying it."""
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=8),
+        algo="PPO",
+        log_dir=str(tmp_path),
+        total_timesteps=12_288,
+    )
+    warning = (
+        "  <-- WARNING: selected before any update; best_model.zip is the "
+        "untrained initial policy"
+    )
+
+    def summary(*, n_updates: int | None = 30) -> str:
+        write_run_summary(
+            cfg,
+            str(tmp_path),
+            final_mean_reward=206.0,
+            final_std_reward=0.0,
+            duration_seconds=1.0,
+            actual_timesteps=12_288,
+            n_updates=n_updates,
+        )
+        return (tmp_path / "stage_summary.txt").read_text()
+
+    # Reward selection: best_model.zip is the reward stream's best.
+    _write_eval_artifacts(
+        tmp_path, [(4_096, 438.0, 0), (8_192, 312.3, 10), (12_288, 183.7, 20)]
+    )
+    text = summary()
+    assert (
+        "Best eval:      438.000 +/- 0.000 (at 4,096 steps, SB3 n_updates 0)"
+        f"  [periodic eval series]{warning}\n"
+    ) in text
+    assert (
+        "<-- policy regressed after best, but the best scored the untrained "
+        "initial policy (SB3 n_updates 0)"
+    ) in text
+    assert "deploy best_model.zip" not in text
+    assert (
+        "[train] WARNING: best_model.zip was selected at 4,096 steps, before "
+        "any PPO update (SB3 n_updates 0)"
+    ) in capsys.readouterr().out
+
+    # A trained best: its count, no warning.
+    _write_eval_artifacts(
+        tmp_path, [(4_096, 312.3, 0), (8_192, 438.0, 10), (12_288, 183.7, 20)]
+    )
+    text = summary()
+    assert "(at 8,192 steps, SB3 n_updates 10)  [periodic eval series]\n" in text
+    assert "WARNING: selected before" not in text
+    assert "deploy best_model.zip" in text
+    assert "best_model.zip was selected" not in capsys.readouterr().out
+
+    # The SAC family (n_updates None) reads as before.
+    _write_eval_artifacts(tmp_path, [(4_096, 438.0, 0), (8_192, 312.3, 10)])
+    text = summary(n_updates=None)
+    assert "(at 4,096 steps)  [periodic eval series]\n" in text
+    assert "WARNING" not in text
+
+
+def test_run_summary_reads_the_headline_best_from_its_meta(tmp_path, capsys):
+    """Under headline selection best_model.zip is best_model_meta.json's
+    checkpoint: its recorded n_updates (or, in an older meta, the
+    eval_info.csv row at its step) decides the warning."""
+    from courtside_dynamics.training.artifacts import artifact_path, write_run_summary
+
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=8),
+        algo="PPO",
+        log_dir=str(tmp_path),
+        total_timesteps=12_288,
+        headline_key="touches",
+    )
+    _write_eval_artifacts(tmp_path, [(4_096, 438.0, 0), (8_192, 312.3, 10)])
+    meta_path = artifact_path(str(tmp_path), "best_model_meta")
+    os.makedirs(os.path.dirname(meta_path), exist_ok=True)
+
+    def summary(meta: dict[str, Any]) -> str:
+        with open(meta_path, "w") as stream:
+            json.dump(meta, stream)
+        write_run_summary(
+            cfg,
+            str(tmp_path),
+            final_mean_reward=300.0,
+            final_std_reward=0.0,
+            duration_seconds=1.0,
+            actual_timesteps=12_288,
+            n_updates=20,
+        )
+        return (tmp_path / "stage_summary.txt").read_text()
+
+    selected = {
+        "timestep": 4_096,
+        "selection_keys": ["touches_ep_mean"],
+        "selection_values": {"touches_ep_mean": 0.0},
+    }
+    text = summary({**selected, "n_updates": 0})
+    assert (
+        "Best model:     step 4,096, SB3 n_updates 0 (touches_ep_mean 0.00)"
+        "  [task-metric selection]  <-- WARNING: selected before any update"
+    ) in text
+    # The reward stream's best is not best_model.zip here: no warning
+    # on its line, one in all.
+    assert text.count("WARNING") == 1
+    assert "best_model.zip was selected at 4,096 steps" in capsys.readouterr().out
+
+    # An older meta without the count falls back to eval_info.csv.
+    text = summary({**selected, "timestep": 8_192})
+    assert "Best model:     step 8,192, SB3 n_updates 10 (touches_ep_mean" in text
+    assert "WARNING: selected before" not in text
+
+
+def test_run_summary_states_the_resolved_reward_normalization(tmp_path):
+    """static-9: PPO's normalize_reward=None resolves to on, discounted
+    at the model's gamma; config.json recorded it, the summary now says
+    it. The SAC summary has no such line."""
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    for algo, n_updates in (("PPO", 8), ("SAC", None)):
+        log_dir = tmp_path / algo
+        cfg = TrainConfig(
+            env_fn=lambda: BallBalanceEnv(episode_len=8),
+            algo=algo,
+            log_dir=str(log_dir),
+            model_kwargs={"gamma": 0.995},
+        )
+        write_run_config(cfg, str(log_dir))
+        write_run_summary(
+            cfg,
+            str(log_dir),
+            final_mean_reward=None,
+            final_std_reward=None,
+            duration_seconds=1.0,
+            n_updates=n_updates,
+        )
+        text = (log_dir / "stage_summary.txt").read_text()
+        line = (
+            "reward_norm        on (normalize_reward=None), normalizer gamma "
+            "0.995 (the model's gamma)"
+        )
+        assert (line in text) is (algo == "PPO"), text
+        assert ("reward_norm" in text) is (algo == "PPO")
+
+
 @pytest.mark.parametrize(
     ("algo", "family", "name"),
     [("SAC", "SAC", "SAC"), ("demosac", "SAC", "DemoSAC"), ("PPO", "PPO", "PPO")],
@@ -4411,6 +4744,24 @@ def test_train_runs_each_family_end_to_end(tmp_path, algo):
     assert meta["eval_seed"] == 4_000
     eval_rows = (tmp_path / "metrics" / "eval_info.csv").read_text()
     assert (",n_updates," in eval_rows) is on_policy
+    # The update count behind the selected policy (on-policy only):
+    # evaluation 1, after 3 rollouts of 2 epochs.
+    if on_policy:
+        assert meta["n_updates"] == 6
+        assert "Best model:     step 32, SB3 n_updates 6 (" in summary
+    else:
+        assert "n_updates" not in meta
+    # progress.csv carries every update's train/* row, the last one
+    # included (SB3 only dumps it with the next rollout's row).
+    with open(tmp_path / "metrics" / "progress.csv") as stream:
+        logged_updates = [
+            float(row["train/n_updates"])
+            for row in csv.DictReader(stream)
+            if row.get("train/n_updates")
+        ]
+    if on_policy:
+        assert logged_updates[-1] == model._n_updates
+        assert "Epochs per update: 2.00 of n_epochs 2" in summary
 
     config = json.loads((tmp_path / "config.json").read_text())
     family = "PPO" if on_policy else "SAC"

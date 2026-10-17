@@ -1277,3 +1277,68 @@ def test_gate_finalize_applies_an_advance_the_stop_left_pending(tmp_path):
     assert on_policy[0]["promoted"] is True
     assert on_policy[0]["advance_reason"] == "gate"
     assert on_policy == off_policy
+
+
+def _gate_with_failing_pending_advance(tmp_path, train_env, eval_env):
+    """An on-policy gate whose last evaluation earned stage 1, stopped
+    before the rollout ended, with an advance that fails to apply."""
+    info_eval = _FakeInfoEval(eval_env)
+    gate = _gate(
+        train_env,
+        info_eval,
+        sustain_evals=1,
+        stage_history_path=str(tmp_path / "curriculum_stages.json"),
+    )
+    gate.model = _on_policy_model(train_env)  # type: ignore[assignment]
+    gate._on_training_start()
+    info_eval.finish_eval({"bounce_count_ep_mean": 2.0})
+    gate._on_step()
+
+    def refuse(reason: str) -> None:
+        raise AttributeError(f"stage refused ({reason})")
+
+    gate._advance_stage = refuse  # type: ignore[method-assign]
+    return gate
+
+
+def test_gate_training_end_raises_when_the_pending_advance_fails(tmp_path, capsys):
+    """A normal training end fails loudly (cardinal rule 1), after the
+    stage history is written without the advance; train()'s crash
+    salvage then finds the gate finalized."""
+    train_env = make_vec_env(_StagedEnv, n_envs=2)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        gate = _gate_with_failing_pending_advance(tmp_path, train_env, eval_env)
+        with pytest.raises(AttributeError, match=r"stage refused \(gate\)"):
+            gate._on_training_end()
+        assert "could not apply the advance pending" in capsys.readouterr().out
+        rows = json.loads((tmp_path / "curriculum_stages.json").read_text())[
+            "stages"
+        ]
+        assert [row["stage_index"] for row in rows] == [0]
+        gate.finalize(salvage=True)  # the salvage path: already closed
+        rows = json.loads((tmp_path / "curriculum_stages.json").read_text())[
+            "stages"
+        ]
+        assert [row["stage_index"] for row in rows] == [0]
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+def test_gate_salvage_reports_a_failed_pending_advance(tmp_path, capsys):
+    """The interrupt and crash salvage paths report the failure and
+    still write the history, so the model and summary get saved."""
+    train_env = make_vec_env(_StagedEnv, n_envs=2)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    try:
+        gate = _gate_with_failing_pending_advance(tmp_path, train_env, eval_env)
+        gate.finalize(salvage=True)
+        assert "could not apply the advance pending" in capsys.readouterr().out
+        rows = json.loads((tmp_path / "curriculum_stages.json").read_text())[
+            "stages"
+        ]
+        assert [row["stage_index"] for row in rows] == [0]
+    finally:
+        train_env.close()
+        eval_env.close()

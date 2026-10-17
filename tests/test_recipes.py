@@ -936,16 +936,17 @@ def test_paddle_tennis_ppo_profile(tmp_path):
 
 
 class TestOnPolicyQuickTest:
-    """PPO plan Step 5: a PPO quick test trains in whole rollouts."""
+    """PPO plan Step 5: a PPO quick test trains in whole rollouts, two
+    per evaluation, so every evaluation follows at least one update."""
 
     @pytest.mark.parametrize(
         "env_name, n_envs, n_steps",
         [
             ("HumanoidTennisStage0Intercept", 1, 2048),
-            ("PaddleTennis", 8, 512),
-            ("PaddleTennis", 16, 256),
-            ("BallBalance", 8, 512),
-            ("BallBalance", 16, 256),
+            ("PaddleTennis", 8, 256),
+            ("PaddleTennis", 16, 128),
+            ("BallBalance", 8, 256),
+            ("BallBalance", 16, 128),
         ],
     )
     def test_at_least_four_rollouts(self, env_name, n_envs, n_steps, tmp_path):
@@ -962,10 +963,27 @@ class TestOnPolicyQuickTest:
         assert cfg.model_kwargs["n_steps"] == n_steps
         rollout = n_steps * n_envs
         assert cfg.total_timesteps // rollout >= 4
-        # The quick test's cadences round down to whole rollouts.
+        # The quick test's cadences round down to whole rollouts, the
+        # evaluation to at least two: evaluation 1 runs before the 2nd
+        # rollout's update, so after the 1st.
         assert cfg.eval_freq == rollout * (5_000 // rollout)
+        assert cfg.eval_freq // rollout >= 2
         assert cfg.checkpoint_freq == rollout * (10_000 // rollout)
         _validate_on_policy_config(cfg)
+
+    def test_an_explicit_rollout_still_gets_two_per_evaluation(self, tmp_path):
+        # 8 workers x 512 = 4,096: the preset 5,000 would round down to
+        # one rollout, so it rounds up to two.
+        cfg = build_train_config(
+            "BallBalance",
+            algo="PPO",
+            log_dir=str(tmp_path),
+            quick_test=True,
+            model_kwargs={"n_steps": 512, "batch_size": 256},
+        )
+        assert cfg.model_kwargs["n_steps"] == 512
+        assert cfg.eval_freq == 8_192
+        assert cfg.checkpoint_freq == 8_192
 
     def test_sb3_default_rollout_shrinks_too(self, tmp_path, monkeypatch):
         from dataclasses import replace
@@ -974,7 +992,7 @@ class TestOnPolicyQuickTest:
         monkeypatch.setitem(
             RECIPES, "BallBalance", replace(RECIPES["BallBalance"], algo_cfg={})
         )
-        for n_envs, n_steps in ((1, 2048), (8, 512), (16, 256)):
+        for n_envs, n_steps in ((1, 2048), (8, 256), (16, 128)):
             cfg = build_train_config(
                 "BallBalance",
                 algo="PPO",
@@ -1021,7 +1039,7 @@ class TestOnPolicyQuickTest:
             quick_test=True,
             model_kwargs=explicit,
         )
-        assert cfg.model_kwargs == {"batch_size": 64, "n_steps": 512}
+        assert cfg.model_kwargs == {"batch_size": 64, "n_steps": 256}
         assert explicit == {"batch_size": 64}
 
     def test_sac_quick_test_is_untouched(self, tmp_path):
