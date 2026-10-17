@@ -166,6 +166,65 @@ def test_algo_registry_has_sac_ppo_and_demosac():
     assert "PPO" not in OFF_POLICY_ALGOS
 
 
+def test_algo_families_are_derived_from_the_registered_classes():
+    """PPO plan Step 1: the derived sets equal the hand-kept ones they
+    replace, and every algorithm maps to exactly one config family."""
+    from courtside_dynamics.training.algos import (
+        ALGO_FAMILIES,
+        FAMILIES,
+        OFF_POLICY_ALGOS,
+        ON_POLICY_ALGOS,
+        algo_family,
+    )
+
+    assert OFF_POLICY_ALGOS == frozenset({"SAC", "DEMOSAC"})
+    assert ON_POLICY_ALGOS == frozenset({"PPO"})
+    assert ALGO_FAMILIES == {"SAC": "SAC", "DEMOSAC": "SAC", "PPO": "PPO"}
+    assert FAMILIES == frozenset({"SAC", "PPO"})
+    # Case-insensitive like the registry; unknown names fail loudly.
+    assert algo_family("DemoSAC") == "SAC"
+    assert algo_family("ppo") == "PPO"
+    with pytest.raises(ValueError, match="Unknown algo"):
+        algo_family("PPPO")
+    # A family never mixes on- and off-policy members.
+    for name, family in ALGO_FAMILIES.items():
+        assert (name in OFF_POLICY_ALGOS) == (family in OFF_POLICY_ALGOS)
+
+
+@pytest.mark.parametrize(
+    "algo, expected", [("PPO", True), ("SAC", False), ("DEMOSAC", False), ("DemoSAC", False)]
+)
+def test_reward_normalization_default_follows_the_family(tmp_path, algo, expected):
+    """normalize_reward=None resolves on for PPO, off for SAC and DemoSAC,
+    in both resolvers (the live config and a recorded train_config)."""
+    from courtside_dynamics.training.train import (
+        TrainConfig,
+        _config_norm_reward,
+        _resolved_norm_reward,
+    )
+
+    cfg = TrainConfig(env_fn=BallBalanceEnv, algo=algo, log_dir=str(tmp_path))
+    assert _resolved_norm_reward(cfg) is expected
+    assert _config_norm_reward({"algo": algo, "normalize_reward": None}) is expected
+    # An explicit choice wins either way.
+    cfg.normalize_reward = not expected
+    assert _resolved_norm_reward(cfg) is (not expected)
+    assert _config_norm_reward({"algo": algo, "normalize_reward": not expected}) is (
+        not expected
+    )
+
+
+def test_recorded_reward_normalization_of_an_unknown_algo_is_off():
+    """config.json data is unvalidated: a missing or unknown algo resolves
+    off, as the hand-written == "PPO" test did, instead of raising."""
+    from courtside_dynamics.training.train import _config_norm_reward
+
+    assert _config_norm_reward({}) is False
+    assert _config_norm_reward({"algo": "TD3"}) is False
+    with pytest.raises(ValueError, match="must be bool or null"):
+        _config_norm_reward({"algo": "PPO", "normalize_reward": "yes"})
+
+
 def test_validate_model_kwargs_accepts_and_rejects_per_algo():
     from courtside_dynamics.training.algos import validate_model_kwargs
 

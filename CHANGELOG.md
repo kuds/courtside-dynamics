@@ -18,6 +18,25 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **Algorithm families (PPO plan Step 1, 2026-10-17).** No env stream
+  or training path changes: the recipe snapshot is unchanged and the
+  trainer digest against `f920d8f` matches on every job.
+  - `algos.OFF_POLICY_ALGOS` and the new `ON_POLICY_ALGOS` are derived
+    from the registered classes (`issubclass` on SB3's off- and
+    on-policy bases) and equal the old hand-kept set. A registered
+    algorithm that is neither refuses at import.
+  - `algos.algo_family()` names each algorithm's config family after
+    its most general registered ancestor: `"SAC"` for SAC and DemoSAC,
+    `"PPO"` for PPO. The reward-normalization default, its twin for
+    recorded configs and the warm-start family check now test families
+    instead of the strings `"PPO"`/`"SAC"`.
+  - One intended notebook fix: `sb3_training` re-applies the worker
+    count only when `ALGO` switches family, and picks it by family. So
+    `ALGO="DemoSAC"` keeps the SAC count (the recipe's own, 8 on every
+    recipe but the 1-env humanoid smoke; 8 on the PPO-default humanoid
+    stages) where it used to get PPO's 16. The notebooks use the
+    derived `OFF_POLICY_ALGOS`, which the pinned `REPO_REF` exports
+    too.
 - **Refactor-gate leftovers (2026-10-17).** No env stream or training
   path changes: every existing golden entry reproduces unchanged, and
   the trainer digest against `f920d8f` matches on every job.

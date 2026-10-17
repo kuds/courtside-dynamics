@@ -14,6 +14,8 @@ from typing import Any
 
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.base_class import BaseAlgorithm
+from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
+from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 
 from courtside_dynamics.training.demo_sac import DemoSAC
 
@@ -21,14 +23,88 @@ from courtside_dynamics.training.demo_sac import DemoSAC
 #: ``DemoSAC`` is SAC plus default-off demonstration injection
 #: (docs/design_paddle_tennis_demo_injection.md) — a distinct name so a
 #: run's algo string alone says whether the injection surface was in
-#: play, and so its off-policy registration below is explicit.
+#: play. Its off-policy membership and its SAC family below follow from
+#: its class, not from a hand-kept list.
 ALGOS: dict[str, type[BaseAlgorithm]] = {"SAC": SAC, "PPO": PPO, "DEMOSAC": DemoSAC}
 
 #: Algorithms that learn off-policy from a replay buffer. For these the
 #: number of gradient updates per rollout is decoupled from the number of
 #: env steps collected, so a vectorised env silently starves the policy of
-#: updates unless we compensate (see ``train._build_algo``).
-OFF_POLICY_ALGOS = frozenset({"SAC", "DEMOSAC"})
+#: updates unless we compensate (see ``train._build_algo``). Derived from
+#: the registered classes: a hand-kept set was the silent trap here, since
+#: an off-policy registration missing from it kept SB3's
+#: ``gradient_steps=1`` against a vectorised ``train_freq``.
+OFF_POLICY_ALGOS = frozenset(
+    name for name, cls in ALGOS.items() if issubclass(cls, OffPolicyAlgorithm)
+)
+
+#: Algorithms that learn on-policy: each update consumes one fresh
+#: rollout of ``n_steps * n_envs`` transitions and then discards it, so
+#: their guards and cadences are counted in rollouts (PPO).
+ON_POLICY_ALGOS = frozenset(
+    name for name, cls in ALGOS.items() if issubclass(cls, OnPolicyAlgorithm)
+)
+
+_UNCLASSIFIED_ALGOS = sorted(set(ALGOS) - OFF_POLICY_ALGOS - ON_POLICY_ALGOS)
+if _UNCLASSIFIED_ALGOS:
+    # Every branch in the trainer asks "off-policy or on-policy?"; an
+    # algorithm that is neither would silently take whichever branch
+    # tests the other set.
+    raise TypeError(
+        f"registered algorithm(s) {_UNCLASSIFIED_ALGOS} subclass neither "
+        f"OffPolicyAlgorithm nor OnPolicyAlgorithm"
+    )
+
+
+def _family_root(name: str) -> str:
+    """The registered algorithm that names ``name``'s config family.
+
+    An algorithm's family is its most general registered ancestor
+    (itself included): ``DemoSAC`` subclasses ``SAC``, so it reads SAC's
+    hyperparameter block and warm-starts across the SAC family. Two
+    unrelated registered ancestors would make the family ambiguous, so
+    that refuses at import.
+    """
+    cls = ALGOS[name]
+    ancestors = [other for other, base in ALGOS.items() if issubclass(cls, base)]
+    roots = [
+        other
+        for other in ancestors
+        if not any(
+            ALGOS[other] is not ALGOS[base]
+            and issubclass(ALGOS[other], ALGOS[base])
+            for base in ancestors
+        )
+    ]
+    if len(roots) != 1:
+        raise TypeError(
+            f"registered algorithm {name!r} has an ambiguous config family: "
+            f"it subclasses the unrelated registered algorithms {roots}"
+        )
+    return roots[0]
+
+
+#: Each registered algorithm's config family (``"SAC"`` for SAC and
+#: DemoSAC, ``"PPO"`` for PPO). A recipe's per-algorithm block
+#: (``Recipe.algo_cfg``) and a run file's ``[train.algo.<family>]`` table
+#: are keyed by family, so DemoSAC inherits SAC's calibrated settings.
+ALGO_FAMILIES: dict[str, str] = {name: _family_root(name) for name in ALGOS}
+
+#: The family names: the only keys ``Recipe.algo_cfg`` may use.
+FAMILIES = frozenset(ALGO_FAMILIES.values())
+
+
+def algo_family(name: str) -> str:
+    """The config family of ``name``, case-insensitively (``"SAC"``/``"PPO"``).
+
+    Raises ``ValueError`` for an unknown algorithm, like
+    :func:`resolve_algo`. Every behaviour that depends on the algorithm
+    tests its family (or the derived on/off-policy sets) instead of
+    comparing hand-written strings: ``algo.upper() == "SAC"`` silently
+    treated DemoSAC as PPO.
+    """
+    resolve_algo(name)
+    return ALGO_FAMILIES[name.upper()]
 
 
 #: Constructor arguments the trainer supplies itself (``train._build_algo``

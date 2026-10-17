@@ -239,10 +239,12 @@ def test_sb3_notebook_uses_run_config_files_not_pinned_model_kwargs() -> None:
     # Recipes carry the calibrated patience; the notebook defers.
     assert "EARLY_STOP_PATIENCE = None" in source
     assert "EARLY_STOP_PATIENCE = 20" not in source
-    # Overriding a recipe's default algorithm re-applies the per-algo
-    # worker-count suggestion (a recipe's n_envs is calibrated for its
-    # default algo only).
-    assert 'ALGO.upper() != RECIPES[ENV].default_algo.upper()' in source
+    # Overriding a recipe's default algorithm family re-applies the
+    # per-family worker-count suggestion (a recipe's n_envs is
+    # calibrated for its default algo's family only); see
+    # test_sb3_notebook_worker_count_follows_the_algorithm_family.
+    assert "in OFF_POLICY_ALGOS) != (" in source
+    assert 'ALGO.upper() == "SAC"' not in source
     assert "model_kwargs=MODEL_KWARGS" not in source
     # Discovery cell: recipes and packaged starters are listable, and
     # starters are copied (never edited in site-packages).
@@ -250,6 +252,50 @@ def test_sb3_notebook_uses_run_config_files_not_pinned_model_kwargs() -> None:
     assert "copy_starter_config" in source
     assert "WallBallBootstrap" in source
     assert "cfg.run_config_file" in source
+
+
+def _sb3_worker_override(algo: str, env: str) -> dict[str, Any]:
+    """Run the training cell's ``n_envs`` override block for ALGO/ENV."""
+    from courtside_dynamics.recipes import RECIPES
+    from courtside_dynamics.training.algos import OFF_POLICY_ALGOS
+
+    source = next(
+        _source(cell)
+        for cell in _load_sb3_notebook()["cells"]
+        if "overrides = {}" in _source(cell)
+    )
+    start = source.index("overrides = {}")
+    end = source.index("if EARLY_STOP_PATIENCE is not None:")
+    namespace: dict[str, Any] = {
+        "ALGO": algo,
+        "ENV": env,
+        "N_ENVS": None,
+        "RECIPES": RECIPES,
+        "OFF_POLICY_ALGOS": OFF_POLICY_ALGOS,
+    }
+    exec(compile(source[start:end], f"{SB3_NOTEBOOK}:overrides", "exec"), namespace)
+    return namespace["overrides"]
+
+
+def test_sb3_notebook_worker_count_follows_the_algorithm_family() -> None:
+    """DemoSAC is SAC family: it keeps the SAC worker count, not PPO's 16.
+
+    The cell used to test ``ALGO.upper() == "SAC"``, so DemoSAC on a
+    PPO-default recipe got 16 workers, and on a SAC-default recipe the
+    "algo differs" branch fired and handed it 16 as well.
+    """
+    # Same family as the recipe default: the recipe's calibrated count.
+    assert _sb3_worker_override("SAC", "PaddleTennis") == {}
+    assert _sb3_worker_override("DemoSAC", "PaddleTennis") == {}
+    assert _sb3_worker_override("PPO", "HumanoidTennisStage0Intercept") == {}
+    # Switching family applies the section-2 table.
+    assert _sb3_worker_override("PPO", "PaddleTennis") == {"n_envs": 16}
+    assert _sb3_worker_override("SAC", "HumanoidTennisStage0Intercept") == {
+        "n_envs": 8
+    }
+    assert _sb3_worker_override(
+        "DemoSAC", "HumanoidTennisStage0Intercept"
+    ) == {"n_envs": 8}
 
 
 def test_sb3_notebook_replay_uses_tennis_court_style() -> None:

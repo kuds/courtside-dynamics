@@ -718,6 +718,30 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### Algorithm-dependent code tests families derived from the registry — *implemented (unreleased, 2026-10-17)*
+PPO plan Step 1 (`design_ppo_first_class_20261016.md`, static-7). The
+trainer and the notebooks decided algorithm-dependent behaviour with
+hand-written strings (`algo.upper() == "PPO"`, `!= "PPO"`, a
+`("SAC", "DEMOSAC")` tuple, a hand-kept `OFF_POLICY_ALGOS`). Each
+string test is a place where a new registration can silently take the
+wrong branch, and one already did: `sb3_training` gave
+`ALGO="DemoSAC"` PPO's 16 workers because DemoSAC is not the string
+`"SAC"`.
+- **Decision.** `OFF_POLICY_ALGOS` and `ON_POLICY_ALGOS` are derived
+  with `issubclass` from SB3's `OffPolicyAlgorithm` and
+  `OnPolicyAlgorithm`, and an algorithm that is neither refuses at
+  import. `algo_family()` names an algorithm's config family after its
+  most general registered ancestor, so DemoSAC (a SAC subclass) is in
+  the SAC family and reads SAC's settings. Two unrelated registered
+  ancestors would make the family ambiguous and refuse at import.
+  Every resolved value is unchanged: the derived sets equal the old
+  set, and the recipe snapshot and trainer digest match.
+- **Notebooks** test the derived `OFF_POLICY_ALGOS`, not
+  `algo_family()`: they install the package at a pinned `REPO_REF`
+  (`b9585e2`), which exports that name but not the new function. The
+  humanoid notebook's `RESOLVED_ALGO != "PPO"` stays: automatic
+  advancement supports exactly PPO, not a family.
+
 ### Golden digests and the freeze harness gate every refactor — *implemented (unreleased, 2026-10-16)*
 Week 1 restructures the env and training code by extraction (design
 M1 + L0, PPO plan Step 0). The rule is that nothing on the campaign path

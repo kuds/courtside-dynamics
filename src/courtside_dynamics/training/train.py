@@ -75,6 +75,12 @@ from courtside_dynamics.training.algos import (
     OFF_POLICY_ALGOS as _OFF_POLICY_ALGOS,
 )
 from courtside_dynamics.training.algos import (
+    ON_POLICY_ALGOS as _ON_POLICY_ALGOS,
+)
+from courtside_dynamics.training.algos import (
+    algo_family as _algo_family,
+)
+from courtside_dynamics.training.algos import (
     resolve_algo as _resolve_algo,
 )
 from courtside_dynamics.training.algos import (
@@ -932,10 +938,13 @@ def _validate_observation_indices(
 
 
 def _resolved_norm_reward(cfg: TrainConfig) -> bool:
+    """``normalize_reward``, with ``None`` resolved per algorithm family:
+    on for the on-policy PPO family, off for the SAC family (DemoSAC
+    included)."""
     return (
         cfg.normalize_reward
         if cfg.normalize_reward is not None
-        else cfg.algo.upper() == "PPO"
+        else _algo_family(cfg.algo) == "PPO"
     )
 
 
@@ -1542,12 +1551,22 @@ def _sha256_file(path: Path) -> str:
 
 
 def _config_norm_reward(train_config: dict[str, Any]) -> bool:
+    """A recorded ``train_config``'s resolved reward normalization.
+
+    Mirrors :func:`_resolved_norm_reward` on ``config.json`` data, where
+    the algorithm is an unvalidated string: an unknown or missing one
+    resolves to off, as the hand-written ``== "PPO"`` test did.
+    """
     configured = train_config.get("normalize_reward")
     if configured is None:
-        return str(train_config.get("algo", "")).upper() == "PPO"
+        return str(train_config.get("algo", "")).upper() in _ON_POLICY_ALGOS
     if not isinstance(configured, bool):
         raise ValueError("source normalize_reward must be bool or null")
     return configured
+
+
+#: The algorithm families a policy-only warm start supports.
+_WARM_START_FAMILIES = ("PPO", "SAC")
 
 
 def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
@@ -1556,7 +1575,13 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
     if warm_start is None:
         return None
     algo = cfg.algo.upper()
-    if algo != "PPO" and algo not in _OFF_POLICY_ALGOS:
+    # train() resolves the algo first; a direct caller with an
+    # unregistered one belongs to no family and gets the same refusal.
+    try:
+        family: str | None = _algo_family(algo)
+    except ValueError:
+        family = None
+    if family not in _WARM_START_FAMILIES:
         raise ValueError(
             "policy-only warm start currently supports PPO and the SAC "
             f"family ({', '.join(sorted(_OFF_POLICY_ALGOS))}) only"
@@ -1604,13 +1629,15 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
     if not isinstance(source_train, dict) or not isinstance(source_env, dict):
         raise ValueError("warm-start config lacks train_config/env provenance")
     source_algo = str(source_train.get("algo", "")).upper()
-    # Same algo, or both in the SAC family: the policy container
-    # (actor/critics/targets/log_ent_coef) is shared across the family,
-    # so a DemoSAC pilot may start from a plain-SAC lineage and vice
-    # versa. PPO never crosses.
-    same_family = source_algo == algo or (
-        source_algo in _OFF_POLICY_ALGOS and algo in _OFF_POLICY_ALGOS
-    )
+    # Same family: the policy container (actor/critics/targets/
+    # log_ent_coef) is shared across the SAC family, so a DemoSAC pilot
+    # may start from a plain-SAC lineage and vice versa. PPO never
+    # crosses. An unknown recorded algo belongs to no family.
+    try:
+        source_family: str | None = _algo_family(source_algo)
+    except ValueError:
+        source_family = None
+    same_family = source_family == family
     if not same_family:
         raise ValueError(
             f"warm-start source algo must match the target "
