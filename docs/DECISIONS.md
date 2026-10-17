@@ -718,6 +718,66 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### PPO runs are configured and checked in whole rollouts — *implemented (unreleased, 2026-10-17)*
+PPO plan Steps 3–5 (`design_ppo_first_class_20261016.md`, static-2,
+static-3(1), static-8, empirical-2). PPO updates once per rollout of
+`n_steps * n_envs` env steps, but every cadence and guard was set in
+env steps for SAC. At 8 workers × SB3's 2,048-step rollout, the
+degenerate stop at 5 evaluations × 25k fired after 0 to 7 updates, a
+25k-step quick test could finish "completed" with one update or none,
+and evaluations landed mid-rollout.
+- **Profiles.** Each recipe's `algo_cfg["PPO"]` holds the design's
+  section-3 values, with these choices where the design left room:
+  - Cadences are whole rollouts at the profile's worker count and at
+    16, sb3_training's PPO count. 25k is not a multiple of any
+    rollout, so `eval_freq` is 24,576 (6 rollouts of 4,096; 12 of
+    2,048) or 32,768 (4 of 8,192), and `checkpoint_freq` is 245,760
+    (98,304 on the humanoid stages).
+  - Guards are sized so none fires before about 20 updates at the
+    profile's own worker count. An evaluation ending rollout k runs
+    before rollout k's update, so evaluation e has seen
+    e × (rollouts per evaluation) − 1. The degenerate stop needs 6
+    evaluations (23 updates) instead of 5 (19); patience 20 first
+    stops at 159–479. At 16 workers an evaluation spans half as many
+    rollouts; Step 6 will floor the guards in code.
+  - The humanoid `ent_coef` is 0.001, the top of the design's 0–0.001
+    range: a token floor against std collapse at a tenth of the drift
+    measured at 0.01. The 1-env humanoid stages are refused at 16
+    workers (`eval_freq // n_envs` is less than `n_steps` 2,048) until
+    Step 13's 8 × 512 geometry.
+  - The design has no smoke row. HumanoidTennisCoopSmoke gets the
+    stage settings on 128-step rollouts, so its 10k budget sees about
+    80 updates.
+  - No profile pins gamma: the recipe's own (a flat `extra_cfg` gamma,
+    else SB3's 0.99) applies to both families. PPO's reward
+    normalization is pinned explicitly even where it equals the
+    default. `device="cpu"` is set on PaddleTennis only; Step 8 makes
+    it the on-policy default.
+- **Pre-flight.** `_validate_on_policy_config` refuses rather than
+  rounds. A config whose cadence is not a whole rollout says so, with
+  the nearest multiple; silently moving an evaluation would change
+  what selection compares. Besides the design's list it refuses
+  cadences that are not whole rollouts and non-integer
+  `n_steps`/`batch_size`. It runs in `train()` before any output and
+  in `build_train_config`, so a recipe refuses at build time. The
+  depth-ladder recipes' SAC-only gate levers make them PPO refusals
+  by design; giving a retired SAC ladder an invented PPO gate would be
+  a new experiment, not a port.
+- **Quick test.** The design's `n_steps` shrink alone left the 5,000-
+  and 10,000-step presets off the rollout grid, which the pre-flight
+  refuses. So the presets, never an explicit value, also round down to
+  whole rollouts. An explicit cadence that misses is refused instead.
+- **Zero updates** are flagged in the summary and on the console for
+  the PPO family only. SAC summaries stay byte-for-byte as they were.
+  The summary line is labelled "SB3 n_updates", not "policy updates":
+  SB3's `_n_updates` counts optimization epochs (`n_epochs` per
+  rollout, fewer under `target_kl`). A BallBalance quick test reads 70
+  after 7 rollouts.
+- **Starters stay family-safe.** A flat cadence in a starter beats the
+  recipe's PPO block and would be refused under PPO. So the starters
+  keep cadences in `[train.algo.*]` tables, and a test checks that
+  each starter resolves like its recipe under both families.
+
 ### Recipes and run files configure each algorithm family separately — *implemented (unreleased, 2026-10-17)*
 PPO plan Step 2 (`design_ppo_first_class_20261016.md`, tests-gaps-1,
 static-1, empirical-9). A recipe carried one flat

@@ -156,7 +156,7 @@
     "best_metric_keys": null,
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 250000,
+    "checkpoint_freq": 245760,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": false,
@@ -181,7 +181,7 @@
       "render_mode": "rgb_array"
      }
     },
-    "eval_freq": 25000,
+    "eval_freq": 24576,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -196,14 +196,26 @@
     "info_eval_terminal_keys": [],
     "info_row_fn": null,
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 512,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
+    },
     "monitor_info_keywords": [],
     "n_envs": 8,
     "n_eval_episodes": 30,
     "name_prefix": "ball_balance_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": null,
     "phase_key": null,
     "phase_labels": null,
@@ -231,7 +243,7 @@
     "best_metric_keys": null,
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 10000,
+    "checkpoint_freq": 8192,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": false,
@@ -256,7 +268,7 @@
       "render_mode": "rgb_array"
      }
     },
-    "eval_freq": 5000,
+    "eval_freq": 4096,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -271,14 +283,26 @@
     "info_eval_terminal_keys": [],
     "info_row_fn": null,
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 512,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
+    },
     "monitor_info_keywords": [],
     "n_envs": 8,
     "n_eval_episodes": 3,
     "name_prefix": "ball_balance_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": null,
     "phase_key": null,
     "phase_labels": null,
@@ -676,7 +700,7 @@
     "best_metric_keys": null,
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 250000,
+    "checkpoint_freq": 245760,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": false,
@@ -723,7 +747,7 @@
       "render_mode": "rgb_array"
      }
     },
-    "eval_freq": 25000,
+    "eval_freq": 24576,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -751,14 +775,26 @@
      "__callable__": "courtside_dynamics.recipes._ball_bounce_info_row"
     },
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 512,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
+    },
     "monitor_info_keywords": [],
     "n_envs": 8,
     "n_eval_episodes": 30,
     "name_prefix": "ball_bounce_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": null,
     "phase_key": null,
     "phase_labels": null,
@@ -786,7 +822,7 @@
     "best_metric_keys": null,
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 10000,
+    "checkpoint_freq": 8192,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": false,
@@ -833,7 +869,7 @@
       "render_mode": "rgb_array"
      }
     },
-    "eval_freq": 5000,
+    "eval_freq": 4096,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -861,14 +897,26 @@
      "__callable__": "courtside_dynamics.recipes._ball_bounce_info_row"
     },
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 512,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
+    },
     "monitor_info_keywords": [],
     "n_envs": 8,
     "n_eval_episodes": 3,
     "name_prefix": "ball_bounce_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": null,
     "phase_key": null,
     "phase_labels": null,
@@ -1640,7 +1688,7 @@
     "best_metric_keys": null,
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 5000,
+    "checkpoint_freq": 4096,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": false,
@@ -1699,7 +1747,7 @@
       "render_mode": "rgb_array"
      }
     },
-    "eval_freq": 2500,
+    "eval_freq": 2048,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -1741,7 +1789,22 @@
      "__callable__": "courtside_dynamics.recipes._humanoid_tennis_info_row"
     },
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 128,
+     "clip_range": 0.2,
+     "ent_coef": 0.001,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0001,
+     "n_epochs": 5,
+     "n_steps": 128,
+     "policy_kwargs": {
+      "log_std_init": -2.0,
+      "ortho_init": false
+     },
+     "sde_sample_freq": -1,
+     "target_kl": 0.02,
+     "use_sde": true
+    },
     "monitor_info_keywords": [],
     "n_envs": 1,
     "n_eval_episodes": 4,
@@ -1855,7 +1918,7 @@
      297,
      298
     ],
-    "normalize_reward": null,
+    "normalize_reward": false,
     "performance_gate": null,
     "phase_key": "rally_phase",
     "phase_labels": {
@@ -1902,7 +1965,7 @@
     "best_metric_keys": null,
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 10000,
+    "checkpoint_freq": 9984,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": false,
@@ -1961,7 +2024,7 @@
       "render_mode": "rgb_array"
      }
     },
-    "eval_freq": 5000,
+    "eval_freq": 4992,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -2003,7 +2066,22 @@
      "__callable__": "courtside_dynamics.recipes._humanoid_tennis_info_row"
     },
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 128,
+     "clip_range": 0.2,
+     "ent_coef": 0.001,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0001,
+     "n_epochs": 5,
+     "n_steps": 128,
+     "policy_kwargs": {
+      "log_std_init": -2.0,
+      "ortho_init": false
+     },
+     "sde_sample_freq": -1,
+     "target_kl": 0.02,
+     "use_sde": true
+    },
     "monitor_info_keywords": [],
     "n_envs": 1,
     "n_eval_episodes": 3,
@@ -2117,7 +2195,7 @@
      297,
      298
     ],
-    "normalize_reward": null,
+    "normalize_reward": false,
     "performance_gate": null,
     "phase_key": "rally_phase",
     "phase_labels": {
@@ -3269,7 +3347,7 @@
     ],
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 100000,
+    "checkpoint_freq": 98304,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -3342,7 +3420,7 @@
       "render_mode": "rgb_array"
      }
     },
-    "eval_freq": 25000,
+    "eval_freq": 24576,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -3392,7 +3470,19 @@
     },
     "ladder_certification": null,
     "model_kwargs": {
-     "ent_coef": 0.01,
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.001,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0001,
+     "n_epochs": 5,
+     "n_steps": 2048,
+     "policy_kwargs": {
+      "log_std_init": -2.0,
+      "ortho_init": false
+     },
+     "sde_sample_freq": 150,
+     "target_kl": 0.02,
      "use_sde": true
     },
     "monitor_info_keywords": [],
@@ -3560,7 +3650,7 @@
     ],
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 10000,
+    "checkpoint_freq": 8192,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -3633,7 +3723,7 @@
       "render_mode": "rgb_array"
      }
     },
-    "eval_freq": 5000,
+    "eval_freq": 4096,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -3683,7 +3773,19 @@
     },
     "ladder_certification": null,
     "model_kwargs": {
-     "ent_coef": 0.01,
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.001,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0001,
+     "n_epochs": 5,
+     "n_steps": 2048,
+     "policy_kwargs": {
+      "log_std_init": -2.0,
+      "ortho_init": false
+     },
+     "sde_sample_freq": 150,
+     "target_kl": 0.02,
      "use_sde": true
     },
     "monitor_info_keywords": [],
@@ -5039,7 +5141,7 @@
     ],
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 100000,
+    "checkpoint_freq": 98304,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -5130,7 +5232,7 @@
       }
      }
     },
-    "eval_freq": 25000,
+    "eval_freq": 24576,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -5180,7 +5282,19 @@
     },
     "ladder_certification": null,
     "model_kwargs": {
-     "ent_coef": 0.01,
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.001,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0001,
+     "n_epochs": 5,
+     "n_steps": 2048,
+     "policy_kwargs": {
+      "log_std_init": -2.0,
+      "ortho_init": false
+     },
+     "sde_sample_freq": 300,
+     "target_kl": 0.02,
      "use_sde": true
     },
     "monitor_info_keywords": [],
@@ -5348,7 +5462,7 @@
     ],
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 10000,
+    "checkpoint_freq": 8192,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -5439,7 +5553,7 @@
       }
      }
     },
-    "eval_freq": 5000,
+    "eval_freq": 4096,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -5489,7 +5603,19 @@
     },
     "ladder_certification": null,
     "model_kwargs": {
-     "ent_coef": 0.01,
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.001,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0001,
+     "n_epochs": 5,
+     "n_steps": 2048,
+     "policy_kwargs": {
+      "log_std_init": -2.0,
+      "ortho_init": false
+     },
+     "sde_sample_freq": 300,
+     "target_kl": 0.02,
      "use_sde": true
     },
     "monitor_info_keywords": [],
@@ -6881,7 +7007,7 @@
     ],
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 100000,
+    "checkpoint_freq": 98304,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -6972,7 +7098,7 @@
       }
      }
     },
-    "eval_freq": 25000,
+    "eval_freq": 24576,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -7022,7 +7148,19 @@
     },
     "ladder_certification": null,
     "model_kwargs": {
-     "ent_coef": 0.01,
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.001,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0001,
+     "n_epochs": 5,
+     "n_steps": 2048,
+     "policy_kwargs": {
+      "log_std_init": -2.0,
+      "ortho_init": false
+     },
+     "sde_sample_freq": 300,
+     "target_kl": 0.02,
      "use_sde": true
     },
     "monitor_info_keywords": [],
@@ -7190,7 +7328,7 @@
     ],
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 10000,
+    "checkpoint_freq": 8192,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -7281,7 +7419,7 @@
       }
      }
     },
-    "eval_freq": 5000,
+    "eval_freq": 4096,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -7331,7 +7469,19 @@
     },
     "ladder_certification": null,
     "model_kwargs": {
-     "ent_coef": 0.01,
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.001,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0001,
+     "n_epochs": 5,
+     "n_steps": 2048,
+     "policy_kwargs": {
+      "log_std_init": -2.0,
+      "ortho_init": false
+     },
+     "sde_sample_freq": 300,
+     "target_kl": 0.02,
      "use_sde": true
     },
     "monitor_info_keywords": [],
@@ -9127,7 +9277,7 @@
      "episodes": 30,
      "seed_start": 5200
     },
-    "checkpoint_freq": 250000,
+    "checkpoint_freq": 245760,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -9180,7 +9330,7 @@
      "episode_legal_hit_count_a_ep_mean"
     ],
     "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
+    "early_stop_degenerate_evals": 6,
     "early_stop_patience": 20,
     "env_attr_schedules": [],
     "env_fn": {
@@ -9205,7 +9355,7 @@
       "render_mode": "rgb_array"
      }
     },
-    "eval_freq": 25000,
+    "eval_freq": 32768,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -9277,7 +9427,23 @@
      "__callable__": "courtside_dynamics.recipes._paddle_tennis_info_row"
     },
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "device": "cpu",
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 1024,
+     "policy_kwargs": {
+      "log_std_init": -2.0,
+      "ortho_init": false
+     },
+     "sde_sample_freq": 64,
+     "target_kl": 0.02,
+     "use_sde": true
+    },
     "monitor_info_keywords": [
      "episode_legal_hit_count_a",
      "episode_valid_return_count_a",
@@ -9314,7 +9480,7 @@
      46,
      47
     ],
-    "normalize_reward": null,
+    "normalize_reward": false,
     "performance_gate": null,
     "phase_key": "rally_phase",
     "phase_labels": {
@@ -9370,7 +9536,7 @@
      "episodes": 30,
      "seed_start": 5200
     },
-    "checkpoint_freq": 250000,
+    "checkpoint_freq": 245760,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -9423,7 +9589,7 @@
      "episode_legal_hit_count_a_ep_mean"
     ],
     "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
+    "early_stop_degenerate_evals": 6,
     "early_stop_patience": 20,
     "env_attr_schedules": [],
     "env_fn": {
@@ -9448,7 +9614,7 @@
       "render_mode": "rgb_array"
      }
     },
-    "eval_freq": 25000,
+    "eval_freq": 32768,
     "eval_reset_options": [
      {
       "serve_side": "a"
@@ -9527,7 +9693,23 @@
      "__callable__": "courtside_dynamics.recipes._paddle_tennis_info_row"
     },
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "device": "cpu",
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 1024,
+     "policy_kwargs": {
+      "log_std_init": -2.0,
+      "ortho_init": false
+     },
+     "sde_sample_freq": 64,
+     "target_kl": 0.02,
+     "use_sde": true
+    },
     "monitor_info_keywords": [
      "episode_legal_hit_count_a",
      "episode_valid_return_count_a",
@@ -9564,7 +9746,7 @@
      46,
      47
     ],
-    "normalize_reward": null,
+    "normalize_reward": false,
     "performance_gate": null,
     "phase_key": "rally_phase",
     "phase_labels": {
@@ -9618,7 +9800,7 @@
      "episodes": 3,
      "seed_start": 5200
     },
-    "checkpoint_freq": 10000,
+    "checkpoint_freq": 8192,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -9671,7 +9853,7 @@
      "episode_legal_hit_count_a_ep_mean"
     ],
     "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
+    "early_stop_degenerate_evals": 6,
     "early_stop_patience": 20,
     "env_attr_schedules": [],
     "env_fn": {
@@ -9696,7 +9878,7 @@
       "render_mode": "rgb_array"
      }
     },
-    "eval_freq": 5000,
+    "eval_freq": 4096,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -9768,7 +9950,23 @@
      "__callable__": "courtside_dynamics.recipes._paddle_tennis_info_row"
     },
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "device": "cpu",
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 512,
+     "policy_kwargs": {
+      "log_std_init": -2.0,
+      "ortho_init": false
+     },
+     "sde_sample_freq": 64,
+     "target_kl": 0.02,
+     "use_sde": true
+    },
     "monitor_info_keywords": [
      "episode_legal_hit_count_a",
      "episode_valid_return_count_a",
@@ -9805,7 +10003,7 @@
      46,
      47
     ],
-    "normalize_reward": null,
+    "normalize_reward": false,
     "performance_gate": null,
     "phase_key": "rally_phase",
     "phase_labels": {
@@ -9861,7 +10059,7 @@
      "episodes": 3,
      "seed_start": 5200
     },
-    "checkpoint_freq": 10000,
+    "checkpoint_freq": 8192,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -9914,7 +10112,7 @@
      "episode_legal_hit_count_a_ep_mean"
     ],
     "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
+    "early_stop_degenerate_evals": 6,
     "early_stop_patience": 20,
     "env_attr_schedules": [],
     "env_fn": {
@@ -9939,7 +10137,7 @@
       "render_mode": "rgb_array"
      }
     },
-    "eval_freq": 5000,
+    "eval_freq": 4096,
     "eval_reset_options": [
      {
       "serve_side": "a"
@@ -10018,7 +10216,23 @@
      "__callable__": "courtside_dynamics.recipes._paddle_tennis_info_row"
     },
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "device": "cpu",
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 512,
+     "policy_kwargs": {
+      "log_std_init": -2.0,
+      "ortho_init": false
+     },
+     "sde_sample_freq": 64,
+     "target_kl": 0.02,
+     "use_sde": true
+    },
     "monitor_info_keywords": [
      "episode_legal_hit_count_a",
      "episode_valid_return_count_a",
@@ -10055,7 +10269,7 @@
      46,
      47
     ],
-    "normalize_reward": null,
+    "normalize_reward": false,
     "performance_gate": null,
     "phase_key": "rally_phase",
     "phase_labels": {
@@ -11413,7 +11627,7 @@
     ],
     "best_metric_min_delta": 0.016666666666666666,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 250000,
+    "checkpoint_freq": 245760,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -11423,7 +11637,7 @@
      "paddle_hit_count_ep_mean"
     ],
     "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
+    "early_stop_degenerate_evals": 6,
     "early_stop_patience": 20,
     "env_attr_schedules": [
      {
@@ -11484,7 +11698,7 @@
       "serve_vy_min": 0.8
      }
     },
-    "eval_freq": 25000,
+    "eval_freq": 32768,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -11507,14 +11721,26 @@
     "info_eval_terminal_keys": [],
     "info_row_fn": null,
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 1024,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
+    },
     "monitor_info_keywords": [],
     "n_envs": 8,
     "n_eval_episodes": 30,
     "name_prefix": "wall_ball_baseline_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": null,
     "phase_key": "rally_phase",
     "phase_labels": {
@@ -11560,7 +11786,7 @@
     ],
     "best_metric_min_delta": 0.016666666666666666,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 10000,
+    "checkpoint_freq": 8192,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -11570,7 +11796,7 @@
      "paddle_hit_count_ep_mean"
     ],
     "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
+    "early_stop_degenerate_evals": 6,
     "early_stop_patience": 20,
     "env_attr_schedules": [
      {
@@ -11631,7 +11857,7 @@
       "serve_vy_min": 0.8
      }
     },
-    "eval_freq": 5000,
+    "eval_freq": 4096,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -11654,14 +11880,26 @@
     "info_eval_terminal_keys": [],
     "info_row_fn": null,
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 512,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
+    },
     "monitor_info_keywords": [],
     "n_envs": 8,
     "n_eval_episodes": 3,
     "name_prefix": "wall_ball_baseline_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": null,
     "phase_key": "rally_phase",
     "phase_labels": {
@@ -12339,7 +12577,7 @@
     ],
     "best_metric_min_delta": 0.016666666666666666,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 250000,
+    "checkpoint_freq": 245760,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -12349,7 +12587,7 @@
      "paddle_hit_count_ep_mean"
     ],
     "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
+    "early_stop_degenerate_evals": 6,
     "early_stop_patience": 20,
     "env_attr_schedules": [],
     "env_fn": {
@@ -12404,7 +12642,7 @@
       "weak_return_penalty": 0.1
      }
     },
-    "eval_freq": 25000,
+    "eval_freq": 32768,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -12428,7 +12666,18 @@
     "info_row_fn": null,
     "ladder_certification": null,
     "model_kwargs": {
-     "gamma": 0.995
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "gamma": 0.995,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 1024,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
     },
     "monitor_info_keywords": [],
     "n_envs": 8,
@@ -12436,7 +12685,7 @@
     "name_prefix": "wall_ball_bootstrap_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": {
      "metric_key": "bounce_count_ep_mean",
      "stages": [
@@ -12504,7 +12753,7 @@
     ],
     "best_metric_min_delta": 0.016666666666666666,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 10000,
+    "checkpoint_freq": 8192,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -12514,7 +12763,7 @@
      "paddle_hit_count_ep_mean"
     ],
     "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
+    "early_stop_degenerate_evals": 6,
     "early_stop_patience": 20,
     "env_attr_schedules": [],
     "env_fn": {
@@ -12569,7 +12818,7 @@
       "weak_return_penalty": 0.1
      }
     },
-    "eval_freq": 5000,
+    "eval_freq": 4096,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -12593,7 +12842,18 @@
     "info_row_fn": null,
     "ladder_certification": null,
     "model_kwargs": {
-     "gamma": 0.995
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "gamma": 0.995,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 512,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
     },
     "monitor_info_keywords": [],
     "n_envs": 8,
@@ -12601,7 +12861,7 @@
     "name_prefix": "wall_ball_bootstrap_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": {
      "metric_key": "bounce_count_ep_mean",
      "stages": [
@@ -13449,454 +13709,10 @@
    "warnings": []
   },
   "WallBallDepthCurriculumAligned|PPO|quick_test=False": {
-   "train_config": {
-    "algo": "PPO",
-    "best_metric_keys": [
-     "bounce_count_ep_mean",
-     "bounce_count_ep_ge_5_rate"
-    ],
-    "best_metric_min_delta": 0.008333333333333333,
-    "checkpoint_diagnosis": null,
-    "checkpoint_freq": 250000,
-    "clip_obs": 10.0,
-    "clip_reward": 10.0,
-    "confirm_best_eval": true,
-    "csv_header": null,
-    "degenerate_flat_keys": null,
-    "degenerate_guard_keys": [
-     "paddle_hit_count_ep_mean"
-    ],
-    "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
-    "early_stop_patience": 20,
-    "env_attr_schedules": [],
-    "env_fn": {
-     "__env_factory__": "courtside_dynamics.recipes.make_env_fn.<locals>._factory",
-     "env_cls": "courtside_dynamics.envs.wall_ball.WallBallEnv",
-     "kwargs": {
-      "min_force": 20.0,
-      "paddle_home_x": -1.25,
-      "paddle_joint_damping": 8.0,
-      "paddle_start_x": -1.6,
-      "paddle_x_fence": [
-       -2.3,
-       -0.2
-      ],
-      "paddle_x_target_range": [
-       -4.7,
-       0.3
-      ],
-      "rally_style": "open",
-      "render_mode": "rgb_array",
-      "return_shaping_scale": 0.15,
-      "serve_lob": 0.0,
-      "serve_speed": 5.2,
-      "serve_speed_jitter": 0.5,
-      "serve_start_x": 1.0,
-      "serve_vy_max": 2.0,
-      "serve_vy_min": 0.8
-     }
-    },
-    "eval_env_fn": {
-     "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
-     "env_cls": "courtside_dynamics.envs.wall_ball.WallBallEnv",
-     "kwargs": {
-      "min_force": 20.0,
-      "paddle_home_x": -3.65,
-      "paddle_joint_damping": 8.0,
-      "paddle_start_x": -3.9,
-      "paddle_x_fence": [
-       -4.7,
-       -2.6
-      ],
-      "paddle_x_target_range": [
-       -4.7,
-       0.3
-      ],
-      "rally_style": "open",
-      "render_mode": "rgb_array",
-      "return_shaping_scale": 0.15,
-      "serve_lob": 0.0,
-      "serve_speed": 7.0,
-      "serve_speed_jitter": 0.5,
-      "serve_start_x": -0.35,
-      "serve_vy_max": 2.0,
-      "serve_vy_min": 0.8
-     }
-    },
-    "eval_freq": 25000,
-    "eval_reset_options": null,
-    "eval_seed": null,
-    "eval_verbose": null,
-    "extra_callbacks": [],
-    "final_eval_episodes": 30,
-    "final_info_eval": true,
-    "headline_key": "bounce_count",
-    "info_dict_eval": true,
-    "info_eval_distribution_keys": [
-     "bounce_count"
-    ],
-    "info_eval_keys": null,
-    "info_eval_survival_thresholds": {
-     "bounce_count": [
-      2,
-      3,
-      5
-     ]
-    },
-    "info_eval_terminal_keys": [],
-    "info_row_fn": null,
-    "ladder_certification": {
-     "episodes": 30,
-     "oracle_probes": [
-      {
-       "lead_charge": 3.0
-      },
-      {
-       "lead_charge": 0.8
-      },
-      {
-       "lead_charge": 1.0
-      },
-      {
-       "lead_charge": 1.2
-      },
-      {
-       "lead_charge": 3.0
-      }
-     ],
-     "seed_start": 30000
-    },
-    "model_kwargs": {
-     "gamma": 0.995
-    },
-    "monitor_info_keywords": [],
-    "n_envs": 8,
-    "n_eval_episodes": 60,
-    "name_prefix": "wall_ball_depth_curriculum_aligned_ppo",
-    "normalize_obs": true,
-    "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
-    "performance_gate": {
-     "advance_update_pause_steps": 50000,
-     "clear_replay_buffer_on_advance": true,
-     "metric_key": "bounce_count_ep_mean",
-     "promotion_rule": "window_mean",
-     "reset_entropy_on_advance": true,
-     "stages": [
-      {
-       "paddle_home_x": -1.25,
-       "paddle_start_x": -1.6,
-       "paddle_x_fence": [
-        -2.3,
-        -0.2
-       ],
-       "serve_speed": 5.2,
-       "serve_start_x": 1.0
-      },
-      {
-       "paddle_home_x": -1.85,
-       "paddle_start_x": -2.1,
-       "paddle_x_fence": [
-        -2.9,
-        -0.8
-       ],
-       "serve_speed": 5.5,
-       "serve_start_x": 0.69
-      },
-      {
-       "paddle_home_x": -2.45,
-       "paddle_start_x": -2.7,
-       "paddle_x_fence": [
-        -3.5,
-        -1.4
-       ],
-       "serve_speed": 6.0,
-       "serve_start_x": 0.34
-      },
-      {
-       "paddle_home_x": -3.05,
-       "paddle_start_x": -3.3,
-       "paddle_x_fence": [
-        -4.1,
-        -2.0
-       ],
-       "serve_speed": 6.5,
-       "serve_start_x": -0.01
-      },
-      {
-       "paddle_home_x": -3.65,
-       "paddle_start_x": -3.9,
-       "paddle_x_fence": [
-        -4.7,
-        -2.6
-       ],
-       "serve_speed": 7.0,
-       "serve_start_x": -0.35
-      }
-     ],
-     "sustain_evals": 3,
-     "threshold": 3.0
-    },
-    "phase_key": "rally_phase",
-    "phase_labels": {
-     "__items__": [
-      [
-       0,
-       "await_bounce"
-      ],
-      [
-       1,
-       "await_paddle"
-      ],
-      [
-       2,
-       "await_wall"
-      ]
-     ]
-    },
-    "policy": "MlpPolicy",
-    "recipe_name": "WallBallDepthCurriculumAligned",
-    "record_video": true,
-    "require_device": null,
-    "reuse_log_dir": false,
-    "reward_eval_episodes": 5,
-    "run_config_file": null,
-    "seed": null,
-    "success_key": "bounce_count",
-    "success_threshold": 3.0,
-    "total_timesteps": 6000000,
-    "verbose": 0,
-    "video_freq": 250000,
-    "video_length": 10000,
-    "warm_start": null
-   },
-   "warnings": []
+   "refused": "ValueError: performance_gate sets ['advance_update_pause_steps', 'clear_replay_buffer_on_advance', 'reset_entropy_on_advance'], which act on an off-policy model's gradient steps, replay buffer or entropy temperature; PPO has none of them (it discards each rollout after its update). Drop them for a PPO run"
   },
   "WallBallDepthCurriculumAligned|PPO|quick_test=True": {
-   "train_config": {
-    "algo": "PPO",
-    "best_metric_keys": [
-     "bounce_count_ep_mean",
-     "bounce_count_ep_ge_5_rate"
-    ],
-    "best_metric_min_delta": 0.008333333333333333,
-    "checkpoint_diagnosis": null,
-    "checkpoint_freq": 10000,
-    "clip_obs": 10.0,
-    "clip_reward": 10.0,
-    "confirm_best_eval": true,
-    "csv_header": null,
-    "degenerate_flat_keys": null,
-    "degenerate_guard_keys": [
-     "paddle_hit_count_ep_mean"
-    ],
-    "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
-    "early_stop_patience": 20,
-    "env_attr_schedules": [],
-    "env_fn": {
-     "__env_factory__": "courtside_dynamics.recipes.make_env_fn.<locals>._factory",
-     "env_cls": "courtside_dynamics.envs.wall_ball.WallBallEnv",
-     "kwargs": {
-      "min_force": 20.0,
-      "paddle_home_x": -1.25,
-      "paddle_joint_damping": 8.0,
-      "paddle_start_x": -1.6,
-      "paddle_x_fence": [
-       -2.3,
-       -0.2
-      ],
-      "paddle_x_target_range": [
-       -4.7,
-       0.3
-      ],
-      "rally_style": "open",
-      "render_mode": "rgb_array",
-      "return_shaping_scale": 0.15,
-      "serve_lob": 0.0,
-      "serve_speed": 5.2,
-      "serve_speed_jitter": 0.5,
-      "serve_start_x": 1.0,
-      "serve_vy_max": 2.0,
-      "serve_vy_min": 0.8
-     }
-    },
-    "eval_env_fn": {
-     "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
-     "env_cls": "courtside_dynamics.envs.wall_ball.WallBallEnv",
-     "kwargs": {
-      "min_force": 20.0,
-      "paddle_home_x": -3.65,
-      "paddle_joint_damping": 8.0,
-      "paddle_start_x": -3.9,
-      "paddle_x_fence": [
-       -4.7,
-       -2.6
-      ],
-      "paddle_x_target_range": [
-       -4.7,
-       0.3
-      ],
-      "rally_style": "open",
-      "render_mode": "rgb_array",
-      "return_shaping_scale": 0.15,
-      "serve_lob": 0.0,
-      "serve_speed": 7.0,
-      "serve_speed_jitter": 0.5,
-      "serve_start_x": -0.35,
-      "serve_vy_max": 2.0,
-      "serve_vy_min": 0.8
-     }
-    },
-    "eval_freq": 5000,
-    "eval_reset_options": null,
-    "eval_seed": null,
-    "eval_verbose": null,
-    "extra_callbacks": [],
-    "final_eval_episodes": 30,
-    "final_info_eval": true,
-    "headline_key": "bounce_count",
-    "info_dict_eval": true,
-    "info_eval_distribution_keys": [
-     "bounce_count"
-    ],
-    "info_eval_keys": null,
-    "info_eval_survival_thresholds": {
-     "bounce_count": [
-      2,
-      3,
-      5
-     ]
-    },
-    "info_eval_terminal_keys": [],
-    "info_row_fn": null,
-    "ladder_certification": {
-     "episodes": 30,
-     "oracle_probes": [
-      {
-       "lead_charge": 3.0
-      },
-      {
-       "lead_charge": 0.8
-      },
-      {
-       "lead_charge": 1.0
-      },
-      {
-       "lead_charge": 1.2
-      },
-      {
-       "lead_charge": 3.0
-      }
-     ],
-     "seed_start": 30000
-    },
-    "model_kwargs": {
-     "gamma": 0.995
-    },
-    "monitor_info_keywords": [],
-    "n_envs": 8,
-    "n_eval_episodes": 3,
-    "name_prefix": "wall_ball_depth_curriculum_aligned_ppo",
-    "normalize_obs": true,
-    "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
-    "performance_gate": {
-     "advance_update_pause_steps": 50000,
-     "clear_replay_buffer_on_advance": true,
-     "metric_key": "bounce_count_ep_mean",
-     "promotion_rule": "window_mean",
-     "reset_entropy_on_advance": true,
-     "stages": [
-      {
-       "paddle_home_x": -1.25,
-       "paddle_start_x": -1.6,
-       "paddle_x_fence": [
-        -2.3,
-        -0.2
-       ],
-       "serve_speed": 5.2,
-       "serve_start_x": 1.0
-      },
-      {
-       "paddle_home_x": -1.85,
-       "paddle_start_x": -2.1,
-       "paddle_x_fence": [
-        -2.9,
-        -0.8
-       ],
-       "serve_speed": 5.5,
-       "serve_start_x": 0.69
-      },
-      {
-       "paddle_home_x": -2.45,
-       "paddle_start_x": -2.7,
-       "paddle_x_fence": [
-        -3.5,
-        -1.4
-       ],
-       "serve_speed": 6.0,
-       "serve_start_x": 0.34
-      },
-      {
-       "paddle_home_x": -3.05,
-       "paddle_start_x": -3.3,
-       "paddle_x_fence": [
-        -4.1,
-        -2.0
-       ],
-       "serve_speed": 6.5,
-       "serve_start_x": -0.01
-      },
-      {
-       "paddle_home_x": -3.65,
-       "paddle_start_x": -3.9,
-       "paddle_x_fence": [
-        -4.7,
-        -2.6
-       ],
-       "serve_speed": 7.0,
-       "serve_start_x": -0.35
-      }
-     ],
-     "sustain_evals": 3,
-     "threshold": 3.0
-    },
-    "phase_key": "rally_phase",
-    "phase_labels": {
-     "__items__": [
-      [
-       0,
-       "await_bounce"
-      ],
-      [
-       1,
-       "await_paddle"
-      ],
-      [
-       2,
-       "await_wall"
-      ]
-     ]
-    },
-    "policy": "MlpPolicy",
-    "recipe_name": "WallBallDepthCurriculumAligned",
-    "record_video": true,
-    "require_device": null,
-    "reuse_log_dir": false,
-    "reward_eval_episodes": 5,
-    "run_config_file": null,
-    "seed": null,
-    "success_key": "bounce_count",
-    "success_threshold": 3.0,
-    "total_timesteps": 25000,
-    "verbose": 0,
-    "video_freq": 10000,
-    "video_length": 750,
-    "warm_start": null
-   },
-   "warnings": []
+   "refused": "ValueError: performance_gate sets ['advance_update_pause_steps', 'clear_replay_buffer_on_advance', 'reset_entropy_on_advance'], which act on an off-policy model's gradient steps, replay buffer or entropy temperature; PPO has none of them (it discards each rollout after its update). Drop them for a PPO run"
   },
   "WallBallDepthCurriculumAligned|SAC|quick_test=False": {
    "train_config": {
@@ -14799,454 +14615,10 @@
    "warnings": []
   },
   "WallBallDepthCurriculum|PPO|quick_test=False": {
-   "train_config": {
-    "algo": "PPO",
-    "best_metric_keys": [
-     "bounce_count_ep_mean",
-     "bounce_count_ep_ge_5_rate"
-    ],
-    "best_metric_min_delta": 0.008333333333333333,
-    "checkpoint_diagnosis": null,
-    "checkpoint_freq": 250000,
-    "clip_obs": 10.0,
-    "clip_reward": 10.0,
-    "confirm_best_eval": true,
-    "csv_header": null,
-    "degenerate_flat_keys": null,
-    "degenerate_guard_keys": [
-     "paddle_hit_count_ep_mean"
-    ],
-    "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
-    "early_stop_patience": 20,
-    "env_attr_schedules": [],
-    "env_fn": {
-     "__env_factory__": "courtside_dynamics.recipes.make_env_fn.<locals>._factory",
-     "env_cls": "courtside_dynamics.envs.wall_ball.WallBallEnv",
-     "kwargs": {
-      "min_force": 20.0,
-      "paddle_home_x": -1.25,
-      "paddle_joint_damping": 8.0,
-      "paddle_start_x": -1.6,
-      "paddle_x_fence": [
-       -2.3,
-       -0.2
-      ],
-      "paddle_x_target_range": [
-       -4.7,
-       0.3
-      ],
-      "rally_style": "open",
-      "render_mode": "rgb_array",
-      "return_shaping_scale": 0.15,
-      "serve_lob": 0.0,
-      "serve_speed": 5.2,
-      "serve_speed_jitter": 0.5,
-      "serve_start_x": 1.0,
-      "serve_vy_max": 2.0,
-      "serve_vy_min": 0.8
-     }
-    },
-    "eval_env_fn": {
-     "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
-     "env_cls": "courtside_dynamics.envs.wall_ball.WallBallEnv",
-     "kwargs": {
-      "min_force": 20.0,
-      "paddle_home_x": -3.65,
-      "paddle_joint_damping": 8.0,
-      "paddle_start_x": -3.9,
-      "paddle_x_fence": [
-       -4.7,
-       -2.6
-      ],
-      "paddle_x_target_range": [
-       -4.7,
-       0.3
-      ],
-      "rally_style": "open",
-      "render_mode": "rgb_array",
-      "return_shaping_scale": 0.15,
-      "serve_lob": 0.0,
-      "serve_speed": 7.0,
-      "serve_speed_jitter": 0.5,
-      "serve_start_x": 1.0,
-      "serve_vy_max": 2.0,
-      "serve_vy_min": 0.8
-     }
-    },
-    "eval_freq": 25000,
-    "eval_reset_options": null,
-    "eval_seed": null,
-    "eval_verbose": null,
-    "extra_callbacks": [],
-    "final_eval_episodes": 30,
-    "final_info_eval": true,
-    "headline_key": "bounce_count",
-    "info_dict_eval": true,
-    "info_eval_distribution_keys": [
-     "bounce_count"
-    ],
-    "info_eval_keys": null,
-    "info_eval_survival_thresholds": {
-     "bounce_count": [
-      2,
-      3,
-      5
-     ]
-    },
-    "info_eval_terminal_keys": [],
-    "info_row_fn": null,
-    "ladder_certification": {
-     "episodes": 30,
-     "oracle_probes": [
-      {
-       "lead_charge": 3.0
-      },
-      {
-       "lead_charge": 0.8
-      },
-      {
-       "lead_charge": 1.0
-      },
-      {
-       "lead_charge": 1.2
-      },
-      {
-       "lead_charge": 3.0
-      }
-     ],
-     "seed_start": 30000
-    },
-    "model_kwargs": {
-     "gamma": 0.995
-    },
-    "monitor_info_keywords": [],
-    "n_envs": 8,
-    "n_eval_episodes": 60,
-    "name_prefix": "wall_ball_depth_curriculum_ppo",
-    "normalize_obs": true,
-    "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
-    "performance_gate": {
-     "advance_update_pause_steps": 50000,
-     "clear_replay_buffer_on_advance": true,
-     "metric_key": "bounce_count_ep_mean",
-     "promotion_rule": "window_mean",
-     "reset_entropy_on_advance": true,
-     "stages": [
-      {
-       "paddle_home_x": -1.25,
-       "paddle_start_x": -1.6,
-       "paddle_x_fence": [
-        -2.3,
-        -0.2
-       ],
-       "serve_speed": 5.2,
-       "serve_start_x": 1.0
-      },
-      {
-       "paddle_home_x": -1.85,
-       "paddle_start_x": -2.1,
-       "paddle_x_fence": [
-        -2.9,
-        -0.8
-       ],
-       "serve_speed": 5.5,
-       "serve_start_x": 1.0
-      },
-      {
-       "paddle_home_x": -2.45,
-       "paddle_start_x": -2.7,
-       "paddle_x_fence": [
-        -3.5,
-        -1.4
-       ],
-       "serve_speed": 6.0,
-       "serve_start_x": 1.0
-      },
-      {
-       "paddle_home_x": -3.05,
-       "paddle_start_x": -3.3,
-       "paddle_x_fence": [
-        -4.1,
-        -2.0
-       ],
-       "serve_speed": 6.5,
-       "serve_start_x": 1.0
-      },
-      {
-       "paddle_home_x": -3.65,
-       "paddle_start_x": -3.9,
-       "paddle_x_fence": [
-        -4.7,
-        -2.6
-       ],
-       "serve_speed": 7.0,
-       "serve_start_x": 1.0
-      }
-     ],
-     "sustain_evals": 3,
-     "threshold": 3.0
-    },
-    "phase_key": "rally_phase",
-    "phase_labels": {
-     "__items__": [
-      [
-       0,
-       "await_bounce"
-      ],
-      [
-       1,
-       "await_paddle"
-      ],
-      [
-       2,
-       "await_wall"
-      ]
-     ]
-    },
-    "policy": "MlpPolicy",
-    "recipe_name": "WallBallDepthCurriculum",
-    "record_video": true,
-    "require_device": null,
-    "reuse_log_dir": false,
-    "reward_eval_episodes": 5,
-    "run_config_file": null,
-    "seed": null,
-    "success_key": "bounce_count",
-    "success_threshold": 3.0,
-    "total_timesteps": 6000000,
-    "verbose": 0,
-    "video_freq": 250000,
-    "video_length": 10000,
-    "warm_start": null
-   },
-   "warnings": []
+   "refused": "ValueError: performance_gate sets ['advance_update_pause_steps', 'clear_replay_buffer_on_advance', 'reset_entropy_on_advance'], which act on an off-policy model's gradient steps, replay buffer or entropy temperature; PPO has none of them (it discards each rollout after its update). Drop them for a PPO run"
   },
   "WallBallDepthCurriculum|PPO|quick_test=True": {
-   "train_config": {
-    "algo": "PPO",
-    "best_metric_keys": [
-     "bounce_count_ep_mean",
-     "bounce_count_ep_ge_5_rate"
-    ],
-    "best_metric_min_delta": 0.008333333333333333,
-    "checkpoint_diagnosis": null,
-    "checkpoint_freq": 10000,
-    "clip_obs": 10.0,
-    "clip_reward": 10.0,
-    "confirm_best_eval": true,
-    "csv_header": null,
-    "degenerate_flat_keys": null,
-    "degenerate_guard_keys": [
-     "paddle_hit_count_ep_mean"
-    ],
-    "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
-    "early_stop_patience": 20,
-    "env_attr_schedules": [],
-    "env_fn": {
-     "__env_factory__": "courtside_dynamics.recipes.make_env_fn.<locals>._factory",
-     "env_cls": "courtside_dynamics.envs.wall_ball.WallBallEnv",
-     "kwargs": {
-      "min_force": 20.0,
-      "paddle_home_x": -1.25,
-      "paddle_joint_damping": 8.0,
-      "paddle_start_x": -1.6,
-      "paddle_x_fence": [
-       -2.3,
-       -0.2
-      ],
-      "paddle_x_target_range": [
-       -4.7,
-       0.3
-      ],
-      "rally_style": "open",
-      "render_mode": "rgb_array",
-      "return_shaping_scale": 0.15,
-      "serve_lob": 0.0,
-      "serve_speed": 5.2,
-      "serve_speed_jitter": 0.5,
-      "serve_start_x": 1.0,
-      "serve_vy_max": 2.0,
-      "serve_vy_min": 0.8
-     }
-    },
-    "eval_env_fn": {
-     "__env_factory__": "courtside_dynamics.recipes.make_eval_env_fn.<locals>._factory",
-     "env_cls": "courtside_dynamics.envs.wall_ball.WallBallEnv",
-     "kwargs": {
-      "min_force": 20.0,
-      "paddle_home_x": -3.65,
-      "paddle_joint_damping": 8.0,
-      "paddle_start_x": -3.9,
-      "paddle_x_fence": [
-       -4.7,
-       -2.6
-      ],
-      "paddle_x_target_range": [
-       -4.7,
-       0.3
-      ],
-      "rally_style": "open",
-      "render_mode": "rgb_array",
-      "return_shaping_scale": 0.15,
-      "serve_lob": 0.0,
-      "serve_speed": 7.0,
-      "serve_speed_jitter": 0.5,
-      "serve_start_x": 1.0,
-      "serve_vy_max": 2.0,
-      "serve_vy_min": 0.8
-     }
-    },
-    "eval_freq": 5000,
-    "eval_reset_options": null,
-    "eval_seed": null,
-    "eval_verbose": null,
-    "extra_callbacks": [],
-    "final_eval_episodes": 30,
-    "final_info_eval": true,
-    "headline_key": "bounce_count",
-    "info_dict_eval": true,
-    "info_eval_distribution_keys": [
-     "bounce_count"
-    ],
-    "info_eval_keys": null,
-    "info_eval_survival_thresholds": {
-     "bounce_count": [
-      2,
-      3,
-      5
-     ]
-    },
-    "info_eval_terminal_keys": [],
-    "info_row_fn": null,
-    "ladder_certification": {
-     "episodes": 30,
-     "oracle_probes": [
-      {
-       "lead_charge": 3.0
-      },
-      {
-       "lead_charge": 0.8
-      },
-      {
-       "lead_charge": 1.0
-      },
-      {
-       "lead_charge": 1.2
-      },
-      {
-       "lead_charge": 3.0
-      }
-     ],
-     "seed_start": 30000
-    },
-    "model_kwargs": {
-     "gamma": 0.995
-    },
-    "monitor_info_keywords": [],
-    "n_envs": 8,
-    "n_eval_episodes": 3,
-    "name_prefix": "wall_ball_depth_curriculum_ppo",
-    "normalize_obs": true,
-    "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
-    "performance_gate": {
-     "advance_update_pause_steps": 50000,
-     "clear_replay_buffer_on_advance": true,
-     "metric_key": "bounce_count_ep_mean",
-     "promotion_rule": "window_mean",
-     "reset_entropy_on_advance": true,
-     "stages": [
-      {
-       "paddle_home_x": -1.25,
-       "paddle_start_x": -1.6,
-       "paddle_x_fence": [
-        -2.3,
-        -0.2
-       ],
-       "serve_speed": 5.2,
-       "serve_start_x": 1.0
-      },
-      {
-       "paddle_home_x": -1.85,
-       "paddle_start_x": -2.1,
-       "paddle_x_fence": [
-        -2.9,
-        -0.8
-       ],
-       "serve_speed": 5.5,
-       "serve_start_x": 1.0
-      },
-      {
-       "paddle_home_x": -2.45,
-       "paddle_start_x": -2.7,
-       "paddle_x_fence": [
-        -3.5,
-        -1.4
-       ],
-       "serve_speed": 6.0,
-       "serve_start_x": 1.0
-      },
-      {
-       "paddle_home_x": -3.05,
-       "paddle_start_x": -3.3,
-       "paddle_x_fence": [
-        -4.1,
-        -2.0
-       ],
-       "serve_speed": 6.5,
-       "serve_start_x": 1.0
-      },
-      {
-       "paddle_home_x": -3.65,
-       "paddle_start_x": -3.9,
-       "paddle_x_fence": [
-        -4.7,
-        -2.6
-       ],
-       "serve_speed": 7.0,
-       "serve_start_x": 1.0
-      }
-     ],
-     "sustain_evals": 3,
-     "threshold": 3.0
-    },
-    "phase_key": "rally_phase",
-    "phase_labels": {
-     "__items__": [
-      [
-       0,
-       "await_bounce"
-      ],
-      [
-       1,
-       "await_paddle"
-      ],
-      [
-       2,
-       "await_wall"
-      ]
-     ]
-    },
-    "policy": "MlpPolicy",
-    "recipe_name": "WallBallDepthCurriculum",
-    "record_video": true,
-    "require_device": null,
-    "reuse_log_dir": false,
-    "reward_eval_episodes": 5,
-    "run_config_file": null,
-    "seed": null,
-    "success_key": "bounce_count",
-    "success_threshold": 3.0,
-    "total_timesteps": 25000,
-    "verbose": 0,
-    "video_freq": 10000,
-    "video_length": 750,
-    "warm_start": null
-   },
-   "warnings": []
+   "refused": "ValueError: performance_gate sets ['advance_update_pause_steps', 'clear_replay_buffer_on_advance', 'reset_entropy_on_advance'], which act on an off-policy model's gradient steps, replay buffer or entropy temperature; PPO has none of them (it discards each rollout after its update). Drop them for a PPO run"
   },
   "WallBallDepthCurriculum|SAC|quick_test=False": {
    "train_config": {
@@ -16047,7 +15419,7 @@
     ],
     "best_metric_min_delta": 0.008333333333333333,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 250000,
+    "checkpoint_freq": 245760,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -16057,7 +15429,7 @@
      "paddle_hit_count_ep_mean"
     ],
     "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
+    "early_stop_degenerate_evals": 6,
     "early_stop_patience": 20,
     "env_attr_schedules": [],
     "env_fn": {
@@ -16114,7 +15486,7 @@
       "serve_vy_min": 0.8
      }
     },
-    "eval_freq": 25000,
+    "eval_freq": 32768,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -16146,7 +15518,18 @@
      "seed_start": 30000
     },
     "model_kwargs": {
-     "gamma": 0.995
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "gamma": 0.995,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 1024,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
     },
     "monitor_info_keywords": [],
     "n_envs": 8,
@@ -16154,7 +15537,7 @@
     "name_prefix": "wall_ball_goal_rally_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": {
      "metric_key": "bounce_count_ep_mean",
      "promotion_rule": "window_mean",
@@ -16217,7 +15600,7 @@
     ],
     "best_metric_min_delta": 0.008333333333333333,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 10000,
+    "checkpoint_freq": 8192,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -16227,7 +15610,7 @@
      "paddle_hit_count_ep_mean"
     ],
     "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
+    "early_stop_degenerate_evals": 6,
     "early_stop_patience": 20,
     "env_attr_schedules": [],
     "env_fn": {
@@ -16284,7 +15667,7 @@
       "serve_vy_min": 0.8
      }
     },
-    "eval_freq": 5000,
+    "eval_freq": 4096,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -16316,7 +15699,18 @@
      "seed_start": 30000
     },
     "model_kwargs": {
-     "gamma": 0.995
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "gamma": 0.995,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 512,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
     },
     "monitor_info_keywords": [],
     "n_envs": 8,
@@ -16324,7 +15718,7 @@
     "name_prefix": "wall_ball_goal_rally_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": {
      "metric_key": "bounce_count_ep_mean",
      "promotion_rule": "window_mean",
@@ -17073,7 +16467,7 @@
     ],
     "best_metric_min_delta": 0.008333333333333333,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 250000,
+    "checkpoint_freq": 245760,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -17083,7 +16477,7 @@
      "paddle_hit_count_ep_mean"
     ],
     "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
+    "early_stop_degenerate_evals": 6,
     "early_stop_patience": 60,
     "env_attr_schedules": [],
     "env_fn": {
@@ -17142,7 +16536,7 @@
       "serve_vy_min": 0.8
      }
     },
-    "eval_freq": 25000,
+    "eval_freq": 32768,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -17175,7 +16569,18 @@
      "seed_start": 30000
     },
     "model_kwargs": {
-     "gamma": 0.995
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "gamma": 0.995,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 1024,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
     },
     "monitor_info_keywords": [],
     "n_envs": 8,
@@ -17183,7 +16588,7 @@
     "name_prefix": "wall_ball_true_baseline_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": {
      "metric_key": "bounce_count_ep_mean",
      "promotion_rule": "window_mean",
@@ -17246,7 +16651,7 @@
     ],
     "best_metric_min_delta": 0.008333333333333333,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 10000,
+    "checkpoint_freq": 8192,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": true,
@@ -17256,7 +16661,7 @@
      "paddle_hit_count_ep_mean"
     ],
     "degenerate_min_evals": null,
-    "early_stop_degenerate_evals": 5,
+    "early_stop_degenerate_evals": 6,
     "early_stop_patience": 60,
     "env_attr_schedules": [],
     "env_fn": {
@@ -17315,7 +16720,7 @@
       "serve_vy_min": 0.8
      }
     },
-    "eval_freq": 5000,
+    "eval_freq": 4096,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -17348,7 +16753,18 @@
      "seed_start": 30000
     },
     "model_kwargs": {
-     "gamma": 0.995
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "gamma": 0.995,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 512,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
     },
     "monitor_info_keywords": [],
     "n_envs": 8,
@@ -17356,7 +16772,7 @@
     "name_prefix": "wall_ball_true_baseline_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": {
      "metric_key": "bounce_count_ep_mean",
      "promotion_rule": "window_mean",
@@ -17978,7 +17394,7 @@
     "best_metric_keys": null,
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 250000,
+    "checkpoint_freq": 245760,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": false,
@@ -18019,7 +17435,7 @@
       "serve_vy_max": 2.6
      }
     },
-    "eval_freq": 25000,
+    "eval_freq": 32768,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -18036,14 +17452,26 @@
     "info_eval_terminal_keys": [],
     "info_row_fn": null,
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 1024,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
+    },
     "monitor_info_keywords": [],
     "n_envs": 8,
     "n_eval_episodes": 30,
     "name_prefix": "wall_ball_volley_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": null,
     "phase_key": "rally_phase",
     "phase_labels": {
@@ -18086,7 +17514,7 @@
     "best_metric_keys": null,
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 10000,
+    "checkpoint_freq": 8192,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": false,
@@ -18127,7 +17555,7 @@
       "serve_vy_max": 2.6
      }
     },
-    "eval_freq": 5000,
+    "eval_freq": 4096,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -18144,14 +17572,26 @@
     "info_eval_terminal_keys": [],
     "info_row_fn": null,
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 512,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
+    },
     "monitor_info_keywords": [],
     "n_envs": 8,
     "n_eval_episodes": 3,
     "name_prefix": "wall_ball_volley_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": null,
     "phase_key": "rally_phase",
     "phase_labels": {
@@ -18602,7 +18042,7 @@
     "best_metric_keys": null,
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 250000,
+    "checkpoint_freq": 245760,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": false,
@@ -18631,7 +18071,7 @@
       "serve_vy_max": 2.6
      }
     },
-    "eval_freq": 25000,
+    "eval_freq": 32768,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -18648,14 +18088,26 @@
     "info_eval_terminal_keys": [],
     "info_row_fn": null,
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 1024,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
+    },
     "monitor_info_keywords": [],
     "n_envs": 8,
     "n_eval_episodes": 30,
     "name_prefix": "wall_ball_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": null,
     "phase_key": "rally_phase",
     "phase_labels": {
@@ -18698,7 +18150,7 @@
     "best_metric_keys": null,
     "best_metric_min_delta": 0.0,
     "checkpoint_diagnosis": null,
-    "checkpoint_freq": 10000,
+    "checkpoint_freq": 8192,
     "clip_obs": 10.0,
     "clip_reward": 10.0,
     "confirm_best_eval": false,
@@ -18727,7 +18179,7 @@
       "serve_vy_max": 2.6
      }
     },
-    "eval_freq": 5000,
+    "eval_freq": 4096,
     "eval_reset_options": null,
     "eval_seed": null,
     "eval_verbose": null,
@@ -18744,14 +18196,26 @@
     "info_eval_terminal_keys": [],
     "info_row_fn": null,
     "ladder_certification": null,
-    "model_kwargs": {},
+    "model_kwargs": {
+     "batch_size": 256,
+     "clip_range": 0.2,
+     "ent_coef": 0.0,
+     "gae_lambda": 0.95,
+     "learning_rate": 0.0003,
+     "n_epochs": 10,
+     "n_steps": 512,
+     "policy_kwargs": {
+      "log_std_init": -1.0
+     },
+     "target_kl": 0.03
+    },
     "monitor_info_keywords": [],
     "n_envs": 8,
     "n_eval_episodes": 3,
     "name_prefix": "wall_ball_ppo",
     "normalize_obs": true,
     "normalize_obs_excluded_indices": [],
-    "normalize_reward": null,
+    "normalize_reward": true,
     "performance_gate": null,
     "phase_key": "rally_phase",
     "phase_labels": {

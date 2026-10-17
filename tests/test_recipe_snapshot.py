@@ -45,12 +45,17 @@ def test_snapshot_spans_the_matrix():
         for algo in algos:
             for quick_test in (False, True):
                 assert f"{name}|{algo}|quick_test={quick_test}" in entries
-    # Every recipe records its PPO resolution, the PPO-default ones too.
+    # Every recipe records its PPO resolution, the PPO-default ones too;
+    # the depth ladders record their refusal (SAC-only gate levers).
     ppo_default = [n for n, r in RECIPES.items() if r.default_algo.upper() == "PPO"]
     assert ppo_default
+    refused = {"WallBallDepthCurriculum", "WallBallDepthCurriculumAligned"}
     for name in RECIPES:
         entry = entries[f"{name}|PPO|quick_test=False"]
-        assert entry["train_config"]["algo"] == "PPO"
+        if name in refused:
+            assert "clear_replay_buffer_on_advance" in entry["refused"]
+        else:
+            assert entry["train_config"]["algo"] == "PPO"
     # Paired evaluation survives only a seeded build, so it is recorded.
     seeded = entries["PaddleTennis|SAC|quick_test=False|seed=0"]["train_config"]
     assert seeded["eval_reset_options"] == [{"serve_side": "a"}, {"serve_side": "b"}]

@@ -14,10 +14,11 @@ new env is one entry in :data:`RECIPES`; the notebook needs no edits.
 
 from __future__ import annotations
 
+import inspect
 import warnings
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import MISSING, dataclass, field, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -458,26 +459,139 @@ def _tennis_curriculum_extra_cfg(
     }
 
 
-def _tennis_curriculum_algo_cfg() -> dict[str, dict[str, Any]]:
+# PPO starting profiles (PPO plan Step 3; the values are
+# docs/design_ppo_first_class_20261016.md section 3 -- starting points to
+# tune, not frozen values). Every family uses clip_range 0.2, gae_lambda
+# 0.95 and the recipe's own gamma (a gamma in extra_cfg reaches PPO too)
+# unless noted. Two geometry rules hold for each profile:
+#
+# - Evaluation and checkpoint cadences are whole rollouts
+#   (n_steps x n_envs env steps) at the profile's worker count and at 16
+#   (sb3_training's worker count when it switches a SAC recipe to PPO),
+#   so no evaluation, selection or checkpoint lands mid-rollout. The
+#   on-policy pre-flight (train._validate_on_policy_config) refuses
+#   anything else.
+# - No early stop can fire before about 20 policy updates at the
+#   profile's worker count. An evaluation that ends rollout k runs
+#   before rollout k's update, so evaluation e sees e * (rollouts per
+#   evaluation) - 1 updates.
+
+
+def _ppo_ball_profile() -> dict[str, Any]:
+    """PPO profile for BallBalance and BallBounce.
+
+    Measured on BallBalance: 750/750 on 20 held-out seeds by 320k steps,
+    approx_kl 0.011-0.014. The zero action already balances about 470
+    steps while std-1 noise drops the ball in about 120, hence
+    log_std_init -1. Reward normalization on (PPO's default, pinned).
+    One rollout is 8 x 512 = 4,096 env steps (8,192 at 16 workers).
+    Patience 20 (extra_cfg) first stops at evaluation 40: 239 updates.
+    """
+    return {
+        "n_envs": 8,
+        "eval_freq": 24_576,  # 6 rollouts (3 at 16 workers)
+        "checkpoint_freq": 245_760,  # 60 rollouts (30 at 16 workers)
+        "normalize_reward": True,
+        "model_kwargs": {
+            "n_steps": 512,
+            "batch_size": 256,
+            "n_epochs": 10,
+            "learning_rate": 3e-4,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.0,
+            "target_kl": 0.03,
+            "policy_kwargs": {"log_std_init": -1.0},
+        },
+    }
+
+
+def _ppo_wall_ball_profile(*, degenerate_guard: bool) -> dict[str, Any]:
+    """PPO profile for the WallBall family. Not yet probed.
+
+    n_steps 1024 holds about 11 exchanges per rollout. One rollout is
+    8 x 1,024 = 8,192 env steps (16,384 at 16 workers), so an
+    evaluation every 4 rollouts: patience 20 (extra_cfg; 60 on
+    TrueBaseline) first stops at evaluation 40, 159 updates. A recipe
+    with the degenerate-signal guard gets 6 evaluations instead of SAC's
+    5, so it cannot fire before 23 updates. Reward normalization on
+    (PPO's default, pinned); its gamma follows the model's once PPO plan
+    Step 7 lands.
+    """
+    profile: dict[str, Any] = {
+        "n_envs": 8,
+        "eval_freq": 32_768,  # 4 rollouts (2 at 16 workers)
+        "checkpoint_freq": 245_760,  # 30 rollouts (15 at 16 workers)
+        "normalize_reward": True,
+        "model_kwargs": {
+            "n_steps": 1024,
+            "batch_size": 256,
+            "n_epochs": 10,
+            "learning_rate": 3e-4,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.0,
+            "target_kl": 0.03,
+            "policy_kwargs": {"log_std_init": -1.0},
+        },
+    }
+    if degenerate_guard:
+        profile["early_stop_degenerate_evals"] = 6
+    return profile
+
+
+def _tennis_curriculum_algo_cfg(*, episode_len: int) -> dict[str, dict[str, Any]]:
     """Per-family blocks for Stages 0–2 (``Recipe.algo_cfg``).
 
     The stages default to PPO, and this exploration bundle was chosen
     and measured under PPO, so it is PPO's alone: an explicit SAC run
     keeps SB3's SAC defaults (auto entropy) instead of inheriting a
     fixed PPO ``ent_coef``.
+
+    The PPO profile (PPO plan Step 3) on the single training env
+    (``extra_cfg``; 8 workers at n_steps 512 once PPO plan Step 13 adds
+    subprocess workers): one rollout is 2,048 env steps, so an
+    evaluation every 12 rollouts. The per-stage patience 8/12/20 first
+    stops at evaluation 16/24/40, after 191/287/479 updates.
     """
     return {
         "PPO": {
-            # Stock iid per-step Gaussian exploration at 100 Hz averages
-            # to a near-still arm (0 contacts in 264 random episodes,
-            # while a *constant* random action held all episode succeeds
-            # ~15% — humanoid_env_review.md C2 / DECISIONS.md). gSDE gives
-            # temporally correlated exploration; the small entropy floor
-            # guards against std collapse onto the repeatable "safe
-            # non-swing" −1 while the success reward is still unsampled.
+            "eval_freq": 24_576,  # 12 rollouts
+            "checkpoint_freq": 98_304,  # 48 rollouts
             "model_kwargs": {
+                "n_steps": 2048,
+                "batch_size": 256,
+                "n_epochs": 5,
+                "learning_rate": 1e-4,
+                "gae_lambda": 0.95,
+                "clip_range": 0.2,
+                # The essential fix: at SB3 defaults these stages ran
+                # far outside the trust region (approx_kl 0.22-1.71,
+                # clip_fraction 0.72-0.83), and log_std_init alone still
+                # measured approx_kl 2.45.
+                "target_kl": 0.02,
+                # Stock iid per-step Gaussian exploration at 100 Hz
+                # averages to a near-still arm (0 contacts in 264 random
+                # episodes, while a *constant* random action held all
+                # episode succeeds ~15% — humanoid_env_review.md C2 /
+                # DECISIONS.md). gSDE gives temporally correlated
+                # exploration, and resampling once per episode length
+                # holds one noise draw for about an episode (SB3's
+                # default resampled once per rollout, one draw per 13
+                # episodes at Stage 0).
                 "use_sde": True,
-                "ent_coef": 0.01,
+                "sde_sample_freq": episode_len,
+                # At SB3 defaults gSDE's pre-clip action noise had a std
+                # of 5.1 on the [-1, 1] action space; -2 without
+                # orthogonal init measures about 0.28 on PaddleTennis.
+                "policy_kwargs": {"log_std_init": -2.0, "ortho_init": False},
+                # A token floor against std collapse onto the "safe
+                # non-swing" -1, the top of the plan's 0-0.001 range:
+                # at 0.01 every one of the 58 action columns' log std
+                # rose 0.04-0.18 within 26.6k steps, and the masked
+                # dimensions feel only this term, so the drift
+                # accumulates across stages.
+                "ent_coef": 0.001,
             },
         },
     }
@@ -496,6 +610,7 @@ RECIPES: dict[str, Recipe] = {
             "n_envs": 8,
             "early_stop_patience": 20,
         },
+        algo_cfg={"PPO": _ppo_ball_profile()},
         description="Keep a ball on a 6-DOF tray.",
     ),
     "BallBounce": Recipe(
@@ -527,6 +642,7 @@ RECIPES: dict[str, Recipe] = {
             ),
             "info_eval_distribution_keys": ("bounce_count",),
         },
+        algo_cfg={"PPO": _ppo_ball_profile()},
         description=("Deliberately juggle a ball from the top face of a 6-DOF paddle."),
     ),
     "WallBall": Recipe(
@@ -573,6 +689,7 @@ RECIPES: dict[str, Recipe] = {
                 2: "await_wall",
             },
         },
+        algo_cfg={"PPO": _ppo_wall_ball_profile(degenerate_guard=False)},
         description=(
             "Rally a ball against a wall with a face-only paddle at a fixed "
             "10-degree upward pitch, three target-controlled DOFs, and a "
@@ -608,6 +725,7 @@ RECIPES: dict[str, Recipe] = {
                 2: "await_wall",
             },
         },
+        algo_cfg={"PPO": _ppo_wall_ball_profile(degenerate_guard=False)},
         description=(
             "Volley against the wall without letting the ball touch the "
             "floor, using the full face-only paddle workspace."
@@ -751,6 +869,7 @@ RECIPES: dict[str, Recipe] = {
                 2: "await_wall",
             },
         },
+        algo_cfg={"PPO": _ppo_wall_ball_profile(degenerate_guard=True)},
         description=(
             "Play one-bounce baseline rallies from a rear paddle zone with "
             "tapered post-wall recovery practice and normal-serve evaluation."
@@ -866,6 +985,7 @@ RECIPES: dict[str, Recipe] = {
                     "buffer_size": 500_000,
                 },
             },
+            "PPO": _ppo_wall_ball_profile(degenerate_guard=True),
         },
         description=(
             "HISTORICAL: the cold-start problem this recipe targets was "
@@ -1182,6 +1302,10 @@ RECIPES: dict[str, Recipe] = {
                 2: "await_wall",
             },
         },
+        # Inherited by the Aligned, GoalRally and TrueBaseline recipes.
+        # Under PPO the depth ladders themselves are refused: their gate
+        # levers (update pause, replay wipe, entropy reset) are SAC-only.
+        algo_cfg={"PPO": _ppo_wall_ball_profile(degenerate_guard=True)},
         description=(
             "HISTORICAL (the sliding-fence ladder was retired by the "
             "0.24.0 campaign diagnosis: three ladder generations "
@@ -1393,6 +1517,42 @@ RECIPES: dict[str, Recipe] = {
                     "train_freq": (64, "step"),
                 },
             },
+            # The PPO starting profile (PPO plan Step 3). Not yet
+            # probed. One rollout is 8 x 1,024 = 8,192 env steps
+            # (16,384 at 16 workers): an evaluation every 4 rollouts,
+            # so the degenerate guard's 6 evaluations cannot stop the
+            # run before 23 updates, and patience 20 not before 159.
+            "PPO": {
+                "n_envs": 8,
+                "eval_freq": 32_768,  # 4 rollouts (2 at 16 workers)
+                "checkpoint_freq": 245_760,  # 30 rollouts (15 at 16)
+                "early_stop_degenerate_evals": 6,
+                # The reward is sparse (+1 per confirmed return plus
+                # escrowed shapings), so no return normalization.
+                "normalize_reward": False,
+                "model_kwargs": {
+                    "n_steps": 1024,
+                    "batch_size": 256,
+                    "n_epochs": 10,
+                    "learning_rate": 3e-4,
+                    "gae_lambda": 0.95,
+                    "clip_range": 0.2,
+                    "target_kl": 0.02,
+                    # gSDE resampled every 64 steps: the SAC block's
+                    # 64-step noise hold (half the 126-step exchange
+                    # cadence).
+                    "use_sde": True,
+                    "sde_sample_freq": 64,
+                    # Pre-clip noise std about 0.28 against 5.1 at SB3
+                    # defaults.
+                    "policy_kwargs": {"log_std_init": -2.0, "ortho_init": False},
+                    "ent_coef": 0.0,
+                    # SB3 recommends CPU for PPO with an MLP policy (and
+                    # warns on a GPU); PPO plan Step 8 makes it the
+                    # on-policy default.
+                    "device": "cpu",
+                },
+            },
         },
         description=(
             "Two-sided paddle rally on the probe-frozen 13 m court "
@@ -1421,7 +1581,7 @@ RECIPES: dict[str, Recipe] = {
         name_prefix="humanoid_tennis_stage0_intercept",
         # patience 8 of a 20-eval budget: earliest stop at eval 16.
         extra_cfg=_tennis_curriculum_extra_cfg(video_length=150, early_stop_patience=8),
-        algo_cfg=_tennis_curriculum_algo_cfg(),
+        algo_cfg=_tennis_curriculum_algo_cfg(episode_len=150),
         description=(
             "Experimental fixed-pelvis, two-shoulder physical intercept task. "
             "Success is the first legal racket contact; convergence is not "
@@ -1451,7 +1611,7 @@ RECIPES: dict[str, Recipe] = {
         extra_cfg=_tennis_curriculum_extra_cfg(
             video_length=300, early_stop_patience=12
         ),
-        algo_cfg=_tennis_curriculum_algo_cfg(),
+        algo_cfg=_tennis_curriculum_algo_cfg(episode_len=300),
         description=(
             "Experimental fixed-pelvis right-arm return into a generous "
             "physical target region; convergence is not claimed."
@@ -1473,7 +1633,7 @@ RECIPES: dict[str, Recipe] = {
         extra_cfg=_tennis_curriculum_extra_cfg(
             video_length=300, early_stop_patience=20
         ),
-        algo_cfg=_tennis_curriculum_algo_cfg(),
+        algo_cfg=_tennis_curriculum_algo_cfg(episode_len=300),
         description=(
             "Experimental fixed-pelvis target return with bounded seeded "
             "launch randomization; convergence is not claimed."
@@ -1513,6 +1673,32 @@ RECIPES: dict[str, Recipe] = {
                 3: "terminal",
             },
         },
+        algo_cfg={
+            # The humanoid stages' PPO settings on a rollout short
+            # enough for the 10k-step smoke budget to see about 80
+            # updates: 128 env steps (2,048 at 16 workers), so the
+            # cadences are whole rollouts at 1 and 16 workers alike.
+            # A 128-step rollout cannot hold one gSDE draw for a
+            # 250-step episode, so the noise resamples per rollout.
+            "PPO": {
+                "eval_freq": 2_048,  # 16 rollouts (1 at 16 workers)
+                "checkpoint_freq": 4_096,
+                "normalize_reward": False,
+                "model_kwargs": {
+                    "n_steps": 128,
+                    "batch_size": 128,
+                    "n_epochs": 5,
+                    "learning_rate": 1e-4,
+                    "gae_lambda": 0.95,
+                    "clip_range": 0.2,
+                    "target_kl": 0.02,
+                    "use_sde": True,
+                    "sde_sample_freq": -1,
+                    "policy_kwargs": {"log_std_init": -2.0, "ortho_init": False},
+                    "ent_coef": 0.001,
+                },
+            },
+        },
         description=(
             "Pipeline and recording smoke run for the centralized two-G1 "
             "tennis environment; not a full-tennis training preset."
@@ -1548,6 +1734,7 @@ def _make_aligned_depth_curriculum(base: Recipe) -> Recipe:
     }
     return replace(
         base,
+        algo_cfg=deepcopy(base.algo_cfg),
         env_kwargs=env_kwargs,
         eval_env_overrides=eval_env_overrides,
         name_prefix="wall_ball_depth_curriculum_aligned",
@@ -1633,6 +1820,7 @@ def _make_goal_rally(base: Recipe) -> Recipe:
     eval_env_overrides = dict(goal)
     return replace(
         base,
+        algo_cfg=deepcopy(base.algo_cfg),
         env_kwargs=env_kwargs,
         eval_env_overrides=eval_env_overrides,
         name_prefix="wall_ball_goal_rally",
@@ -1741,6 +1929,7 @@ def _make_true_baseline(base: Recipe) -> Recipe:
     eval_env_overrides = dict(task)
     return replace(
         base,
+        algo_cfg=deepcopy(base.algo_cfg),
         env_kwargs=env_kwargs,
         eval_env_overrides=eval_env_overrides,
         name_prefix="wall_ball_true_baseline",
@@ -1878,6 +2067,64 @@ def _drop_unpairable_recipe_reset_options(
     )
 
 
+def _fit_quick_test_rollouts(
+    cfg_kwargs: dict[str, Any],
+    overrides: Mapping[str, Any],
+    algo_cls: type,
+    defaults: Mapping[str, Any],
+) -> None:
+    """Fit an on-policy quick test into its budget in whole rollouts.
+
+    PPO plan Step 5 (empirical-2). SB3's default 2,048-step rollout at 8
+    workers is 16,384 env steps, so the 25,000-step quick test ran one
+    update -- zero, with an early stop inside the first rollout -- and
+    still reported "completed". Unless the explicit ``model_kwargs``
+    set ``n_steps``, it becomes the largest power of two <= min(current,
+    total_timesteps // (4 * n_envs), eval_freq // n_envs): at least four
+    rollouts, and one per evaluation. SB3's 2,048 becomes 512 at 8
+    workers and 256 at 16; one worker keeps 2,048. The quick test's own
+    evaluation and checkpoint cadences (unless set explicitly) then
+    round down to whole rollouts, as the on-policy pre-flight requires.
+    Mutates ``cfg_kwargs``; a caller's ``model_kwargs`` dict is copied,
+    never edited.
+    """
+
+    def resolved(key: str) -> Any:
+        return cfg_kwargs[key] if key in cfg_kwargs else defaults[key]
+
+    n_envs = resolved("n_envs")
+    # model_kwargs defaults through a factory: absent means empty.
+    model_kwargs = dict(cfg_kwargs.get("model_kwargs") or {})
+    parameters = inspect.signature(algo_cls).parameters
+    if "n_steps" not in parameters:
+        return
+    n_steps = model_kwargs.get("n_steps", parameters["n_steps"].default)
+    if (
+        isinstance(n_steps, bool)
+        or not isinstance(n_steps, int)
+        or isinstance(n_envs, bool)
+        or not isinstance(n_envs, int)
+        or n_envs < 1
+    ):
+        return  # malformed; the on-policy pre-flight refuses it by name
+    if "n_steps" not in (overrides.get("model_kwargs") or {}):
+        bound = min(
+            n_steps,
+            int(resolved("total_timesteps")) // (4 * n_envs),
+            int(resolved("eval_freq")) // n_envs,
+        )
+        fitted = 1 << (max(bound, 1).bit_length() - 1)
+        if fitted != n_steps:
+            n_steps = fitted
+            cfg_kwargs["model_kwargs"] = {**model_kwargs, "n_steps": n_steps}
+    rollout = n_steps * n_envs
+    for key in ("eval_freq", "checkpoint_freq"):
+        cadence = resolved(key)
+        if key in overrides or cadence <= 0 or cadence % rollout == 0:
+            continue
+        cfg_kwargs[key] = max(rollout, cadence // rollout * rollout)
+
+
 def _apply_algo_block(
     cfg_kwargs: dict[str, Any], block: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -1990,6 +2237,9 @@ def build_train_config(
         end-to-end in a couple of minutes -- handy for smoke-testing on
         a new Colab runtime. A recipe's ``checkpoint_diagnosis`` is
         capped at :data:`_QUICK_TEST_DIAGNOSIS_EPISODES` episodes too.
+        A PPO quick test also shrinks its rollout to fit at least four
+        into the budget and rounds the preset cadences to whole
+        rollouts (:func:`_fit_quick_test_rollouts`).
     config_file:
         Optional path to a TOML run-configuration file
         (docs/run_config_file_spec.md). Its ``[train]`` table, then its
@@ -2017,6 +2267,7 @@ def build_train_config(
         resolve_algo,
         validate_model_kwargs,
     )
+    from courtside_dynamics.training.train import _validate_on_policy_config
 
     if env_name not in RECIPES:
         raise KeyError(f"Unknown env '{env_name}'. Choose one of {sorted(RECIPES)}.")
@@ -2115,6 +2366,17 @@ def build_train_config(
     if total_timesteps is not None:
         cfg_kwargs["total_timesteps"] = total_timesteps
     cfg_kwargs.update(overrides)
+    if quick_test and family == "PPO":
+        _fit_quick_test_rollouts(
+            cfg_kwargs,
+            overrides,
+            resolve_algo(resolved_algo),
+            {
+                spec.name: spec.default
+                for spec in fields(TrainConfig)
+                if spec.default is not MISSING
+            },
+        )
 
     _drop_unpairable_recipe_reset_options(
         env_name, cfg_kwargs, recipe, file_config, overrides
@@ -2134,6 +2396,10 @@ def build_train_config(
         validate_model_kwargs(resolved_algo, merged_model_kwargs)
 
     cfg = TrainConfig(**cfg_kwargs)
+    # On-policy rollout geometry (cadences in whole rollouts, the budget,
+    # minibatching, SAC-only gate levers) fails here, before the env
+    # probe; train() repeats the check for a hand-built config.
+    _validate_on_policy_config(cfg)
     if file_config is not None:
         # Fail on a typo'd [env]/[eval_env] kwarg now, in seconds,
         # rather than mid-train() after loggers and callbacks spin up.

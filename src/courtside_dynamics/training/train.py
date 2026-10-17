@@ -86,6 +86,9 @@ from courtside_dynamics.training.algos import (
 from courtside_dynamics.training.algos import (
     validate_model_kwargs as _validate_model_kwargs,
 )
+from courtside_dynamics.training.algos import (
+    validate_policy_kwargs as _validate_policy_kwargs,
+)
 from courtside_dynamics.training.artifacts import (
     RUN_LAYOUT,
     artifact_path,
@@ -1189,6 +1192,160 @@ def _validate_callback_config(cfg: TrainConfig) -> None:
             )
 
 
+def _on_policy_updates(cfg: TrainConfig, model: BaseAlgorithm) -> int | None:
+    """A PPO-family model's SB3 ``_n_updates`` for the run summary.
+
+    SB3 counts optimization epochs there (``n_epochs`` per rollout).
+    ``None`` for the SAC family, so its summary is unchanged (PPO plan
+    Step 5 gates the zero-update warning on the PPO family).
+    """
+    if _algo_family(cfg.algo) != "PPO":
+        return None
+    return int(getattr(model, "_n_updates", 0))
+
+
+#: Performance-gate levers that act on state only an off-policy model
+#: has: the update pause sets ``gradient_steps``, the wipe clears the
+#: replay buffer, and the reset restores an auto-tuned entropy
+#: temperature.
+_OFF_POLICY_GATE_LEVERS = (
+    "advance_update_pause_steps",
+    "clear_replay_buffer_on_advance",
+    "reset_entropy_on_advance",
+)
+
+
+def _validate_on_policy_config(cfg: TrainConfig) -> None:
+    """Refuse on-policy settings that cannot train as configured.
+
+    PPO plan Step 4 (static-2, static-8, static-3(1)). An on-policy
+    algorithm updates once per rollout of ``n_steps * n_envs`` env
+    steps and then discards it, so its geometry, cadences and budget
+    are counted in rollouts. Config-only, like the checks beside it, so
+    ``train()`` runs it before any env is built or artifact written, and
+    ``build_train_config`` runs it too. Off-policy algorithms return at
+    once. A setting absent from ``model_kwargs`` takes the algorithm
+    constructor's default (``inspect.signature``). Refused:
+
+    - the performance gate's SAC-only levers
+      (:data:`_OFF_POLICY_GATE_LEVERS`); the gate callback refused them
+      only at training start, after ``config.json`` was written;
+    - ``n_steps``/``batch_size`` that are not positive integers,
+      ``batch_size <= 1`` with advantage normalization (NaN advantages),
+      ``n_steps * n_envs <= 1``, and a rollout ``batch_size`` does not
+      divide (SB3 only warns, then trains a truncated minibatch in every
+      epoch);
+    - an evaluation every fewer env steps than one rollout
+      (``eval_freq // n_envs < n_steps``: evaluations repeat on an
+      unchanged policy) and a budget shorter than one rollout
+      (``learn()`` would still collect the whole rollout);
+    - evaluation and checkpoint cadences that are not whole rollouts:
+      the evaluation that selects ``best_model.zip`` and drives the
+      stops, or a checkpoint, would land between a rollout's data and
+      the update that consumes it;
+    - ``policy_kwargs`` the policy class does not accept
+      (``algos.validate_policy_kwargs``).
+    """
+    name = cfg.algo.upper()
+    if name not in _ON_POLICY_ALGOS:
+        return
+    cls = _resolve_algo(name)
+    defaults = inspect.signature(cls.__init__).parameters
+
+    def setting(key: str) -> Any:
+        if key in cfg.model_kwargs:
+            return cfg.model_kwargs[key]
+        parameter = defaults.get(key)
+        if parameter is None or parameter.default is inspect.Parameter.empty:
+            return None
+        return parameter.default
+
+    if isinstance(cfg.performance_gate, Mapping):
+        levers = [
+            lever
+            for lever in _OFF_POLICY_GATE_LEVERS
+            if cfg.performance_gate.get(lever)
+        ]
+        if levers:
+            raise ValueError(
+                f"performance_gate sets {levers}, which act on an "
+                f"off-policy model's gradient steps, replay buffer or "
+                f"entropy temperature; {name} has none of them (it "
+                f"discards each rollout after its update). Drop them for "
+                f"a {name} run"
+            )
+
+    n_envs = cfg.n_envs
+    n_steps = setting("n_steps")
+    batch_size = setting("batch_size")
+    for key, value in (("n_steps", n_steps), ("batch_size", batch_size)):
+        if value is not None and not _positive_int(value):
+            raise ValueError(
+                f"model_kwargs['{key}'] must be a positive integer for "
+                f"{name}, got {value!r}"
+            )
+    if n_steps is None:
+        # An on-policy class without a rollout length has no rollout
+        # geometry to check (none is registered today).
+        return
+    rollout = n_steps * n_envs
+    if rollout <= 1:
+        raise ValueError(
+            f"n_steps * n_envs = {n_steps} * {n_envs} = {rollout}: a "
+            f"{name} rollout needs at least two transitions"
+        )
+    if batch_size is not None:
+        if setting("normalize_advantage") and batch_size <= 1:
+            raise ValueError(
+                f"batch_size {batch_size} with normalize_advantage: a "
+                f"one-sample minibatch has no advantage spread to "
+                f"normalize by (NaN advantages)"
+            )
+        if rollout % batch_size:
+            raise ValueError(
+                f"batch_size {batch_size} does not divide the rollout of "
+                f"n_steps * n_envs = {n_steps} * {n_envs} = {rollout} "
+                f"transitions: every epoch would end on a truncated "
+                f"minibatch of {rollout % batch_size}. Pick a batch_size "
+                f"that divides {rollout}"
+            )
+    if cfg.total_timesteps < rollout:
+        raise ValueError(
+            f"total_timesteps {cfg.total_timesteps:,} is shorter than one "
+            f"rollout (n_steps * n_envs = {rollout:,} env steps): learn() "
+            f"would still collect the whole rollout, overrunning the "
+            f"budget, for a single update"
+        )
+    per_worker = cfg.eval_freq // max(n_envs, 1)
+    if per_worker < n_steps:
+        raise ValueError(
+            f"eval_freq {cfg.eval_freq:,} is {per_worker} steps per worker, "
+            f"fewer than one rollout (n_steps {n_steps}): evaluations "
+            f"would repeat on a policy no update has changed. Evaluate "
+            f"every whole number of rollouts ({rollout:,} env steps each)"
+        )
+    cadences = (
+        ("eval_freq", cfg.eval_freq, "an evaluation (selection, early stops)"),
+        ("checkpoint_freq", cfg.checkpoint_freq, "a checkpoint"),
+    )
+    for field_name, cadence, consumer in cadences:
+        if field_name == "checkpoint_freq" and cadence <= 0:
+            continue
+        if cadence % rollout:
+            nearest = max(rollout, round(cadence / rollout) * rollout)
+            raise ValueError(
+                f"{field_name} {cadence:,} is not a whole number of "
+                f"rollouts (n_steps * n_envs = {n_steps} * {n_envs} = "
+                f"{rollout:,} env steps): {consumer} would land mid-"
+                f"rollout, between a rollout's data and the update that "
+                f"consumes it. Use a multiple of {rollout:,}, e.g. "
+                f"{nearest:,}"
+            )
+    policy_kwargs = cfg.model_kwargs.get("policy_kwargs")
+    if policy_kwargs:
+        _validate_policy_kwargs(name, cfg.policy, policy_kwargs)
+
+
 def _validate_monitor_info_keywords(cfg: TrainConfig) -> tuple[str, ...]:
     """The training ``Monitor``'s extra columns, checked against the env.
 
@@ -1532,6 +1689,7 @@ def _salvage_crashed_run(
                 status="crashed",
                 actual_timesteps=int(model.num_timesteps),
                 stop_reason=f"crashed: {error!r}",
+                n_updates=_on_policy_updates(cfg, model),
             ),
         )
     )
@@ -1858,6 +2016,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     _check_required_device(cfg)
     _validate_evaluation_config(cfg)
     _validate_callback_config(cfg)
+    _validate_on_policy_config(cfg)
     env_attr_schedule_callbacks = tuple(
         LinearEnvAttrScheduleCallback(**dict(schedule))
         for schedule in cfg.env_attr_schedules
@@ -1875,11 +2034,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     # Last pre-output check: a refusal leaves the directory untouched,
     # and an opted-in rotation only happens once every config-only check
     # above passed (algo, model kwargs, device, evaluation, eval-stream,
-    # diagnosis and gate settings, warm start, monitor keys, reset
-    # options), so a misconfigured retry cannot strand the previous
-    # attempt. Checks that need the constructed evaluators (the
-    # selection-metric probe, the gate callback's value checks) and the
-    # ladder certification still run after config.json is written.
+    # diagnosis and gate settings, on-policy rollout geometry, warm
+    # start, monitor keys, reset options), so a misconfigured retry
+    # cannot strand the previous attempt. Checks that need the
+    # constructed evaluators (the selection-metric probe, the gate
+    # callback's value checks) and the ladder certification still run
+    # after config.json is written.
     _check_log_dir_reuse(cfg)
 
     os.makedirs(cfg.log_dir, exist_ok=True)
@@ -2710,6 +2870,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 status="interrupted" if interrupted else "completed",
                 actual_timesteps=int(model.num_timesteps),
                 stop_reason=stop_reason,
+                n_updates=_on_policy_updates(cfg, model),
             )
         finally:
             train_env.close()

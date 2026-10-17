@@ -27,17 +27,35 @@
 total_timesteps = 2_000_000
 n_envs = 8
 early_stop_patience = 20  # evals without a new best before stopping
+
+[train.algo.sac]
 eval_freq = 25_000        # env steps (summed across workers) between evals
 
-# The recipe pins the ground-era exploration package (gSDE with a
-# 64-step noise hold, auto-entropy from a raised -1.5 target;
+# The recipe pins the ground-era exploration package for SAC (gSDE with
+# a 64-step noise hold, auto-entropy from a raised -1.5 target;
 # docs/paddle_tennis_exploration_20260808.md): use_sde=true,
 # ent_coef="auto_0.02", target_entropy=-1.5, train_freq=[64, "step"].
 # Other model kwargs are SB3 SAC defaults. Uncomment to tune
-# (deep-merged, so one key at a time is safe).
-# [train.model_kwargs]
+# (deep-merged, so one key at a time is safe). Keep SAC keys in this
+# table: a flat [train.model_kwargs] ent_coef or use_sde is refused
+# under PPO.
+# [train.algo.sac.model_kwargs]
 # gamma = 0.99
 # learning_rate = 3e-4
+
+[train.algo.ppo]
+# PPO evaluates every whole number of rollouts (n_steps 1024 x 8
+# workers = 8,192 env steps; 16,384 at 16): 4 here. The recipe's PPO
+# profile also stops a dead run after 6 flat evaluations (23 updates)
+# instead of SAC's 5, and keeps reward normalization off.
+eval_freq = 32_768
+
+# The recipe's PPO profile (not yet probed): rollout 1024, minibatch
+# 256, target_kl 0.02, gSDE resampled every 64 steps, log_std_init -2
+# without orthogonal init, ent_coef 0, CPU. Uncomment to tune.
+# [train.algo.ppo.model_kwargs]
+# target_kl = 0.02
+# sde_sample_freq = 64
 
 # The recipe's per-key selection deltas (a table here REPLACES the
 # recipe's whole mapping; keys must be selection keys, missing ones

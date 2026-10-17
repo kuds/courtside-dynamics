@@ -720,7 +720,24 @@ def test_humanoid_tennis_curriculum_recipes_are_fixed_stage_and_recordable(
     assert cfg.confirm_best_eval is True
     assert cfg.reward_eval_episodes == 5
     assert cfg.normalize_reward is False
-    assert cfg.model_kwargs == {"use_sde": True, "ent_coef": 0.01}
+    # The PPO profile (PPO plan Step 3): the trust-region fix
+    # (target_kl), gSDE held for about an episode, a small initial std
+    # without orthogonal init, and a token entropy floor.
+    assert cfg.model_kwargs == {
+        "n_steps": 2048,
+        "batch_size": 256,
+        "n_epochs": 5,
+        "learning_rate": 1e-4,
+        "gae_lambda": 0.95,
+        "clip_range": 0.2,
+        "target_kl": 0.02,
+        "use_sde": True,
+        "sde_sample_freq": episode_len,
+        "policy_kwargs": {"log_std_init": -2.0, "ortho_init": False},
+        "ent_coef": 0.001,
+    }
+    # Whole rollouts (2,048 env steps on the single env).
+    assert (cfg.eval_freq, cfg.checkpoint_freq) == (24_576, 98_304)
     assert cfg.early_stop_patience == patience
     assert "experimental" in recipe.description.lower()
     assert "convergence is not claimed" in recipe.description.lower()
@@ -818,13 +835,201 @@ def test_build_train_config_rejects_cross_algo_model_kwargs(tmp_path):
         )
 
 
+#: Recipes PPO cannot run: their depth ladders advance with SAC-only
+#: gate levers (update pause, replay wipe, entropy reset), which the
+#: on-policy pre-flight refuses (PPO plan Step 4).
+_PPO_REFUSED_RECIPES = frozenset(
+    {"WallBallDepthCurriculum", "WallBallDepthCurriculumAligned"}
+)
+
+
 @pytest.mark.parametrize("env_name", sorted(RECIPES))
 def test_every_recipe_builds_under_every_algorithm(env_name, tmp_path):
     for algo in ("SAC", "DemoSAC", "PPO"):
+        if algo == "PPO" and env_name in _PPO_REFUSED_RECIPES:
+            with pytest.raises(ValueError, match="clear_replay_buffer_on_advance"):
+                build_train_config(
+                    env_name, algo=algo, log_dir=str(tmp_path), seed=0
+                )
+            continue
         cfg = build_train_config(
             env_name, algo=algo, log_dir=str(tmp_path), seed=0
         )
         assert cfg.algo == algo
+
+
+def _ppo_updates_before_stop(cfg) -> dict[str, int]:
+    """Policy updates done when each early stop can first fire.
+
+    An evaluation that ends rollout k runs before rollout k's update, so
+    evaluation e has seen e * (rollouts per evaluation) - 1 updates.
+    """
+    rollout = cfg.model_kwargs["n_steps"] * cfg.n_envs
+    per_eval = cfg.eval_freq // rollout
+    stops = {}
+    if cfg.early_stop_patience:
+        # min_evals = patience, then patience non-improving evaluations.
+        stops["patience"] = 2 * cfg.early_stop_patience * per_eval - 1
+    if cfg.early_stop_degenerate_evals:
+        first = (cfg.degenerate_min_evals or 0) + cfg.early_stop_degenerate_evals
+        stops["degenerate"] = first * per_eval - 1
+    return stops
+
+
+@pytest.mark.parametrize(
+    "env_name", sorted(set(RECIPES) - _PPO_REFUSED_RECIPES)
+)
+def test_ppo_profiles_train_in_whole_rollouts(env_name, tmp_path):
+    """PPO plan Step 3: every recipe's PPO profile passes the on-policy
+    pre-flight with cadences that are whole rollouts, no early stop can
+    fire before about 20 updates, and the off-humanoid profiles keep
+    whole-rollout cadences at sb3_training's 16 PPO workers too."""
+    from courtside_dynamics.training.train import _validate_on_policy_config
+
+    cfg = build_train_config(env_name, algo="PPO", log_dir=str(tmp_path), seed=0)
+    worker_counts = [cfg.n_envs]
+    if cfg.n_envs == 8:
+        worker_counts.append(16)
+    for n_envs in worker_counts:
+        cfg.n_envs = n_envs
+        _validate_on_policy_config(cfg)
+        rollout = cfg.model_kwargs["n_steps"] * n_envs
+        assert cfg.eval_freq % rollout == 0
+        assert cfg.checkpoint_freq % rollout == 0
+        assert rollout % cfg.model_kwargs["batch_size"] == 0
+    cfg.n_envs = worker_counts[0]
+    for guard, updates in _ppo_updates_before_stop(cfg).items():
+        assert updates >= 20, (guard, updates)
+    # Settings that name SAC's exploration machinery never reach PPO.
+    assert "target_entropy" not in cfg.model_kwargs
+    assert "train_freq" not in cfg.model_kwargs
+    assert isinstance(cfg.model_kwargs.get("ent_coef", 0.0), float)
+
+
+def test_paddle_tennis_ppo_profile(tmp_path):
+    cfg = build_train_config(
+        "PaddleTennis", algo="PPO", log_dir=str(tmp_path), seed=0
+    )
+    assert cfg.n_envs == 8
+    assert cfg.normalize_reward is False
+    assert cfg.model_kwargs == {
+        "n_steps": 1024,
+        "batch_size": 256,
+        "n_epochs": 10,
+        "learning_rate": 3e-4,
+        "gae_lambda": 0.95,
+        "clip_range": 0.2,
+        "target_kl": 0.02,
+        "use_sde": True,
+        "sde_sample_freq": 64,
+        "policy_kwargs": {"log_std_init": -2.0, "ortho_init": False},
+        "ent_coef": 0.0,
+        "device": "cpu",
+    }
+    # gamma is the recipe's (SB3's 0.99): no family pins it.
+    assert "gamma" not in cfg.model_kwargs
+    assert (cfg.eval_freq, cfg.checkpoint_freq) == (32_768, 245_760)
+    assert cfg.early_stop_degenerate_evals == 6
+    # The SAC resolution keeps SAC's guard and cadence.
+    sac = build_train_config("PaddleTennis", log_dir=str(tmp_path), seed=0)
+    assert (sac.eval_freq, sac.early_stop_degenerate_evals) == (25_000, 5)
+
+
+class TestOnPolicyQuickTest:
+    """PPO plan Step 5: a PPO quick test trains in whole rollouts."""
+
+    @pytest.mark.parametrize(
+        "env_name, n_envs, n_steps",
+        [
+            ("HumanoidTennisStage0Intercept", 1, 2048),
+            ("PaddleTennis", 8, 512),
+            ("PaddleTennis", 16, 256),
+            ("BallBalance", 8, 512),
+            ("BallBalance", 16, 256),
+        ],
+    )
+    def test_at_least_four_rollouts(self, env_name, n_envs, n_steps, tmp_path):
+        from courtside_dynamics.training.train import _validate_on_policy_config
+
+        cfg = build_train_config(
+            env_name,
+            algo="PPO",
+            log_dir=str(tmp_path),
+            seed=0,
+            quick_test=True,
+            n_envs=n_envs,
+        )
+        assert cfg.model_kwargs["n_steps"] == n_steps
+        rollout = n_steps * n_envs
+        assert cfg.total_timesteps // rollout >= 4
+        # The quick test's cadences round down to whole rollouts.
+        assert cfg.eval_freq == rollout * (5_000 // rollout)
+        assert cfg.checkpoint_freq == rollout * (10_000 // rollout)
+        _validate_on_policy_config(cfg)
+
+    def test_sb3_default_rollout_shrinks_too(self, tmp_path, monkeypatch):
+        from dataclasses import replace
+
+        # A recipe without a PPO profile: SB3's 2,048-step default.
+        monkeypatch.setitem(
+            RECIPES, "BallBalance", replace(RECIPES["BallBalance"], algo_cfg={})
+        )
+        for n_envs, n_steps in ((1, 2048), (8, 512), (16, 256)):
+            cfg = build_train_config(
+                "BallBalance",
+                algo="PPO",
+                log_dir=str(tmp_path),
+                quick_test=True,
+                n_envs=n_envs,
+            )
+            if n_steps == 2048:
+                assert "n_steps" not in cfg.model_kwargs  # unchanged
+            else:
+                assert cfg.model_kwargs["n_steps"] == n_steps
+
+    def test_explicit_choices_win(self, tmp_path):
+        explicit = {"n_steps": 128, "batch_size": 64}
+        cfg = build_train_config(
+            "BallBalance",
+            algo="PPO",
+            log_dir=str(tmp_path),
+            quick_test=True,
+            model_kwargs=explicit,
+            eval_freq=2_048,
+        )
+        assert cfg.model_kwargs == {"n_steps": 128, "batch_size": 64}
+        assert cfg.eval_freq == 2_048
+        # The preset checkpoint cadence still rounds to whole rollouts.
+        assert cfg.checkpoint_freq == 9_216
+        # An explicit cadence that is not a whole rollout is refused, not
+        # rounded.
+        with pytest.raises(ValueError, match="eval_freq 5,000 is not a whole"):
+            build_train_config(
+                "BallBalance",
+                algo="PPO",
+                log_dir=str(tmp_path),
+                quick_test=True,
+                eval_freq=5_000,
+            )
+
+    def test_callers_model_kwargs_are_not_edited(self, tmp_path):
+        explicit = {"batch_size": 64}
+        cfg = build_train_config(
+            "BallBalance",
+            algo="PPO",
+            log_dir=str(tmp_path),
+            quick_test=True,
+            model_kwargs=explicit,
+        )
+        assert cfg.model_kwargs == {"batch_size": 64, "n_steps": 512}
+        assert explicit == {"batch_size": 64}
+
+    def test_sac_quick_test_is_untouched(self, tmp_path):
+        cfg = build_train_config(
+            "PaddleTennis", log_dir=str(tmp_path), seed=0, quick_test=True
+        )
+        assert "n_steps" not in cfg.model_kwargs
+        assert (cfg.eval_freq, cfg.checkpoint_freq) == (5_000, 10_000)
 
 
 def test_recipe_algo_blocks_are_keyed_by_family(tmp_path, monkeypatch):
@@ -849,6 +1054,12 @@ def test_algo_block_merges_model_kwargs_one_level_and_replaces_the_rest(
     from dataclasses import replace
 
     base = RECIPES["BallBalance"]
+    profile = base.algo_cfg["PPO"]
+    block_kwargs = {
+        "n_steps": 512,
+        "n_epochs": 3,
+        "policy_kwargs": {"log_std_init": -0.5},
+    }
     monkeypatch.setitem(
         RECIPES,
         "BallBalance",
@@ -856,13 +1067,13 @@ def test_algo_block_merges_model_kwargs_one_level_and_replaces_the_rest(
             base,
             extra_cfg={
                 **base.extra_cfg,
-                "model_kwargs": {"gamma": 0.98, "policy_kwargs": {"a": 1}},
+                "model_kwargs": {
+                    "gamma": 0.98,
+                    "policy_kwargs": {"net_arch": [8]},
+                },
             },
             algo_cfg={
-                "PPO": {
-                    "n_envs": 2,
-                    "model_kwargs": {"n_epochs": 3, "policy_kwargs": {"b": 2}},
-                },
+                "PPO": {**profile, "n_envs": 2, "model_kwargs": block_kwargs},
                 "SAC": {"early_stop_patience": 7},
             },
         ),
@@ -873,17 +1084,19 @@ def test_algo_block_merges_model_kwargs_one_level_and_replaces_the_rest(
     # One level: the block's policy_kwargs replaces the flat one.
     assert ppo.model_kwargs == {
         "gamma": 0.98,
+        "n_steps": 512,
         "n_epochs": 3,
-        "policy_kwargs": {"b": 2},
+        "policy_kwargs": {"log_std_init": -0.5},
     }
     sac = build_train_config("BallBalance", algo="SAC", log_dir=str(tmp_path))
     assert sac.n_envs == base.extra_cfg["n_envs"]
     assert sac.early_stop_patience == 7
-    assert sac.model_kwargs == {"gamma": 0.98, "policy_kwargs": {"a": 1}}
+    assert sac.model_kwargs == {"gamma": 0.98, "policy_kwargs": {"net_arch": [8]}}
     # The registry is never mutated by a build.
     assert RECIPES["BallBalance"].algo_cfg["PPO"]["model_kwargs"] == {
+        "n_steps": 512,
         "n_epochs": 3,
-        "policy_kwargs": {"b": 2},
+        "policy_kwargs": {"log_std_init": -0.5},
     }
 
 

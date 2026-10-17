@@ -1035,6 +1035,7 @@ def write_run_summary(
     status: str = "completed",
     actual_timesteps: int | None = None,
     stop_reason: str | None = None,
+    n_updates: int | None = None,
 ) -> str:
     """Write a human-readable end-of-run report to ``log_dir/stage_summary.txt``.
 
@@ -1051,7 +1052,13 @@ def write_run_summary(
     a stopped-early run (patience, degenerate signal, stage budget):
     the callbacks print it, but the console vanishes with the Colab
     runtime, and a bare "(stopped early)" sends the run review back to
-    the curves to reconstruct why.
+    the curves to reconstruct why. ``n_updates`` is an on-policy run's
+    SB3 ``_n_updates``, its count of optimization epochs (``n_epochs``
+    per rollout, fewer when ``target_kl`` ends one early); ``train()``
+    passes ``None`` for the SAC family, whose summary is unchanged. Zero
+    is flagged, because every saved model is then the untrained initial
+    policy however "completed" the status reads (a PPO quick test could
+    end exactly so).
     """
     env_name = _env_display_name(cfg)
     git_sha = _git_sha()
@@ -1103,6 +1110,19 @@ def write_run_summary(
         )
     else:
         lines.append(_kv("Timesteps", f"{cfg.total_timesteps:,}"))
+    if n_updates is not None:
+        lines.append(
+            _kv(
+                "SB3 n_updates",
+                f"{n_updates:,} (optimization epochs over all rollouts)"
+                + (
+                    "  <-- WARNING: no update ran; every saved model is "
+                    "the untrained initial policy"
+                    if n_updates == 0
+                    else ""
+                ),
+            )
+        )
     lines.append(_kv("Duration", duration_str))
     lines.append(_kv("Throughput", f"{throughput_fps} FPS"))
     # Instrument tags: run 20260821_013700 left three different "final
@@ -1408,4 +1428,12 @@ def write_run_summary(
     out = artifact_path(log_dir, "stage_summary")
     with open(out, "w") as f:
         f.write("\n".join(lines) + "\n")
+    if n_updates == 0:
+        # Also on the console: the cell output is where a quick test's
+        # "completed" is read.
+        print(
+            f"[train] WARNING: {cfg.algo} ran no update (SB3 n_updates 0) "
+            f"in {steps_trained:,} env steps; every saved model is the "
+            f"untrained initial policy (see {out})"
+        )
     return out

@@ -18,6 +18,64 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **PPO starting profiles, on-policy pre-flight and quick test (PPO
+  plan Steps 3–5, 2026-10-17).** No env stream or SAC-family change:
+  every SAC and DemoSAC snapshot entry is byte-identical, and the
+  trainer digest against `f920d8f` matches on every job. The PPO job
+  matches too, since its explicit settings override the new profile.
+  - **Profiles (Step 3).** Every recipe's `algo_cfg["PPO"]` carries the
+    design's starting profile (section 3), with clip_range 0.2,
+    gae_lambda 0.95 and the recipe's own gamma:
+    - BallBalance and BallBounce: 8 × 512 rollouts, minibatch 256,
+      lr 3e-4, target_kl 0.03, log_std_init −1, ent_coef 0, reward
+      normalization on.
+    - WallBall family: 8 × 1,024 rollouts, otherwise the same.
+    - PaddleTennis: 8 × 1,024, minibatch 256, 10 epochs, lr 3e-4,
+      target_kl 0.02, gSDE resampled every 64 steps, log_std_init −2
+      without orthogonal init, ent_coef 0, no reward normalization,
+      CPU.
+    - Humanoid Stages 0–2: 1 × 2,048, minibatch 256, 5 epochs, lr
+      1e-4, target_kl 0.02, gSDE resampled every episode (150/300
+      steps), log_std_init −2 without orthogonal init, ent_coef 0.001
+      (was 0.01).
+    - Humanoid smoke: the stage settings on 128-step rollouts.
+
+    Cadences are whole rollouts at the profile's worker count and at 16
+    (sb3_training's PPO count): `eval_freq` 24,576 (ball and humanoid)
+    or 32,768 (WallBall, PaddleTennis), `checkpoint_freq` 245,760
+    (98,304 on the humanoid stages, 4,096 on the smoke). No early stop
+    can fire before about 20 updates. The degenerate-signal stop needs
+    6 flat evaluations under PPO, not 5.
+  - **Pre-flight (Step 4).** `train._validate_on_policy_config` runs
+    in `train()` before any output and in `build_train_config`, and
+    returns at once for the SAC family. It refuses the gate's SAC-only
+    levers (update pause, replay wipe, entropy reset). It refuses
+    non-integer `n_steps`/`batch_size`, `batch_size <= 1` with advantage
+    normalization, `n_steps * n_envs <= 1`, and a minibatch that does
+    not divide the rollout. It refuses `eval_freq // n_envs < n_steps`,
+    a budget shorter than one rollout, evaluation or checkpoint
+    cadences that are not whole rollouts, and `policy_kwargs` the
+    policy class does not accept (new `algos.validate_policy_kwargs`).
+    WallBallDepthCurriculum and its Aligned variant are refused under
+    PPO for their gate levers. So is a hand-built
+    `TrainConfig(algo="PPO")` left at the dataclass cadences
+    (`eval_freq` 25,000 at 4 × 2,048): the message names the nearest
+    whole-rollout value.
+  - **Quick test (Step 5).** Unless the explicit `model_kwargs` set
+    `n_steps`, a PPO quick test shrinks it to the largest power of two
+    within min(current, budget // (4 · n_envs), eval_freq // n_envs).
+    SB3's 2,048 becomes 512 at 8 workers and 256 at 16. The preset
+    evaluation and checkpoint cadences then round down to whole
+    rollouts. A PPO run's `stage_summary.txt` gains an "SB3 n_updates"
+    line (SB3's count of optimization epochs), flagged and printed
+    when it is 0. SAC summaries are unchanged.
+  - **Starters.** Flat `eval_freq`/`checkpoint_freq` move into
+    `[train.algo.sac]`, with `[train.algo.ppo]` counterparts (ball
+    balance, paddle tennis, the humanoid stages and smoke). A run file
+    copied from an older starter with a flat cadence is refused under
+    PPO when the cadence is not a whole rollout; move it into
+    `[train.algo.sac]`.
+  - Snapshot: the 32 PPO entries are re-recorded; nothing else changes.
 - **Per-algorithm config blocks (PPO plan Step 2, 2026-10-17).** No env
   stream changes. SAC and DemoSAC training paths are unchanged except
   an explicit SAC run of the humanoid stages (below); the trainer

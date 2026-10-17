@@ -1000,11 +1000,15 @@ def test_prepare_warm_start_resolves_new_layout_source(tmp_path):
 
 def test_warm_start_rejects_invalid_source_before_writing_target(tmp_path):
     target_dir = tmp_path / "target"
+    # Cadences of whole rollouts (4 workers x SB3's 2,048 steps), which
+    # the on-policy pre-flight requires before the warm-start checks.
+    whole_rollouts = {"eval_freq": 8_192, "checkpoint_freq": 0}
     cfg = TrainConfig(
         env_fn=lambda: BallBalanceEnv(),
         algo="PPO",
         log_dir=str(target_dir),
         warm_start=WarmStartConfig(tmp_path / "missing"),
+        **whole_rollouts,
     )
     with pytest.raises(ValueError, match="does not exist"):
         train(cfg)
@@ -1018,6 +1022,7 @@ def test_warm_start_rejects_invalid_source_before_writing_target(tmp_path):
         log_dir=str(mismatched_dir),
         normalize_obs_excluded_indices=(1,),
         warm_start=WarmStartConfig(source_dir),
+        **whole_rollouts,
     )
     with pytest.raises(ValueError, match="excluded_indices differ"):
         train(mismatch)
@@ -1061,6 +1066,9 @@ def test_warm_start_setup_failure_closes_every_constructed_env(tmp_path):
         clip_obs=5.0,
         normalize_obs_excluded_indices=(0,),
         warm_start=WarmStartConfig(source_dir),
+        # Whole rollouts of SB3's 2,048 steps (the on-policy pre-flight).
+        eval_freq=2_048,
+        checkpoint_freq=0,
     )
     with pytest.raises(ValueError, match="normalizer clip_obs settings differ"):
         train(cfg)
@@ -2959,3 +2967,259 @@ def test_eval_reset_option_probe_resets_once_per_distinct_mapping():
     _validate_eval_reset_options(
         TrainConfig(env_fn=_unbuildable_env, seed=4), None
     )
+
+
+# -- PPO plan Step 4: the on-policy pre-flight --------------------------------
+
+
+def _on_policy_cfg(log_dir, **overrides) -> TrainConfig:
+    """A PPO config that passes the on-policy pre-flight (rollout 4 x 64
+    = 256 env steps, minibatch 64, cadences of whole rollouts); each
+    refusal test breaks exactly one thing. The env is unbuildable: every
+    refusal must come before any env work."""
+    model_kwargs = {"n_steps": 64, "batch_size": 64, "n_epochs": 1}
+    model_kwargs.update(overrides.pop("model_kwargs", {}))
+    fields: dict[str, Any] = {
+        "env_fn": _unbuildable_env,
+        "algo": "PPO",
+        "log_dir": str(log_dir),
+        "n_envs": 4,
+        "total_timesteps": 1_024,
+        "eval_freq": 512,
+        "checkpoint_freq": 1_024,
+        "model_kwargs": model_kwargs,
+    }
+    fields.update(overrides)
+    return TrainConfig(**fields)
+
+
+def test_on_policy_preflight_accepts_whole_rollout_geometry(tmp_path):
+    from courtside_dynamics.training.train import _validate_on_policy_config
+
+    _validate_on_policy_config(_on_policy_cfg(tmp_path / "run"))
+    # checkpoint_freq <= 0 disables checkpoints, so it has no cadence.
+    _validate_on_policy_config(_on_policy_cfg(tmp_path / "run", checkpoint_freq=0))
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        pytest.param(
+            {
+                "performance_gate": {
+                    "stages": ({},),
+                    "metric_key": "m",
+                    "threshold": 1.0,
+                    "sustain_evals": 1,
+                    "advance_update_pause_steps": 1_000,
+                },
+                "info_dict_eval": True,
+            },
+            r"\['advance_update_pause_steps'\]",
+            id="gate-update-pause",
+        ),
+        pytest.param(
+            {
+                "performance_gate": {
+                    "stages": ({},),
+                    "metric_key": "m",
+                    "threshold": 1.0,
+                    "sustain_evals": 1,
+                    "clear_replay_buffer_on_advance": True,
+                },
+            },
+            r"\['clear_replay_buffer_on_advance'\]",
+            id="gate-replay-wipe",
+        ),
+        pytest.param(
+            {
+                "performance_gate": {
+                    "stages": ({},),
+                    "metric_key": "m",
+                    "threshold": 1.0,
+                    "sustain_evals": 1,
+                    "reset_entropy_on_advance": True,
+                },
+            },
+            r"\['reset_entropy_on_advance'\]",
+            id="gate-entropy-reset",
+        ),
+        pytest.param(
+            {"model_kwargs": {"batch_size": 1}},
+            "normalize_advantage",
+            id="batch-size-one",
+        ),
+        pytest.param(
+            {"n_envs": 1, "model_kwargs": {"n_steps": 1, "batch_size": 1}},
+            r"n_steps \* n_envs = 1 \* 1 = 1",
+            id="one-transition-rollout",
+        ),
+        pytest.param(
+            {"model_kwargs": {"batch_size": 96}},
+            "batch_size 96 does not divide the rollout",
+            id="batch-does-not-divide",
+        ),
+        pytest.param(
+            {"total_timesteps": 255, "eval_freq": 256, "checkpoint_freq": 0},
+            "total_timesteps 255 is shorter than one rollout",
+            id="budget-under-a-rollout",
+        ),
+        pytest.param(
+            {"eval_freq": 128},
+            "eval_freq 128 is 32 steps per worker",
+            id="eval-inside-a-rollout",
+        ),
+        pytest.param(
+            {"eval_freq": 640},
+            r"eval_freq 640 is not a whole number of rollouts .* e\.g\. 512",
+            id="eval-not-whole-rollouts",
+        ),
+        pytest.param(
+            {"checkpoint_freq": 1_000},
+            r"checkpoint_freq 1,000 is not a whole number of rollouts",
+            id="checkpoint-not-whole-rollouts",
+        ),
+        pytest.param(
+            {"model_kwargs": {"policy_kwargs": {"log_std_int": -1.0}}},
+            "did you mean 'log_std_init'",
+            id="unknown-policy-kwarg",
+        ),
+        pytest.param(
+            {"model_kwargs": {"policy_kwargs": {"use_sde": True}}},
+            r"policy_kwargs may not set \['use_sde'\]",
+            id="reserved-policy-kwarg",
+        ),
+        pytest.param(
+            {"model_kwargs": {"n_steps": 64.0}},
+            "must be a positive integer",
+            id="non-integer-n-steps",
+        ),
+    ],
+)
+def test_on_policy_preflight_refuses_before_any_output(tmp_path, overrides, match):
+    """One refusal per case; each leaves the log_dir untouched (no
+    config.json, no directory), since the check runs with the other
+    config-only checks before any env is built or artifact written."""
+    log_dir = tmp_path / "run"
+    cfg = _on_policy_cfg(log_dir, **overrides)
+    with pytest.raises(ValueError, match=match):
+        train(cfg)
+    assert not log_dir.exists()
+
+
+def test_on_policy_preflight_is_inert_for_the_sac_family(tmp_path):
+    """SAC and DemoSAC return at once: their cadences are not counted in
+    rollouts, and the gate's SAC-only levers are theirs to use."""
+    from courtside_dynamics.training.train import _validate_on_policy_config
+
+    for algo in ("SAC", "DEMOSAC"):
+        cfg = _on_policy_cfg(
+            tmp_path / "run",
+            algo=algo,
+            eval_freq=100,
+            checkpoint_freq=333,
+            total_timesteps=1,
+            model_kwargs={"n_steps": 1, "batch_size": 1},
+            performance_gate={
+                "stages": ({},),
+                "metric_key": "m",
+                "threshold": 1.0,
+                "sustain_evals": 1,
+                "clear_replay_buffer_on_advance": True,
+                "reset_entropy_on_advance": True,
+            },
+        )
+        _validate_on_policy_config(cfg)
+
+
+def test_validate_policy_kwargs_resolves_the_policy_alias():
+    from courtside_dynamics.training.algos import validate_policy_kwargs
+
+    validate_policy_kwargs("PPO", "MlpPolicy", {"log_std_init": -2.0, "ortho_init": False})
+    with pytest.raises(ValueError, match="not one of PPO's policies"):
+        validate_policy_kwargs("PPO", "MlpPolicyy", {"ortho_init": False})
+    with pytest.raises(TypeError, match="must be a mapping"):
+        validate_policy_kwargs("PPO", "MlpPolicy", [("ortho_init", False)])
+
+
+# -- PPO plan Step 5: zero policy updates are flagged -------------------------
+
+
+def test_run_summary_flags_zero_policy_updates(tmp_path, capsys):
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    def env_fn():
+        raise RuntimeError("no env needed; probe degrades gracefully")
+
+    cfg = TrainConfig(env_fn=env_fn, algo="PPO", log_dir=str(tmp_path))
+    for n_updates, flagged in ((3, False), (0, True)):
+        write_run_summary(
+            cfg,
+            str(tmp_path),
+            final_mean_reward=1.0,
+            final_std_reward=0.5,
+            duration_seconds=10.0,
+            n_updates=n_updates,
+        )
+        text = (tmp_path / "stage_summary.txt").read_text()
+        assert f"SB3 n_updates:  {n_updates} (optimization epochs" in text
+        assert ("WARNING: no update ran" in text) is flagged
+        assert ("ran no update" in capsys.readouterr().out) is flagged
+    # None (the SAC family) leaves the summary as it was.
+    write_run_summary(
+        cfg,
+        str(tmp_path),
+        final_mean_reward=1.0,
+        final_std_reward=0.5,
+        duration_seconds=10.0,
+    )
+    assert "SB3 n_updates:" not in (tmp_path / "stage_summary.txt").read_text()
+
+
+class _StopAtFirstStep(BaseCallback):
+    def _on_step(self) -> bool:
+        return False
+
+
+def test_ppo_run_stopped_inside_its_first_rollout_reports_zero_updates(tmp_path):
+    """A stop inside the first rollout used to leave a "completed" run
+    whose saved models were the initial policy, with nothing to say so."""
+    log_dir = tmp_path / "run"
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=12),
+        algo="PPO",
+        log_dir=str(log_dir),
+        n_envs=1,
+        seed=0,
+        total_timesteps=64,
+        eval_freq=64,
+        checkpoint_freq=0,
+        n_eval_episodes=1,
+        record_video=False,
+        info_dict_eval=False,
+        model_kwargs={"n_steps": 64, "batch_size": 64, "n_epochs": 1},
+        extra_callbacks=(_StopAtFirstStep(),),
+    )
+    model = train(cfg)
+    assert model._n_updates == 0
+    text = (log_dir / "stage_summary.txt").read_text()
+    assert "SB3 n_updates:  0 (optimization epochs over all rollouts)  <-- WARNING" in text
+    # A SAC run's summary has no update line (unchanged).
+    sac_dir = tmp_path / "sac"
+    sac = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=12),
+        algo="SAC",
+        log_dir=str(sac_dir),
+        n_envs=1,
+        seed=0,
+        total_timesteps=8,
+        eval_freq=8,
+        checkpoint_freq=0,
+        n_eval_episodes=1,
+        record_video=False,
+        info_dict_eval=False,
+        model_kwargs={"buffer_size": 64, "learning_starts": 4},
+    )
+    train(sac)
+    # (Its Training Health section still lists train/n_updates.)
+    assert "SB3 n_updates:" not in (sac_dir / "stage_summary.txt").read_text()

@@ -9,8 +9,16 @@
 total_timesteps = 10_000
 n_envs = 1
 early_stop_patience = 20  # evals without a new best before stopping
+
+[train.algo.sac]
 eval_freq = 2_500
 checkpoint_freq = 5_000
+
+[train.algo.ppo]
+# Whole rollouts of the recipe's 128-step PPO smoke rollout (2,048 env
+# steps per rollout at 16 workers).
+eval_freq = 2_048
+checkpoint_freq = 4_096
 
 [env]
 episode_len = 250

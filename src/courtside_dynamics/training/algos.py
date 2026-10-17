@@ -172,6 +172,62 @@ def validate_model_kwargs(
             )
 
 
+#: Policy constructor arguments the algorithm supplies itself (its
+#: ``_setup_model`` passes the spaces and the learning-rate schedule,
+#: and ``use_sde`` from its own argument), so a ``policy_kwargs`` value
+#: for one collides at construction or is silently overwritten.
+_RESERVED_POLICY_KWARGS = frozenset(
+    {"observation_space", "action_space", "lr_schedule", "use_sde"}
+)
+
+
+def validate_policy_kwargs(
+    algo_name: str, policy: Any, policy_kwargs: Any
+) -> None:
+    """Reject ``policy_kwargs`` the algorithm's policy class cannot accept.
+
+    SB3 hands them to the policy constructor inside the algorithm's
+    ``_setup_model`` -- after the env fleet is built and ``config.json``
+    is written -- so an unknown key (a typo, or ``ortho_init`` meant for
+    PPO's ``ActorCriticPolicy``) used to fail there. ``policy`` is one
+    of the algorithm's aliases (``"MlpPolicy"``) or a policy class.
+    """
+    cls = resolve_algo(algo_name)
+    if not isinstance(policy_kwargs, Mapping):
+        raise TypeError(
+            f"policy_kwargs must be a mapping, got {policy_kwargs!r}"
+        )
+    if isinstance(policy, str):
+        policy_class = cls.policy_aliases.get(policy)
+        if policy_class is None:
+            raise ValueError(
+                f"policy {policy!r} is not one of {cls.__name__}'s "
+                f"policies {sorted(cls.policy_aliases)}"
+            )
+    else:
+        policy_class = policy
+    reserved = sorted(_RESERVED_POLICY_KWARGS & set(policy_kwargs))
+    if reserved:
+        raise ValueError(
+            f"policy_kwargs may not set {reserved}: {cls.__name__} supplies "
+            f"these to {policy_class.__name__} itself (gSDE is the "
+            f"algorithm's model_kwargs['use_sde'])"
+        )
+    accepted, open_ended = _accepted_parameters(policy_class)
+    if open_ended:
+        return
+    accepted = accepted - _RESERVED_POLICY_KWARGS
+    for key in policy_kwargs:
+        if key in accepted:
+            continue
+        suggestions = difflib.get_close_matches(key, sorted(accepted), n=1)
+        hint = f"; did you mean '{suggestions[0]}'?" if suggestions else ""
+        raise ValueError(
+            f"policy_kwargs key '{key}' is not accepted by "
+            f"{policy_class.__name__}{hint}"
+        )
+
+
 def _accepted_parameters(cls: type) -> tuple[set[str], bool]:
     """Explicit constructor parameters along the MRO.
 
