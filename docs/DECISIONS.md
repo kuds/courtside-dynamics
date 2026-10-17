@@ -718,6 +718,81 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### A run directory says what ran and seals itself; a mirror is trusted only through its manifest — *implemented (unreleased, 2026-10-17); design L1, first half*
+`design_campaign_structure_20261016.md` R3: 7 of about 48 archived run
+directories were stubs that looked live, one run lost all its videos
+with no trace, and nothing could tell a Drive copy from a partial one.
+Every env stream and training path is unchanged (golden digests 22/22;
+trainer digest against `09f202a`: every component matches but the
+layout list, which gains `run_record` and `sync_manifest`).
+- **Two files, one rule.** `run_record.json` says what ran and how it
+  ended; `sync_manifest.json` (path, size and sha256 of every other
+  file) is written last, after the final record, once every env and
+  the SB3 logger are closed. A directory is *complete* when its
+  manifest verifies and the record it lists is terminal. Complete
+  means "exactly what `train()` left when the run ended", a crashed
+  or interrupted run included; it does not mean "succeeded". A
+  SIGKILL, a dead VM or a run still training leaves no manifest, so
+  the directory is incomplete by definition.
+- **The record copies `config.json`, it never re-derives.** Algorithm,
+  task fingerprints, comparability key, seeds and versions come from
+  the `config.json` payload, so the two cannot disagree. The task's
+  constructor kwargs are recorded as the sha256 of their canonical
+  JSON, and the warm start by its source directory's *name*, not its
+  machine path. `eval_protocol` stays `null` until phase 4 versions
+  protocols.
+- **Status is finer than the summary's.** The record separates
+  `early_stop` from `completed`; `stage_summary.txt` keeps
+  `completed` for both, because the campaign resumes (re-scores) a
+  leg only from that line. A guard whose condition first holds at
+  the last scheduled evaluation trained the whole budget: `completed`,
+  with a `full_budget: ...` reason that quotes the guard. A callback
+  that stops early without a reason gets one that says so.
+- **Unlisted files are reported, not fatal by default.** The notebooks
+  write plots, the replay video and the long-horizon audit into the run
+  directory after `train()` sealed it. Failing those would make every
+  notebook run incomplete. Every file `train()` wrote is still checked,
+  and `--strict` fails extras. A partial *mirror* still never verifies:
+  its terminal record only arrives in the final pass, and a pass that
+  dies leaves the previous manifest, which then lists a changed file
+  or a `running` record.
+- **Mirror rules.** Opt-in (`sync_dir`, default off). The target must be
+  absent or empty at launch, so every file in it is this run's, and
+  its parent must exist, so an unmounted Drive fails before output
+  instead of filling a local folder of the same name. Each file is
+  hashed while it is read, written to a temporary file, renamed, then
+  read back and re-hashed. A checkpoint pass that fails is printed and
+  training continues. The final pass gets three attempts (5 s and 30
+  s apart), then raises once the local directory is sealed: the run
+  is safe locally, but the caller must learn that its durable copy is
+  not. `sync_dir` is refused in run-config files, like `log_dir`: it
+  belongs to the machine, not the experiment.
+- **The trust fixes, and why each is shaped as it is.**
+  `disconnect_runtime` keeps the VM up when `flush_and_unmount()`
+  fails: an idle GPU costs less than the last writes of a run.
+  `reuse_log_dir` rotates the monitor and TensorBoard *directories*
+  whole, because TensorBoard reads any file whose name contains
+  `tfevents`, so a renamed event file would still be read. A previous
+  attempt's run record now refuses reuse like its evaluation rows, so
+  an attempt that died before its first evaluation is caught. The
+  interrupt salvage saves the model and normalizer before the gate's
+  `finalize` (an `OSError` there used to lose all three).
+  `SubstepTennisEventSampler.reset()` discards an open control step;
+  a healthy trajectory never reaches it, so the goldens hold, and a
+  recovered PaddleTennis env replays a fresh env's stream byte for
+  byte. Early stops the budget cannot reach are warned before output
+  and recorded (`resolved_training.early_stop_reachability`); the
+  warm-up arithmetic moved into helpers that `train()` and the record
+  share.
+- **Eval share is measured, not estimated.** Each evaluation
+  callback's evaluating calls are timed on the instance with
+  `time.monotonic` (no stream or RNG moves), plus the closing
+  evaluation: the number L8 needs before trimming in-loop
+  evaluation. The checkpoint diagnosis is not counted.
+- **Open (L1, second half).** The regenerated run index, the backfill of
+  the ~48 legacy run dirs (the 7 stubs marked aborted), and mapping
+  each PaddleTennis run to its lever.
+
 ### The PPO verifier pass: a deployable best states its updates, and nothing fails quietly — *implemented (unreleased, 2026-10-17)*
 Verifiers re-ran the phase-2 PPO commits (since `f920d8f`). The fixes
 keep every env stream and SAC-family training path unchanged (trainer

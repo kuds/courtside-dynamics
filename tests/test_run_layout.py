@@ -32,11 +32,27 @@ _DIRECTORY_NAMES = {
 
 
 def test_layout_keeps_human_files_at_root_and_sorts_the_rest():
-    """Root keeps exactly the three files a human opens first; every
-    other artifact is one folder deep by audience, and progress.csv is
-    directly in metrics/ (pandas metrics, not TB event data)."""
+    """Root keeps exactly the three files a human opens first plus the
+    run's record and manifest (experiments.records reads them there);
+    every other artifact is one folder deep by audience, and
+    progress.csv is directly in metrics/ (pandas metrics, not TB event
+    data)."""
+    from courtside_dynamics.experiments.records import (
+        RUN_RECORD_NAME,
+        SYNC_MANIFEST_NAME,
+    )
+
     at_root = {name for name, rel in RUN_LAYOUT.items() if os.sep not in rel}
-    assert at_root == {"config", "stage_summary", "run_config_toml", "checkpoints_dir"}
+    assert at_root == {
+        "config",
+        "stage_summary",
+        "run_config_toml",
+        "checkpoints_dir",
+        "run_record",
+        "sync_manifest",
+    }
+    assert RUN_LAYOUT["run_record"] == RUN_RECORD_NAME == "run_record.json"
+    assert RUN_LAYOUT["sync_manifest"] == SYNC_MANIFEST_NAME == "sync_manifest.json"
     assert RUN_LAYOUT["config"] == "config.json"
     assert RUN_LAYOUT["stage_summary"] == "stage_summary.txt"
     assert RUN_LAYOUT["run_config_toml"] == "run_config.toml"
@@ -134,6 +150,9 @@ def test_expected_artifacts_derive_from_run_layout():
         "eval_rewards",
         "eval_diagnostics",
         "best_model_video",
+        # Every train() run writes both (experiments.records).
+        "run_record",
+        "sync_manifest",
     } <= names
     # Conditional extras stay out of the default expectations: TOML
     # copies, WallBall long-horizon outputs, and checkpoint-diagnosis

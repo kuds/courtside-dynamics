@@ -1287,3 +1287,96 @@ def test_every_notebook_installs_a_pinned_immutable_ref() -> None:
                 path.name,
                 line,
             )
+
+
+# -- Local-then-sync knobs (design L1) ----------------------------------------
+
+
+def test_sb3_notebook_local_then_sync_is_opt_in_and_mirrors_last() -> None:
+    """LOCAL_THEN_SYNC ships off, reaches train() only when set, and the
+    post-training plots, video and audits are mirrored after they are
+    written and before the runtime disconnects."""
+    source = "\n".join(_source(cell) for cell in _load_sb3_notebook()["cells"])
+    assert "\nLOCAL_THEN_SYNC = False\n" in source
+    assert 'if SYNC_DIR is not None:\n    overrides["sync_dir"] = SYNC_DIR\n' in source
+    audit = source.index("missing = check_run_artifacts(")
+    mirror = source.index("sync_run_dir(LOG_DIR, SYNC_DIR)")
+    disconnect = source.index("disconnect_runtime(delay_seconds=30)")
+    assert audit < mirror < disconnect
+    assert "verify_run_dir(SYNC_DIR, strict=True)" in source
+
+
+def test_sb3_notebook_local_then_sync_needs_drive(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    run_dir_cell = next(
+        _source(cell)
+        for cell in _load_sb3_notebook()["cells"]
+        if "SYNC_DIR = None" in _source(cell)
+    )
+    monkeypatch.chdir(tmp_path)
+
+    def run(**settings: Any) -> dict[str, Any]:
+        namespace: dict[str, Any] = {
+            "ENV": "BallBalance",
+            "ALGO": None,
+            "USE_DRIVE": False,
+            "CONFIG_FILE": None,
+            **settings,
+        }
+        exec(compile(run_dir_cell, f"{SB3_NOTEBOOK}:run_dir", "exec"), namespace)
+        return namespace
+
+    with pytest.raises(ValueError, match="set USE_DRIVE = True"):
+        run(LOCAL_THEN_SYNC=True)
+    off = run(LOCAL_THEN_SYNC=False)
+    assert off["SYNC_DIR"] is None
+    assert Path(off["LOG_DIR"]).resolve().is_relative_to(
+        (tmp_path / "logs" / "BallBalance").resolve()
+    )
+
+
+def test_campaign_local_then_sync_is_operational_not_fingerprinted(
+    tmp_path,
+) -> None:
+    """The campaign knob ships off, never joins the fingerprint (a
+    campaign may switch it between resumes, like REQUIRE_DEVICE), needs
+    Drive, and hands each leg's Drive attempt dir to train() as its
+    sync_dir while the leg trains on local disk."""
+    import pytest
+
+    off = _exec_campaign_plan()
+    assert off["LOCAL_THEN_SYNC"] is False
+    on = _exec_campaign_plan((("LOCAL_THEN_SYNC = False", "LOCAL_THEN_SYNC = True"),))
+    assert on["FINGERPRINT"] == off["FINGERPRINT"]
+    with pytest.raises(ValueError, match="set USE_DRIVE = True"):
+        _exec_campaign_plan(
+            (
+                ("LOCAL_THEN_SYNC = False", "LOCAL_THEN_SYNC = True"),
+                ("USE_DRIVE = True", "USE_DRIVE = False"),
+            )
+        )
+    leg = on["make_leg_config"](
+        log_dir=tmp_path / "local" / "attempt_01",
+        seed=0,
+        total_timesteps=1_000_000,
+        sync_dir=tmp_path / "drive" / "attempt_01",
+    )
+    assert leg.sync_dir == str(tmp_path / "drive" / "attempt_01")
+    assert leg.log_dir == str(tmp_path / "local" / "attempt_01")
+    unsynced = off["make_leg_config"](
+        log_dir=tmp_path / "leg", seed=0, total_timesteps=1_000_000
+    )
+    assert unsynced.sync_dir is None
+    helpers = next(
+        _source(cell)
+        for cell in _load_campaign_notebook()["cells"]
+        if "def run_leg(" in _source(cell)
+    )
+    run_leg = helpers[helpers.index("def run_leg(") :]
+    assert 'log_dir = os.path.join("/content/runs", drive_relative)' in run_leg
+    assert "sync_dir = stage_dir" in run_leg
+    assert "sync_dir=sync_dir," in run_leg
+    # Everything after train() keeps reading the Drive attempt dir.
+    assert 'locate_artifact(stage_dir, "config")' in run_leg
+    assert "stage_summary_status(stage_dir)" in run_leg

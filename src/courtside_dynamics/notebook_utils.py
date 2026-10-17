@@ -257,10 +257,28 @@ def _report_run_config_drift(
 def disconnect_runtime(delay_seconds: int = 5) -> None:
     """Free the Colab GPU by tearing down the runtime. No-op locally.
 
-    The optional delay gives any in-flight cell output a moment to
-    render before the runtime disconnects.
+    Drive is flushed and unmounted first (``drive.flush_and_unmount()``,
+    which only reports when nothing is mounted): the mount caches
+    writes, and tearing the VM down under it could lose the last ones
+    -- the campaign record and report, the final leg's artifacts
+    (``repo_review_20261016`` critic-4). When the flush raises, the
+    runtime is left up and the cell says so: an idle GPU costs less
+    than a lost run, and the writes can still be retried. The optional
+    delay gives any in-flight cell output a moment to render before the
+    runtime disconnects.
     """
     if not _in_colab():
+        return
+    try:
+        from google.colab import drive
+
+        drive.flush_and_unmount()
+    except Exception as error:
+        print(
+            f"[notebook_utils] Drive flush_and_unmount() failed ({error!r}); "
+            "NOT disconnecting, so the last Drive writes are not lost with "
+            "the VM. Retry drive.flush_and_unmount(), then disconnect by hand."
+        )
         return
     print(f"Disconnecting Colab runtime in {delay_seconds}s...")
     time.sleep(delay_seconds)
@@ -465,6 +483,8 @@ _ARTIFACT_HINTS: dict[str, str] = {
     RUN_LAYOUT["final_model"]: "written when learn() finishes, is interrupted, or raises (salvaged before the error re-raises); absent means the process died hard",
     RUN_LAYOUT["vec_normalize"]: "only written when VecNormalize is enabled (normalize_obs / normalize_reward)",
     RUN_LAYOUT["stage_summary"]: "written by train()'s epilogue or crash salvage (Status: completed/interrupted/crashed); absent means the process died hard",
+    RUN_LAYOUT["run_record"]: "written when train() starts and rewritten on every terminal path; absent means train() never ran on this dir, or the run predates run records",
+    RUN_LAYOUT["sync_manifest"]: "written last, once the run ended; absent means the run never finished (killed, a disconnected runtime, still training) or predates run records -- python -m courtside_dynamics.experiments.verify <run_dir>",
     RUN_LAYOUT["learning_curve"]: "saved by the plot_learning_curve cell -- did it run with save_path set?",
     RUN_LAYOUT["eval_headline"]: "saved by the plot_eval_info cell -- did it run with save_path set?",
     RUN_LAYOUT["eval_terminations"]: "saved by the plot_eval_info cell -- did it run with save_path set?",
@@ -495,8 +515,9 @@ def check_run_artifacts(
     """Audit ``log_dir`` against every artifact a run should have produced.
 
     Prints one line per artifact -- present ones with their size (file
-    count for directories), missing ones with the most common cause --
-    and returns the missing relative paths (as recorded in
+    count for directories; an empty directory counts as missing), missing
+    ones with the most common cause -- and returns the missing relative
+    paths (as recorded in
     ``RUN_LAYOUT``). Run it at the end of a notebook session, after the
     plotting and replay cells: it catches silently-skipped outputs (no
     video because moviepy failed, no best_model because eval never
@@ -525,7 +546,17 @@ def check_run_artifacts(
                 total += sum(
                     os.path.getsize(os.path.join(root, f)) for f in files
                 )
-            status = f"ok       {n_files} file(s), {_human_size(total)}"
+            if n_files:
+                status = f"ok       {n_files} file(s), {_human_size(total)}"
+            else:
+                # The directory is created before anything is written
+                # into it: empty means the artifact is missing (the 1M
+                # LT1 run lost all four videos behind an empty folder).
+                missing.append(rel)
+                hint = _ARTIFACT_HINTS.get(rel)
+                status = "MISSING  (empty directory)" + (
+                    f"  -- {hint}" if hint else ""
+                )
         elif os.path.isfile(full):
             status = f"ok       {_human_size(os.path.getsize(full))}"
         else:

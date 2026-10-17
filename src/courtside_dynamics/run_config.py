@@ -86,6 +86,9 @@ _REJECTED_TRAIN_KEYS = {
     "reuse_log_dir": "pass reuse_log_dir= alongside log_dir=; whether a "
     "run may overwrite an earlier attempt's directory is the caller's "
     "decision, not the experiment's",
+    "sync_dir": "pass sync_dir= alongside log_dir=; where a run's "
+    "directory is mirrored is a property of the machine it runs on, not "
+    "of the experiment",
     "recipe_name": "recorded from the recipe actually built",
 }
 

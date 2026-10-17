@@ -998,6 +998,10 @@ class TestEvaluationFields:
                 "[train]\nreuse_log_dir = true\n",
                 "reuse_log_dir.*not file-configurable",
             ),
+            (
+                '[train]\nsync_dir = "/mnt/mirror/runs"\n',
+                "sync_dir.*not file-configurable",
+            ),
         ],
     )
     def test_bad_shapes_fail_at_load(self, tmp_path, text, message):

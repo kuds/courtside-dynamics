@@ -76,6 +76,11 @@ from courtside_dynamics.callbacks.video_record import (
     InfoRowFn,
     VideoRecordCallback,
 )
+from courtside_dynamics.experiments import records as run_records
+from courtside_dynamics.experiments.sync import (
+    RunDirMirror,
+    validate_sync_target,
+)
 from courtside_dynamics.training.algos import (
     OFF_POLICY_ALGOS as _OFF_POLICY_ALGOS,
 )
@@ -96,8 +101,10 @@ from courtside_dynamics.training.algos import (
 )
 from courtside_dynamics.training.artifacts import (
     RUN_LAYOUT,
+    _git_dirty,
     artifact_path,
     env_observation_names,
+    is_empty_directory,
     locate_artifact,
     observation_fingerprint_mismatch,
     update_run_config_with_initialization,
@@ -131,6 +138,338 @@ class _SaveVecNormalizeOnNewBest(BaseCallback):
             return True
         os.makedirs(os.path.dirname(self.save_path) or ".", exist_ok=True)
         vec_norm.save(self.save_path)
+        return True
+
+
+class _StopOnNoRewardImprovement(StopTrainingOnNoModelImprovement):
+    """SB3's reward-path early stop, plus the ``stop_reason`` train() persists.
+
+    Reward selection (no ``headline_key``) hands ``early_stop_patience``
+    to SB3's ``StopTrainingOnNoModelImprovement`` as the reward
+    ``EvalCallback``'s ``callback_after_eval``. It printed why it
+    stopped and recorded nothing, so the summary of such a run read a
+    bare "(stopped early)" (``repo_review_20261016`` train-1). When it
+    stops it now sets ``stop_reason`` like ``InfoDictEvalCallback`` and
+    the gate; when it stops is SB3's own rule, unchanged (it fires once
+    the count of non-improving evaluations *exceeds* the patience).
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.stop_reason: str | None = None
+
+    def _on_step(self) -> bool:
+        continue_training = super()._on_step()
+        if not continue_training:
+            self.stop_reason = (
+                f"early_stop_patience: no new best mean reward for the last "
+                f"{self.no_improvement_evals} evaluations (reward selection: "
+                f"SB3 StopTrainingOnNoModelImprovement, patience "
+                f"{self.max_no_improvement_evals})"
+            )
+        return continue_training
+
+
+def _stop_reason_of(callbacks: Iterable[BaseCallback]) -> str | None:
+    """The first ``stop_reason`` any callback in ``callbacks`` recorded.
+
+    Walks nested callbacks too: SB3's ``EvalCallback`` holds its
+    ``callback_after_eval`` (where the reward-path early stop lives) as
+    ``.callback`` and its new-best hook as ``.callback_on_new_best``, and
+    a ``CallbackList`` holds ``.callbacks``.
+    """
+    for callback in callbacks:
+        reason = getattr(callback, "stop_reason", None)
+        if reason:
+            return str(reason)
+        nested = [
+            child
+            for child in (
+                getattr(callback, "callback", None),
+                getattr(callback, "callback_on_new_best", None),
+                *getattr(callback, "callbacks", ()),
+            )
+            if isinstance(child, BaseCallback)
+        ]
+        reason = _stop_reason_of(nested)
+        if reason:
+            return reason
+    return None
+
+
+class _EvalClock:
+    """Wall clock spent evaluating, for the run record's eval share.
+
+    :meth:`watch` wraps one evaluation callback's ``_on_step`` on the
+    instance and times the calls that evaluate (``n_calls`` a multiple
+    of its ``eval_freq``): the selection batch and any ``confirm_best``
+    batch, the final-config stream, SB3's reward evaluator.
+    ``closing_seconds`` collects the end-of-run closing evaluation. Only
+    ``time.monotonic`` is read, so no stream or RNG moves.
+    """
+
+    def __init__(self) -> None:
+        self.periodic_seconds = 0.0
+        self.closing_seconds = 0.0
+
+    def watch(self, callback: BaseCallback) -> None:
+        inner = callback._on_step
+
+        def timed() -> bool:
+            eval_freq = getattr(callback, "eval_freq", 0)
+            if eval_freq <= 0 or callback.n_calls % eval_freq:
+                return inner()
+            started = time.monotonic()
+            try:
+                return inner()
+            finally:
+                self.periodic_seconds += time.monotonic() - started
+
+        setattr(callback, "_on_step", timed)  # noqa: B010 -- instance override
+
+
+#: Seconds between attempts to mirror a finished run directory to
+#: ``sync_dir`` (three attempts in all): a Drive hiccup at the end of a
+#: multi-hour run should not cost its durable copy.
+_FINAL_SYNC_RETRY_SECONDS: tuple[float, ...] = (5.0, 30.0)
+
+
+class _RunLifecycle:
+    """One ``train()`` call's run record, sync manifest and mirror.
+
+    Created right after ``config.json``, when it writes the
+    ``"running"`` record (``experiments.records``). The training body
+    hands it the built model and reports how the run ended
+    (:meth:`note_outcome`); :meth:`close` runs once the body returned or
+    raised -- after every env and the SB3 logger are closed, so no file
+    is still being written -- and writes the final record, then
+    ``sync_manifest.json`` last, then mirrors the directory to
+    ``sync_dir`` when one is set.
+    """
+
+    def __init__(self, cfg: TrainConfig, *, preflight_warnings: Sequence[str]) -> None:
+        self.cfg = cfg
+        self.log_dir = Path(cfg.log_dir)
+        self.run_id = self.log_dir.resolve().name
+        self.created_at = run_records.utc_now()
+        self.started = time.monotonic()
+        self.preflight_warnings = tuple(preflight_warnings)
+        self.git_dirty = _git_dirty()
+        self.eval_clock = _EvalClock()
+        self.mirror: RunDirMirror | None = (
+            None
+            if cfg.sync_dir is None
+            else RunDirMirror(cfg.log_dir, cfg.sync_dir, run_id=self.run_id)
+        )
+        self.model: BaseAlgorithm | None = None
+        self.status: str | None = None
+        self.stop_reason: str | None = None
+        self._write_record(run_records.RUNNING)
+
+    def note_outcome(
+        self, status: str, stop_reason: str | None, model: BaseAlgorithm
+    ) -> None:
+        self.status = status
+        self.stop_reason = stop_reason
+        self.model = model
+
+    def _artifacts(self) -> list[dict[str, str]]:
+        """The layout artifacts present (an empty directory is not one)."""
+        present = []
+        for name in RUN_LAYOUT:
+            if name in ("run_record", "sync_manifest"):
+                continue
+            path = locate_artifact(self.log_dir, name)
+            if path is not None and not is_empty_directory(path):
+                present.append(
+                    {"name": name, "path": os.path.relpath(path, self.log_dir)}
+                )
+        return present
+
+    def _write_record(
+        self,
+        status: str,
+        *,
+        finished: bool = False,
+        progress: Mapping[str, Any] | None = None,
+    ) -> None:
+        config_path = locate_artifact(self.log_dir, "config")
+        if config_path is None:
+            raise FileNotFoundError(f"no config.json under {self.log_dir}")
+        config = run_records.read_json_object(config_path)
+        best_meta: dict[str, Any] | None = None
+        meta_path = locate_artifact(self.log_dir, "best_model_meta")
+        if meta_path is not None:
+            try:
+                best_meta = run_records.read_json_object(meta_path)
+            except ValueError as error:
+                print(f"[train] run record omits the selection: {error}")
+        trained: int | None = None
+        n_updates: int | None = None
+        if self.model is not None:
+            trained = int(self.model.num_timesteps)
+            updates = getattr(self.model, "_n_updates", None)
+            if isinstance(updates, int) and not isinstance(updates, bool):
+                n_updates = updates
+        wall_clock: dict[str, Any] | None = None
+        if finished:
+            total = time.monotonic() - self.started
+            evaluating = (
+                self.eval_clock.periodic_seconds + self.eval_clock.closing_seconds
+            )
+            wall_clock = {
+                "total_seconds": round(total, 3),
+                "periodic_eval_seconds": round(self.eval_clock.periodic_seconds, 3),
+                "closing_eval_seconds": round(self.eval_clock.closing_seconds, 3),
+                "eval_share": round(evaluating / total, 4) if total > 0 else None,
+            }
+        sync = (
+            None
+            if self.mirror is None
+            else {
+                "dir": str(self.cfg.sync_dir),
+                "checkpoint_mirrors": self.mirror.passes,
+                "failed_mirrors": self.mirror.failures,
+            }
+        )
+        record = run_records.build_run_record(
+            config,
+            run_id=self.run_id,
+            created_at=self.created_at,
+            status=status,
+            finished_at=run_records.utc_now() if finished else None,
+            stop_reason=self.stop_reason if finished else None,
+            trained_timesteps=trained,
+            n_updates=n_updates,
+            git_dirty=self.git_dirty,
+            best_model_meta=best_meta,
+            wall_clock=wall_clock,
+            preflight_warnings=self.preflight_warnings,
+            artifacts=self._artifacts(),
+            sync=sync,
+            progress=progress,
+        )
+        run_records.write_run_record(self.log_dir, record)
+
+    def checkpoint_sync(self, num_timesteps: int) -> None:
+        """Refresh the running record's progress and mirror the run dir.
+
+        Never raises: a failed pass is printed, training continues, and
+        the mirror keeps its previous manifest until a pass succeeds.
+        """
+        assert self.mirror is not None
+        try:
+            self._write_record(
+                run_records.RUNNING,
+                progress={
+                    "trained_timesteps": int(num_timesteps),
+                    "updated_at": run_records.utc_now(),
+                },
+            )
+            self.mirror.sync()
+        except Exception as error:
+            print(
+                f"[train] mirroring {self.log_dir} to {self.cfg.sync_dir} "
+                f"failed at {num_timesteps:,} steps ({error!r}); training "
+                f"continues, and the mirror stays incomplete until a later "
+                f"pass succeeds"
+            )
+
+    def close(self, error: BaseException | None) -> None:
+        """Write the final record, the manifest, then the final mirror.
+
+        ``error`` is the exception ``train()`` is about to re-raise, or
+        ``None``. A run that never reported an outcome failed outside
+        ``learn()`` (after ``config.json`` existed): ``"crashed"``, or
+        ``"interrupted"`` for a ``KeyboardInterrupt``. While ``error``
+        propagates, a failure here is printed and never masks it;
+        otherwise it raises, because a run directory that cannot seal
+        itself is incomplete and the caller must know.
+        """
+        if self.status is None:
+            if isinstance(error, KeyboardInterrupt):
+                self.status = run_records.INTERRUPTED
+                self.stop_reason = "interrupted outside learn(): KeyboardInterrupt"
+            else:
+                self.status = run_records.CRASHED
+                self.stop_reason = f"crashed: {error!r}"
+        status = self.status
+        for label, action in (
+            (
+                run_records.RUN_RECORD_NAME,
+                lambda: self._write_record(status, finished=True),
+            ),
+            (
+                run_records.SYNC_MANIFEST_NAME,
+                lambda: run_records.write_sync_manifest(
+                    self.log_dir, run_id=self.run_id
+                ),
+            ),
+        ):
+            try:
+                action()
+            except Exception as close_error:
+                if error is None:
+                    raise
+                print(
+                    f"  could not write {label} ({close_error!r}); "
+                    f"{self.log_dir} stays incomplete"
+                )
+                return
+        if self.mirror is not None:
+            self._final_sync(error)
+
+    def _final_sync(self, error: BaseException | None) -> None:
+        assert self.mirror is not None
+        last: Exception | None = None
+        delays = (0.0, *_FINAL_SYNC_RETRY_SECONDS)
+        for attempt, delay in enumerate(delays, start=1):
+            if delay > 0:
+                time.sleep(delay)
+            try:
+                manifest = self.mirror.sync()
+            except Exception as sync_error:
+                last = sync_error
+                print(
+                    f"[train] mirroring {self.log_dir} to {self.cfg.sync_dir} "
+                    f"failed (attempt {attempt} of {len(delays)}): "
+                    f"{sync_error!r}"
+                )
+                continue
+            print(
+                f"[train] mirrored {manifest['file_count']} file(s) to "
+                f"{self.cfg.sync_dir}, sealed by its {run_records.SYNC_MANIFEST_NAME}"
+            )
+            return
+        message = (
+            f"{self.log_dir} is complete, but mirroring it to sync_dir "
+            f"{self.cfg.sync_dir} failed {len(delays)} times (last: "
+            f"{last!r}), so the mirror does not verify. Re-run: from "
+            f"courtside_dynamics.experiments.sync import sync_run_dir; "
+            f"sync_run_dir({str(self.log_dir)!r}, {str(self.cfg.sync_dir)!r})"
+        )
+        if error is not None:
+            print(f"[train] {message}")
+            return
+        raise RuntimeError(message) from last
+
+
+class _MirrorRunDirCallback(BaseCallback):
+    """Mirror the run directory to ``sync_dir`` at checkpoint cadence.
+
+    Ordered after the checkpoint (and diagnosis) callbacks, so each pass
+    carries the checkpoint just written. Never stops training; the
+    lifecycle prints a failed pass and the next one retries.
+    """
+
+    def __init__(self, lifecycle: _RunLifecycle, save_freq: int) -> None:
+        super().__init__()
+        self.lifecycle = lifecycle
+        self.save_freq = save_freq
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.save_freq == 0:
+            self.lifecycle.checkpoint_sync(self.num_timesteps)
         return True
 
 
@@ -490,7 +829,11 @@ class TrainConfig:
         reachable stop, guaranteeing zero time at the target
         distribution). An on-policy run also floors the warm-up at
         ``min_policy_updates_before_stop`` policy updates (see there).
-        ``None`` (default) trains for the full budget.
+        ``None`` (default) trains for the full budget. A patience (or
+        degenerate guard) whose earliest stop lies past the budget's last
+        evaluation is warned about before any output and recorded
+        (:func:`early_stop_reachability`); a stop whose condition first
+        holds at the final evaluation records the run as ``completed``.
         Motivation: the first real WallBall run kept training for 10+
         GPU-hours after its best checkpoint while the policy
         collapsed; run 20260712_190054 then spent 525k steps
@@ -701,11 +1044,18 @@ class TrainConfig:
         append, so a second attempt used to mix its rows into the
         first's, and the stage summary joined the two by timestep;
         the best-model triple and checkpoints of the earlier attempt
-        would also sit beside the new ``config.json``. ``True`` opts in
-        to reusing the directory: the old evaluation CSVs are rotated
-        aside (``eval_info.attempt_<UTC time>.csv``) with a loud message,
-        and every other artifact is overwritten as the new attempt
-        writes it.
+        would also sit beside the new ``config.json``. A previous
+        attempt's ``run_record.json`` is refused the same way (every
+        attempt writes one first, so an attempt that died before its
+        first evaluation is caught too). ``True`` opts in to reusing the
+        directory: the old evaluation CSVs, run record and sync manifest
+        are rotated aside (``eval_info.attempt_<UTC time>.csv``), and so
+        are the monitor and TensorBoard directories
+        (``metrics/monitor.attempt_<UTC time>``: SB3's ``Monitor`` only
+        overwrites the CSVs of this attempt's workers, and TensorBoard
+        reads every event file in its folder, so both were read back
+        into the new attempt's curves), each with a loud message; every
+        other artifact is overwritten as the new attempt writes it.
     confirm_best_eval:
         When ``True``, a candidate best must also win an independent
         second eval batch before ``best_model.zip`` is overwritten
@@ -849,6 +1199,30 @@ class TrainConfig:
         re-imports the main module, and an unguarded script fails in
         the VecEnv constructor (``EOFError``) after ``config.json`` is
         written. Notebooks need no guard.
+    sync_dir:
+        Opt-in local-then-sync (``experiments.sync``). ``None``
+        (default) keeps every artifact where ``log_dir`` puts it. Set to
+        a directory (a Google Drive folder on Colab) and ``train()``
+        still writes everything under ``log_dir`` -- point that at local
+        disk -- but mirrors the run directory here at every checkpoint
+        (``checkpoint_freq``) and once more at the end, after the local
+        ``sync_manifest.json``. The mirror's own manifest is written
+        last, only after every copied file re-hashes correctly, so a
+        mirror cut short (a disconnected runtime, a Drive error) never
+        verifies as complete. It must be absent or empty at launch,
+        outside ``log_dir``, with an existing parent (checked before any
+        output). A failed checkpoint pass is printed and training
+        continues; a final mirror that still fails after three attempts
+        raises once the local run directory is complete (a run that is
+        already failing keeps its own exception, and the mirror failure
+        is printed).
+
+    Every run directory also carries ``run_record.json`` (written right
+    after ``config.json`` with status ``"running"`` and rewritten on every
+    terminal path: completed, early stop, interrupted, crashed) and,
+    written last, ``sync_manifest.json`` (``experiments.records``); a run
+    directory without a manifest that verifies is incomplete
+    (``python -m courtside_dynamics.experiments.verify <run_dir>``).
     """
 
     env_fn: Callable
@@ -926,6 +1300,7 @@ class TrainConfig:
     reuse_log_dir: bool = False
     min_policy_updates_before_stop: int = DEFAULT_MIN_POLICY_UPDATES_BEFORE_STOP
     vec_env: str = "dummy"
+    sync_dir: str | os.PathLike[str] | None = None
 
 
 #: Offset of the derived paired-evaluation seed block from ``cfg.seed``
@@ -1208,6 +1583,157 @@ def _policy_update_floor_evals(cfg: TrainConfig) -> int:
     return math.ceil(updates * rollout / cfg.eval_freq)
 
 
+def _floor_stop_warmup(cfg: TrainConfig, evals: int) -> int:
+    """An early stop's warm-up after the on-policy update floor."""
+    floor = _policy_update_floor_evals(cfg)
+    return evals if floor == 0 or evals >= floor else floor
+
+
+def _degenerate_warmup_evals(
+    cfg: TrainConfig, schedules: Sequence[LinearEnvAttrScheduleCallback]
+) -> int:
+    """``degenerate_min_evals`` as ``train()`` arms it, before the floor.
+
+    The configured value; when that is ``None`` and ``env_attr_schedules``
+    exist, the evaluations up to the longest schedule's hold: while a
+    reset curriculum still holds its start distribution, a dead
+    full-difficulty eval is expected by design, so the guard arms only
+    once every schedule has begun tapering. Else 0.
+    """
+    evals = cfg.degenerate_min_evals
+    if evals is None and schedules:
+        evals = math.ceil(
+            max(schedule.hold_until_timesteps for schedule in schedules)
+            / cfg.eval_freq
+        )
+    return evals or 0
+
+
+def _headline_patience_warmup_evals(
+    cfg: TrainConfig, schedules: Sequence[LinearEnvAttrScheduleCallback]
+) -> int:
+    """The headline patience's warm-up (``min_evals``), before the floor.
+
+    The patience itself; with ``env_attr_schedules``, at least the
+    evaluations up to the last schedule's end, which guarantees a full
+    patience window of training at the final scheduled distribution:
+    without it, a schedule ending at the earliest reachable stop gets
+    zero post-taper training (run 20260714_211111's design flaw).
+    """
+    assert cfg.early_stop_patience is not None
+    min_evals = cfg.early_stop_patience
+    if schedules:
+        schedule_end = max(schedule.end_timesteps for schedule in schedules)
+        min_evals = max(min_evals, math.ceil(schedule_end / cfg.eval_freq))
+    return min_evals
+
+
+def _scheduled_evaluations(cfg: TrainConfig) -> int:
+    """How many evaluations ``cfg``'s budget runs.
+
+    Every evaluation stream fires when its callback's call count (one
+    per vec step) is a multiple of ``eval_freq // n_envs``.
+    ``learn()`` checks the budget between collections: an on-policy run
+    collects whole rollouts of ``n_steps`` vec steps, an off-policy run
+    ``train_freq`` vec steps at a time (one by default; a ``train_freq``
+    counted in episodes is taken as one step, which can only undercount).
+    """
+    n_envs = max(cfg.n_envs, 1)
+    rollout = _rollout_env_steps(cfg)
+    if rollout is not None:
+        vec_steps = math.ceil(cfg.total_timesteps / rollout) * (rollout // n_envs)
+    else:
+        chunk = 1
+        train_freq = _algo_setting(cfg, "train_freq")
+        if isinstance(train_freq, (tuple, list)) and len(train_freq) == 2:
+            if train_freq[1] == "step" and _positive_int(train_freq[0]):
+                chunk = int(train_freq[0])
+        elif _positive_int(train_freq):
+            chunk = int(train_freq)
+        vec_steps = math.ceil(math.ceil(cfg.total_timesteps / n_envs) / chunk) * chunk
+    return vec_steps // _env_steps_to_calls(cfg.eval_freq, cfg.n_envs)
+
+
+def early_stop_reachability(cfg: TrainConfig) -> dict[str, Any]:
+    """Whether each configured early stop can fire inside the budget.
+
+    Nothing said when a budget was too small for a stop to fire
+    (``repo_review_20261016`` train-3): BallBalance's reward-path
+    patience of 20 can never stop its 1M-step run at an evaluation every
+    25k steps (its earliest stop is evaluation 41 of 40). For the
+    early-stop patience (headline or reward selection) and the
+    degenerate-signal guard this returns the warm-up ``train()`` arms,
+    the earliest evaluation the stop can fire at, and whether that is
+    past the last evaluation the budget runs (``inert``); ``warnings``
+    words each inert one. ``train()`` prints the warnings before any
+    output, and ``config.json``'s ``resolved_training`` and the run
+    record carry them.
+    """
+    result: dict[str, Any] = {
+        "scheduled_evaluations": None,
+        "guards": {},
+        "warnings": [],
+    }
+    if cfg.eval_freq <= 0:
+        return result
+    schedules = tuple(
+        LinearEnvAttrScheduleCallback(**dict(schedule))
+        for schedule in cfg.env_attr_schedules
+    )
+    scheduled = _scheduled_evaluations(cfg)
+    result["scheduled_evaluations"] = scheduled
+    headline = bool(cfg.info_dict_eval and cfg.headline_key)
+    guards: dict[str, dict[str, Any]] = {}
+    patience = cfg.early_stop_patience
+    if _positive_int(patience):
+        assert patience is not None
+        if headline:
+            warmup = _floor_stop_warmup(
+                cfg, _headline_patience_warmup_evals(cfg, schedules)
+            )
+            earliest = warmup + patience
+        else:
+            # SB3's StopTrainingOnNoModelImprovement counts from
+            # evaluation min_evals + 1 and stops once the count exceeds
+            # the patience.
+            warmup = _floor_stop_warmup(cfg, patience)
+            earliest = warmup + patience + 1
+        guards["early_stop_patience"] = {
+            "selection": "headline" if headline else "reward",
+            "warmup_evals": warmup,
+            "earliest_stop_evaluation": earliest,
+            "inert": earliest > scheduled,
+        }
+    degenerate_evals = cfg.early_stop_degenerate_evals
+    if (
+        headline
+        and _positive_int(degenerate_evals)
+        and (
+            cfg.degenerate_min_evals is None
+            or isinstance(cfg.degenerate_min_evals, int)
+        )
+    ):
+        warmup = _floor_stop_warmup(cfg, _degenerate_warmup_evals(cfg, schedules))
+        earliest = warmup + degenerate_evals
+        guards["degenerate_signal"] = {
+            "warmup_evals": warmup,
+            "earliest_stop_evaluation": earliest,
+            "inert": earliest > scheduled,
+        }
+    result["guards"] = guards
+    result["warnings"] = [
+        f"{name} can never fire: its earliest stop is evaluation "
+        f"{guard['earliest_stop_evaluation']} (after a warm-up of "
+        f"{guard['warmup_evals']}), but total_timesteps "
+        f"{cfg.total_timesteps:,} at eval_freq {cfg.eval_freq:,} runs "
+        f"{scheduled} evaluation(s); this run trains its full budget "
+        f"whatever its evaluations read"
+        for name, guard in guards.items()
+        if guard["inert"]
+    ]
+    return result
+
+
 def resolved_training_settings(cfg: TrainConfig) -> dict[str, Any]:
     """What ``train()`` resolves from ``cfg`` beyond its fields.
 
@@ -1215,9 +1741,10 @@ def resolved_training_settings(cfg: TrainConfig) -> dict[str, Any]:
     block records the fields as configured, and ``resolved_model`` what
     the built model reports): the reward normalization and the
     discount of the normalizer's return statistics (``None`` without a
-    VecNormalize), the device asked of SB3 and why, and, for an
-    on-policy run, the rollout and the evaluation floor the early stops
-    get from ``min_policy_updates_before_stop``.
+    VecNormalize), the device asked of SB3 and why, for an on-policy
+    run the rollout and the evaluation floor the early stops get from
+    ``min_policy_updates_before_stop``, and whether each early stop can
+    fire inside the budget (:func:`early_stop_reachability`).
     """
     norm_reward = _resolved_norm_reward(cfg)
     use_vec_normalize = bool(cfg.normalize_obs or norm_reward)
@@ -1242,6 +1769,7 @@ def resolved_training_settings(cfg: TrainConfig) -> dict[str, Any]:
         "policy_update_floor_evals": (
             _policy_update_floor_evals(cfg) if _is_on_policy(cfg) else None
         ),
+        "early_stop_reachability": early_stop_reachability(cfg),
     }
 
 
@@ -1828,7 +2356,7 @@ def _has_data_rows(path: str) -> bool:
 
 
 def _check_log_dir_reuse(cfg: TrainConfig) -> None:
-    """Refuse (or, opted in, rotate) a previous attempt's evaluation logs.
+    """Refuse (or, opted in, rotate) a previous attempt's records and logs.
 
     ``InfoDictEvalCallback`` appends to ``eval_info.csv`` /
     ``eval_info_final.csv`` -- correct within one run, but a second
@@ -1839,7 +2367,18 @@ def _check_log_dir_reuse(cfg: TrainConfig) -> None:
     checkpoints would sit beside the new ``config.json`` until (if
     ever) the new attempt overwrites them. Every shipped caller already
     starts in a fresh directory (``resolve_run_dir`` timestamps one,
-    the campaign's ``next_stage_attempt_dir`` numbers one).
+    the campaign's ``next_stage_attempt_dir`` numbers one). A previous
+    attempt is recognized by its evaluation rows or by its
+    ``run_record.json``, which every attempt writes first.
+
+    Under ``reuse_log_dir=True`` the old evaluation CSVs, run record and
+    sync manifest rotate aside as ``<name>.attempt_<UTC time>``, and so
+    do the monitor and TensorBoard directories (``repo_review_20261016``
+    train-5): SB3's ``Monitor`` overwrites only the CSVs of the workers
+    this attempt has, and TensorBoard reads every event file in its
+    folder, so both were read back into the new attempt's curves and
+    summary. A directory moves whole because a renamed event file is
+    still read: TensorBoard matches any name containing ``tfevents``.
     """
     stale = [
         path
@@ -1849,19 +2388,30 @@ def _check_log_dir_reuse(cfg: TrainConfig) -> None:
         )
         if path is not None and _has_data_rows(path)
     ]
-    if not stale:
+    previous_record = locate_artifact(cfg.log_dir, "run_record")
+    if not stale and previous_record is None:
         return
     if not cfg.reuse_log_dir:
+        evidence = stale + ([previous_record] if previous_record else [])
         raise ValueError(
             f"log_dir {cfg.log_dir} already holds a previous training "
-            f"attempt's evaluation rows ({', '.join(stale)}); a new run "
-            f"would append to them and mix two attempts' artifacts. Use a "
-            f"fresh log_dir (resolve_run_dir() timestamps one), or pass "
-            f"reuse_log_dir=True to rotate those CSVs aside and overwrite "
-            f"the rest of the directory"
+            f"attempt ({', '.join(evidence)}); a new run would append to its "
+            f"evaluation rows and mix two attempts' artifacts. Use a fresh "
+            f"log_dir (resolve_run_dir() timestamps one), or pass "
+            f"reuse_log_dir=True to rotate its records and logs aside and "
+            f"overwrite the rest of the directory"
         )
+    rotated = list(stale)
+    for name in ("run_record", "sync_manifest"):
+        path = locate_artifact(cfg.log_dir, name)
+        if path is not None:
+            rotated.append(path)
+    for name in ("monitor_dir", "tensorboard_dir"):
+        path = locate_artifact(cfg.log_dir, name)
+        if path is not None and not is_empty_directory(path):
+            rotated.append(path)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    for path in stale:
+    for path in rotated:
         root, extension = os.path.splitext(path)
         destination = f"{root}.attempt_{stamp}{extension}"
         suffix = 1
@@ -2094,6 +2644,117 @@ def _salvage_crashed_run(
                 status="crashed",
                 actual_timesteps=int(model.num_timesteps),
                 stop_reason=f"crashed: {error!r}",
+                n_updates=_on_policy_updates(cfg, model),
+            ),
+        )
+    )
+    for label, action in steps:
+        try:
+            action()
+        except Exception as salvage_error:
+            print(f"  could not salvage {label}: {salvage_error!r}")
+
+
+def _salvage_interrupted_run(
+    cfg: TrainConfig,
+    model: BaseAlgorithm,
+    train_env: VecEnv,
+    eval_env: VecEnv,
+    *,
+    gate_callback: PerformanceGatedEnvStagesCallback | None,
+    start_time: float,
+    stop_reason: str,
+    eval_clock: _EvalClock,
+) -> None:
+    """Epilogue for a run stopped by ``KeyboardInterrupt``.
+
+    A stopped Colab cell must not vaporize hours of training, and one
+    I/O error in its epilogue must not either: the gate's ``finalize``
+    (which copies the best triple on the Drive mount) used to run first
+    and unguarded, so an ``OSError`` there lost the model, its
+    normalizer and the summary (``repo_review_20261016`` train-2). Like
+    :func:`_salvage_crashed_run`, the policy and its normalizer are
+    saved first and every step is isolated: a failure is printed and the
+    next step runs. Unlike it, the closing evaluation still runs (the
+    env stepped fine until the interrupt, and the tennis event sampler
+    now discards a control step the interrupt left open), and the
+    summary is marked ``interrupted``.
+    """
+    closing: dict[str, float] = {}
+
+    def closing_evaluation() -> None:
+        if isinstance(train_env, VecNormalize):
+            # The last evaluation synced eval_env's statistics up to
+            # eval_freq steps ago; normalize with the final ones.
+            sync_envs_normalization(train_env, eval_env)
+        started = time.monotonic()
+        try:
+            mean_reward, std_reward = evaluate_policy(
+                model, eval_env, n_eval_episodes=cfg.n_eval_episodes
+            )
+        finally:
+            eval_clock.closing_seconds += time.monotonic() - started
+        closing["mean"] = (
+            sum(mean_reward) / len(mean_reward)
+            if isinstance(mean_reward, list)
+            else float(mean_reward)
+        )
+        closing["std"] = (
+            sum(std_reward) / len(std_reward)
+            if isinstance(std_reward, list)
+            else float(std_reward)
+        )
+        print(f"Mean reward: {closing['mean']:.2f} +/- {closing['std']:.2f}")
+
+    steps: list[tuple[str, Callable[[], object]]] = [
+        (
+            "final_model",
+            lambda: model.save(artifact_path(cfg.log_dir, "final_model")),
+        )
+    ]
+    if _is_on_policy(cfg):
+        steps.append(
+            (
+                "config.json training progress",
+                lambda: update_run_config_with_model(
+                    model, cfg.log_dir, progress=True
+                ),
+            )
+        )
+    if isinstance(train_env, VecNormalize):
+        steps.append(
+            (
+                "vec_normalize",
+                lambda: train_env.save(
+                    artifact_path(cfg.log_dir, "vec_normalize")
+                ),
+            )
+        )
+    if gate_callback is not None:
+        # SB3 only calls on_training_end after a clean training loop, so
+        # the gate's in-flight stage row and final-stage archive come
+        # from here; a pending advance that fails to apply is reported,
+        # not raised (finalize(salvage=True)).
+        steps.append(
+            (
+                "performance-gate stage history",
+                functools.partial(gate_callback.finalize, salvage=True),
+            )
+        )
+    steps.append(("closing evaluation", closing_evaluation))
+    steps.append(
+        (
+            "stage_summary",
+            lambda: write_run_summary(
+                cfg,
+                cfg.log_dir,
+                final_mean_reward=closing.get("mean"),
+                final_std_reward=closing.get("std"),
+                duration_seconds=time.monotonic() - start_time,
+                device=str(getattr(model, "device", "")) or None,
+                status="interrupted",
+                actual_timesteps=int(model.num_timesteps),
+                stop_reason=stop_reason,
                 n_updates=_on_policy_updates(cfg, model),
             ),
         )
@@ -2464,7 +3125,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     TensorBoard events, evaluation npz, video MP4s, ``best_model`` /
     ``final_model`` checkpoints, plus ``config.json`` (provenance
     snapshot at start) and ``stage_summary.txt`` (eval / wall-clock
-    report at end) under ``cfg.log_dir``.
+    report at end) under ``cfg.log_dir``; ``run_record.json`` (written
+    right after ``config.json`` as ``"running"`` and rewritten on every
+    terminal path) and, last of all, ``sync_manifest.json``; and, with
+    ``cfg.sync_dir``, a verified mirror of the whole directory there.
 
     The SB3 logger ``train()`` installs (``progress.csv`` + TensorBoard)
     is closed on return; a caller that trains the returned model further
@@ -2499,19 +3163,58 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     monitor_info_keywords = _validate_monitor_info_keywords(cfg)
     resolved_eval_seed = resolve_eval_seed(cfg)
     _validate_eval_reset_options(cfg, resolved_eval_seed)
+    validate_sync_target(cfg.log_dir, cfg.sync_dir)
+    # An early stop the budget cannot reach is a silent no-op: say so
+    # now (config.json's resolved_training and the run record keep it).
+    reachability = early_stop_reachability(cfg)
+    for warning in reachability["warnings"]:
+        print(f"[train] warning: {warning}")
     # Last pre-output check: a refusal leaves the directory untouched,
     # and an opted-in rotation only happens once every config-only check
     # above passed (algo, model kwargs, device, evaluation, eval-stream,
     # diagnosis and gate settings, worker kind and update floor,
     # on-policy rollout geometry, warm start, monitor keys, reset
-    # options), so a misconfigured retry cannot strand the previous
-    # attempt. Checks that need the constructed evaluators (the
+    # options, sync target), so a misconfigured retry cannot strand the
+    # previous attempt. Checks that need the constructed evaluators (the
     # selection-metric probe, the gate callback's value checks) and the
     # ladder certification still run after config.json is written.
     _check_log_dir_reuse(cfg)
 
     os.makedirs(cfg.log_dir, exist_ok=True)
     write_run_config(cfg, cfg.log_dir)
+    run = _RunLifecycle(cfg, preflight_warnings=reachability["warnings"])
+    try:
+        model = _train_in_log_dir(
+            cfg,
+            run,
+            env_attr_schedule_callbacks=env_attr_schedule_callbacks,
+            warm_start_artifacts=warm_start_artifacts,
+            monitor_info_keywords=monitor_info_keywords,
+            resolved_eval_seed=resolved_eval_seed,
+        )
+    except BaseException as error:
+        run.close(error)
+        raise
+    run.close(None)
+    return model
+
+
+def _train_in_log_dir(
+    cfg: TrainConfig,
+    run: _RunLifecycle,
+    *,
+    env_attr_schedule_callbacks: tuple[LinearEnvAttrScheduleCallback, ...],
+    warm_start_artifacts: _WarmStartArtifacts | None,
+    monitor_info_keywords: tuple[str, ...],
+    resolved_eval_seed: int | None,
+) -> BaseAlgorithm:
+    """``train()`` once ``config.json`` and the running record exist.
+
+    Builds the envs, callbacks and model, runs ``learn()`` and its
+    epilogue (or the interrupt / crash salvage), and reports the
+    outcome to ``run``; every env and the SB3 logger are closed before
+    it returns or raises, so ``train()`` can seal the directory next.
+    """
     start_time = time.monotonic()
 
     if cfg.ladder_certification is not None:
@@ -2741,8 +3444,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             # min_evals = patience gives the run a warm-up of the same
             # length as the patience window, so at least 2N evaluations
             # happen before the stop can fire. verbose=1 so the stop
-            # reason is visible in the Colab cell output.
-            after_eval = StopTrainingOnNoModelImprovement(
+            # reason is visible in the Colab cell output (and the
+            # subclass records it for the summary and the run record).
+            after_eval = _StopOnNoRewardImprovement(
                 max_no_improvement_evals=cfg.early_stop_patience,
                 min_evals=_floored_warmup(
                     "early_stop_patience's warm-up (min_evals)",
@@ -2817,6 +3521,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     verbose=cfg.verbose,
                 )
             )
+        if run.mirror is not None and cfg.checkpoint_freq > 0:
+            # After the checkpoint and its diagnosis, so each mirror
+            # pass carries them (experiments.sync; TrainConfig.sync_dir).
+            callbacks.append(
+                _MirrorRunDirCallback(run, save_freq=_calls(cfg.checkpoint_freq))
+            )
         if cfg.record_video and cfg.video_freq > 0:
             callbacks.append(
                 VideoRecordCallback(
@@ -2870,25 +3580,15 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     selection_kwargs["degenerate_guard_keys"] = tuple(
                         cfg.degenerate_guard_keys
                     )
-                    degenerate_min_evals = cfg.degenerate_min_evals
-                    if (
-                        degenerate_min_evals is None
-                        and env_attr_schedule_callbacks
-                    ):
-                        # While a reset curriculum still holds its start
-                        # distribution, a dead full-difficulty eval is
-                        # expected by design -- arm the guard only once
-                        # every schedule has begun tapering.
-                        degenerate_min_evals = math.ceil(
-                            max(
-                                callback.hold_until_timesteps
-                                for callback in env_attr_schedule_callbacks
-                            )
-                            / cfg.eval_freq
-                        )
+                    # Derived from the schedules' hold when unset (see
+                    # _degenerate_warmup_evals, which the run record's
+                    # reachability check shares).
                     selection_kwargs["degenerate_min_evals"] = (
                         _floored_warmup(
-                            "degenerate_min_evals", degenerate_min_evals or 0
+                            "degenerate_min_evals",
+                            _degenerate_warmup_evals(
+                                cfg, env_attr_schedule_callbacks
+                            ),
                         )
                     )
                 if (
@@ -2898,25 +3598,15 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     selection_kwargs["early_stop_patience"] = (
                         cfg.early_stop_patience
                     )
-                    min_evals = cfg.early_stop_patience
-                    if env_attr_schedule_callbacks:
-                        # Guarantee a full patience window of training
-                        # at the final scheduled distribution: without
-                        # this, a schedule ending at the earliest
-                        # reachable stop gets zero post-taper training
-                        # (run 20260714_211111's design flaw).
-                        schedule_end = max(
-                            callback.end_timesteps
-                            for callback in env_attr_schedule_callbacks
-                        )
-                        min_evals = max(
-                            min_evals,
-                            math.ceil(schedule_end / cfg.eval_freq),
-                        )
+                    # At least a full patience window at the final
+                    # scheduled distribution (see
+                    # _headline_patience_warmup_evals).
                     selection_kwargs["early_stop_min_evals"] = (
                         _floored_warmup(
                             "early_stop_patience's warm-up (min_evals)",
-                            min_evals,
+                            _headline_patience_warmup_evals(
+                                cfg, env_attr_schedule_callbacks
+                            ),
                         )
                     )
             else:
@@ -3087,6 +3777,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         # refused by the pre-flight _validate_callback_config.)
         callbacks.extend(env_attr_schedule_callbacks)
         callbacks.extend(cfg.extra_callbacks)
+        # Evaluation wall clock for the run record's eval share.
+        for callback in callbacks:
+            if isinstance(callback, (EvalCallback, InfoDictEvalCallback)):
+                run.eval_clock.watch(callback)
 
         # cfg.seed / cfg.verbose are the first-class knobs; an explicit value in
         # model_kwargs still wins (setdefault), and routing both through
@@ -3130,6 +3824,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             policy=cfg.policy,
             **model_kwargs,
         )
+        run.model = model
         _check_model_device(model, cfg.require_device)
         if normalizer_gamma is not None:
             # The normalizer was built before the model it serves; fail
@@ -3362,23 +4057,15 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 )
             except KeyboardInterrupt:
                 # A stopped Colab cell / ^C shouldn't vaporize hours of
-                # training. Salvage the run: fall through to save the model,
-                # normalization stats, final eval, and summary (marked
-                # "interrupted") so the run dir stays self-describing.
+                # training. Salvage the run below: the model, normalization
+                # stats, the gate's stage history, final eval, and summary
+                # (marked "interrupted") so the run dir stays
+                # self-describing.
                 interrupted = True
                 print(
                     "Training interrupted -- saving final_model and summary "
                     "for the partial run."
                 )
-                # SB3 only calls on_training_end after a clean training
-                # loop, so an interrupt would otherwise lose the gate's
-                # in-flight stage row and final-stage archive; finalize
-                # is idempotent, so a duplicate close cannot occur. As
-                # a salvage, a pending advance that fails to apply is
-                # reported rather than raised: the model is not saved
-                # yet.
-                if gate_callback is not None:
-                    gate_callback.finalize(salvage=True)
             except Exception as error:
                 # Any other exception out of learn() -- an I/O error on
                 # the Drive mount, an env or callback bug -- used to skip
@@ -3389,6 +4076,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     f"Training crashed ({error!r}) -- saving final_model "
                     f"and the normalizer before re-raising."
                 )
+                run.note_outcome(run_records.CRASHED, f"crashed: {error!r}", model)
                 _salvage_crashed_run(
                     cfg,
                     model,
@@ -3398,7 +4086,26 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     error=error,
                 )
                 raise
-            if _is_on_policy(cfg) and not interrupted:
+            if interrupted:
+                # Saves the model and normalizer before anything else,
+                # each salvage step isolated (repo_review_20261016 train-2).
+                interrupt_reason = (
+                    f"interrupted: KeyboardInterrupt at "
+                    f"{model.num_timesteps:,} of {cfg.total_timesteps:,} steps"
+                )
+                run.note_outcome(run_records.INTERRUPTED, interrupt_reason, model)
+                _salvage_interrupted_run(
+                    cfg,
+                    model,
+                    train_env,
+                    eval_env,
+                    gate_callback=gate_callback,
+                    start_time=start_time,
+                    stop_reason=interrupt_reason,
+                    eval_clock=run.eval_clock,
+                )
+                return model
+            if _is_on_policy(cfg):
                 _dump_final_update_logs(model)
             model.save(artifact_path(cfg.log_dir, "final_model"))
             if _is_on_policy(cfg):
@@ -3414,9 +4121,11 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 # observations with the end-of-training statistics.
                 sync_envs_normalization(train_env, eval_env)
 
+            closing_started = time.monotonic()
             mean_reward, std_reward = evaluate_policy(
                 model, eval_env, n_eval_episodes=cfg.n_eval_episodes
             )
+            run.eval_clock.closing_seconds += time.monotonic() - closing_started
             mean_reward_value = (
                 sum(mean_reward) / len(mean_reward)
                 if isinstance(mean_reward, list)
@@ -3428,21 +4137,35 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 else float(std_reward)
             )
             print(f"Mean reward: {mean_reward_value:.2f} +/- {std_reward_value:.2f}")
-            # Which guard ended a stopped-early run (patience,
-            # degenerate signal, stage budget). The stopping callback
-            # printed it, but the console vanishes with the Colab
-            # runtime; the summary is the durable record.
-            stop_reason = next(
-                (
-                    reason
-                    for reason in (
-                        getattr(callback, "stop_reason", None)
-                        for callback in callbacks
+            # Which guard ended a stopped-early run (patience on either
+            # selection path, degenerate signal, stage budget). The
+            # stopping callback printed it, but the console vanishes with
+            # the Colab runtime; the summary and run record are the
+            # durable record.
+            stop_reason = _stop_reason_of(callbacks)
+            status = run_records.COMPLETED
+            if int(model.num_timesteps) >= cfg.total_timesteps:
+                if stop_reason is not None:
+                    # The guard fired on the last scheduled evaluation:
+                    # the run trained its whole budget, so it is not an
+                    # early stop (both 2026-08-28 runs were labeled
+                    # one; repo_review_20261016 train-3).
+                    stop_reason = (
+                        f"full_budget: trained all {cfg.total_timesteps:,} "
+                        f"steps; the stop condition also held at the final "
+                        f"evaluation ({stop_reason})"
                     )
-                    if reason
-                ),
-                None,
-            )
+            else:
+                status = run_records.EARLY_STOP
+                if stop_reason is None:
+                    stop_reason = (
+                        f"stopped_early: a callback ended training at "
+                        f"{model.num_timesteps:,} of {cfg.total_timesteps:,} "
+                        f"steps without recording a stop_reason"
+                    )
+            # stage_summary.txt keeps "completed" for an early stop (the
+            # campaign resumes a leg only from that status); the run
+            # record says which.
             write_run_summary(
                 cfg,
                 cfg.log_dir,
@@ -3450,11 +4173,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 final_std_reward=std_reward_value,
                 duration_seconds=time.monotonic() - start_time,
                 device=str(getattr(model, "device", "")) or None,
-                status="interrupted" if interrupted else "completed",
+                status="completed",
                 actual_timesteps=int(model.num_timesteps),
                 stop_reason=stop_reason,
                 n_updates=_on_policy_updates(cfg, model),
             )
+            run.note_outcome(status, stop_reason, model)
         finally:
             train_env.close()
             eval_env.close()

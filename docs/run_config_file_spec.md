@@ -74,7 +74,10 @@ serve_vy_max = 1.1
   `recipe_name` (written into the kwargs before the file merges, so a
   file value would silently invert the "file < explicit arguments"
   precedence and falsify provenance — pass them to
-  `build_train_config` instead).
+  `build_train_config` instead), and `reuse_log_dir` / `sync_dir` (pass
+  them alongside `log_dir`: whether a run may overwrite an earlier
+  attempt's directory, and where its directory is mirrored, belong to
+  the caller and its machine, not to the experiment).
 - `[env]` / `[eval_env]` keys are environment constructor kwargs. TOML has
   no `None`: a kwarg whose meaning requires `None` (e.g.
   `early_touch_penalty = None` for the legacy terminal rule) uses the

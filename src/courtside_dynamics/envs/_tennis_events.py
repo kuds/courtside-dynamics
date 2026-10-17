@@ -294,9 +294,26 @@ class SubstepTennisEventSampler:
         *,
         ball_side: CourtSide | None = None,
     ) -> None:
-        """Prime latches and crossing state after ``mj_forward`` on reset."""
+        """Prime latches and crossing state after ``mj_forward`` on reset.
+
+        A control step still open here was abandoned: an exception (a
+        ``KeyboardInterrupt`` from a stopped Colab cell, most of the time)
+        escaped the env's ``step`` between :meth:`begin_control_step` and
+        :meth:`end_control_step`. Its buffered events belong to a step
+        that never returned, so they are discarded and the sampler starts
+        clean. Raising instead wedged the env for good -- every later
+        ``reset()`` and ``step()`` failed, and ``train()``'s interrupt
+        salvage crashed in its closing evaluation (``repo_review_20261016``
+        rules-events-1). A healthy trajectory never reaches ``reset()``
+        with a step open, so its stream is unchanged.
+        """
         if self._control_step is not None:
-            raise RuntimeError("cannot reset during an open control step")
+            self._control_step = None
+            self._last_control_substep = -1
+            self._buffer_events = []
+            self._buffer_contact_peaks = {}
+            self._buffer_episode_peaks = {}
+            self._substeps_sampled = 0
         self._physics_substep = -1
         self._next_event_id = 0
         self._contact_episode.clear()
@@ -329,7 +346,12 @@ class SubstepTennisEventSampler:
         if control_step < 0:
             raise ValueError("control_step must be non-negative")
         if self._control_step is not None:
-            raise RuntimeError("previous control step has not been drained")
+            raise RuntimeError(
+                f"previous control step {self._control_step} has not been "
+                f"drained (end_control_step() never ran): an exception "
+                f"escaped the env's step mid-way, so its state is undefined. "
+                f"reset() the env, which discards the abandoned step"
+            )
         self._control_step = control_step
         self._last_control_substep = -1
         self._buffer_events = []

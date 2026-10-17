@@ -86,14 +86,134 @@ def test_check_run_artifacts_detects_files_and_dirs(tmp_path, capsys):
 def test_check_run_artifacts_all_present(tmp_path, capsys):
     for _, rel in EXPECTED_ARTIFACTS:
         full = tmp_path / rel
-        # RUN_LAYOUT entries without a file extension are directories.
+        # RUN_LAYOUT entries without a file extension are directories,
+        # present once they hold a file.
         if not full.suffix:
             full.mkdir(parents=True)
+            (full / "0.dat").write_text("x")
         else:
             full.parent.mkdir(parents=True, exist_ok=True)
             full.write_text("x")
     assert check_run_artifacts(tmp_path) == []
     assert "All expected artifacts present." in capsys.readouterr().out
+
+
+def test_check_run_artifacts_counts_an_empty_directory_as_missing(
+    tmp_path, capsys
+):
+    """repo_review_20261016 training-data-5: the 1M LT1 run lost all four
+    periodic videos behind an empty ``media/videos/`` that audited as
+    present. Every directory artifact exists before anything is written
+    into it, so an empty one is missing, and the audit says why."""
+    for _, rel in EXPECTED_ARTIFACTS:
+        full = tmp_path / rel
+        if not full.suffix:
+            full.mkdir(parents=True)
+            if rel != RUN_LAYOUT["videos_dir"]:
+                (full / "0.dat").write_text("x")
+        else:
+            full.parent.mkdir(parents=True, exist_ok=True)
+            full.write_text("x")
+    assert check_run_artifacts(tmp_path) == [RUN_LAYOUT["videos_dir"]]
+    out = capsys.readouterr().out
+    videos_line = next(line for line in out.splitlines() if "videos_dir" in line)
+    assert "MISSING  (empty directory)" in videos_line
+    assert "moviepy" in videos_line
+    assert "All expected artifacts present." not in out
+
+
+def test_run_summary_marks_an_empty_videos_directory(tmp_path):
+    """The summary's Artifacts section says the same as the audit."""
+    from courtside_dynamics.envs import BallBalanceEnv
+    from courtside_dynamics.training import TrainConfig
+    from courtside_dynamics.training.artifacts import write_run_summary
+
+    (tmp_path / RUN_LAYOUT["videos_dir"]).mkdir(parents=True)
+    (tmp_path / RUN_LAYOUT["monitor_dir"]).mkdir(parents=True)
+    (tmp_path / RUN_LAYOUT["monitor_dir"] / "0.monitor.csv").write_text("#\n")
+    cfg = TrainConfig(env_fn=lambda: BallBalanceEnv(), log_dir=str(tmp_path))
+    text = open(
+        write_run_summary(
+            cfg,
+            str(tmp_path),
+            final_mean_reward=1.0,
+            final_std_reward=0.0,
+            duration_seconds=10.0,
+        )
+    ).read()
+    lines = text.split("Artifacts", 1)[1].splitlines()
+    (videos,) = [line for line in lines if "videos_dir" in line]
+    assert "EMPTY: no file was written (missing)" in videos
+    (monitor,) = [line for line in lines if "monitor_dir" in line]
+    assert "EMPTY" not in monitor
+
+
+def _fake_colab(monkeypatch, *, flush_error: Exception | None = None) -> list[str]:
+    """Install a fake ``google.colab`` (drive + runtime); return its call log."""
+    import sys
+    import types
+
+    from courtside_dynamics import notebook_utils
+
+    calls: list[str] = []
+
+    def flush_and_unmount() -> None:
+        calls.append("flush_and_unmount")
+        if flush_error is not None:
+            raise flush_error
+
+    drive = types.ModuleType("google.colab.drive")
+    drive.flush_and_unmount = flush_and_unmount
+    runtime = types.ModuleType("google.colab.runtime")
+    runtime.unassign = lambda: calls.append("unassign")
+    colab = types.ModuleType("google.colab")
+    colab.drive = drive
+    colab.runtime = runtime
+    google = types.ModuleType("google")
+    google.colab = colab
+    for name, module in (
+        ("google", google),
+        ("google.colab", colab),
+        ("google.colab.drive", drive),
+        ("google.colab.runtime", runtime),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(notebook_utils, "_in_colab", lambda: True)
+    monkeypatch.setattr(notebook_utils.time, "sleep", lambda seconds: None)
+    return calls
+
+
+def test_disconnect_runtime_flushes_drive_before_tearing_down(monkeypatch):
+    """repo_review_20261016 critic-4: the VM was torn down under an
+    unflushed Drive mount, which can lose the last writes (the campaign
+    record and report, the final leg's artifacts)."""
+    from courtside_dynamics.notebook_utils import disconnect_runtime
+
+    calls = _fake_colab(monkeypatch)
+    disconnect_runtime(delay_seconds=0)
+    assert calls == ["flush_and_unmount", "unassign"]
+
+
+def test_disconnect_runtime_keeps_the_runtime_when_the_flush_fails(
+    monkeypatch, capsys
+):
+    """A failed flush leaves the VM up (and says so): an idle GPU costs
+    less than the run whose last writes would die with it."""
+    from courtside_dynamics.notebook_utils import disconnect_runtime
+
+    calls = _fake_colab(monkeypatch, flush_error=ValueError("flush timed out"))
+    disconnect_runtime(delay_seconds=0)
+    assert calls == ["flush_and_unmount"]
+    out = capsys.readouterr().out
+    assert "flush_and_unmount() failed" in out
+    assert "NOT disconnecting" in out
+
+
+def test_disconnect_runtime_is_a_no_op_outside_colab(monkeypatch):
+    from courtside_dynamics import notebook_utils
+
+    monkeypatch.setattr(notebook_utils, "_in_colab", lambda: False)
+    notebook_utils.disconnect_runtime(delay_seconds=0)
 
 
 def test_check_run_artifacts_accepts_conditional_post_training_outputs(

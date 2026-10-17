@@ -18,6 +18,87 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **Run records, sync manifests and run-directory trust (design L1,
+  first half; 2026-10-17).** No env stream or training change: golden
+  digests 22/22; the trainer digest against `09f202a` matches every
+  policy, normalizer, monitor, evaluation, best-model, checkpoint,
+  diagnosis, `resolved_model` and RNG component of the SAC, DemoSAC,
+  PaddleTennis-SAC and PPO jobs, and `run_layout_artifacts` differs
+  only by the two new files, `run_record` and `sync_manifest`. Recipe
+  snapshot re-recorded: each of the 92 entries gains
+  `sync_dir: null`; nothing else changes.
+  - **`run_record.json`** (`courtside-run-record/1`, new package
+    `courtside_dynamics.experiments`, which imports neither SB3 nor
+    torch). Written atomically right after `config.json` with status
+    `running`, rewritten on every terminal path: `completed`,
+    `early_stop` (patience on either selection path, the degenerate
+    guard or a gate stage budget; `stop_reason` says which),
+    `interrupted`, `crashed` (the crash salvage, or a failure before or
+    after `learn()` once `config.json` exists). It records the run id
+    (the `log_dir` leaf), UTC start and finish, the budget (total,
+    trained, SB3 `n_updates`), the algorithm, recipe, task (env
+    classes, the sha256 of their constructor kwargs, the observation
+    fingerprint, `eval_protocol: null`), the comparability key, seeds,
+    git sha and dirty state, library versions, the warm start's source
+    directory name and artifact digests, the selection from
+    `best_model_meta.json`, the wall clock with the periodic and
+    closing evaluations' share, the pre-flight warnings, the artifacts
+    present, and `experiment` placeholders for the spec system.
+    `stage_summary.txt` keeps `Status: completed` for an early stop
+    (the campaign resumes a leg only from it); the record says which.
+  - **`sync_manifest.json`** (`courtside-sync-manifest/1`): the path,
+    size and sha256 of every other file, written atomically and last on
+    every terminal path, once every env and the SB3 logger are closed.
+    `experiments.records.verify_run_dir` and `python -m
+    courtside_dynamics.experiments.verify <run_dir>` (exit 0 only when
+    complete) call a directory complete when its manifest verifies and
+    the run record it lists is terminal; files written after the
+    manifest are listed as unlisted and fail only `--strict`.
+  - **Local-then-sync.** New `TrainConfig.sync_dir` (default `None`,
+    recorded in `config.json`, refused in run-config files): train under
+    `log_dir` on local disk and mirror it to `sync_dir` at every
+    checkpoint and at the end. Each copied file is re-hashed and the
+    mirror's manifest is written only after every one matches; a failed
+    pass leaves the previous manifest, so a partial mirror never
+    verifies. A failed checkpoint pass is printed and training goes on;
+    the final mirror retries twice, then raises once the local run
+    directory is sealed (`experiments.sync.sync_run_dir` re-runs it).
+    `sync_dir` must be absent or empty, outside `log_dir`, with an
+    existing parent, checked before any output. Notebook knobs, default
+    off: `sb3_training` `LOCAL_THEN_SYNC` (section 9d mirrors the
+    post-training plots and video before the disconnect) and
+    `paddle_tennis_campaign` `LOCAL_THEN_SYNC` (each leg trains locally
+    and mirrors into its Drive attempt dir; operational, not
+    fingerprinted).
+  - **Run-directory trust fixes** (`repo_review_20261016`):
+    `disconnect_runtime` flushes and unmounts Drive before tearing the
+    VM down and leaves it up when the flush fails (critic-4);
+    `check_run_artifacts` and the summary's Artifacts section count an
+    empty directory artifact, such as `media/videos/`, as missing and
+    say so (training-data-5); a guard whose condition first holds at the
+    last scheduled evaluation now reads `completed` with a
+    `full_budget: ...` stop reason that quotes it, and `train()` warns
+    before any output (and `config.json`'s
+    `resolved_training.early_stop_reachability` and the run record keep
+    it) when patience or the degenerate guard cannot fire inside the
+    budget: BallBalance's recipe patience is evaluation 41 of 40
+    (train-3, training-data-3); the reward-path early stop records its
+    `stop_reason`, found through `EvalCallback`'s nested
+    `callback_after_eval`, and stops exactly when it did (train-1);
+    `reuse_log_dir=True` also rotates the run record, the sync
+    manifest and the monitor and TensorBoard directories
+    (`metrics/monitor.attempt_<UTC time>`), and a `log_dir` holding a
+    previous attempt's run record is refused like one holding its
+    evaluation rows (train-5); the `KeyboardInterrupt` salvage saves
+    `final_model` and the normalizer first and runs the gate's
+    `finalize`, the closing evaluation and the summary each
+    log-and-continue, like the crash salvage (train-2); and
+    `SubstepTennisEventSampler.reset()` discards a control step an
+    exception left open instead of raising, so an interrupted env can
+    be reset (`begin_control_step` still refuses, naming the cure),
+    and a recovered PaddleTennis env replays a fresh env's stream byte
+    for byte (rules-events-1). Interrupted summaries now carry a
+    `Stop reason: interrupted: ...` line.
 - **Verifier fixes on the PPO commits (2026-10-17).** No env stream or
   SAC-family training change: the trainer digest against `f920d8f`
   matches every component of the SAC, DemoSAC and PaddleTennis-SAC

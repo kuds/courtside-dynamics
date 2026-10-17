@@ -301,9 +301,21 @@ def test_early_stop_patience_cuts_training_short(tmp_path):
     )
     summary = open(os.path.join(str(tmp_path), "stage_summary.txt")).read()
     assert "stopped early" in summary
+    # The reward path (SB3's StopTrainingOnNoModelImprovement under
+    # reward selection) now says why it stopped, in the summary and the
+    # run record (repo_review_20261016 train-1); when it stops is SB3's
+    # rule, unchanged: the count must exceed the patience.
+    reason = (
+        "early_stop_patience: no new best mean reward for the last 2 "
+        "evaluations (reward selection: SB3 StopTrainingOnNoModelImprovement, "
+        "patience 1)"
+    )
+    assert f"Stop reason:    {reason}" in summary
+    record = json.load(open(os.path.join(str(tmp_path), "run_record.json")))
+    assert record["status"] == "early_stop"
+    assert record["stop_reason"] == reason
+    assert model.num_timesteps == 3 * 200
     # The knob is part of the run's provenance snapshot.
-    import json
-
     config = json.load(open(os.path.join(str(tmp_path), "config.json")))
     assert config["train_config"]["early_stop_patience"] == 1
 
@@ -2797,6 +2809,224 @@ def test_reuse_log_dir_rotates_the_previous_attempts_eval_logs(
     assert len(second_rows) == len(set(second_rows)) == len(first_rows)
 
 
+def test_reuse_log_dir_rotates_the_previous_attempts_records_and_logs(
+    tmp_path, capsys
+):
+    """repo_review_20261016 train-5: SB3's Monitor overwrites only the
+    CSVs of this attempt's workers (a 2-worker attempt's 1.monitor.csv
+    outlived a 1-worker retry), and TensorBoard reads every event file
+    in its folder, so both were read back into the new attempt's
+    curves. Both directories rotate whole, beside the run record and
+    the sync manifest, and the new attempt seals the directory."""
+    from courtside_dynamics.experiments.records import verify_run_dir
+
+    metrics = tmp_path / "metrics"
+    small = {"learning_starts": 16, "buffer_size": 500, "batch_size": 32}
+    train(
+        _merged_eval_cfg(
+            tmp_path,
+            final_info_eval=False,
+            total_timesteps=400,
+            n_envs=2,
+            model_kwargs=small,
+        )
+    )
+    first_monitors = sorted(path.name for path in (metrics / "monitor").iterdir())
+    assert first_monitors == ["0.monitor.csv", "1.monitor.csv"]
+    first_events = sorted(path.name for path in (metrics / "tensorboard").iterdir())
+    assert first_events
+    first_record = (tmp_path / "run_record.json").read_text()
+    first_manifest = (tmp_path / "sync_manifest.json").read_text()
+
+    train(
+        _merged_eval_cfg(
+            tmp_path,
+            final_info_eval=False,
+            total_timesteps=400,
+            reuse_log_dir=True,
+            model_kwargs=small,
+        )
+    )
+    out = capsys.readouterr().out
+    assert out.count("reuse_log_dir=True: rotated the previous attempt's") == 5
+    (old_monitor,) = metrics.glob("monitor.attempt_*")
+    assert sorted(path.name for path in old_monitor.iterdir()) == first_monitors
+    assert sorted(path.name for path in (metrics / "monitor").iterdir()) == [
+        "0.monitor.csv"
+    ]
+    (old_events,) = metrics.glob("tensorboard.attempt_*")
+    assert sorted(path.name for path in old_events.iterdir()) == first_events
+    current_events = {path.name for path in (metrics / "tensorboard").iterdir()}
+    assert current_events and not current_events & set(first_events)
+    (old_record,) = tmp_path.glob("run_record.attempt_*.json")
+    assert old_record.read_text() == first_record
+    (old_manifest,) = tmp_path.glob("sync_manifest.attempt_*.json")
+    assert old_manifest.read_text() == first_manifest
+    assert verify_run_dir(tmp_path, strict=True).complete
+
+
+def test_train_refuses_a_log_dir_holding_a_previous_attempts_run_record(
+    tmp_path,
+):
+    """An attempt that died before its first evaluation leaves no eval
+    rows, but every attempt writes its run record first: a retry in the
+    same directory is refused before any output, like the rows."""
+    record = '{"status": "running"}\n'
+    (tmp_path / "run_record.json").write_text(record)
+    cfg = TrainConfig(env_fn=_unbuildable_env, log_dir=str(tmp_path))
+    with pytest.raises(ValueError, match=r"previous training attempt .*run_record"):
+        train(cfg)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["run_record.json"]
+    assert (tmp_path / "run_record.json").read_text() == record
+
+
+def test_interrupt_salvage_saves_the_model_before_a_failing_gate_finalize(
+    tmp_path, monkeypatch, capsys
+):
+    """repo_review_20261016 train-2: the KeyboardInterrupt handler called
+    the gate's finalize first and unguarded, so an OSError archiving the
+    final stage's best (on the Drive mount) escaped train() before
+    final_model, the normalizer or the summary existed. The salvage now
+    saves the model and normalizer first and isolates finalize, like
+    the crash salvage."""
+    from stable_baselines3 import SAC
+
+    from courtside_dynamics.callbacks.info_dict_eval import InfoDictEvalCallback
+    from courtside_dynamics.experiments.records import verify_run_dir
+    from courtside_dynamics.training.artifacts import artifact_path
+
+    def archive_fails(self, destination_dir):
+        raise OSError("Transport endpoint is not connected")
+
+    monkeypatch.setattr(InfoDictEvalCallback, "archive_best", archive_fails)
+    cfg = _family_e2e_cfg(
+        tmp_path,
+        "SAC",
+        early_stop_patience=None,
+        final_info_eval=False,
+        confirm_best_eval=False,
+        extra_callbacks=(_RaiseAt(KeyboardInterrupt, at=200),),
+    )
+    model = train(cfg)
+    out = capsys.readouterr().out
+    assert (
+        "could not salvage performance-gate stage history: "
+        "OSError('Transport endpoint is not connected')"
+    ) in out
+    assert 200 <= model.num_timesteps < cfg.total_timesteps
+    final_model = artifact_path(str(tmp_path), "final_model")
+    assert SAC.load(final_model).num_timesteps == model.num_timesteps
+    assert os.path.isfile(artifact_path(str(tmp_path), "vec_normalize"))
+    assert _summary_field(tmp_path, "Status") == "interrupted"
+    assert "closing eval" in _summary_field(tmp_path, "Final eval")
+    record = json.loads((tmp_path / "run_record.json").read_text())
+    assert record["status"] == "interrupted"
+    assert verify_run_dir(tmp_path, strict=True).complete
+
+
+def test_a_guard_firing_at_the_final_evaluation_completes_the_budget(tmp_path):
+    """repo_review_20261016 train-3: when the stop condition first holds
+    at the last scheduled evaluation the run trained its full budget;
+    both 2026-08-28 runs were labeled early_stop_patience anyway."""
+    model = train(
+        _merged_eval_cfg(
+            tmp_path,
+            final_info_eval=False,
+            total_timesteps=400,
+            eval_freq=100,
+            early_stop_patience=2,
+            best_metric_keys=("steps_alive_ep_mean",),
+        )
+    )
+    assert model.num_timesteps == 400
+    reason = _summary_field(tmp_path, "Stop reason")
+    assert reason.startswith(
+        "full_budget: trained all 400 steps; the stop condition also held at "
+        "the final evaluation (early_stop_patience: no improvement in"
+    )
+    assert _summary_field(tmp_path, "Status") == "completed"
+    assert _summary_field(tmp_path, "Timesteps") == "400"
+    record = json.loads((tmp_path / "run_record.json").read_text())
+    assert record["status"] == "completed"
+    assert record["stop_reason"] == reason
+
+
+def test_the_reward_path_stop_at_the_final_evaluation_completes_the_budget(
+    tmp_path,
+):
+    cfg = _salvage_cfg(
+        tmp_path,
+        total_timesteps=600,
+        eval_freq=200,
+        early_stop_patience=1,
+        normalize_obs=False,
+        model_kwargs={"learning_starts": 16, "buffer_size": 500, "batch_size": 32},
+    )
+    model = train(cfg)
+    assert model.num_timesteps == 600
+    record = json.loads((tmp_path / "run_record.json").read_text())
+    assert record["status"] == "completed"
+    assert record["stop_reason"].startswith("full_budget: trained all 600 steps")
+    assert "no new best mean reward" in record["stop_reason"]
+
+
+def test_inert_early_stops_are_warned_before_output_and_recorded(
+    tmp_path, capsys
+):
+    """repo_review_20261016 train-3: nothing said when a budget was too
+    small for a stop to fire at all."""
+    from courtside_dynamics.training.train import early_stop_reachability
+
+    cfg = _merged_eval_cfg(
+        tmp_path,
+        final_info_eval=False,
+        total_timesteps=200,
+        eval_freq=100,
+        early_stop_patience=2,
+    )
+    warning = (
+        "early_stop_patience can never fire: its earliest stop is "
+        "evaluation 4 (after a warm-up of 2), but total_timesteps 200 at "
+        "eval_freq 100 runs 2 evaluation(s); this run trains its full "
+        "budget whatever its evaluations read"
+    )
+    assert early_stop_reachability(cfg)["warnings"] == [warning]
+    train(cfg)
+    assert f"[train] warning: {warning}" in capsys.readouterr().out
+    config = json.loads((tmp_path / "config.json").read_text())
+    reachability = config["resolved_training"]["early_stop_reachability"]
+    assert reachability["warnings"] == [warning]
+    assert reachability["guards"]["early_stop_patience"]["inert"] is True
+    record = json.loads((tmp_path / "run_record.json").read_text())
+    assert record["preflight_warnings"] == [warning]
+
+
+def test_recipe_early_stop_reachability_matches_the_review():
+    """BallBalance's reward-path patience of 20 can never fire at its 1M
+    budget (earliest stop 41 of 40 evaluations); PaddleTennis's headline
+    patience can (40 of 80)."""
+    from courtside_dynamics.recipes import build_train_config
+    from courtside_dynamics.training.train import early_stop_reachability
+
+    ball = early_stop_reachability(
+        build_train_config("BallBalance", log_dir="x", seed=0)
+    )
+    assert ball["scheduled_evaluations"] == 40
+    assert ball["guards"]["early_stop_patience"] == {
+        "selection": "reward",
+        "warmup_evals": 20,
+        "earliest_stop_evaluation": 41,
+        "inert": True,
+    }
+    assert len(ball["warnings"]) == 1
+    paddle = early_stop_reachability(
+        build_train_config("PaddleTennis", log_dir="x", seed=0)
+    )
+    assert paddle["scheduled_evaluations"] == 80
+    assert paddle["guards"]["early_stop_patience"]["earliest_stop_evaluation"] == 40
+    assert paddle["warnings"] == []
+
+
 _GATE = {
     "stages": [{"x": 1.0}],
     "metric_key": "steps_alive_ep_mean",
@@ -3527,6 +3757,23 @@ def test_sac_stop_warmups_are_wired_as_before(tmp_path, monkeypatch):
     assert kwargs["record_n_updates"] is False
     config = json.loads((tmp_path / "run" / "config.json").read_text())
     assert config["resolved_training"]["policy_update_floor_evals"] is None
+    # The reachability record reads the warm-ups the callbacks got.
+    reachability = config["resolved_training"]["early_stop_reachability"]
+    assert reachability["scheduled_evaluations"] == 10
+    assert reachability["guards"] == {
+        "early_stop_patience": {
+            "selection": "headline",
+            "warmup_evals": 7,
+            "earliest_stop_evaluation": 10,
+            "inert": False,
+        },
+        "degenerate_signal": {
+            "warmup_evals": 3,
+            "earliest_stop_evaluation": 5,
+            "inert": False,
+        },
+    }
+    assert reachability["warnings"] == []
 
 
 def test_ppo_stop_warmups_are_floored_in_policy_updates(tmp_path, monkeypatch):
@@ -3550,6 +3797,17 @@ def test_ppo_stop_warmups_are_floored_in_policy_updates(tmp_path, monkeypatch):
     assert kwargs["degenerate_min_evals"] == 20
     assert kwargs["early_stop_min_evals"] == 20
     assert kwargs["record_n_updates"] is True
+    # 160 steps at an evaluation per 8-step rollout run 20 evaluations,
+    # so both floored stops are past the budget, and the record says so.
+    config = json.loads((tmp_path / "run" / "config.json").read_text())
+    reachability = config["resolved_training"]["early_stop_reachability"]
+    assert reachability["scheduled_evaluations"] == 20
+    guards = reachability["guards"]
+    assert guards["degenerate_signal"]["warmup_evals"] == 20
+    assert guards["early_stop_patience"]["warmup_evals"] == 20
+    assert guards["degenerate_signal"]["inert"] is True
+    assert guards["early_stop_patience"]["inert"] is True
+    assert len(reachability["warnings"]) == 2
 
 
 def test_reward_selected_ppo_patience_warmup_is_floored(tmp_path, monkeypatch):
@@ -3559,12 +3817,12 @@ def test_reward_selected_ppo_patience_warmup_is_floored(tmp_path, monkeypatch):
     train_module = importlib.import_module("courtside_dynamics.training.train")
     built: list[dict[str, Any]] = []
 
-    class _Recording(train_module.StopTrainingOnNoModelImprovement):
+    class _Recording(train_module._StopOnNoRewardImprovement):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             built.append(kwargs)
 
-    monkeypatch.setattr(train_module, "StopTrainingOnNoModelImprovement", _Recording)
+    monkeypatch.setattr(train_module, "_StopOnNoRewardImprovement", _Recording)
     for algo, model_kwargs in (
         ("PPO", {"n_steps": 8, "batch_size": 8, "n_epochs": 1}),
         ("SAC", {"learning_starts": 4, "buffer_size": 64}),

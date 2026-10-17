@@ -97,6 +97,41 @@ def _git_sha() -> str | None:
     return _git_sha_from_checkout() or _git_sha_from_install_metadata()
 
 
+def _git_dirty() -> bool | None:
+    """Whether the code behind :func:`_git_sha` has uncommitted edits.
+
+    An editable checkout that tracks this file is asked directly
+    (``git status --porcelain --untracked-files=no``). A pip VCS install
+    (the Colab flow) is its recorded commit's tree, so ``False``.
+    ``None`` when neither applies or git cannot answer.
+    """
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", package_dir, "ls-files", "--error-unmatch",
+             os.path.abspath(__file__)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if tracked.returncode == 0:
+            status = subprocess.run(
+                ["git", "-C", package_dir, "status", "--porcelain",
+                 "--untracked-files=no"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if status.returncode != 0:
+                return None
+            return bool(status.stdout.strip())
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    return False if _git_sha_from_install_metadata() else None
+
+
 def _versions() -> dict[str, str]:
     versions: dict[str, str] = {"python": platform.python_version()}
     for name in (
@@ -586,11 +621,13 @@ def write_run_config(cfg: TrainConfig, log_dir: str) -> str:
             "require_device": cfg.require_device,
             "min_policy_updates_before_stop": cfg.min_policy_updates_before_stop,
             "vec_env": cfg.vec_env,
+            "sync_dir": None if cfg.sync_dir is None else str(cfg.sync_dir),
         },
         # What train() resolves beyond the configured fields: the reward
         # normalization and the normalizer's return discount, the device
         # asked of SB3 and why, an on-policy run's rollout and the
-        # evaluation floor of its early stops.
+        # evaluation floor of its early stops, and whether each early
+        # stop can fire inside the budget at all.
         "resolved_training": _resolved_training(cfg),
     }
     out = artifact_path(log_dir, "config")
@@ -1154,6 +1191,11 @@ RUN_LAYOUT: dict[str, str] = {
     "config": "config.json",
     "stage_summary": "stage_summary.txt",
     "run_config_toml": "run_config.toml",
+    # What ran and how it ended (rewritten on every terminal path), and
+    # the sha256 of every other file, written last: a run dir without a
+    # manifest that verifies is incomplete (experiments.records).
+    "run_record": "run_record.json",
+    "sync_manifest": "sync_manifest.json",
     # model/: everything needed to reload a policy.
     "best_model": "model/best_model.zip",
     "best_vec_normalize": "model/best_vec_normalize.pkl",
@@ -1243,6 +1285,19 @@ def locate_artifact(run_dir: str | os.PathLike[str], name: str) -> str | None:
     if os.path.exists(legacy):
         return legacy
     return None
+
+
+def is_empty_directory(path: str | os.PathLike[str]) -> bool:
+    """Whether ``path`` is a directory holding no file at any depth.
+
+    A directory artifact (``media/videos``, ``checkpoints``, the
+    monitor logs) is created before anything is written into it, so its
+    existence alone says nothing: the audit and the summary treat an
+    empty one as missing.
+    """
+    if not os.path.isdir(path):
+        return False
+    return not any(files for _root, _dirs, files in os.walk(path))
 
 
 #: Artifacts that only exist for specific configurations (TOML-driven
@@ -1838,9 +1893,14 @@ def write_run_summary(
             continue  # this report itself; listing it would be circular
         full = locate_artifact(log_dir, label)
         if full is not None:
-            artifact_lines.append(
-                f"  {_kv(label, os.path.relpath(full, log_dir))}"
-            )
+            relative = os.path.relpath(full, log_dir)
+            if is_empty_directory(full):
+                # An empty directory is not an artifact: the 1M LT1 run
+                # lost all four periodic videos while its media/videos/
+                # folder made this section read "present"
+                # (repo_review_20261016 training-data-5).
+                relative += "  <-- EMPTY: no file was written (missing)"
+            artifact_lines.append(f"  {_kv(label, relative)}")
     if artifact_lines:
         lines.extend(_section("Artifacts"))
         lines.extend(artifact_lines)
