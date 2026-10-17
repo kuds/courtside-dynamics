@@ -19,7 +19,9 @@ distinguish:
 * every registered environment id builds, resets, and steps -- which is
   what actually reads the MJCF and, transitively, its meshes;
 * the packaged run configs are discoverable and copyable, the path Colab
-  uses to bootstrap a config without cloning the repo.
+  uses to bootstrap a config without cloning the repo;
+* the run index's campaign map (``experiments/legacy_levers.toml``)
+  loads, as ``python -m courtside_dynamics.experiments.index`` needs.
 
 Usage (after installing a built wheel into the active interpreter)::
 
@@ -156,6 +158,27 @@ def _check_packaged_run_configs() -> None:
     print(f"  ok  {len(tomls)} packaged run configs (read {tomls[0]})")
 
 
+def _check_packaged_campaign_map() -> None:
+    """Assert the run index's campaign map is installed and parses.
+
+    ``python -m courtside_dynamics.experiments.index`` joins every row to
+    ``experiments/legacy_levers.toml``, package data like the starter
+    configs; without it the index fails on a Colab install. The index
+    imports neither SB3 nor torch, so the base install suffices.
+    """
+    from courtside_dynamics.experiments.index import load_legacy_levers
+
+    try:
+        entries = load_legacy_levers()
+    except (FileNotFoundError, ValueError) as error:
+        raise SystemExit(
+            f"smoke_wheel: the packaged campaign map does not load ({error})"
+        ) from error
+    if not entries:
+        raise SystemExit("smoke_wheel: the packaged campaign map is empty")
+    print(f"  ok  campaign map ({len(entries)} runs)")
+
+
 def main() -> int:
     print("smoke-testing the installed courtside-dynamics distribution")
     location = _check_installed_not_shadowed()
@@ -164,6 +187,7 @@ def main() -> int:
     print(f"  version {courtside_dynamics.__version__} from {location}")
     _check_environments()
     _check_packaged_run_configs()
+    _check_packaged_campaign_map()
     print("smoke_wheel: OK")
     return 0
 

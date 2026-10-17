@@ -342,6 +342,14 @@ enabled.
 directory, explain missing optional artifacts, and plot learning, evaluation,
 and training-health CSVs. The notebooks run these diagnostics after training.
 
+`python -m courtside_dynamics.experiments.index --root <training_runs>`
+regenerates `<root>/index/runs.jsonl`, one row per run directory: run records
+as written with their manifest verdict, and older directories backfilled from
+`config.json` and `stage_summary.txt` (aborted launches marked as stubs), each
+joined to the campaign map of what it tested. See
+[`docs/experiments.md`](docs/experiments.md), which also covers verification
+and Colab use.
+
 ## Development
 
 Install the development and training dependencies, then run the checks:
@@ -442,7 +450,7 @@ courtside-dynamics/
 │   ├── envs/                    # Gymnasium tasks and curriculum contracts
 │   ├── callbacks/               # Evaluation and video recording
 │   ├── training/                # SAC/PPO training, artifacts, and promotion
-│   ├── experiments/             # Run records, sync manifests, run-dir verification
+│   ├── experiments/             # Run records, sync manifests, verification, run index
 │   ├── run_configs/             # Packaged starter TOMLs, one per recipe
 │   ├── digests.py               # Golden env-stream digests (the refactor gate)
 │   ├── recipes.py               # Curated environment/training presets

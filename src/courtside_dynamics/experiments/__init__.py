@@ -7,7 +7,9 @@ and sha256 of every other file in the directory, written last). A run
 directory without a manifest, or whose manifest does not verify, is
 incomplete by definition: :func:`records.verify_run_dir` and its CLI
 (``python -m courtside_dynamics.experiments.verify <run_dir>``) say
-which.
+which. The run index (``python -m courtside_dynamics.experiments.index
+--root <runs root>``) regenerates ``<root>/index/runs.jsonl`` from the
+run directories, backfilling the ones that predate run records.
 
 Nothing in this package imports Stable-Baselines3 or torch, so a
 record, a manifest or a Drive mirror can be read and checked anywhere

@@ -1,0 +1,348 @@
+# Campaign map for the run directories that predate experiment specs.
+#
+# The run index (courtside_dynamics.experiments.index) joins this file
+# by run id into each row's `campaign` block. Run records written since
+# design L1 carry their own `experiment` block; these runs had none, so
+# what each one tested lived only in prose. This file is that prose,
+# curated once: the campaign archaeology of 2026-10-16
+# (docs/design_campaign_structure_20261016.md), DECISIONS.md and the
+# dated review and pre-registration docs.
+#
+# One table per run directory under `runs`, keyed by the directory's
+# name (its run id). Keys:
+#   campaign  "paddle_tennis" or "wall_ball"
+#   lever     PaddleTennis: the one lever the run tested, "baseline"
+#             (a stock-recipe run) or "infra" (a launch with no
+#             experiment in it). WallBall: the recipe era, "era/<name>",
+#             because that campaign changed several things per recipe.
+#   verdict   the lever's (or era's) recorded outcome, with its date
+#   doc       the repo doc that names the run; omitted only when no doc
+#             does, and then `note` says why
+#   note      optional: this run's role within the lever
+#
+# PaddleTennis: 20 directories, 15 completed runs and 5 aborted
+# launches. WallBall: the 27 directories of the five era folders
+# (WallBallBaseline, WallBallDepthCurriculum,
+# WallBallDepthCurriculumAligned, WallBallGoalRally,
+# WallBallTrueBaseline).
+
+# --- PaddleTennis ------------------------------------------------------
+
+[runs."20260803_004559"]
+campaign = "paddle_tennis"
+lever = "baseline"
+verdict = "volley era: 37.6 crossings at 2M via close-net cooperative volleying; the rules fix (volley_rule='fault') closed the exploit and the era was re-certified (2026-08-03)"
+doc = "docs/paddle_tennis_ground_rules_20260803.md"
+note = "first learned GPU run, stock recipe; seed 0, not the pre-registered seed 1, so an unregistered diagnosis run"
+
+[runs."20260808_022106"]
+campaign = "paddle_tennis"
+lever = "baseline"
+verdict = "ground era, stock recipe: early stop at 1.75M of 6M, best at 1.25M; the diagnosis routed the campaign to the exploration package (2026-08-08)"
+doc = "docs/paddle_tennis_diagnosis_20260808.md"
+note = "ground-era GPU pilot"
+
+[runs."20260809_005951"]
+campaign = "paddle_tennis"
+lever = "exploration_package"
+verdict = "mechanism works but no stroke learned; kept in the recipe (2026-08-09)"
+doc = "docs/paddle_tennis_exploration_20260808.md"
+note = "gSDE, ent_coef auto_0.02, target entropy -1.5, train_freq 64; the lever lived in the recipe's model_kwargs, and the run used the stock paddle_tennis.toml (sha a45bec21) like the two stock runs before it"
+
+[runs."20260809_161704"]
+campaign = "paddle_tennis"
+lever = "contact_shaping"
+verdict = "L1 passed, k=2 still 0 (2026-08-09/10); adopted into the recipe 2026-08-16"
+doc = "docs/design_paddle_tennis_contact_shaping.md"
+note = "1M pilot"
+
+[runs."20260809_211147"]
+campaign = "paddle_tennis"
+lever = "contact_shaping"
+verdict = "L1 passed, k=2 still 0 (2026-08-09/10); adopted into the recipe 2026-08-16"
+doc = "docs/design_paddle_tennis_contact_shaping.md"
+note = "2M budget extension: k=1 mastered on both sides, k=2 exactly 0%; warm-start source of the L2W and LR1 runs"
+
+[runs."20260810_211754"]
+campaign = "paddle_tennis"
+lever = "npoint"
+verdict = "stop/pivot (2026-08-15): from scratch, continuous play un-samples contact; transfer collects the credit. n-point play adopted 2026-08-16"
+doc = "docs/paddle_tennis_npoint_pilot_20260815_review.md"
+note = "L2 pilot: seed 0, n_envs 4, early-stopped at 1.125M"
+
+[runs."20260815_015143"]
+campaign = "paddle_tennis"
+lever = "npoint"
+verdict = "stop/pivot (2026-08-15): from scratch, continuous play un-samples contact; transfer collects the credit. n-point play adopted 2026-08-16"
+doc = "docs/paddle_tennis_npoint_pilot_20260815_review.md"
+note = "L2 full-budget replication; seed 1 and n_envs 8 changed together, so it is not a clean replicate"
+
+[runs."20260815_180815"]
+campaign = "paddle_tennis"
+lever = "npoint"
+verdict = "stop/pivot (2026-08-15): from scratch, continuous play un-samples contact; transfer collects the credit. n-point play adopted 2026-08-16"
+doc = "docs/paddle_tennis_npoint_pilot_20260815_review.md"
+note = "L2W: warm start from 20260809_211147; the transferred checkpoint scored +1.92 with zero updates, then training regressed k=1"
+
+[runs."20260815_180638"]
+campaign = "paddle_tennis"
+lever = "infra"
+verdict = "aborted launch: an empty directory"
+note = "created 1m37s before 20260815_180815 (L2W) and named by no doc; an undocumented false start of that launch"
+
+[runs."20260816_135919"]
+campaign = "paddle_tennis"
+lever = "reach_shaping"
+verdict = "adopt (2026-08-16): first positive learned final eval (+0.14), k=2 above zero at five checkpoints; the recipe entered the n-point era"
+doc = "docs/design_paddle_tennis_reach_shaping.md"
+note = "LR1, warm-started from 20260809_211147"
+
+[runs."20260816_135115"]
+campaign = "paddle_tennis"
+lever = "infra"
+verdict = "aborted launch: an empty directory"
+note = "created 8m04s before 20260816_135919 (LR1) and named by no doc; an undocumented false start of that launch"
+
+[runs."20260816_235141"]
+campaign = "paddle_tennis"
+lever = "registered_run"
+verdict = "LS1 PASS (the adopted task trains from scratch), RK1 FAIL: k=2 is the standing blocker (adjudicated 2026-08-22)"
+doc = "docs/paddle_tennis_registered_run_prereg_20260816.md"
+note = "the registered n-point-era run: the adopted recipe (n-point play, contact and reach shaping) from scratch; source of every later warm start"
+
+[runs."20260818_210727"]
+campaign = "paddle_tennis"
+lever = "hold_escrow"
+verdict = "closed without adoption (2026-08-22)"
+doc = "docs/design_paddle_tennis_postswing_hold.md"
+note = "LH1: hold_shaping 0.25, travel 4.0 m; exactly zero gradient, the travel budget sat outside the policy's band"
+
+[runs."20260820_013545"]
+campaign = "paddle_tennis"
+lever = "hold_escrow"
+verdict = "closed without adoption (2026-08-22)"
+doc = "docs/design_paddle_tennis_postswing_hold.md"
+note = "LH1b: hold_shaping 0.5, travel 4.0 m; trained byte-identical to LH1 through 175k (doubling a zero), so void as a dose test. The doc records it as stopped early; its directory trained the full 2M budget"
+
+[runs."20260821_013700"]
+campaign = "paddle_tennis"
+lever = "hold_escrow"
+verdict = "closed without adoption (2026-08-22)"
+doc = "docs/design_paddle_tennis_postswing_hold.md"
+note = "LH1c: hold_shaping 0.5, travel 12.0 m; registered 1M window KH1 FAIL; ran 3M instead of the frozen 1M (notebook override), and MuJoCo 3.12 is a named confound"
+
+[runs."20260828_112830"]
+campaign = "paddle_tennis"
+lever = "temperature_skip"
+verdict = "lever spent: KT1, T1 and R1 all FAIL (adjudicated 2026-08-29)"
+doc = "docs/paddle_tennis_lt1_prereg_20260823.md"
+note = "aborted before training (notebook import error); an empty remnant"
+
+[runs."20260828_113136"]
+campaign = "paddle_tennis"
+lever = "temperature_skip"
+verdict = "lever spent: KT1, T1 and R1 all FAIL (adjudicated 2026-08-29)"
+doc = "docs/paddle_tennis_lt1_prereg_20260823.md"
+note = "unregistered companion: the recipe's 3M default won over the frozen 1M and patience 60 was inherited from the notebook; its 0-1M window is a same-seed quasi-replicate of LT1, not independent evidence"
+
+[runs."20260828_114038"]
+campaign = "paddle_tennis"
+lever = "temperature_skip"
+verdict = "lever spent: KT1, T1 and R1 all FAIL (adjudicated 2026-08-29)"
+doc = "docs/paddle_tennis_lt1_prereg_20260823.md"
+note = "the frozen 1M shape on a CPU-only runtime; superseded by the GPU relaunch 20260828_121324"
+
+[runs."20260828_114815"]
+campaign = "paddle_tennis"
+lever = "temperature_skip"
+verdict = "lever spent: KT1, T1 and R1 all FAIL (adjudicated 2026-08-29)"
+doc = "docs/paddle_tennis_lt1_prereg_20260823.md"
+note = "the frozen 1M shape on a CPU-only runtime; superseded by the GPU relaunch 20260828_121324"
+
+[runs."20260828_121324"]
+campaign = "paddle_tennis"
+lever = "temperature_skip"
+verdict = "lever spent: KT1, T1 and R1 all FAIL (adjudicated 2026-08-29)"
+doc = "docs/paddle_tennis_lt1_prereg_20260823.md"
+note = "the registered LT1: the only run its pre-registered bars score"
+
+# --- WallBall ----------------------------------------------------------
+
+[runs."20260714_050506"]
+campaign = "wall_ball"
+lever = "era/wall_ball_baseline"
+verdict = "superseded by the depth curriculum (0.15.0): the baseline era's levers (recovery curriculum, geometry recalibration, weak-return retry, escalating wall reward, network capacity) closed negative or unpromoted by 2026-07-20"
+doc = "docs/wall_ball_baseline_review.md"
+note = "run 1 (unreleased 1eec0d4 code labeled v0.8.0)"
+
+[runs."20260714_211111"]
+campaign = "wall_ball"
+lever = "era/wall_ball_baseline"
+verdict = "superseded by the depth curriculum (0.15.0): the baseline era's levers (recovery curriculum, geometry recalibration, weak-return retry, escalating wall reward, network capacity) closed negative or unpromoted by 2026-07-20"
+doc = "docs/wall_ball_baseline_review.md"
+note = "run 2 (v0.9.0)"
+
+[runs."20260717_025611"]
+campaign = "wall_ball"
+lever = "era/wall_ball_baseline"
+verdict = "superseded by the depth curriculum (0.15.0): the baseline era's levers (recovery curriculum, geometry recalibration, weak-return retry, escalating wall reward, network capacity) closed negative or unpromoted by 2026-07-20"
+doc = "docs/wall_ball_baseline_review.md"
+note = "recovery curriculum: practice fragments 0.6, tapering (v0.10.0)"
+
+[runs."20260717_040824"]
+campaign = "wall_ball"
+lever = "era/wall_ball_baseline"
+verdict = "superseded by the depth curriculum (0.15.0): the baseline era's levers (recovery curriculum, geometry recalibration, weak-return retry, escalating wall reward, network capacity) closed negative or unpromoted by 2026-07-20"
+doc = "docs/wall_ball_baseline_review.md"
+note = "recovery curriculum arm B (fragments off): total bootstrap failure"
+
+[runs."20260717_164059"]
+campaign = "wall_ball"
+lever = "era/wall_ball_baseline"
+verdict = "superseded by the depth curriculum (0.15.0): the baseline era's levers (recovery curriculum, geometry recalibration, weak-return retry, escalating wall reward, network capacity) closed negative or unpromoted by 2026-07-20"
+doc = "docs/repo_infrastructure_review_20260802.md"
+note = "aborted launch: config.json and monitor/ only"
+
+[runs."20260717_165144"]
+campaign = "wall_ball"
+lever = "era/wall_ball_baseline"
+verdict = "superseded by the depth curriculum (0.15.0): the baseline era's levers (recovery curriculum, geometry recalibration, weak-return retry, escalating wall reward, network capacity) closed negative or unpromoted by 2026-07-20"
+doc = "docs/repo_infrastructure_review_20260802.md"
+note = "aborted launch: config.json and monitor/ only"
+
+[runs."20260717_165358"]
+campaign = "wall_ball"
+lever = "era/wall_ball_baseline"
+verdict = "superseded by the depth curriculum (0.15.0): the baseline era's levers (recovery curriculum, geometry recalibration, weak-return retry, escalating wall reward, network capacity) closed negative or unpromoted by 2026-07-20"
+doc = "docs/design_court_and_config_updates.md"
+note = "geometry era: one of two independent samples of the recalibrated task"
+
+[runs."20260718_023737"]
+campaign = "wall_ball"
+lever = "era/wall_ball_baseline"
+verdict = "superseded by the depth curriculum (0.15.0): the baseline era's levers (recovery curriculum, geometry recalibration, weak-return retry, escalating wall reward, network capacity) closed negative or unpromoted by 2026-07-20"
+doc = "docs/design_court_and_config_updates.md"
+note = "geometry era: the second sample; the era's best model on record"
+
+[runs."20260718_213222"]
+campaign = "wall_ball"
+lever = "era/wall_ball_baseline"
+verdict = "superseded by the depth curriculum (0.15.0): the baseline era's levers (recovery curriculum, geometry recalibration, weak-return retry, escalating wall reward, network capacity) closed negative or unpromoted by 2026-07-20"
+doc = "docs/design_court_and_config_updates.md"
+note = "weak-return retry: taught soft, defensive returns; reverted in 0.14.0"
+
+[runs."20260719_164219"]
+campaign = "wall_ball"
+lever = "era/wall_ball_baseline"
+verdict = "superseded by the depth curriculum (0.15.0): the baseline era's levers (recovery curriculum, geometry recalibration, weak-return retry, escalating wall reward, network capacity) closed negative or unpromoted by 2026-07-20"
+note = "no doc names this run; its config.json and run_config.toml are its only record"
+
+[runs."20260719_223139"]
+campaign = "wall_ball"
+lever = "era/wall_ball_baseline"
+verdict = "superseded by the depth curriculum (0.15.0): the baseline era's levers (recovery curriculum, geometry recalibration, weak-return retry, escalating wall reward, network capacity) closed negative or unpromoted by 2026-07-20"
+doc = "docs/design_revert_and_run_layout.md"
+note = "escalating wall reward, increment 0.5, 3M: redistributed failure style; not promoted"
+
+[runs."20260720_124628"]
+campaign = "wall_ball"
+lever = "era/wall_ball_baseline"
+verdict = "superseded by the depth curriculum (0.15.0): the baseline era's levers (recovery curriculum, geometry recalibration, weak-return retry, escalating wall reward, network capacity) closed negative or unpromoted by 2026-07-20"
+doc = "docs/lessons_learned.md"
+note = "network capacity (400x300), TOML only: negative"
+
+[runs."20260721_004722"]
+campaign = "wall_ball"
+lever = "era/depth_curriculum"
+verdict = "retired in 0.24.0 (2026-07-28): the sliding-fence depth ladder stalled; the goal task is trained directly"
+doc = "docs/wall_ball_depth_curriculum_run1_review.md"
+note = "run 1 of the depth ladder"
+
+[runs."20260721_142121"]
+campaign = "wall_ball"
+lever = "era/depth_curriculum"
+verdict = "retired in 0.24.0 (2026-07-28): the sliding-fence depth ladder stalled; the goal task is trained directly"
+doc = "docs/wall_ball_rally_diagnosis_20260728_review.md"
+
+[runs."20260722_002913"]
+campaign = "wall_ball"
+lever = "era/depth_curriculum"
+verdict = "retired in 0.24.0 (2026-07-28): the sliding-fence depth ladder stalled; the goal task is trained directly"
+doc = "docs/wall_ball_rally_diagnosis_20260728_review.md"
+
+[runs."20260722_124613"]
+campaign = "wall_ball"
+lever = "era/depth_curriculum"
+verdict = "retired in 0.24.0 (2026-07-28): the sliding-fence depth ladder stalled; the goal task is trained directly"
+doc = "docs/design_wall_ball_depth_curriculum.md"
+note = "reached stage 4 at about 4.175M steps"
+
+[runs."20260723_190923"]
+campaign = "wall_ball"
+lever = "era/depth_curriculum"
+verdict = "retired in 0.24.0 (2026-07-28): the sliding-fence depth ladder stalled; the goal task is trained directly"
+doc = "docs/wall_ball_rally_diagnosis_20260728_review.md"
+
+[runs."20260727_004014"]
+campaign = "wall_ball"
+lever = "era/depth_curriculum"
+verdict = "retired in 0.24.0 (2026-07-28): the sliding-fence depth ladder stalled; the goal task is trained directly"
+doc = "docs/wall_ball_rally_diagnosis_20260728_review.md"
+
+[runs."20260727_233859"]
+campaign = "wall_ball"
+lever = "era/depth_curriculum"
+verdict = "retired in 0.24.0 (2026-07-28): the sliding-fence depth ladder stalled; the goal task is trained directly"
+doc = "docs/wall_ball_depth_curriculum_20260727_233859_review.md"
+
+[runs."20260724_152530"]
+campaign = "wall_ball"
+lever = "era/depth_curriculum_aligned"
+verdict = "serve alignment falsified as a learning aid: easier receives train weaker policies (closed 0.24.0)"
+doc = "docs/wall_ball_aligned_patience_review.md"
+
+[runs."20260725_171747"]
+campaign = "wall_ball"
+lever = "era/depth_curriculum_aligned"
+verdict = "serve alignment falsified as a learning aid: easier receives train weaker policies (closed 0.24.0)"
+doc = "docs/wall_ball_aligned_patience_review.md"
+
+[runs."20260728_224706"]
+campaign = "wall_ball"
+lever = "era/goal_rally"
+verdict = "campaign goal met: a sustained rally from the workspace baseline (run 20260728_225217, replicated 2026-07-30)"
+doc = "docs/wall_ball_goal_rally_20260728_225217_review.md"
+note = "first launch, stopped at about 5 minutes: the notebook's TOTAL_TIMESTEPS overrode the TOML's 6M with 3M"
+
+[runs."20260728_225217"]
+campaign = "wall_ball"
+lever = "era/goal_rally"
+verdict = "campaign goal met: a sustained rally from the workspace baseline (run 20260728_225217, replicated 2026-07-30)"
+doc = "docs/wall_ball_goal_rally_20260728_225217_review.md"
+
+[runs."20260729_140112"]
+campaign = "wall_ball"
+lever = "era/goal_rally"
+verdict = "campaign goal met: a sustained rally from the workspace baseline (run 20260728_225217, replicated 2026-07-30)"
+doc = "docs/wall_ball_goal_rally_replication_20260730_review.md"
+note = "replication, seed 1, patience 60"
+
+[runs."20260730_005134"]
+campaign = "wall_ball"
+lever = "era/goal_rally"
+verdict = "campaign goal met: a sustained rally from the workspace baseline (run 20260728_225217, replicated 2026-07-30)"
+doc = "docs/wall_ball_goal_rally_replication_20260730_review.md"
+note = "replication, seed 2"
+
+[runs."20260731_132322"]
+campaign = "wall_ball"
+lever = "era/true_baseline"
+verdict = "the true-baseline era opened on its first run; the replication split (reliability 2/2, era skill 1/2) and the wall-ball chapter closed (2026-08-02)"
+doc = "docs/wall_ball_true_baseline_20260731_132322_review.md"
+
+[runs."20260801_144043"]
+campaign = "wall_ball"
+lever = "era/true_baseline"
+verdict = "the true-baseline era opened on its first run; the replication split (reliability 2/2, era skill 1/2) and the wall-ball chapter closed (2026-08-02)"
+doc = "docs/wall_ball_true_baseline_replication_20260801_review.md"
+note = "replication"

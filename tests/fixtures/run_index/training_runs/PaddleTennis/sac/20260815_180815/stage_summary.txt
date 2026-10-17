@@ -1,0 +1,84 @@
+courtside-dynamics: SAC on PaddleTennis
+==================================================
+
+Project:        courtside-dynamics
+Environment:    PaddleTennis
+Algorithm:      SAC
+Seed:           0
+Date:           2026-08-16 00:33:05
+Status:         completed
+Stop reason:    early_stop_patience: no improvement in crossings_ep_mean/success_rate/episode_reward_mean for the last 20 evaluations
+Git SHA:        731cf08
+Run config:     paddle_tennis_npoint_warmstart_l2w.toml (16eea45d0684)
+Timesteps:      1,000,000
+Duration:       6h 24m 37s
+Throughput:     43 FPS
+Final eval:     -1.875 +/- 2.032
+Avg ep length:  1500.0 +/- 0.0 steps
+Best eval:      1.917 +/- 1.555 (at 25,000 steps)
+Final vs best:  -3.792  <-- policy regressed after best; deploy best_model.zip
+Best model:     step 25,000 (crossings_ep_mean 6.37)  [task-metric selection]
+Headline:       crossings_ep_mean
+Headline final: 3.80
+Headline best:  6.37 (at 25,000 steps)
+Recent train:   -1.640 +/- 1.944 (last 100 episodes)
+
+Device
+----------------------------------------
+  Device:         cuda
+  GPU:            NVIDIA L4
+  VRAM:           22563 MB
+  Compute cap:    8.9
+  CUDA:           12.8
+  cuDNN:          91900
+  PyTorch:        2.11.0+cu128
+
+Hyperparameters
+----------------------------------------
+  total_timesteps    1000000
+  n_envs             4
+  use_sde            True
+  ent_coef           auto_0.02
+  target_entropy     -1.5
+  train_freq         (64, 'step')
+  learning_starts    25000
+
+Best Checkpoint Evaluation (step 25,000)
+----------------------------------------
+  Reward:         1.917 +/- 1.555
+  Episode length: 1500.0
+  bounce_count:      final 0.00  max 1.00
+  crossings:         final 8.00  max 8.00
+  legal_hit_count:   final 0.00  max 3.00
+  legal_hit_count_a: final 0.00  max 2.00
+  rally_count:       final 0.00  max 3.00
+  Phase fractions:
+    awaiting_return     39.1%
+    initial_feed        13.0%
+    return_in_flight    47.7%
+    terminal            0.3%
+
+Training Health (final)
+----------------------------------------
+  train/actor_loss:    0.3648
+  train/critic_loss:   0.000335
+  train/ent_coef:      0.0001009
+  train/ent_coef_loss: 0.4302
+  train/learning_rate: 0.0003
+  train/n_updates:     9.751e+05
+  train/std:           0.01979
+
+Artifacts
+----------------------------------------
+  config:         config.json
+  best_model:     model/best_model.zip
+  best_vec_normalize:model/best_vec_normalize.pkl
+  best_model_meta:model/best_model_meta.json
+  final_model:    model/final_model.zip
+  vec_normalize:  model/vec_normalize.pkl
+  monitor_dir:    metrics/monitor
+  progress_csv:   metrics/progress.csv
+  evaluations:    metrics/evaluations.npz
+  eval_info_csv:  metrics/eval_info.csv
+  videos_dir:     media/videos
+  checkpoints_dir:checkpoints

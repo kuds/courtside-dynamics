@@ -18,6 +18,47 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **The regenerated run index and the legacy backfill (design L1,
+  second half; 2026-10-17).** No env stream, training or run-directory
+  change: golden digests 22/22, recipe snapshot unchanged, and the
+  trainer digest against `09f202a` differs only where the first half
+  declared (`run_layout_artifacts` gains `run_record` and
+  `sync_manifest`).
+  - **`python -m courtside_dynamics.experiments.index --root <runs
+    root> [--out <file>] [--legacy-levers <toml>] [--skip-verify]`**
+    (`experiments.index.build_index`, no SB3 or torch) writes
+    `<root>/index/runs.jsonl`: one row per run directory, sorted by path,
+    keys sorted, byte-identical when regenerated over unchanged
+    directories. A row is the run record's keys plus `index` (path,
+    source, `version_inferred`, the inferred fields, stub, manifest
+    verdict, model/checkpoint/video presence, run config basename and
+    sha256, the parsed summary head, problems) and `campaign`.
+  - **Run-record directories** are taken as written, with
+    `verify_run_dir`'s verdict (`--skip-verify` leaves it unchecked).
+  - **Older directories are backfilled** into the record's shape from
+    `config.json` (through `build_run_record`), `stage_summary.txt`
+    and `best_model_meta.json`, marked `version_inferred`. The
+    summary's `X of Y budget (stopped early)` line makes an early stop
+    `early_stop`; a stop reason on a full-budget run (train-3) becomes
+    `completed` with the `full_budget: ...` reason `train()` now
+    writes. No summary: `aborted`, and a stub without a final model; an
+    empty run-named directory is an aborted stub. A directory without a
+    run marker, or with a `config.json` that is not a courtside run
+    config, is skipped and listed, never parsed. No machine path
+    reaches a backfilled row.
+  - **`experiments/legacy_levers.toml`** (new package data): each of
+    the 20 PaddleTennis run directories mapped to one lever (or
+    `baseline`/`infra`), and the 27 WallBall directories of the five
+    era folders to their recipe era, each with its verdict and doc.
+    The index joins it by run id. `tools/smoke_wheel.py` checks that an
+    installed wheel carries it and that it parses.
+  - Validated against a text-only mirror of the Drive archive (25
+    directories: all 20 PaddleTennis and 5 WallBall): 8 aborted, 7 of
+    them stubs; all 20 PaddleTennis runs joined to one lever; git sha,
+    algorithm, budget against steps trained, best step and stop reason
+    agree with the source files for all 17 runs with a summary. New
+    [`docs/experiments.md`](docs/experiments.md) documents records,
+    manifests, `verify` and the index, Colab use included.
 - **Run records, sync manifests and run-directory trust (design L1,
   first half; 2026-10-17).** No env stream or training change: golden
   digests 22/22; the trainer digest against `09f202a` matches every

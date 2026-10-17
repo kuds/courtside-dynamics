@@ -718,6 +718,66 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### Run records and manifests are the source of truth; the index is regenerated — *implemented (unreleased, 2026-10-17); design L1, second half*
+`design_campaign_structure_20261016.md` step L1 and its rule "don't
+co-append to one Drive index". No env stream, training or run-directory
+change (golden digests 22/22; trainer digest against `09f202a` as the
+first half declared).
+- **Derived, never appended.** `runs.jsonl` is rebuilt whole from the
+  run directories on every call: sorted by path, keys sorted, written
+  atomically, the same bytes over unchanged directories. Each run file
+  has one writer; a shared Drive file appended by two Colab sessions
+  would have two.
+- **One shape, two sources.** A run-record directory is its record as
+  written plus its manifest verdict. A pre-record directory goes
+  through the same `build_run_record` from its `config.json`, so a
+  field means the same thing in both. What the summary supplied
+  (status, stop reason, steps trained, wall clock) and the inferred
+  algorithm family are named in `index.inferred`, and
+  `version_inferred` is true.
+- **Statuses in record terms.** The summary's `completed` covers early
+  stops; its `X of Y budget (stopped early)` line separates them. A stop
+  reason on a full-budget run is the train-3 label: `completed` with
+  the `full_budget: ...` reason `train()` now writes. Five PaddleTennis
+  runs carry it (`20260815_180815`, `20260816_135919`,
+  `20260818_210727`, `20260828_113136`, `20260828_121324`).
+- **Aborted, and when a stub.** No summary means no terminal path was
+  reached: `aborted`. It is a stub when no final model was saved
+  either; a best model from the first evaluation does not make a run.
+  An empty run-named directory is a stub too. On the archive that gives
+  7 stubs (PaddleTennis `20260815_180638`, `20260816_135115` and
+  `20260828_112830` empty; `20260828_114038` and `20260828_114815`, the
+  LT1 CPU false starts; WallBall `20260717_164059` and
+  `20260717_165144`, config and monitor only) and one aborted salvage
+  (`20260728_224706`, final model at about 5 minutes). The count matches
+  the archaeology's 7 but not its dates: it put three on 07-17 and
+  missed the two empty 08-15/08-16 directories, which no doc names.
+- **Never mis-parse.** Only `run_record.json`, a courtside `config.json`
+  (a `train_config` with `algo` and `total_timesteps`) or an empty
+  run-named directory makes a row. Anything else is listed as skipped
+  with its reason. A malformed summary or meta file becomes a row
+  problem, printed as a warning; it is never dropped silently.
+- **The campaign map is curated data, joined by run id.**
+  `legacy_levers.toml` is package data with a strict loader. Every
+  PaddleTennis directory maps to exactly one lever, `baseline` or
+  `infra`. WallBall maps by recipe era, because that campaign changed
+  several things per recipe and its aids stay task versions. Runs
+  launched from specs will carry the lever in their record's
+  `experiment` block; the map covers only the pre-spec archive.
+- **Validated on the archive, which corrected a doc.** A text-only
+  mirror of 25 directories (all 20 PaddleTennis, 5 WallBall) indexed to
+  8 aborted, 7 stubs and 20 lever joins. For all 17 runs with a summary,
+  git sha, algorithm, budget against steps trained, best step and stop
+  reason agree with the source files. LH1b (`20260820_013545`) is
+  recorded in `design_paddle_tennis_postswing_hold.md` §4b as stopped
+  early once its first 175k matched LH1 (and as ~0.18M in the
+  archaeology). Its directory trained the full 2M budget: the summary says so and the last
+  checkpoint is at 2M. The map's note records this; the doc is left
+  unchanged.
+- **Open.** Index the full Drive archive. The mirror skipped the text
+  of 22 WallBall runs and the out-of-scope `WallBall/` and `TennisWall/`
+  folders, and its checkpoint and video counts are lower bounds.
+
 ### A run directory says what ran and seals itself; a mirror is trusted only through its manifest — *implemented (unreleased, 2026-10-17); design L1, first half*
 `design_campaign_structure_20261016.md` R3: 7 of about 48 archived run
 directories were stubs that looked live, one run lost all its videos
@@ -789,9 +849,8 @@ layout list, which gains `run_record` and `sync_manifest`).
   `time.monotonic` (no stream or RNG moves), plus the closing
   evaluation: the number L8 needs before trimming in-loop
   evaluation. The checkpoint diagnosis is not counted.
-- **Open (L1, second half).** The regenerated run index, the backfill of
-  the ~48 legacy run dirs (the 7 stubs marked aborted), and mapping
-  each PaddleTennis run to its lever.
+- **L1, second half.** The regenerated run index, the legacy backfill
+  and the PaddleTennis lever map: the entry above.
 
 ### The PPO verifier pass: a deployable best states its updates, and nothing fails quietly — *implemented (unreleased, 2026-10-17)*
 Verifiers re-ran the phase-2 PPO commits (since `f920d8f`). The fixes

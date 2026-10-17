@@ -1,0 +1,130 @@
+{
+  "timestamp_utc": "2026-07-14T05:05:16+00:00",
+  "git_sha": null,
+  "versions": {
+    "python": "3.12.13",
+    "numpy": "2.0.2",
+    "stable_baselines3": "2.9.0",
+    "gymnasium": "1.3.0",
+    "mujoco": "3.10.0",
+    "torch": "2.11.0+cu128",
+    "courtside_dynamics": "0.8.0"
+  },
+  "gpu": {
+    "available": true,
+    "cuda_version": "12.8",
+    "cudnn_version": 91900,
+    "device_count": 1,
+    "devices": [
+      {
+        "index": 0,
+        "name": "NVIDIA L4",
+        "total_memory_bytes": 23659151360,
+        "capability": "8.9"
+      }
+    ]
+  },
+  "env": {
+    "class": "WallBallEnv",
+    "observation_shape": [
+      22
+    ],
+    "action_shape": [
+      3
+    ],
+    "constructor_kwargs": {
+      "episode_len": 750,
+      "min_force": 20.0,
+      "serve_speed": 5.5,
+      "serve_lob": 0.0,
+      "serve_speed_jitter": 0.5,
+      "serve_vy_min": 0.8,
+      "serve_vy_max": 2.0,
+      "paddle_hit_bonus": 0.25,
+      "track_shaping_scale": 0.5,
+      "out_of_bounds_penalty": 1.0,
+      "double_bounce_penalty": 1.0,
+      "stall_penalty": 1.0,
+      "style_violation_penalty": 1.0,
+      "floor_bounce_min_speed": 0.5,
+      "stall_steps": 200,
+      "rally_style": "one_bounce",
+      "paddle_home_x": -2.7,
+      "paddle_x_target_range": [
+        -3.2,
+        -2.2
+      ],
+      "render_mode": "rgb_array"
+    }
+  },
+  "train_config": {
+    "algo": "SAC",
+    "total_timesteps": 1500000,
+    "log_dir": "/scrubbed/courtside-dynamics/training_runs/WallBallBaseline/sac/20260714_050506",
+    "name_prefix": "wall_ball_baseline_sac",
+    "n_envs": 8,
+    "seed": 0,
+    "verbose": 0,
+    "eval_freq": 25000,
+    "checkpoint_freq": 250000,
+    "video_freq": 250000,
+    "n_eval_episodes": 30,
+    "early_stop_patience": 20,
+    "video_length": 10000,
+    "record_video": true,
+    "normalize_obs": true,
+    "normalize_reward": null,
+    "clip_obs": 10.0,
+    "clip_reward": 10.0,
+    "normalize_obs_excluded_indices": [],
+    "policy": "MlpPolicy",
+    "model_kwargs": {
+      "ent_coef": 0.02,
+      "buffer_size": 2000000,
+      "gamma": 0.995
+    },
+    "warm_start": null,
+    "csv_header": null,
+    "info_dict_eval": true,
+    "info_eval_keys": null,
+    "info_eval_terminal_keys": [],
+    "info_eval_distribution_keys": [
+      "bounce_count"
+    ],
+    "success_key": "bounce_count",
+    "success_threshold": 1.0,
+    "headline_key": "bounce_count",
+    "phase_key": "rally_phase",
+    "phase_labels": {
+      "0": "await_bounce",
+      "1": "await_paddle",
+      "2": "await_wall"
+    }
+  },
+  "resolved_model": {
+    "algo_class": "SAC",
+    "device": "cuda",
+    "policy_class": "SACPolicy",
+    "net_arch": [
+      256,
+      256
+    ],
+    "activation_fn": "ReLU",
+    "policy_num_params": 364042,
+    "hyperparameters": {
+      "learning_rate": 0.0003,
+      "gamma": 0.995,
+      "batch_size": 256,
+      "seed": 0,
+      "tau": 0.005,
+      "buffer_size": 2000000,
+      "learning_starts": 100,
+      "train_freq": "TrainFreq(frequency=1, unit=<TrainFrequencyUnit.STEP: 'step'>)",
+      "gradient_steps": -1,
+      "ent_coef": 0.02,
+      "target_entropy": -3.0,
+      "target_update_interval": 1,
+      "n_steps": 1
+    }
+  }
+}
