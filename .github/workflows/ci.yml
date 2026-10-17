@@ -55,7 +55,10 @@ jobs:
       # With torch already satisfied, the editable install keeps it.
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e ".[train,dev]"
-      - run: mypy
+      # python -m: mypy must run in the interpreter that has numpy,
+      # gymnasium and SB3. A mypy that cannot see them (a global or uv
+      # tool install) passes silently under ignore_missing_imports.
+      - run: python -m mypy
 
   build:
     name: build

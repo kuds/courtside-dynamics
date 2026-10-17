@@ -16,10 +16,19 @@ each run produced:
   ``log_ent_coef``;
 - the final VecNormalize ``obs_rms`` / ``ret_rms`` and its settings
   (read from the pickled stats, never the pickle bytes);
+- the best-model artifacts that replay, evaluation, warm start and
+  promotion load: ``best_model.zip``'s policy weights and saved torch
+  variables (``log_ent_coef``) read back from the zip, and
+  ``best_vec_normalize.pkl``'s stats and settings;
 - the monitor CSVs (every column but the wall-clock ``t``);
 - ``evaluations.npz``; ``eval_info.csv`` without wall-clock rows;
-- the selection fields of ``best_model_meta.json`` (the artifact
-  sha256s are dropped: SB3 zips embed timestamps);
+- the selection fields of ``best_model_meta.json`` and the names of
+  the artifacts it binds (their sha256s are dropped from the
+  comparison, since SB3 zips embed timestamps, and checked against the
+  files on each side instead);
+- which run-layout artifacts exist (``RUN_LAYOUT`` names) and the
+  checkpoint file names, so an artifact that stops (or starts) being
+  written is a mismatch;
 - the checkpoint-diagnosis reports (PaddleTennis);
 - ``config.json``'s ``resolved_model`` (hyperparameters read back from
   the model), so a change the float32 math rounds away still shows;
@@ -61,7 +70,11 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # the orchestrator never imports the training stack
+    import torch
+    from stable_baselines3.common.base_class import BaseAlgorithm
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -223,9 +236,44 @@ def _hash_state_dict(state_dict: Any) -> str:
     return _sha(*chunks)
 
 
-def _hash_normalizer(path: Path | None) -> dict[str, str]:
+def _log_ent_coef(model: BaseAlgorithm) -> torch.Tensor | None:
+    """The SAC family's learned entropy temperature, if the model has one.
+
+    ``None`` for on-policy models and for a SAC with a fixed
+    ``ent_coef`` (SB3 then keeps ``ent_coef_tensor`` instead). DemoSAC
+    subclasses SAC.
+    """
+    from stable_baselines3 import SAC
+
+    return model.log_ent_coef if isinstance(model, SAC) else None
+
+
+def _hash_best_model(path: Path | None) -> dict[str, str]:
+    """``best_model.zip``'s policy weights and torch variables, from the zip.
+
+    Read through SB3's own ``load_from_zip_file`` without the pickled
+    ``data`` block (it serializes schedules and spaces whose bytes are
+    not a training output), so no algorithm class or env is needed.
+    The torch variables are SAC's ``log_ent_coef`` (or
+    ``ent_coef_tensor``); PPO saves none.
+    """
     if path is None:
-        return {"vecnormalize_obs_rms": "absent", "vecnormalize_ret_rms": "absent"}
+        return {"best_model_policy": "absent", "best_model_variables": "absent"}
+    from stable_baselines3.common.save_util import load_from_zip_file
+
+    _data, params, variables = load_from_zip_file(path, load_data=False, device="cpu")
+    return {
+        "best_model_policy": _hash_state_dict(params["policy"]),
+        "best_model_variables": (
+            _hash_state_dict(variables) if variables else "none"
+        ),
+    }
+
+
+def _hash_normalizer(path: Path | None, prefix: str = "vecnormalize") -> dict[str, str]:
+    """A pickled VecNormalize's running stats and settings, ``prefix``-keyed."""
+    if path is None:
+        return {f"{prefix}_obs_rms": "absent", f"{prefix}_ret_rms": "absent"}
     with open(path, "rb") as handle:
         normalizer = pickle.load(handle)
 
@@ -249,9 +297,9 @@ def _hash_normalizer(path: Path | None) -> dict[str, str]:
         )
     }
     return {
-        "vecnormalize_obs_rms": rms(normalizer.obs_rms),
-        "vecnormalize_ret_rms": rms(normalizer.ret_rms),
-        "vecnormalize_settings": _json_sha(settings),
+        f"{prefix}_obs_rms": rms(normalizer.obs_rms),
+        f"{prefix}_ret_rms": rms(normalizer.ret_rms),
+        f"{prefix}_settings": _json_sha(settings),
     }
 
 
@@ -291,12 +339,63 @@ def _hash_eval_info(log_dir: str) -> str:
 
 
 def _hash_best_meta(log_dir: str) -> str:
+    """``best_model_meta.json`` minus the artifact sha256s it binds.
+
+    The selection fields (timestep, keys, values, the selecting batch's
+    metrics, eval seed, confirmation, context) are kept whole, and so
+    are the *names* of the bound artifacts; only their sha256s go, since
+    SB3 zips embed timestamps. :func:`_check_best_meta_bindings` checks
+    those sha256s against the files instead.
+    """
     path = _locate(log_dir, "best_model_meta")
     if path is None:
         return "absent"
     meta = json.loads(path.read_text(encoding="utf-8"))
-    meta.pop("artifacts", None)  # zip sha256s embed timestamps
+    if "artifacts" in meta:
+        meta["artifacts"] = sorted(meta["artifacts"])
     return _json_sha(meta)
+
+
+def _check_best_meta_bindings(log_dir: str) -> str:
+    """Whether the files beside ``best_model_meta.json`` are the ones it binds.
+
+    The loaders refuse a best model / normalizer pair the meta does not
+    vouch for (``notebook_utils.verify_best_checkpoint_pair``), so a
+    side whose pair fails that check is reported as ``FAILED``, which
+    never counts as a match.
+    """
+    path = _locate(log_dir, "best_model_meta")
+    if path is None:
+        return "absent"
+    bound = json.loads(path.read_text(encoding="utf-8")).get("artifacts")
+    if not bound:
+        return "FAILED: best_model_meta.json binds no artifacts"
+    stale = [
+        name
+        for name, entry in sorted(bound.items())
+        if not (path.parent / name).is_file()
+        or _sha((path.parent / name).read_bytes()) != entry.get("sha256")
+    ]
+    if stale:
+        return f"FAILED: {', '.join(stale)} not the file(s) best_model_meta.json binds"
+    return "verified: " + ", ".join(sorted(bound))
+
+
+def _existing_layout_artifacts(log_dir: str) -> str:
+    """The ``RUN_LAYOUT`` names this run wrote (directories included)."""
+    from courtside_dynamics.training.artifacts import RUN_LAYOUT
+
+    return ", ".join(
+        sorted(name for name in RUN_LAYOUT if _locate(log_dir, name) is not None)
+    ) or "none"
+
+
+def _checkpoint_files(log_dir: str) -> str:
+    """The periodic checkpoints' file names (their cadence), if any."""
+    checkpoints = _locate(log_dir, "checkpoints_dir")
+    if checkpoints is None:
+        return "absent"
+    return ", ".join(sorted(p.name for p in checkpoints.iterdir())) or "none"
 
 
 def _hash_resolved_model(log_dir: str) -> str:
@@ -343,18 +442,24 @@ def run_job(name: str, src: str, log_dir: str, out: str) -> None:
     started = time.monotonic()
     cfg = JOBS[name](log_dir)
     model = train(cfg)
+    log_ent_coef = _log_ent_coef(model)
     components: dict[str, str] = {
         "policy_state_dict": _hash_state_dict(model.policy.state_dict()),
         "log_ent_coef": (
-            _sha(_array_bytes(model.log_ent_coef.detach().cpu().numpy()))
-            if getattr(model, "log_ent_coef", None) is not None
+            _sha(_array_bytes(log_ent_coef.detach().cpu().numpy()))
+            if log_ent_coef is not None
             else "n/a"
         ),
         **_hash_normalizer(_locate(log_dir, "vec_normalize")),
+        **_hash_best_model(_locate(log_dir, "best_model")),
+        **_hash_normalizer(_locate(log_dir, "best_vec_normalize"), "best_vecnormalize"),
         "monitor_csvs": _hash_monitors(log_dir),
         "evaluations_npz": _hash_evaluations(log_dir),
         "eval_info_csv": _hash_eval_info(log_dir),
         "best_model_meta": _hash_best_meta(log_dir),
+        "best_model_meta_bindings": _check_best_meta_bindings(log_dir),
+        "run_layout_artifacts": _existing_layout_artifacts(log_dir),
+        "checkpoint_files": _checkpoint_files(log_dir),
         "resolved_model": _hash_resolved_model(log_dir),
         "diagnosis_reports": _hash_diagnosis(log_dir),
         "numpy_rng": _json_sha(
@@ -453,6 +558,33 @@ def compare_runs(
     return rows, ok
 
 
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def readable_mismatches(
+    jobs: list[str], head: dict[str, Any], base: dict[str, Any]
+) -> list[str]:
+    """Full HEAD/base values of mismatched components that are not hashes.
+
+    The table truncates every value to 16 characters, which is enough to
+    tell two sha256s apart but hides what changed in a readable one (an
+    artifact list, a ``FAILED:`` reason).
+    """
+    lines = []
+    for job in jobs:
+        sides = (head[job], base[job])
+        if any("error" in side for side in sides):
+            continue
+        a, b = (side["components"] for side in sides)
+        for component in sorted(set(a) | set(b)):
+            x, y = a.get(component, "missing"), b.get(component, "missing")
+            if x != y or x.startswith("FAILED"):
+                if not (_is_sha256(x) and _is_sha256(y)):
+                    lines.append(f"{job} / {component}:\n  HEAD: {x}\n  base: {y}")
+    return lines
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--base", help="git ref to compare against")
@@ -520,6 +652,8 @@ def main(argv: list[str] | None = None) -> int:
     print()
     for row in [("job", "component", "HEAD", "base", "status"), *rows]:
         print("  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)))
+    for line in readable_mismatches(jobs, head, base):
+        print(f"\n{line}")
     for job in jobs:
         for label, side in (("HEAD", head[job]), ("base", base[job])):
             if "error" in side:

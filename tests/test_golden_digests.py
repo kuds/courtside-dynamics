@@ -36,7 +36,9 @@ from courtside_dynamics.digests import (
     FULL_CASES,
     MISMATCH_EXPLANATION,
     PADDLE_TENNIS_REWARD_INFO_KEYS,
+    RESET_MODES,
     StreamCase,
+    _numpy_umath,
     _oracle_policy,
     digest_mismatches,
     expected_digest,
@@ -44,6 +46,7 @@ from courtside_dynamics.digests import (
     info_value_bytes,
     iter_stream,
     left_to_right_sum,
+    numpy_simd_dispatch,
     order_sensitive_swaps,
     stream_digest,
     version_info,
@@ -98,9 +101,11 @@ def test_golden_records_exactly_the_defined_cases(golden, set_name):
     """No stale entry, no unrecorded case: either drifts silently."""
     cases = {"ci": CI_CASES, "full": FULL_CASES}[set_name]
     assert sorted(golden["sets"][set_name]) == sorted(case.name for case in cases)
+    # Entries recorded before version_info() gained numpy_simd lack it.
+    required = version_info().keys() - {"numpy_simd"}
     for name, entry in golden["sets"][set_name].items():
         assert "stream_sha256" in entry, f"{name} has no primary digest"
-        assert entry["versions"].keys() == version_info().keys()
+        assert required <= entry["versions"].keys() <= version_info().keys(), name
         for label, slot in entry.get("declared_drift", {}).items():
             assert name in DECLARED_DRIFT[label], (name, label)
             assert slot["reason"] == DECLARED_DRIFT[label][name]
@@ -118,7 +123,7 @@ def test_stream_digest_matches_golden(golden, case):
 
 def test_paddle_cases_cover_all_nine_reward_terms():
     paddle = [case for case in CI_CASES if case.recipe == "PaddleTennis"]
-    assert len(paddle) == 12
+    assert len(paddle) == 14
     for case in paddle:
         assert case.required_info_keys == PADDLE_TENNIS_REWARD_INFO_KEYS
         # Every step's reward must be their left-to-right sum, bit for bit.
@@ -383,6 +388,109 @@ def test_legal_volley_case_drives_the_lead_charge_oracle():
         env.close()
 
 
+def test_reset_modes_pick_the_seed_each_episode_resets_with():
+    each = StreamCase(name="x", recipe="BallBalance", policy="zero", seeds=(7,), steps=1)
+    once = dataclasses.replace(each, reset="seed_once")
+    assert RESET_MODES == ("seed_each", "seed_once")
+    assert each.reset == "seed_each"  # the default keeps every older golden
+    assert [each.reset_seed(7, k) for k in range(3)] == [7, 8, 9]
+    assert [once.reset_seed(7, k) for k in range(3)] == [7, None, None]
+
+
+def test_seed_once_carries_the_rng_and_the_serve_alternation():
+    """The training path: one seeded reset, then ``seed=None`` (SB3).
+
+    Reseeding every episode restarts PaddleTennis' serve alternation at
+    side A and redraws the serve from a fresh RNG; seeding once lets
+    both carry, so later episodes serve from alternating sides and
+    their serves come from the carried RNG stream.
+    """
+
+    def resets(mode: str) -> list:
+        case = StreamCase(
+            name="x", env_cls=PaddleTennisEnv, policy="random", seeds=(0,),
+            steps=700, reset=mode,
+        )
+        return [record for record in iter_stream(case) if record.step is None]
+
+    each, once = resets("seed_each"), resets("seed_once")
+    assert [r.info["serve_side"] for r in each] == ["a", "a", "a"]
+    assert [r.info["serve_side"] for r in once] == ["a", "b", "a", "b"]
+    # The first reset is seeded identically in both modes ...
+    assert np.array_equal(each[0].obs, once[0].obs)
+    assert np.array_equal(each[0].qpos, once[0].qpos)
+    # ... and a later serve from the same side comes from another draw.
+    assert not np.array_equal(each[2].qpos, once[2].qpos)
+
+
+def test_ci_runs_the_training_path_resets():
+    """Seed-once cases: PaddleTennis random and oracle over at least three
+    episodes (two unseeded resets), plus one WallBall case."""
+    once = {case.name: case for case in CI_CASES if case.reset == "seed_once"}
+    assert sorted(once) == [
+        "paddle_tennis/recipe/oracle_seed_once",
+        "paddle_tennis/recipe/random_seed_once",
+        "wall_ball_true_baseline/oracle_seed_once",
+    ]
+    golden = golden_digest.load_golden(GOLDEN_PATH)["sets"]["ci"]
+    for name, case in once.items():
+        assert case.reset_options == ()  # SB3's auto-resets pass none
+        assert golden[name]["episodes"] >= 3, name
+    assert once["paddle_tennis/recipe/random_seed_once"].policy == "random"
+    assert once["paddle_tennis/recipe/oracle_seed_once"].policy == "oracle"
+
+
+def test_version_info_records_the_numpy_simd_path():
+    simd = version_info()["numpy_simd"]
+    assert simd == numpy_simd_dispatch()
+    assert simd.startswith("baseline ") and "; dispatch " in simd
+
+
+#: CI cases replayed with numpy's SIMD dispatch switched off, one per
+#: env family. The numpy float64 math the env code calls (np.sin,
+#: np.cos, np.hypot, np.sqrt, np.linalg.norm) does not move with the
+#: dispatch; the loops that do (exp, log1p, arctan2, ...) appear
+#: nowhere in it. This keeps that true as the code changes.
+_DISPATCH_CASES = (
+    "paddle_tennis/recipe/oracle_nan_contact_escrow",
+    "wall_ball_true_baseline/oracle",
+    "ball_bounce/oracle",
+    "ball_balance/random",
+    "humanoid_tennis_coop/random",
+)
+
+
+def test_streams_do_not_depend_on_numpy_simd_dispatch():
+    """The goldens must match on a runner without this CPU's SIMD paths.
+
+    numpy picks AVX-512, AVX2 or baseline loops at import, and several
+    float64 transcendentals (exp, log1p, arctan2, ...) round differently
+    on each (``digests.numpy_simd_dispatch``). A stream that called one
+    would match its goldens only on CPUs with the recording's SIMD, and
+    GitHub's runners vary. Every dispatch target is disabled in a
+    subprocess, so this runs the baseline path whatever the CPU, and
+    the streams must not move.
+    """
+    disabled = " ".join(_numpy_umath().__cpu_dispatch__)
+    if not disabled:
+        pytest.skip("this numpy build dispatches nothing at runtime")
+    env = {
+        **os.environ,
+        "NPY_DISABLE_CPU_FEATURES": disabled,
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    }
+    argv = [sys.executable, str(REPO_ROOT / "tools" / "golden_digest.py")]
+    for name in _DISPATCH_CASES:
+        argv += ["--case", name]
+    result = subprocess.run(
+        argv, capture_output=True, text=True, env=env, cwd=REPO_ROOT, timeout=300
+    )
+    assert "; dispatch none" in result.stdout, result.stdout + result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"{len(_DISPATCH_CASES)}/{len(_DISPATCH_CASES)} cases match" in result.stdout
+
+
 def test_stream_digest_is_sensitive_to_the_nan_injection():
     clean = StreamCase(
         name="probe", recipe="BallBalance", policy="zero", seeds=(0,), steps=40
@@ -498,6 +606,15 @@ def test_case_validation_is_loud():
         StreamCase(name="x", recipe="Nope", policy="zero", seeds=(0,), steps=1)
     with pytest.raises(ValueError, match="policy must be one of"):
         StreamCase(name="x", recipe="BallBalance", policy="best", seeds=(0,), steps=1)
+    with pytest.raises(ValueError, match="reset must be one of"):
+        StreamCase(
+            name="x",
+            recipe="BallBalance",
+            policy="zero",
+            seeds=(0,),
+            steps=1,
+            reset="seed_never",
+        )
     with pytest.raises(ValueError, match="nan_action_step"):
         StreamCase(
             name="x",

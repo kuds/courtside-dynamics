@@ -18,6 +18,34 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **Refactor-gate leftovers (2026-10-17).** No env stream or training
+  path changes: every existing golden entry reproduces unchanged, and
+  the trainer digest against `f920d8f` matches on every job.
+  - CI's typecheck passes again. Three errors (`Env.data`, an
+    `np.full` shape that may be `None`, `BaseAlgorithm.log_ent_coef`)
+    are narrowed with typed checks, and CI runs `python -m mypy`. A
+    mypy without numpy, Gymnasium and SB3 beside it passes silently;
+    README "Refactor gates" says how to run it as CI does.
+  - Golden cases gain a reset mode. `"seed_once"` seeds the first
+    reset only, as SB3's VecEnvs do in training, so the env RNG and
+    PaddleTennis' serve alternation carry across episodes. New CI
+    cases: the PaddleTennis recipe under random and oracle play over
+    three episodes, and the WallBall TrueBaseline oracle. CI now runs
+    22 cases in about 45 s.
+  - The trainer digest also compares the best-model artifacts: the
+    policy weights and `log_ent_coef` inside `best_model.zip`,
+    `best_vec_normalize.pkl`'s stats, the meta's selection fields and
+    bound artifact names (each side checks the bound sha256s against
+    its files), which run-layout artifacts exist, and the checkpoint
+    file names.
+  - `digests.version_info()` records numpy's SIMD dispatch. The CI
+    goldens match with AVX-512, or all SIMD dispatch, disabled (the
+    env code calls no dispatch-sensitive numpy loop), and a test
+    replays one case per env family with every dispatch target off.
+  - `tests/test_packaging.py` checks that the installed dependencies,
+    and the imported MuJoCo, satisfy the declared ranges ("mujoco
+    3.16.0 violates the declared range ..."), and reads the CI
+    workflow's install lines through quoting and flag variants.
 - **Refactor-gate hardening (2026-10-16).** No env stream or training
   path changes: every recorded `stream_sha256` reproduces unchanged.
   Fixes from the gates' review (see DECISIONS):
@@ -32,7 +60,7 @@ supersedes it (see the ground-rules bullet).
     order-sensitive reward in the CI streams.
   - New cases: `volley_rule="legal"` with the lead-charge oracle, and
     the k=2 drill in both launch arms from a library harvested
-    in-process. CI now runs 19 cases in about 40 s.
+    in-process.
   - The digest and snapshot tools and the test suite refuse to run
     when `courtside_dynamics` imports from another checkout (a git
     worktree's editable install).
@@ -43,8 +71,9 @@ supersedes it (see the ground-rules bullet).
   stream or training path changes. Three refactor gates (see DECISIONS):
   - `courtside_dynamics.digests` plus `tools/golden_digest.py`
     (`--check`, `--write`, `--full`) check per-step env-stream and info
-    digests against `tests/golden/env_digests.json`. CI runs 15 cases in
-    about 30 s through `tests/test_golden_digests.py`, including the
+    digests against `tests/golden/env_digests.json`. CI runs the fast
+    set (22 cases in about 45 s, with the cases added below) through
+    `tests/test_golden_digests.py`, including the
     NaN-with-pending-escrow witnesses. The humanoid case has a declared
     MuJoCo 3.16 drift slot.
   - `tools/recipe_snapshot.py` freezes every recipe's resolved
@@ -65,7 +94,8 @@ supersedes it (see the ground-rules bullet).
   humanoid Stage-1 oracle off its calibration (138 steps, target
   missed), while the PaddleTennis, WallBall and BallBounce streams are
   identical from 3.12 through 3.16. Below 3.12 the streams move: 3.11
-  changes the humanoid stream, 3.10 every other env's (see DECISIONS).
+  changes the humanoid stream, and 3.10 every golden case but the
+  WallBall TrueBaseline random stream (see DECISIONS).
   The `gymnasium` floor rises to 1.1.1, since 1.1.0 cannot construct
   any courtside env. The license is now the SPDX string `MIT` with no License
   classifier, built with `setuptools>=77`. CI's typecheck and test

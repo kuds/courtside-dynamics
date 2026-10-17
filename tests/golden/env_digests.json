@@ -326,6 +326,27 @@
           "python": "3.13.16"
         }
       },
+      "paddle_tennis/recipe/oracle_seed_once": {
+        "episodes": 3,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "4204dbf85b29af6cdb744eaf7b6355f649872115849f29da0777ee729d475a76",
+        "interface_sha256": "dda97a03bcdca7555df05f208586c09f70dabedd5fb0d34ac67e39aad454cebb",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 25.02966147467599,
+        "steps": 3200,
+        "stream_sha256": "d3d3fd062244f5883ee688fd43883c71fab8322ee516d32875f29e551b76312e",
+        "terminations": 0,
+        "truncations": 2,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4",
+          "python": "3.13.16"
+        }
+      },
       "paddle_tennis/recipe/random": {
         "episodes": 2,
         "info_key_count": 165,
@@ -343,6 +364,27 @@
           "machine": "x86_64",
           "mujoco": "3.15.0",
           "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/random_seed_once": {
+        "episodes": 3,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "328b7d90f22f85cbc87969945157e2d7aa3ccaaf503ea6cd62b288768dbf484f",
+        "interface_sha256": "dda97a03bcdca7555df05f208586c09f70dabedd5fb0d34ac67e39aad454cebb",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": -14.0,
+        "steps": 3200,
+        "stream_sha256": "ba9d061444d6ffab758bba45fd14ea06b8f6f656d3989d2c8e0bc9ef198e5252",
+        "terminations": 0,
+        "truncations": 2,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4",
           "python": "3.13.16"
         }
       },
@@ -382,6 +424,26 @@
           "machine": "x86_64",
           "mujoco": "3.15.0",
           "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "wall_ball_true_baseline/oracle_seed_once": {
+        "episodes": 12,
+        "info_key_count": 58,
+        "info_keys_sha256": "6a978b71f6397d5c44f25c0d9e9a42ac9594bb09576cde407aa04a632c435f5a",
+        "info_sha256": "ac9e87dfc68b22ebd0dfed93bbfbbdf190ad5f21cc4682685821866de11caa2d",
+        "interface_sha256": "74a77fede15753d1dd0f11085ff2051ae5bdcdb69629198025c7f08cccd9a223",
+        "reward_sum": 79.01262518164873,
+        "steps": 3000,
+        "stream_sha256": "82f7591ea3085f1e1e9db41eb565cf850a28a5ab88dbe1b1147572fde9481c79",
+        "terminations": 11,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4",
           "python": "3.13.16"
         }
       },
@@ -729,6 +791,27 @@
           "python": "3.13.16"
         }
       },
+      "paddle_tennis/recipe/oracle_seed_once": {
+        "episodes": 15,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "4d801cfb96fbb92090805b9a5f9e03fcab40af8cb0bf3c285013c35a3146aef3",
+        "interface_sha256": "51514d175436e1b3693aeff4408813d05a5b4e314c98b40d6bce23ef912fcabe",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 128.67937387505427,
+        "steps": 16000,
+        "stream_sha256": "a59c2769f4f87418d054224d2c1d486a05d1693b5fd7d2ae1a0a3ec84c000e43",
+        "terminations": 0,
+        "truncations": 10,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4",
+          "python": "3.13.16"
+        }
+      },
       "paddle_tennis/recipe/random": {
         "episodes": 10,
         "info_key_count": 165,
@@ -746,6 +829,27 @@
           "machine": "x86_64",
           "mujoco": "3.15.0",
           "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/random_seed_once": {
+        "episodes": 15,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "079a64b4f9daccb8120d16ea4545004a32c4b4e4c6168d64e9cf039fe256e00f",
+        "interface_sha256": "51514d175436e1b3693aeff4408813d05a5b4e314c98b40d6bce23ef912fcabe",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": -60.0,
+        "steps": 16000,
+        "stream_sha256": "7a08c4bb6511f5b547bc2a7919a10c81b2231ba0815f2880295966cb26ba2569",
+        "terminations": 0,
+        "truncations": 10,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4",
           "python": "3.13.16"
         }
       },
@@ -785,6 +889,26 @@
           "machine": "x86_64",
           "mujoco": "3.15.0",
           "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "wall_ball_true_baseline/oracle_seed_once": {
+        "episodes": 63,
+        "info_key_count": 58,
+        "info_keys_sha256": "6a978b71f6397d5c44f25c0d9e9a42ac9594bb09576cde407aa04a632c435f5a",
+        "info_sha256": "18be46333d3c475b69429bcdf5087982a501a826557a8c20b4ff6134b9048307",
+        "interface_sha256": "58bccf360874d0e5aa5c20d1896eb5947223748bd987e9f978ac81f6e3110d45",
+        "reward_sum": 387.41630685812066,
+        "steps": 15000,
+        "stream_sha256": "fad1493024ff7eb3468f88589f3fea92e86dbafd84237d5b2f9dd1fb9ea8f93a",
+        "terminations": 58,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4",
           "python": "3.13.16"
         }
       },

@@ -63,6 +63,114 @@ def test_best_meta_hash_drops_only_the_artifact_shas(tmp_path):
     first = hashed({**meta, "artifacts": {"best_model.zip": {"sha256": "a"}}})
     assert first == hashed({**meta, "artifacts": {"best_model.zip": {"sha256": "b"}}})
     assert first != hashed({**meta, "timestep": 1536})
+    # Which artifacts the meta binds is compared; only their sha256s are not.
+    both = {"best_model.zip": {"sha256": "a"}, "best_vec_normalize.pkl": {"sha256": "c"}}
+    assert first != hashed({**meta, "artifacts": both})
+
+
+def _write_best_pair(run: Path, *, bind: dict[str, bytes] | None = None) -> Path:
+    model = run / "model"
+    model.mkdir(parents=True)
+    files = {"best_model.zip": b"zip", "best_vec_normalize.pkl": b"pkl"}
+    for name, content in files.items():
+        (model / name).write_bytes(content)
+    bound = files if bind is None else bind
+    meta = {
+        "timestep": 768,
+        "artifacts": {
+            name: {"sha256": trainer_digest._sha(content)}
+            for name, content in bound.items()
+        },
+    }
+    (model / "best_model_meta.json").write_text(json.dumps(meta))
+    return model
+
+
+def test_best_meta_bindings_are_checked_against_the_files(tmp_path):
+    """A pair the meta does not vouch for is FAILED, which never matches."""
+    check = trainer_digest._check_best_meta_bindings
+    assert check(str(tmp_path / "none")) == "absent"
+    _write_best_pair(tmp_path / "ok")
+    assert check(str(tmp_path / "ok")) == (
+        "verified: best_model.zip, best_vec_normalize.pkl"
+    )
+    _write_best_pair(
+        tmp_path / "stale", bind={"best_model.zip": b"zip", "best_vec_normalize.pkl": b"x"}
+    )
+    assert check(str(tmp_path / "stale")) == (
+        "FAILED: best_vec_normalize.pkl not the file(s) best_model_meta.json binds"
+    )
+    _write_best_pair(tmp_path / "unbound", bind={})
+    assert check(str(tmp_path / "unbound")) == (
+        "FAILED: best_model_meta.json binds no artifacts"
+    )
+    _write_best_pair(tmp_path / "missing")
+    (tmp_path / "missing" / "model" / "best_model.zip").unlink()
+    assert check(str(tmp_path / "missing")).startswith("FAILED: best_model.zip")
+
+
+def test_layout_and_checkpoint_listings_name_what_exists(tmp_path):
+    run = tmp_path / "run"
+    assert trainer_digest._existing_layout_artifacts(str(run)) == "none"
+    assert trainer_digest._checkpoint_files(str(run)) == "absent"
+    _write_best_pair(run)
+    (run / "config.json").write_text("{}")
+    (run / "checkpoints").mkdir()
+    for name in ("x_1536_steps.zip", "x_768_steps.zip"):
+        (run / "checkpoints" / name).write_bytes(b"")
+    assert trainer_digest._existing_layout_artifacts(str(run)) == (
+        "best_model, best_model_meta, best_vec_normalize, checkpoints_dir, config"
+    )
+    assert trainer_digest._checkpoint_files(str(run)) == (
+        "x_1536_steps.zip, x_768_steps.zip"
+    )
+
+
+def test_best_model_hash_reads_the_weights_not_the_zip_bytes(tmp_path):
+    """Two saves of one model hash alike (SB3 zips embed timestamps); a
+    weight or temperature change, or another algorithm, does not."""
+    import torch
+    from stable_baselines3 import PPO, SAC
+
+    sac = SAC("MlpPolicy", "Pendulum-v1", buffer_size=64, seed=0, device="cpu")
+    sac.save(tmp_path / "a")
+    sac.save(tmp_path / "b")
+    hashed = trainer_digest._hash_best_model
+    first = hashed(tmp_path / "a.zip")
+    assert first == hashed(tmp_path / "b.zip")
+    assert first["best_model_variables"] not in ("none", "absent")
+    with torch.no_grad():
+        sac.log_ent_coef.add_(1.0)
+    sac.save(tmp_path / "c")
+    moved = hashed(tmp_path / "c.zip")
+    assert moved["best_model_policy"] == first["best_model_policy"]
+    assert moved["best_model_variables"] != first["best_model_variables"]
+    with torch.no_grad():
+        next(iter(sac.policy.parameters())).add_(1e-3)
+    sac.save(tmp_path / "d")
+    assert hashed(tmp_path / "d.zip")["best_model_policy"] != first["best_model_policy"]
+
+    ppo = PPO("MlpPolicy", "Pendulum-v1", n_steps=64, seed=0, device="cpu")
+    ppo.save(tmp_path / "ppo")
+    assert hashed(tmp_path / "ppo.zip")["best_model_variables"] == "none"
+    assert hashed(None) == {"best_model_policy": "absent", "best_model_variables": "absent"}
+
+
+def test_log_ent_coef_accessor_follows_the_algorithm_family():
+    from stable_baselines3 import PPO, SAC
+
+    from courtside_dynamics.training.demo_sac import DemoSAC
+
+    auto = SAC("MlpPolicy", "Pendulum-v1", buffer_size=64, seed=0, device="cpu")
+    assert trainer_digest._log_ent_coef(auto) is auto.log_ent_coef is not None
+    demo = DemoSAC("MlpPolicy", "Pendulum-v1", buffer_size=64, seed=0, device="cpu")
+    assert trainer_digest._log_ent_coef(demo) is demo.log_ent_coef is not None
+    fixed = SAC(
+        "MlpPolicy", "Pendulum-v1", buffer_size=64, ent_coef=0.1, seed=0, device="cpu"
+    )
+    assert trainer_digest._log_ent_coef(fixed) is None
+    ppo = PPO("MlpPolicy", "Pendulum-v1", n_steps=64, seed=0, device="cpu")
+    assert trainer_digest._log_ent_coef(ppo) is None
 
 
 def test_compare_runs_is_loud_about_mismatches_and_failures():
@@ -78,6 +186,25 @@ def test_compare_runs_is_loud_about_mismatches_and_failures():
     failed = {"components": {"diagnosis_reports": "FAILED: probe crashed"}}
     _, ok = trainer_digest.compare_runs(["j"], {"j": failed}, {"j": failed})
     assert not ok  # a failed diagnosis never counts as a match
+
+
+def test_readable_mismatches_print_what_the_table_truncates():
+    sha_a, sha_b = "a" * 64, "b" * 64
+    head = {"j": {"components": {
+        "policy_state_dict": sha_a,
+        "run_layout_artifacts": "best_model, config, monitor_dir",
+        "best_model_meta_bindings": "FAILED: best_model.zip not bound",
+    }}}
+    base = {"j": {"components": {
+        "policy_state_dict": sha_b,
+        "run_layout_artifacts": "best_model, best_model_meta, config, monitor_dir",
+        "best_model_meta_bindings": "FAILED: best_model.zip not bound",
+    }}}
+    lines = trainer_digest.readable_mismatches(["j"], head, base)
+    assert len(lines) == 2  # the two sha256s stay in the table only
+    assert "HEAD: best_model, config, monitor_dir" in lines[1]
+    assert "base: best_model, best_model_meta, config, monitor_dir" in lines[1]
+    assert lines[0].startswith("j / best_model_meta_bindings:")
 
 
 @pytest.mark.parametrize("job", sorted(trainer_digest.JOBS))

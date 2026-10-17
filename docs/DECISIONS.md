@@ -730,13 +730,55 @@ moves unless the change is declared, and three gates make that checkable:
   flag types. All nine `rew_*` keys are required at every PaddleTennis
   step. `tools/golden_digest.py` checks against
   `tests/golden/env_digests.json`, and `tests/test_golden_digests.py`
-  gates CI. The 19 CI cases take about 40 s serial: the recipe ×
+  gates CI. The 22 CI cases take about 45 s serial: the recipe ×
   {zero, random, oracle, camper}, one-point with alternating serves,
   the +hold arm, `volley_rule="legal"` with the lead-charge oracle, the
-  k=2 drill in both launch arms, three NaN witnesses, WallBall
-  TrueBaseline, BallBounce, BallBalance and 300 humanoid steps.
+  k=2 drill in both launch arms, three NaN witnesses, the recipe's
+  random and oracle streams reset the way training resets them,
+  WallBall TrueBaseline (random, oracle, and the oracle reset the
+  training way), BallBounce, BallBalance and 300 humanoid steps.
   `--full` runs five spaced seeds per case (two for the humanoid case;
   the NaN witnesses stay on the one seed each is calibrated on).
+- **Reset modes.** The original cases reseed every episode
+  (`env.reset(seed=seed + episode)`), so each episode reproduces on its
+  own, but training never resets that way: SB3's `DummyVecEnv` seeds
+  its first reset and auto-resets with `reset()` (no seed, no options)
+  from then on, so the env RNG and any state the env keeps across
+  resets carry over. PaddleTennis keeps its serve alternation, which a
+  seeded reset restarts at side A. A refactor that, say, re-derived the
+  serve side on every reset would pass every reseeded case. A case's
+  `reset` field picks `"seed_each"` (the default, so every older
+  golden reproduces unchanged) or `"seed_once"`. Three seed-once CI
+  cases run the training path: the PaddleTennis recipe under random
+  and oracle play for 3,200 steps (two 1,500-step episodes and 200
+  steps of a third, so two unseeded resets), and the WallBall
+  TrueBaseline oracle for 3,000 steps (12 episodes). On seed 0 the
+  oracle's three episodes serve from sides A, B and A; a test pins
+  that seed-once resets alternate the serve and draw later serves
+  from the carried RNG, where seed-each resets serve from A every
+  time. The new cases are recorded as new entries; no existing entry
+  changed.
+- **SIMD dispatch.** numpy picks AVX-512, AVX2 or baseline ufunc
+  loops at import, and some of them round differently. On numpy 2.5.3
+  (x86-64, 2×10⁵ random inputs) these float64 loops give other last
+  bits without AVX-512: `exp` (4.7% of inputs), `log1p`, `expm1`,
+  `power`, `arcsin`, `arccos`, `arctan2`, `cbrt`, and rarely `log`,
+  `tan` and `arctan`. `tanh` differs without AVX2 (20%). Float64
+  `sin`, `cos`, `sqrt` and `hypot` do not move. The env code calls
+  only those four (and `np.linalg.norm`) from numpy's math; its few
+  other transcendentals are Python `math` calls (libm, no dispatch),
+  and the physics is MuJoCo's compiled code. So the goldens,
+  recorded on an AVX-512 machine, still match on GitHub's runners,
+  which may lack AVX-512 (often an AMD EPYC 7763). Measured: all 22 CI cases match
+  with AVX-512 disabled (`NPY_DISABLE_CPU_FEATURES="X86_V4 AVX512_ICL
+  AVX512_SPR"`, numpy 2.x names; numpy 1.26 calls them `AVX512F
+  AVX512CD AVX512_SKX AVX512_CLX`), with AVX2 disabled as well, and the
+  full set matches with AVX-512 disabled. `version_info()` now records
+  the dispatch (`numpy_simd`, e.g. `baseline X86_V2; dispatch X86_V3
+  X86_V4`), and a CI test replays one case per env family with every
+  dispatch target disabled, so a refactor that brings, say, an
+  `np.exp` into a stream is caught on any CPU before a runner with
+  other SIMD finds it.
 - **NaN witnesses.** These sit on pending escrows, and a test re-proves
   them from the stream's own info. A NaN action at step 250 of the
   seed-0 recipe oracle stream claws back the contact escrow (−0.25). At
@@ -780,9 +822,28 @@ moves unless the change is declared, and three gates make that checkable:
   and on a temporary worktree of the ref. It compares policy weights,
   `log_ent_coef`, normalizer stats, monitor, evaluations,
   `eval_info.csv`, selection meta, diagnosis reports, RNG states and
-  `resolved_model`. Both sides take about 100 s together, under
+  `resolved_model`. It also compares the best-model artifacts that
+  replay, evaluation, warm start and promotion load: the policy weights
+  and torch variables (`log_ent_coef`) read back from `best_model.zip`,
+  `best_vec_normalize.pkl`'s stats and settings, and the selection
+  fields and bound artifact names of `best_model_meta.json`. The
+  meta's sha256s cannot be compared across sides, since SB3 zips embed
+  timestamps, so each side checks them against its own files, as the
+  loaders do, and a failed check never counts as a match. Finally it
+  compares which `RUN_LAYOUT` artifacts exist and the checkpoint file
+  names. Both sides take about 100 s together, under
   different hash seeds (`PYTHONHASHSEED` 1 and 0), so a str-hash-order
   dependence shows up as a mismatch.
+- **Typecheck.** Run mypy as CI does: `python -m mypy` in an
+  environment with the train extra (CI: Python 3.11). With
+  `ignore_missing_imports`, a mypy that cannot import numpy, Gymnasium
+  and SB3 (a global or `uv tool` install) treats them as `Any` and
+  passes. That is how three errors reached CI's typecheck (an
+  `Env.data` access, an `np.full` shape that may be `None`, and
+  `BaseAlgorithm.log_ent_coef`), each now narrowed with a typed check.
+  CI runs `python -m mypy`, and `tests/test_packaging.py` pins that and
+  the CPU-torch order, reading the workflow's install lines through
+  quoting and flag variants.
 - **Names.** The PPO design's Step 0 names `tests/test_sac_freeze.py`
   and `tools/sac_freeze_digest.py`. Part 1 shipped as
   `tools/recipe_snapshot.py` plus `tests/test_recipe_snapshot.py`, and
@@ -801,7 +862,10 @@ moves unless the change is declared, and three gates make that checkable:
   CI set matches 19/19 under MuJoCo 3.12.0, 3.15.0 and 3.16.0, Python
   3.11 and 3.13, numpy 1.26.4, 2.4.6 and 2.5.x, and gymnasium 1.1.1 and
   1.4.0; the full set matches under 3.16. With HEAD and the base on
-  different hash seeds, every trainer component still matches.
+  different hash seeds, every trainer component still matches. With
+  the seed-once cases, the 22-case CI set matches 22/22 under MuJoCo
+  3.12.0, 3.15.0 and 3.16.0, under Python 3.11 with numpy 2.4.6, and
+  with AVX-512 or all SIMD dispatch disabled.
 - **Decisions.**
   - Primary digests are recorded under the supported MuJoCo (what CI
     resolves). A version-specific difference lives only in a
@@ -816,7 +880,9 @@ moves unless the change is declared, and three gates make that checkable:
     those of `4e2e019`, the commit before the import move.
   - `--write` leaves every reproduced entry untouched, versions
     included, and prints each change. The mismatch text says to
-    declare, never to re-record.
+    declare, never to re-record. Entries recorded before `numpy_simd`
+    joined `version_info()` keep versions without it: the CPU that
+    recorded them is unknown, so it is not backfilled.
   - Info values with no canonical form raise instead of being skipped.
     Every info key counts in the census, so adding, renaming or
     removing an array- or tuple-valued item is visible.
@@ -1110,12 +1176,15 @@ humanoid notebook's Stage-1 preflight.
   versions share differs, except the declarative `actuator_ctrlspec`.
   PaddleTennis, WallBall and BallBounce per-step digests are identical
   from 3.12 through 3.16 (`repo_review_20261016.md` §1).
-- **Floor evidence.** The format-2 golden CI set (19 cases) matches 19/19
-  on 3.12.0 and 18/19 on 3.11.0, where the humanoid random stream
-  moves. The gates' review measured the format-1 set at 1/15 on
-  3.10.0, where every PaddleTennis, WallBall, BallBounce and
-  BallBalance case moves, and at 0/15 on 3.3.0, where the Stage-1
-  oracle takes 127 steps instead of 129.
+- **Floor evidence.** The golden CI set (22 cases, seed-once cases
+  included) matches 22/22 on 3.12.0 and 21/22 on 3.11.0, where the
+  humanoid random stream moves. On 3.10.0 it matches 1/22: every
+  PaddleTennis, BallBounce, BallBalance and humanoid case moves, and
+  so do both WallBall TrueBaseline oracle cases; only its random
+  stream reproduces. (The gates' review measured the format-1 set at
+  the same 1/15 there, the one match being that WallBall random case.)
+  On 3.3.0 the format-1 set matched 0/15, and the Stage-1 oracle takes
+  127 steps instead of 129.
 - **Decision.** Bound `mujoco>=3.12,<3.16`: the supported range is
   exactly the range that reproduces the golden digests, so "every other
   version must reproduce the primary" holds on all of it. 3.12 is also

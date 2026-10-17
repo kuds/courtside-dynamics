@@ -33,9 +33,15 @@ the physics under it) can see.
   association of both reward sums on forced adversarial terms as well,
   since the natural streams rarely put three terms on one step.
 
-Episodes reset with ``seed = stream seed + episode index`` until the
-step budget is spent; each seed's stream rolls on a freshly constructed
-env, so a multi-seed digest is the concatenation of independent streams.
+A case resets in one of two modes (:data:`RESET_MODES`) until the step
+budget is spent. ``"seed_each"`` (the default) reseeds every episode
+with ``seed = stream seed + episode index``, so each episode is
+reproducible on its own. ``"seed_once"`` is the path training runs:
+SB3's VecEnvs seed the first reset and auto-reset with ``seed=None``
+from then on, so the env's RNG -- and any state it keeps across resets,
+such as PaddleTennis' serve alternation -- carries from one episode
+into the next. Each seed's stream rolls on a freshly constructed env,
+so a multi-seed digest is the concatenation of independent streams.
 A ``drill_library`` case plays the k=2 drill from a tiny library that
 :func:`build_drill_library` harvests deterministically in-process.
 
@@ -55,6 +61,7 @@ from __future__ import annotations
 import copy
 import functools
 import hashlib
+import importlib
 import itertools
 import pickle
 import platform
@@ -68,6 +75,7 @@ from typing import Any
 import gymnasium
 import mujoco
 import numpy as np
+from gymnasium.envs.mujoco import MujocoEnv
 
 from courtside_dynamics.envs import (
     BallBounceEnv,
@@ -97,6 +105,14 @@ from courtside_dynamics.scripted_policies import (
 #: - ``"camper"``: a constant action that parks the paddle somewhere
 #:   meaningful for the env's shaping (see :func:`_camper_policy`).
 POLICIES = ("zero", "random", "oracle", "camper")
+
+#: How a :class:`StreamCase` reseeds its episodes.
+#:
+#: - ``"seed_each"``: episode ``k`` resets with ``seed=stream seed + k``.
+#: - ``"seed_once"``: episode 0 resets with the stream seed and every
+#:   later episode with ``seed=None``, as SB3's ``DummyVecEnv`` does
+#:   after its first reset, so RNG and cross-episode env state carry.
+RESET_MODES = ("seed_each", "seed_once")
 
 #: The nine per-step reward-decomposition keys PaddleTennis publishes;
 #: they sum exactly to the step reward. Every PaddleTennis case requires
@@ -140,8 +156,12 @@ class StreamCase:
     top as overrides; an ``env_cls`` is built from ``env_kwargs`` alone.
 
     ``steps`` is the per-seed budget of ``env.step`` calls. Within a
-    seed's stream, episode ``k`` resets with ``seed + k`` and, when
-    ``reset_options`` is non-empty, ``reset_options[k % len]``.
+    seed's stream, episode ``k`` resets with ``seed + k`` under
+    ``reset="seed_each"`` (the default), or with ``seed`` for ``k = 0``
+    and ``None`` after it under ``reset="seed_once"`` (the training
+    path; see :data:`RESET_MODES`). Either way, when ``reset_options``
+    is non-empty, episode ``k`` passes ``reset_options[k % len]``; SB3's
+    auto-resets pass none, so the ``seed_once`` cases leave it empty.
 
     ``nan_action_step`` replaces the policy's action with an all-NaN
     one at that 0-based ``env.step`` index of every seed's stream
@@ -177,11 +197,17 @@ class StreamCase:
     required_info_keys: tuple[str, ...] = ()
     reward_terms: tuple[str, ...] = ()
     drill_library: bool = False
+    reset: str = "seed_each"
 
     def __post_init__(self) -> None:
         if (self.recipe is None) == (self.env_cls is None):
             raise ValueError(
                 f"{self.name}: exactly one of recipe and env_cls must be set"
+            )
+        if self.reset not in RESET_MODES:
+            raise ValueError(
+                f"{self.name}: reset must be one of {RESET_MODES}, "
+                f"got {self.reset!r}"
             )
         unrequired = sorted(set(self.reward_terms) - set(self.required_info_keys))
         if unrequired:
@@ -222,6 +248,13 @@ class StreamCase:
             return recipe.env_cls(**kwargs)
         assert self.env_cls is not None  # __post_init__ guarantees it
         return self.env_cls(**overrides)
+
+    def reset_seed(self, seed: int, episode: int) -> int | None:
+        """What ``env.reset(seed=...)`` gets for episode ``episode`` of
+        the stream seeded ``seed`` (``None``: carry the RNG over)."""
+        if self.reset == "seed_each":
+            return seed + episode
+        return seed if episode == 0 else None
 
 
 @dataclass(frozen=True)
@@ -348,9 +381,19 @@ def _camper_policy(env: gymnasium.Env) -> Policy:
     )
 
 
-def _make_policy(case: StreamCase, env: gymnasium.Env, seed: int) -> Policy:
+def _box_action_space(env: gymnasium.Env) -> gymnasium.spaces.Box:
+    """``env``'s action space, which every digested env declares as a Box."""
     space = env.action_space
-    assert isinstance(space, gymnasium.spaces.Box)
+    if not isinstance(space, gymnasium.spaces.Box):
+        raise TypeError(
+            f"{type(env.unwrapped).__name__}: the digests drive Box action "
+            f"spaces only, got a {type(space).__name__}"
+        )
+    return space
+
+
+def _make_policy(case: StreamCase, env: gymnasium.Env, seed: int) -> Policy:
+    space = _box_action_space(env)
     if case.policy == "zero":
         zero = np.zeros(space.shape, dtype=space.dtype)
         return lambda _obs: zero.copy()
@@ -491,8 +534,13 @@ def drill_library_path() -> str:
 
 def _physics_state(env: gymnasium.Env) -> tuple[np.ndarray, np.ndarray]:
     """Copies of the raw MuJoCo ``qpos``/``qvel`` behind ``env``."""
-    data = env.unwrapped.data
-    return data.qpos.copy(), data.qvel.copy()
+    base = env.unwrapped
+    if not isinstance(base, MujocoEnv):
+        raise TypeError(
+            f"{type(base).__name__} is not a MujocoEnv: the stream digest "
+            f"hashes the raw MuJoCo qpos/qvel"
+        )
+    return base.data.qpos.copy(), base.data.qvel.copy()
 
 
 def iter_stream(case: StreamCase) -> Iterator[StreamStep]:
@@ -502,7 +550,7 @@ def iter_stream(case: StreamCase) -> Iterator[StreamStep]:
         try:
             policy = _make_policy(case, env, seed)
             nan_action = np.full(
-                env.action_space.shape, np.nan, dtype=np.float64
+                _box_action_space(env).shape, np.nan, dtype=np.float64
             )
             episode = 0
             step = 0
@@ -512,7 +560,9 @@ def iter_stream(case: StreamCase) -> Iterator[StreamStep]:
                     if case.reset_options
                     else None
                 )
-                obs, info = env.reset(seed=seed + episode, options=options)
+                obs, info = env.reset(
+                    seed=case.reset_seed(seed, episode), options=options
+                )
                 qpos, qvel = _physics_state(env)
                 yield StreamStep(
                     seed=seed,
@@ -846,12 +896,54 @@ def stream_digest(case: StreamCase) -> dict[str, Any]:
     return digest
 
 
+def _numpy_umath() -> Any:
+    """numpy's compiled umath module, which carries the CPU-dispatch tables."""
+    try:
+        return importlib.import_module("numpy._core._multiarray_umath")
+    except ImportError:  # numpy 1.x before the numpy._core alias
+        return importlib.import_module("numpy.core._multiarray_umath")
+
+
+def numpy_simd_dispatch() -> str:
+    """The SIMD code paths numpy's ufuncs run on in this process.
+
+    numpy compiles some ufunc loops for several instruction sets and
+    picks one at import from the CPU (and ``NPY_DISABLE_CPU_FEATURES``),
+    and the paths do not round alike. On numpy 2.5.3 (x86-64) the
+    float64 ``exp``, ``log``, ``log1p``, ``expm1``, ``tan``, ``arctan``,
+    ``arctan2``, ``arcsin``, ``arccos``, ``power`` and ``cbrt`` give
+    other last bits without AVX-512, and ``tanh`` without AVX2; float64
+    ``sin``, ``cos``, ``sqrt`` and ``hypot`` do not move. The env
+    streams call none of the moving loops, and
+    ``tests/test_golden_digests.py`` replays CI cases with every
+    dispatch target disabled (``docs/DECISIONS.md``, "Golden digests and
+    the freeze harness gate every refactor"). This records the path
+    anyway, so a mismatch report says which one ran: the compiled
+    baseline and the dispatch targets this CPU enables, e.g.
+    ``"baseline X86_V2; dispatch X86_V3 X86_V4"``.
+    """
+    umath = _numpy_umath()
+    features: Mapping[str, bool] = umath.__cpu_features__
+    enabled = [name for name in umath.__cpu_dispatch__ if features.get(name)]
+    return (
+        f"baseline {' '.join(umath.__cpu_baseline__) or 'none'}; "
+        f"dispatch {' '.join(enabled) or 'none'}"
+    )
+
+
 def version_info() -> dict[str, str]:
-    """The library versions a golden digest was recorded under."""
+    """The library versions (and numpy SIMD path) a golden digest was
+    recorded under.
+
+    ``numpy_simd`` is newer than the first entries: a golden entry's
+    ``versions`` may lack it, and then the recording's dispatch is
+    unknown (``tests/test_golden_digests.py`` allows exactly that).
+    """
     return {
         "python": platform.python_version(),
         "mujoco": mujoco.__version__,
         "numpy": np.__version__,
+        "numpy_simd": numpy_simd_dispatch(),
         "gymnasium": gymnasium.__version__,
         "machine": platform.machine(),
     }
@@ -990,6 +1082,13 @@ _NAN_REACH_HOLD_ESCROW_STEP = 430
 _NAN_ORDER_SENSITIVE_SEED = 1
 _NAN_ORDER_SENSITIVE_STEP = 443
 
+#: The recipe's training-path streams (``reset="seed_once"``): two
+#: 1,500-step episodes and 200 steps into a third, so two unseeded
+#: resets carry the env RNG and the serve alternation. On seed 0 the
+#: oracle's three episodes serve from sides A, B, A; every seeded reset
+#: serves from A.
+_SEED_ONCE_PADDLE_STEPS = 3_200
+
 
 def _paddle_case(name: str, **kwargs: Any) -> StreamCase:
     return StreamCase(
@@ -1073,6 +1172,17 @@ def _cases(*, seeds: tuple[int, ...], steps: int, humanoid_steps: int) -> tuple[
             env_kwargs=_HOLD_ARM,
             nan_action_step=_NAN_ORDER_SENSITIVE_STEP,
         ),
+        # The training path: SB3 seeds the first reset only.
+        *(
+            _paddle_case(
+                f"paddle_tennis/recipe/{policy}_seed_once",
+                policy=policy,
+                seeds=seeds,
+                steps=_SEED_ONCE_PADDLE_STEPS,
+                reset="seed_once",
+            )
+            for policy in ("random", "oracle")
+        ),
         *(
             StreamCase(
                 name=f"wall_ball_true_baseline/{policy}",
@@ -1082,6 +1192,14 @@ def _cases(*, seeds: tuple[int, ...], steps: int, humanoid_steps: int) -> tuple[
                 steps=steps,
             )
             for policy in ("random", "oracle")
+        ),
+        StreamCase(
+            name="wall_ball_true_baseline/oracle_seed_once",
+            recipe="WallBallTrueBaseline",
+            policy="oracle",
+            seeds=seeds,
+            steps=steps,
+            reset="seed_once",
         ),
         *(
             StreamCase(
@@ -1113,7 +1231,8 @@ def _cases(*, seeds: tuple[int, ...], steps: int, humanoid_steps: int) -> tuple[
     )
 
 
-#: The CI gate: one seed, two 1,500-step PaddleTennis episodes per arm.
+#: The CI gate: one seed, two 1,500-step PaddleTennis episodes per arm
+#: (three for the seed-once arms).
 CI_CASES = _cases(seeds=(0,), steps=3_000, humanoid_steps=300)
 
 #: The local refactor gate: five spaced seeds (spaced so no two streams
@@ -1138,6 +1257,7 @@ __all__ = [
     "MISMATCH_EXPLANATION",
     "PADDLE_TENNIS_REWARD_INFO_KEYS",
     "POLICIES",
+    "RESET_MODES",
     "StreamCase",
     "StreamStep",
     "build_drill_library",
@@ -1149,6 +1269,7 @@ __all__ = [
     "info_value_bytes",
     "iter_stream",
     "left_to_right_sum",
+    "numpy_simd_dispatch",
     "order_sensitive_swaps",
     "stream_digest",
     "version_info",

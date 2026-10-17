@@ -349,18 +349,35 @@ Env and training refactors must leave the task's streams and the SAC
 training paths bit-identical unless the change is declared. Three gates
 check it, and a mismatch means "declare it", never "re-record it":
 
+1. **Env digests** (`tools/golden_digest.py`). Per-step digests of
+   seeded scripted streams: 22 cases in the CI set, or five spaced
+   seeds per case with `--full` (two for the humanoid case; the NaN
+   witnesses keep the one seed each is calibrated on). CI runs the CI
+   set through `tests/test_golden_digests.py`; run `--full` by hand.
+2. **Recipe snapshot** (`tools/recipe_snapshot.py`). Every resolved
+   `TrainConfig`. CI runs it through `tests/test_recipe_snapshot.py`.
+3. **Trainer digest** (`tools/trainer_digest.py --base <ref>`). Tiny
+   seeded `train()` jobs on this checkout and on a worktree of the ref.
+   It runs by hand only; in CI, `tests/test_trainer_digest.py` covers
+   its hashing, not the jobs.
+
+Before a merge that touches the envs or training, run all three by
+hand; CI covers only gate 1's CI set and gate 2:
+
 ```bash
-OMP_NUM_THREADS=1 python tools/golden_digest.py           # env streams, CI set (~40 s)
-OMP_NUM_THREADS=1 python tools/golden_digest.py --full    # five spaced seeds per case (~3 min)
-python tools/recipe_snapshot.py                            # every resolved TrainConfig
-python tools/trainer_digest.py --base main                 # seeded train() jobs vs a ref (~2 min)
+OMP_NUM_THREADS=1 python tools/golden_digest.py           # gate 1, CI set (~45 s)
+OMP_NUM_THREADS=1 python tools/golden_digest.py --full    # gate 1, full set (~3.5 min)
+python tools/recipe_snapshot.py                            # gate 2
+python tools/trainer_digest.py --base main                 # gate 3 (~2 min)
+python -m mypy                                             # the typecheck, as CI runs it
 ```
 
-`--full` runs five spaced seeds per case, except the humanoid case (two)
-and the NaN witnesses (the one seed each is calibrated on).
-`tests/test_golden_digests.py` and `tests/test_recipe_snapshot.py` run
-the first and third gates in CI; the full digest set and the trainer
-digest run by hand before a merge that touches the envs or training.
+Run mypy the way CI's typecheck job does: `python -m mypy`, in an
+environment with the train extra installed (`pip install -e
+".[train,dev]"`; CI uses Python 3.11). A mypy that cannot import
+numpy, Gymnasium and SB3, such as a global or `uv tool` install, treats
+them as `Any` under `ignore_missing_imports` and passes silently.
+
 In a git worktree, run the gates with
 `PYTHONPATH=src`: the editable install imports the main checkout's
 package there, and the tools and the test suite refuse to run against
