@@ -79,6 +79,7 @@ from courtside_dynamics.callbacks.video_record import (
 from courtside_dynamics.experiments import records as run_records
 from courtside_dynamics.experiments.sync import (
     RunDirMirror,
+    SyncError,
     validate_sync_target,
 )
 from courtside_dynamics.training.algos import (
@@ -245,9 +246,20 @@ class _RunLifecycle:
     is still being written -- and writes the final record, then
     ``sync_manifest.json`` last, then mirrors the directory to
     ``sync_dir`` when one is set.
+
+    ``sync_dir`` is the mirror target as :func:`validate_sync_target`
+    resolved and checked it (``~`` expanded, absolute), so the directory
+    validated is the directory mirrored and recorded, whatever the
+    working directory does later.
     """
 
-    def __init__(self, cfg: TrainConfig, *, preflight_warnings: Sequence[str]) -> None:
+    def __init__(
+        self,
+        cfg: TrainConfig,
+        *,
+        preflight_warnings: Sequence[str],
+        sync_dir: Path | None,
+    ) -> None:
         self.cfg = cfg
         self.log_dir = Path(cfg.log_dir)
         self.run_id = self.log_dir.resolve().name
@@ -256,22 +268,32 @@ class _RunLifecycle:
         self.preflight_warnings = tuple(preflight_warnings)
         self.git_dirty = _git_dirty()
         self.eval_clock = _EvalClock()
+        self.sync_dir = sync_dir
         self.mirror: RunDirMirror | None = (
             None
-            if cfg.sync_dir is None
-            else RunDirMirror(cfg.log_dir, cfg.sync_dir, run_id=self.run_id)
+            if sync_dir is None
+            else RunDirMirror(cfg.log_dir, sync_dir, run_id=self.run_id)
         )
         self.model: BaseAlgorithm | None = None
         self.status: str | None = None
         self.stop_reason: str | None = None
+        # The exception the body already recorded as the outcome (the
+        # crash salvage re-raises it): close() must not record it twice.
+        self.noted_error: BaseException | None = None
         self._write_record(run_records.RUNNING)
 
     def note_outcome(
-        self, status: str, stop_reason: str | None, model: BaseAlgorithm
+        self,
+        status: str,
+        stop_reason: str | None,
+        model: BaseAlgorithm,
+        *,
+        error: BaseException | None = None,
     ) -> None:
         self.status = status
         self.stop_reason = stop_reason
         self.model = model
+        self.noted_error = error
 
     def _artifacts(self) -> list[dict[str, str]]:
         """The layout artifacts present (an empty directory is not one)."""
@@ -327,7 +349,7 @@ class _RunLifecycle:
             None
             if self.mirror is None
             else {
-                "dir": str(self.cfg.sync_dir),
+                "dir": str(self.sync_dir),
                 "checkpoint_mirrors": self.mirror.passes,
                 "failed_mirrors": self.mirror.failures,
             }
@@ -369,7 +391,7 @@ class _RunLifecycle:
             self.mirror.sync()
         except Exception as error:
             print(
-                f"[train] mirroring {self.log_dir} to {self.cfg.sync_dir} "
+                f"[train] mirroring {self.log_dir} to {self.sync_dir} "
                 f"failed at {num_timesteps:,} steps ({error!r}); training "
                 f"continues, and the mirror stays incomplete until a later "
                 f"pass succeeds"
@@ -381,18 +403,36 @@ class _RunLifecycle:
         ``error`` is the exception ``train()`` is about to re-raise, or
         ``None``. A run that never reported an outcome failed outside
         ``learn()`` (after ``config.json`` existed): ``"crashed"``, or
-        ``"interrupted"`` for a ``KeyboardInterrupt``. While ``error``
-        propagates, a failure here is printed and never masks it;
-        otherwise it raises, because a run directory that cannot seal
-        itself is incomplete and the caller must know.
+        ``"interrupted"`` for a ``KeyboardInterrupt``. A run that did
+        report one and then raised something else -- an env, the SB3
+        logger's TensorBoard flush or a salvage step failing after a
+        completed run -- is recorded the same way, its ``stop_reason``
+        quoting the outcome it had reached: ``train()`` raises, so the
+        record must not read ``completed``. While ``error`` propagates,
+        a failure here is printed and never masks it; otherwise it
+        raises, because a run directory that cannot seal itself is
+        incomplete and the caller must know.
         """
-        if self.status is None:
+        if error is not None and error is not self.noted_error:
+            reached = (
+                ""
+                if self.status is None
+                else f" after the run ended as {self.status}"
+                + (f" ({self.stop_reason})" if self.stop_reason else "")
+            )
             if isinstance(error, KeyboardInterrupt):
                 self.status = run_records.INTERRUPTED
-                self.stop_reason = "interrupted outside learn(): KeyboardInterrupt"
+                self.stop_reason = (
+                    f"interrupted outside learn(){reached}: KeyboardInterrupt"
+                )
             else:
                 self.status = run_records.CRASHED
-                self.stop_reason = f"crashed: {error!r}"
+                self.stop_reason = f"crashed{reached}: {error!r}"
+        elif self.status is None:
+            # Unreachable through train() (a body that returns noted an
+            # outcome), but a record must never be left "running".
+            self.status = run_records.CRASHED
+            self.stop_reason = "crashed: the run reported no outcome"
         status = self.status
         for label, action in (
             (
@@ -419,6 +459,35 @@ class _RunLifecycle:
         if self.mirror is not None:
             self._final_sync(error)
 
+    def _final_pass(self) -> dict[str, Any]:
+        """One final mirror pass, checked against the local manifest.
+
+        The pass trusts its change cache (size, mtime); a file rewritten
+        with both unchanged would keep a stale copy whose cached digest
+        the mirror's manifest repeats. So the mirror's file list must
+        equal the sealed local ``sync_manifest.json``'s, path, bytes and
+        sha256; when it does not, the pass is redone with the cache off,
+        and a mirror that still differs raises.
+        """
+        assert self.mirror is not None
+        local = run_records.read_json_object(
+            self.log_dir / run_records.SYNC_MANIFEST_NAME
+        ).get("files")
+        manifest = self.mirror.sync()
+        if manifest["files"] != local:
+            print(
+                f"[train] the mirror's {run_records.SYNC_MANIFEST_NAME} "
+                f"differs from {self.log_dir}'s; re-copying every file"
+            )
+            manifest = self.mirror.sync(use_cache=False)
+            if manifest["files"] != local:
+                raise SyncError(
+                    f"the mirror's {run_records.SYNC_MANIFEST_NAME} still "
+                    f"differs from {self.log_dir}'s after re-copying every "
+                    f"file: the run directory changed after it was sealed"
+                )
+        return manifest
+
     def _final_sync(self, error: BaseException | None) -> None:
         assert self.mirror is not None
         last: Exception | None = None
@@ -427,26 +496,26 @@ class _RunLifecycle:
             if delay > 0:
                 time.sleep(delay)
             try:
-                manifest = self.mirror.sync()
+                manifest = self._final_pass()
             except Exception as sync_error:
                 last = sync_error
                 print(
-                    f"[train] mirroring {self.log_dir} to {self.cfg.sync_dir} "
+                    f"[train] mirroring {self.log_dir} to {self.sync_dir} "
                     f"failed (attempt {attempt} of {len(delays)}): "
                     f"{sync_error!r}"
                 )
                 continue
             print(
                 f"[train] mirrored {manifest['file_count']} file(s) to "
-                f"{self.cfg.sync_dir}, sealed by its {run_records.SYNC_MANIFEST_NAME}"
+                f"{self.sync_dir}, sealed by its {run_records.SYNC_MANIFEST_NAME}"
             )
             return
         message = (
             f"{self.log_dir} is complete, but mirroring it to sync_dir "
-            f"{self.cfg.sync_dir} failed {len(delays)} times (last: "
+            f"{self.sync_dir} failed {len(delays)} times (last: "
             f"{last!r}), so the mirror does not verify. Re-run: from "
             f"courtside_dynamics.experiments.sync import sync_run_dir; "
-            f"sync_run_dir({str(self.log_dir)!r}, {str(self.cfg.sync_dir)!r})"
+            f"sync_run_dir({str(self.log_dir)!r}, {str(self.sync_dir)!r})"
         )
         if error is not None:
             print(f"[train] {message}")
@@ -832,8 +901,12 @@ class TrainConfig:
         ``None`` (default) trains for the full budget. A patience (or
         degenerate guard) whose earliest stop lies past the budget's last
         evaluation is warned about before any output and recorded
-        (:func:`early_stop_reachability`); a stop whose condition first
-        holds at the final evaluation records the run as ``completed``.
+        (:func:`early_stop_reachability`); a stop that fires once the
+        run has trained its whole budget (``num_timesteps >=
+        total_timesteps``: at the final evaluation of a budget that is a
+        multiple of ``eval_freq``, say) records the run as
+        ``completed``, and one that leaves steps untrained (the final
+        scheduled evaluation of any other budget) as ``early_stop``.
         Motivation: the first real WallBall run kept training for 10+
         GPU-hours after its best checkpoint while the policy
         collapsed; run 20260712_190054 then spent 525k steps
@@ -1048,14 +1121,19 @@ class TrainConfig:
         attempt's ``run_record.json`` is refused the same way (every
         attempt writes one first, so an attempt that died before its
         first evaluation is caught too). ``True`` opts in to reusing the
-        directory: the old evaluation CSVs, run record and sync manifest
-        are rotated aside (``eval_info.attempt_<UTC time>.csv``), and so
-        are the monitor and TensorBoard directories
-        (``metrics/monitor.attempt_<UTC time>``: SB3's ``Monitor`` only
-        overwrites the CSVs of this attempt's workers, and TensorBoard
-        reads every event file in its folder, so both were read back
-        into the new attempt's curves), each with a loud message; every
-        other artifact is overwritten as the new attempt writes it.
+        directory: every run-layout artifact the previous attempt left
+        but ``config.json`` is rotated aside with a loud message
+        (``metrics/eval_info.attempt_<UTC time>.csv``,
+        ``metrics/monitor.attempt_<UTC time>``,
+        ``model/best_model.attempt_<UTC time>.zip``, ...), so the new
+        attempt's run record, manifest and summary describe it alone.
+        The monitor and TensorBoard directories move whole (SB3's
+        ``Monitor`` only overwrites the CSVs of this attempt's workers,
+        and TensorBoard reads every event file in its folder, so both
+        were read back into the new attempt's curves), and the model
+        files move too (an attempt that crashed before its first
+        evaluation recorded the previous attempt's selection as its
+        own). ``config.json`` is overwritten as this attempt starts.
     confirm_best_eval:
         When ``True``, a candidate best must also win an independent
         second eval batch before ``best_model.zip`` is overwritten
@@ -1204,7 +1282,9 @@ class TrainConfig:
         (default) keeps every artifact where ``log_dir`` puts it. Set to
         a directory (a Google Drive folder on Colab) and ``train()``
         still writes everything under ``log_dir`` -- point that at local
-        disk -- but mirrors the run directory here at every checkpoint
+        disk -- but mirrors the run directory to it (``~`` expanded and
+        resolved once, before any output, so a later change of working
+        directory cannot move the mirror) at every checkpoint
         (``checkpoint_freq``) and once more at the end, after the local
         ``sync_manifest.json``. The mirror's own manifest is written
         last, only after every copied file re-hashes correctly, so a
@@ -2129,9 +2209,12 @@ def _validate_on_policy_config(cfg: TrainConfig) -> None:
       unchanged policy) and a budget shorter than one rollout
       (``learn()`` would still collect the whole rollout);
     - evaluation and checkpoint cadences that are not whole rollouts:
-      the evaluation that selects ``best_model.zip`` and drives the
-      stops, or a checkpoint, would land between a rollout's data and
-      the update that consumes it;
+      every evaluation (which selects ``best_model.zip`` and drives the
+      stops) and every checkpoint must follow the same whole number of
+      updates, so the stops' update floor, the gate's advances and the
+      checkpoint series line up with updates (SB3 runs a whole-rollout
+      evaluation on the rollout's last step, after its data and before
+      its update);
     - a performance gate whose ``stage_eval_budget`` stop would fire
       before ``min_policy_updates_before_stop`` updates (a budget at or
       below :func:`_policy_update_floor_evals`);
@@ -2212,8 +2295,8 @@ def _validate_on_policy_config(cfg: TrainConfig) -> None:
             f"every whole number of rollouts ({rollout:,} env steps each)"
         )
     cadences = (
-        ("eval_freq", cfg.eval_freq, "an evaluation (selection, early stops)"),
-        ("checkpoint_freq", cfg.checkpoint_freq, "a checkpoint"),
+        ("eval_freq", cfg.eval_freq, "each evaluation (selection, early stops)"),
+        ("checkpoint_freq", cfg.checkpoint_freq, "each checkpoint"),
     )
     for field_name, cadence, consumer in cadences:
         if field_name == "checkpoint_freq" and cadence <= 0:
@@ -2223,10 +2306,10 @@ def _validate_on_policy_config(cfg: TrainConfig) -> None:
             raise ValueError(
                 f"{field_name} {cadence:,} is not a whole number of "
                 f"rollouts (n_steps * n_envs = {n_steps} * {n_envs} = "
-                f"{rollout:,} env steps): {consumer} would land mid-"
-                f"rollout, between a rollout's data and the update that "
-                f"consumes it. Use a multiple of {rollout:,}, e.g. "
-                f"{nearest:,}"
+                f"{rollout:,} env steps): {consumer} must follow the same "
+                f"whole number of updates, so the stop floor, gate advances "
+                f"and checkpoints line up with updates. Use "
+                f"a multiple of {rollout:,}, e.g. {nearest:,}"
             )
     if isinstance(cfg.performance_gate, Mapping):
         # The gate's budget stop counts a stage's own evaluations, with
@@ -2371,14 +2454,21 @@ def _check_log_dir_reuse(cfg: TrainConfig) -> None:
     attempt is recognized by its evaluation rows or by its
     ``run_record.json``, which every attempt writes first.
 
-    Under ``reuse_log_dir=True`` the old evaluation CSVs, run record and
-    sync manifest rotate aside as ``<name>.attempt_<UTC time>``, and so
-    do the monitor and TensorBoard directories (``repo_review_20261016``
+    Under ``reuse_log_dir=True`` every run-layout artifact the previous
+    attempt left (``RUN_LAYOUT``: summary, run record, sync manifest,
+    the model files, the metrics, reports, media and checkpoints) but
+    ``config.json``, which this attempt rewrites first, rotates aside as
+    ``<name>.attempt_<UTC time>`` (a directory whole). The monitor and
+    TensorBoard directories were the first (``repo_review_20261016``
     train-5): SB3's ``Monitor`` overwrites only the CSVs of the workers
     this attempt has, and TensorBoard reads every event file in its
     folder, so both were read back into the new attempt's curves and
-    summary. A directory moves whole because a renamed event file is
-    still read: TensorBoard matches any name containing ``tfevents``.
+    summary; a directory moves whole because a renamed event file is
+    still read (TensorBoard matches any name containing ``tfevents``).
+    The rest followed: an attempt that crashed before its first
+    evaluation recorded the previous attempt's ``best_model_meta.json``
+    as its selection and listed the previous best, final model and
+    normalizer as its own artifacts, sealed by its manifest.
     """
     stale = [
         path
@@ -2398,18 +2488,21 @@ def _check_log_dir_reuse(cfg: TrainConfig) -> None:
             f"attempt ({', '.join(evidence)}); a new run would append to its "
             f"evaluation rows and mix two attempts' artifacts. Use a fresh "
             f"log_dir (resolve_run_dir() timestamps one), or pass "
-            f"reuse_log_dir=True to rotate its records and logs aside and "
-            f"overwrite the rest of the directory"
+            f"reuse_log_dir=True to rotate its run-layout artifacts aside "
+            f"and overwrite its config.json"
         )
-    rotated = list(stale)
-    for name in ("run_record", "sync_manifest"):
+    rotated: list[str] = []
+    for name in RUN_LAYOUT:
+        if name == "config":
+            continue
         path = locate_artifact(cfg.log_dir, name)
-        if path is not None:
-            rotated.append(path)
-    for name in ("monitor_dir", "tensorboard_dir"):
-        path = locate_artifact(cfg.log_dir, name)
-        if path is not None and not is_empty_directory(path):
-            rotated.append(path)
+        if path is None:
+            continue
+        if os.path.isdir(path) and is_empty_directory(path):
+            continue
+        if any(path.startswith(os.path.join(parent, "")) for parent in rotated):
+            continue  # moves with its directory (pre-0.14 tensorboard/)
+        rotated.append(path)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     for path in rotated:
         root, extension = os.path.splitext(path)
@@ -2421,10 +2514,14 @@ def _check_log_dir_reuse(cfg: TrainConfig) -> None:
         os.replace(path, destination)
         print(
             f"[train] reuse_log_dir=True: rotated the previous attempt's "
-            f"{path} to {destination}; config.json, model/, checkpoints/ "
-            f"and the other artifacts in {cfg.log_dir} are overwritten as "
-            f"this attempt writes them"
+            f"{path} to {destination}"
         )
+    print(
+        f"[train] reuse_log_dir=True: {len(rotated)} artifact(s) of the "
+        f"previous attempt rotated aside; this attempt overwrites "
+        f"config.json in {cfg.log_dir}, and files outside the run layout "
+        f"stay as they are"
+    )
 
 
 def _resolve_warm_start_warmup(
@@ -3163,7 +3260,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     monitor_info_keywords = _validate_monitor_info_keywords(cfg)
     resolved_eval_seed = resolve_eval_seed(cfg)
     _validate_eval_reset_options(cfg, resolved_eval_seed)
-    validate_sync_target(cfg.log_dir, cfg.sync_dir)
+    # The resolved target is the one mirrored and recorded: a "~" or a
+    # relative sync_dir means the same directory for the whole run.
+    sync_target = validate_sync_target(cfg.log_dir, cfg.sync_dir)
     # An early stop the budget cannot reach is a silent no-op: say so
     # now (config.json's resolved_training and the run record keep it).
     reachability = early_stop_reachability(cfg)
@@ -3182,7 +3281,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
 
     os.makedirs(cfg.log_dir, exist_ok=True)
     write_run_config(cfg, cfg.log_dir)
-    run = _RunLifecycle(cfg, preflight_warnings=reachability["warnings"])
+    run = _RunLifecycle(
+        cfg, preflight_warnings=reachability["warnings"], sync_dir=sync_target
+    )
     try:
         model = _train_in_log_dir(
             cfg,
@@ -4076,7 +4177,9 @@ def _train_in_log_dir(
                     f"Training crashed ({error!r}) -- saving final_model "
                     f"and the normalizer before re-raising."
                 )
-                run.note_outcome(run_records.CRASHED, f"crashed: {error!r}", model)
+                run.note_outcome(
+                    run_records.CRASHED, f"crashed: {error!r}", model, error=error
+                )
                 _salvage_crashed_run(
                     cfg,
                     model,
@@ -4146,10 +4249,10 @@ def _train_in_log_dir(
             status = run_records.COMPLETED
             if int(model.num_timesteps) >= cfg.total_timesteps:
                 if stop_reason is not None:
-                    # The guard fired on the last scheduled evaluation:
-                    # the run trained its whole budget, so it is not an
-                    # early stop (both 2026-08-28 runs were labeled
-                    # one; repo_review_20261016 train-3).
+                    # The guard fired once the run had trained its whole
+                    # budget, so it is not an early stop (both
+                    # 2026-08-28 runs were labeled one;
+                    # repo_review_20261016 train-3).
                     stop_reason = (
                         f"full_budget: trained all {cfg.total_timesteps:,} "
                         f"steps; the stop condition also held at the final "

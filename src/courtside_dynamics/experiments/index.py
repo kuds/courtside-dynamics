@@ -19,7 +19,11 @@ What becomes a row:
   the record as written, plus its manifest verdict
   (:func:`~courtside_dynamics.experiments.records.verify_run_dir`;
   ``--skip-verify`` leaves it unchecked, which avoids re-reading every
-  checkpoint on a Drive mount).
+  checkpoint on a Drive mount). A record that still says ``"running"``
+  is a run that is training or died without reaching a terminal path
+  (a killed VM): the row says so in ``index.problems`` -- with or
+  without verification -- and is a stub when no final model exists,
+  as a backfilled launch would be.
 - A directory holding a courtside ``config.json`` but no record (every
   run before run records): backfilled into the record's shape from
   ``config.json`` (git sha, recipe, algorithm, seeds, env kwargs, warm
@@ -29,21 +33,33 @@ What becomes a row:
   ``index.version_inferred`` is true and ``index.inferred`` names the
   fields that were derived rather than copied. Without
   ``stage_summary.txt`` the run never reached a terminal path: status
-  ``"aborted"``, and a *stub* when no final model was saved either.
-- An empty directory named like a run (``YYYYMMDD_HHMMSS``): an aborted
-  stub, a launch that died before writing ``config.json``.
+  ``"aborted"``, and a *stub* when no final model was saved either. A
+  summary that exists but cannot be read leaves the status ``None``
+  with a problem: the run may well have finished.
+- A directory named like a run (``YYYYMMDD_HHMMSS``) whose
+  ``config.json`` cannot be read or is not a courtside run config (a
+  zero-byte file from a partial Drive sync): backfilled without the
+  config's fields, the config problem in ``index.problems``.
+- An empty directory named like a run: an aborted stub, a launch that
+  died before writing ``config.json``.
 
 Nothing else is parsed. A directory that holds files but none of
 these, or whose ``config.json`` is not a courtside run config, is
 listed under ``skipped`` with the reason, and its contents are never
-read as a run.
+read as a run. A run directory is not searched for further runs unless
+a subdirectory holds a run marker (``config.json``, ``run_record.json``
+or a run-named directory): then the scan goes on into it and the outer
+row (or skip) names the nested directories, because a stray
+``config.json`` in a recipe folder would otherwise hide every run
+beneath it.
 
 Every row joins the curated campaign map (``legacy_levers.toml``,
 package data: run id -> campaign, lever, verdict, doc) under
 ``campaign``, ``None`` for a run the map does not name. A backfilled
 row holds no machine path: the warm start is named by its source
-directory's basename, the run config file by its basename, and
-``index.path`` is relative to the root.
+directory's basename, the run config file by its basename,
+``index.path`` is relative to the root, and every problem names files
+relative to the run directory.
 
 Stable-Baselines3 and torch are never imported here.
 """
@@ -70,7 +86,9 @@ from courtside_dynamics.experiments.records import (
     RUN_RECORD_NAME,
     RUNNING,
     SYNC_MANIFEST_NAME,
+    TERMINAL_STATUSES,
     build_run_record,
+    describe_read_error,
     read_json_object,
     verify_run_dir,
 )
@@ -104,6 +122,7 @@ _LAYOUT: dict[str, tuple[str, str]] = {
     "final_model": ("model/final_model.zip", "final_model.zip"),
     "checkpoints_dir": ("checkpoints", "checkpoints"),
     "videos_dir": ("media/videos", "videos"),
+    "best_model_video": ("media/best_model.mp4", "best_model.mp4"),
 }
 
 #: ``config.json``'s ``algorithm`` block arrived with first-class PPO;
@@ -115,7 +134,9 @@ _RUN_ID = re.compile(r"\d{8}_\d{6}")
 _CHECKPOINT_STEP = re.compile(r"_(\d+)_steps\.zip$")
 _SUMMARY_LINE = re.compile(r"([A-Z][A-Za-z0-9_ ]*):\s*(.*)")
 _NUMBER = r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
-_STEPS = re.compile(r"\(at ([\d,]+) steps\)")
+#: "(at 4,096 steps)", or an on-policy run's "(at 4,096 steps, SB3
+#: n_updates 0)".
+_STEPS = re.compile(r"\(at ([\d,]+) steps[,)]")
 
 
 @dataclass(frozen=True)
@@ -143,6 +164,8 @@ class RunIndex:
 class _Scan:
     runs: list[tuple[Path, str]] = field(default_factory=list)
     skipped: list[SkippedDir] = field(default_factory=list)
+    # Row problems found while scanning (nested run directories).
+    notes: dict[Path, list[str]] = field(default_factory=dict)
 
 
 def _locate(run_dir: Path, name: str) -> Path | None:
@@ -161,6 +184,18 @@ def _int(text: str) -> int:
     return int(text.replace(",", ""))
 
 
+def _budget(value: Any) -> int | None:
+    """A ``total_timesteps`` as an int: an int, or an integral float
+    (``TrainConfig(total_timesteps=1e6)`` records ``1000000.0``)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
 def _courtside_config(config: Any) -> bool:
     """Whether a ``config.json`` payload is a courtside run config."""
     if not isinstance(config, dict):
@@ -169,8 +204,36 @@ def _courtside_config(config: Any) -> bool:
     return (
         isinstance(train_config, dict)
         and isinstance(train_config.get("algo"), str)
-        and isinstance(train_config.get("total_timesteps"), int)
+        and _budget(train_config.get("total_timesteps")) is not None
     )
+
+
+_NOT_COURTSIDE = (
+    "config.json is not a courtside run config (no train_config with algo "
+    "and an integral total_timesteps)"
+)
+
+
+def _read_json(run_dir: Path, relative: str) -> dict[str, Any]:
+    """A JSON object from ``run_dir/relative``; errors name ``relative``."""
+    return read_json_object(run_dir / relative, label=relative)
+
+
+def _nested_runs(here: Path, subdirs: list[str]) -> list[str]:
+    """The subdirectories of ``here`` that hold a run marker at any depth.
+
+    A run-named directory, or one holding ``config.json`` or
+    ``run_record.json`` somewhere below. A real run directory's own
+    folders (``model/``, ``metrics/``, ``checkpoints/`` ...) hold none.
+    """
+    nested = []
+    for name in subdirs:
+        if _RUN_ID.fullmatch(name) or any(
+            RUN_RECORD_NAME in files or "config.json" in files
+            for _root, _dirs, files in os.walk(here / name)
+        ):
+            nested.append(name)
+    return nested
 
 
 def _relative(path: Path, root: Path) -> str:
@@ -196,32 +259,42 @@ def _scan(root: Path, out: Path | None) -> _Scan:
             or (here / name).resolve() != written
         }
         rel = _relative(here, root)
-        if RUN_RECORD_NAME in names:
-            scan.runs.append((here, "record"))
-            subdirs[:] = []
-            continue
-        if "config.json" in names:
-            subdirs[:] = []
-            try:
-                config = json.loads((here / "config.json").read_text("utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-                scan.skipped.append(
-                    SkippedDir(rel, f"config.json is unreadable ({error!r})")
-                )
-                continue
-            if _courtside_config(config):
-                scan.runs.append((here, "legacy"))
+        run_named = here != root and bool(_RUN_ID.fullmatch(here.name))
+        if RUN_RECORD_NAME in names or "config.json" in names:
+            # Only runs nested below (a stray config.json in a recipe
+            # folder) keep the walk going; a run's own folders do not.
+            subdirs[:] = _nested_runs(here, subdirs)
+            nested = (
+                f"holds nested run directories ({', '.join(subdirs)}), "
+                f"indexed as rows of their own"
+                if subdirs
+                else None
+            )
+            reason: str | None = None
+            if RUN_RECORD_NAME not in names:
+                try:
+                    config = _read_json(here, "config.json")
+                except ValueError as error:
+                    reason = str(error)
+                else:
+                    if not _courtside_config(config):
+                        reason = _NOT_COURTSIDE
+            if reason is None or run_named:
+                # A run-named directory with a broken config.json is a
+                # dead launch (a zero-byte file from a partial sync), not
+                # something else: a row, the config problem among its
+                # problems.
+                kind = "record" if RUN_RECORD_NAME in names else "legacy"
+                scan.runs.append((here, kind))
+                if nested:
+                    scan.notes.setdefault(here, []).append(nested)
             else:
                 scan.skipped.append(
-                    SkippedDir(
-                        rel,
-                        "config.json is not a courtside run config (no "
-                        "train_config with algo and total_timesteps)",
-                    )
+                    SkippedDir(rel, reason + (f"; it {nested}" if nested else ""))
                 )
             continue
-        if here != root and _RUN_ID.fullmatch(here.name):
-            subdirs[:] = []
+        if run_named:
+            subdirs[:] = _nested_runs(here, subdirs)
             if _has_files(here):
                 scan.skipped.append(
                     SkippedDir(
@@ -302,7 +375,12 @@ def parse_stage_summary(text: str) -> dict[str, Any]:
 
 
 def _files(run_dir: Path) -> dict[str, Any]:
-    """Which artifacts exist (either layout); checkpoints and videos counted."""
+    """Which artifacts exist (either layout); checkpoints and videos counted.
+
+    ``videos`` counts the periodic training videos; ``best_model_video``
+    is the replay a notebook records after training (``best_model.mp4``
+    at the root of a pre-0.14 flat-layout run).
+    """
     present: dict[str, Any] = {
         name: _locate(run_dir, name) is not None
         for name in (
@@ -311,6 +389,7 @@ def _files(run_dir: Path) -> dict[str, Any]:
             "best_model",
             "best_model_meta",
             "final_model",
+            "best_model_video",
         )
     }
     present["run_record"] = (run_dir / RUN_RECORD_NAME).is_file()
@@ -344,23 +423,35 @@ def _run_config(config: Mapping[str, Any] | None) -> dict[str, Any] | None:
 
 
 def _legacy_outcome(
-    summary: Mapping[str, Any] | None, budget: Any, problems: list[str]
+    summary: Mapping[str, Any] | None,
+    budget: Any,
+    problems: list[str],
+    *,
+    summary_present: bool,
 ) -> tuple[str | None, str | None, int | None]:
     """(status, stop_reason, trained) in run-record terms.
 
     ``stage_summary.txt`` says ``completed`` for an early stop too; the
     ``X of Y budget (stopped early)`` timesteps form tells them apart. A
     stop reason on a run that trained its whole budget is the train-3
-    label (the guard held only at the final evaluation): ``completed``
+    label (the guard fired once the budget was trained): ``completed``
     with a ``full_budget`` reason, exactly as ``train()`` records it now.
+    Only a *missing* summary means no terminal path was reached
+    (``aborted``); one that exists but cannot be read leaves the status
+    unknown (``None``; the caller recorded why). Without a budget in
+    ``config.json`` the summary's ``of Y budget`` form names it, and a
+    summary without that form trained exactly its budget.
     """
     if summary is None:
-        return ABORTED, None, None
+        return (None if summary_present else ABORTED), None, None
     raw_status = summary["status"]
     raw_reason = summary["stop_reason"]
     trained = summary["trained_timesteps"]
     summary_budget = summary["budget_timesteps"]
-    if summary_budget is not None and summary_budget != budget:
+    configured = _budget(budget)
+    if summary_budget is not None and configured is not None and (
+        summary_budget != configured
+    ):
         problems.append(
             f"stage_summary.txt budget {summary_budget:,} differs from "
             f"config.json total_timesteps {budget!r}"
@@ -370,9 +461,15 @@ def _legacy_outcome(
     if raw_status != COMPLETED:
         problems.append(f"stage_summary.txt has no known Status ({raw_status!r})")
         return None, raw_reason, trained
-    if trained is None or not isinstance(budget, int):
+    if trained is None:
         problems.append("stage_summary.txt has no readable Timesteps line")
         return COMPLETED, raw_reason, trained
+    if configured is not None:
+        budget = configured
+    elif summary_budget is not None:
+        budget = summary_budget
+    else:
+        budget = trained
     if trained >= budget:
         if raw_reason is None:
             return COMPLETED, None, trained
@@ -391,13 +488,21 @@ def _legacy_outcome(
 
 
 def _read_summary(run_dir: Path, problems: list[str]) -> dict[str, Any] | None:
+    """The parsed summary head; ``None`` when missing or unreadable.
+
+    An unreadable one (bytes that are not UTF-8, written under another
+    locale before the summary was written as UTF-8) is a problem,
+    described by its error type and position, never its contents.
+    """
     path = _locate(run_dir, "stage_summary")
     if path is None:
         return None
     try:
-        return parse_stage_summary(path.read_text("utf-8"))
+        return parse_stage_summary(path.read_text("utf-8-sig"))
     except (OSError, UnicodeDecodeError) as error:
-        problems.append(f"stage_summary.txt is unreadable ({error!r})")
+        problems.append(
+            f"stage_summary.txt is unreadable ({describe_read_error(error)})"
+        )
         return None
 
 
@@ -443,12 +548,15 @@ def _legacy_row(
     meta_path = _locate(run_dir, "best_model_meta")
     if meta_path is not None:
         try:
-            meta = read_json_object(meta_path)
+            meta = _read_json(run_dir, meta_path.relative_to(run_dir).as_posix())
         except ValueError as error:
             problems.append(f"the selection is omitted: {error}")
     train_config = config.get("train_config") or {}
     status, stop_reason, trained = _legacy_outcome(
-        summary, train_config.get("total_timesteps"), problems
+        summary,
+        train_config.get("total_timesteps"),
+        problems,
+        summary_present=_locate(run_dir, "stage_summary") is not None,
     )
     # build_run_record accepts only run-record statuses and a creation
     # time; "aborted", an unknown status and a missing time are set after.
@@ -506,17 +614,24 @@ def _legacy_row(
 def _record_row(
     run_dir: Path, rel: str, *, verify: bool, problems: list[str]
 ) -> dict[str, Any] | None:
-    """A run record as written, plus its manifest verdict."""
+    """A run record as written, plus its manifest verdict.
+
+    A record that is not terminal adds a problem whether or not the
+    manifest is verified (``--skip-verify`` is the Colab default): one
+    that still says ``"running"`` without a manifest is a run that is
+    training or died (the R3 stub that looked live), and with one it is
+    a mid-run mirror snapshot. Either is a stub when no final model
+    exists, as a backfilled launch would be.
+    """
     try:
-        record = read_json_object(run_dir / RUN_RECORD_NAME)
+        record = _read_json(run_dir, RUN_RECORD_NAME)
     except ValueError as error:
         problems.append(f"{error}; backfilled from config.json instead")
         return None
-    config_path = _locate(run_dir, "config")
     config: dict[str, Any] | None = None
-    if config_path is not None:
+    if _locate(run_dir, "config") is not None:
         try:
-            config = read_json_object(config_path)
+            config = _read_json(run_dir, "config.json")
         except ValueError as error:
             problems.append(str(error))
     if verify:
@@ -536,15 +651,31 @@ def _record_row(
             "problems": [],
             "unlisted": [],
         }
+    files = _files(run_dir)
+    status = record.get("status")
+    terminal = status in TERMINAL_STATUSES
+    if status == RUNNING and files["sync_manifest"]:
+        problems.append(
+            f"{RUN_RECORD_NAME} says 'running' and {SYNC_MANIFEST_NAME} "
+            f"lists it: a mid-run mirror snapshot, not a finished run"
+        )
+    elif status == RUNNING:
+        problems.append(
+            f"{RUN_RECORD_NAME} says 'running' and there is no "
+            f"{SYNC_MANIFEST_NAME}: the run is still training, or died "
+            f"without reaching a terminal path"
+        )
+    elif not terminal:
+        problems.append(f"{RUN_RECORD_NAME} has no known status ({status!r})")
     row = dict(record)
     row["index"] = _index_block(
         rel,
-        files=_files(run_dir),
+        files=files,
         source="run_record",
         config=config,
         summary=_read_summary(run_dir, problems),
         inferred=[],
-        stub=False,
+        stub=not terminal and not files["final_model"],
         verification=verification,
         problems=problems,
     )
@@ -631,7 +762,7 @@ def build_index(
     rows: list[dict[str, Any]] = []
     for run_dir, kind in scan.runs:
         rel = _relative(run_dir, base)
-        problems: list[str] = []
+        problems: list[str] = list(scan.notes.get(run_dir, ()))
         row: dict[str, Any] | None = None
         if kind == "record":
             row = _record_row(run_dir, rel, verify=verify, problems=problems)
@@ -639,9 +770,15 @@ def build_index(
             config: dict[str, Any] | None = None
             if kind != "empty" and _locate(run_dir, "config") is not None:
                 try:
-                    config = read_json_object(run_dir / "config.json")
+                    config = _read_json(run_dir, "config.json")
                 except ValueError as error:
-                    problems.append(str(error))
+                    problems.append(f"{error}; the row has none of its fields")
+                else:
+                    if not _courtside_config(config):
+                        problems.append(
+                            f"{_NOT_COURTSIDE}; the row has none of its fields"
+                        )
+                        config = None
             row = _legacy_row(run_dir, rel, config, problems)
         entry = campaign_map.get(str(row.get("run_id")))
         row["campaign"] = dict(entry) if entry is not None else None
@@ -704,15 +841,21 @@ def main(argv: list[str] | None = None) -> int:
     write_index(index, out)
     rows = index.rows
     records = sum(1 for row in rows if row["index"]["source"] == "run_record")
+    running = sum(
+        1
+        for row in rows
+        if row["index"]["source"] == "run_record" and row["status"] == RUNNING
+    )
     aborted = sum(1 for row in rows if row["status"] == ABORTED)
     stubs = sum(1 for row in rows if row["index"]["stub"])
     joined = sum(1 for row in rows if row["campaign"] is not None)
     print(
-        f"{out}: {len(rows)} run(s), {records} from run records and "
-        f"{len(rows) - records} backfilled ({aborted} aborted, {stubs} of them "
-        f"stubs); {joined} joined to the campaign map "
-        f"({index.campaign_entries} entries); {len(index.skipped)} "
-        f"director{'y' if len(index.skipped) == 1 else 'ies'} skipped"
+        f"{out}: {len(rows)} run(s): {records} from run records ({running} "
+        f"still say running: training, or dead), {len(rows) - records} "
+        f"backfilled ({aborted} aborted); {stubs} stub(s); {joined} joined "
+        f"to the campaign map ({index.campaign_entries} entries); "
+        f"{len(index.skipped)} director"
+        f"{'y' if len(index.skipped) == 1 else 'ies'} skipped"
     )
     for skipped in index.skipped:
         print(f"  skipped {skipped.path}: {skipped.reason}")

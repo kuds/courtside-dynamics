@@ -718,6 +718,102 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### The run-record verifier pass: a run that raises never reads completed, and a mirror deletes only its own files — *implemented (unreleased, 2026-10-17)*
+Verifiers re-ran the two L1 commits (`d273409`, `4445669`), and the
+PPO round-2 verifier's leftovers against `09f202a` came along. Every
+env stream and training path is unchanged: golden digests 22/22, recipe
+snapshot unchanged, trainer digest against `09f202a` matching every
+policy, normalizer, monitor, evaluation, best-model, checkpoint,
+diagnosis, `resolved_model` and RNG component of all four jobs, with
+`run_layout_artifacts` differing only by `run_record` and
+`sync_manifest` as declared. The PPO fixes are reporting and message
+text only.
+- **A failure after the outcome is a crash.** An exception that escaped
+  `train()` after the body had reported its outcome (an env close, the
+  SB3 logger's TensorBoard and `progress.csv` flush -- straight onto the
+  Drive mount by default) kept `completed` with no stop reason, and
+  the directory verified complete: the R3 failure the record exists to
+  catch. `close()` now records `crashed` (`interrupted` for a
+  `KeyboardInterrupt`) with `crashed after the run ended as completed
+  (...): OSError(...)`, unless the error is the one the crash salvage
+  already recorded. A status change, not a `teardown_error` field:
+  `train()` raises, so the record must agree with the caller, and the
+  schema stays `courtside-run-record/1`. `stage_summary.txt`, written
+  before the failure, still says `completed`; the record is the
+  source of truth.
+- **A reused directory starts clean.** `reuse_log_dir=True` rotated the
+  logs but not the model files, so an attempt that crashed before its
+  first evaluation recorded the previous attempt's selection and its
+  best and final models as its own. Every run-layout artifact but
+  `config.json` now rotates aside (`*.attempt_<UTC time>`), rather than
+  having the record skip files older than the attempt: mtimes on a
+  FUSE Drive mount are coarse, and the directory itself must describe
+  one attempt, since loaders read `best_model.zip`, not the record.
+- **The validated mirror target is the mirrored one.** `train()` now
+  passes `validate_sync_target`'s resolved path to the mirror and the
+  record; `RunDirMirror` also expands and resolves both of its paths
+  and refuses one inside the other. A `~/Drive/run` had been validated
+  against `$HOME` and then mirrored into a literal `./~/Drive/run` on
+  local disk, reported as a success.
+- **A mirror deletes only what it wrote.** `sync_run_dir`, the public
+  manual re-sync the error message and notebook section 9d call,
+  deleted every destination file the source lacked: one slip in the
+  path (the Drive root) wiped unrelated files silently. A pass now
+  overwrites or removes only files it can prove are this run's: copied
+  by this mirror, listed by the destination's manifest for this run
+  id, byte-identical to the source's file, or a copy's temporary
+  leftover. Anything else, an unreadable manifest or another run's
+  manifest refuses the pass before it writes. Refusing, not keeping:
+  a kept stray would fail verification later, and the refusal names
+  the files now. A partial copy left before any manifest re-syncs,
+  because its files match the source.
+- **The final mirror checks itself.** The change cache trusts (size,
+  mtime); a file rewritten with both unchanged kept a stale copy that
+  verified complete. The final pass compares the mirror's file list
+  with the sealed local manifest and redoes the pass without the cache
+  when they differ.
+- **Default verification tolerates only the post-training locations.**
+  Stray files used to pass with exit 0, an interrupted write's hidden
+  `.x.tmp-<pid>` included. The notebook use case stays (rather than a
+  strict default plus an allowlist flag, which every notebook would
+  need): an unlisted file under `reports/` or at `media/best_model.mp4`
+  fails only `--strict`; any other unlisted file, and any writer's
+  temporary leftover anywhere, fails the directory.
+- **The index says when a run looks live.** A run record that still
+  says `running` gets a problem with or without verification
+  (`--skip-verify` is the Colab default): no manifest means training or
+  dead, a manifest means a mid-run mirror snapshot. It is a stub
+  without a final model, and the CLI counts these rows. A summary that
+  exists but is not UTF-8 is no longer `aborted` (status `null`, a short
+  problem); `train()` now writes the summary as UTF-8 whatever the
+  locale, which was the trigger. Problems name files relative to the
+  run directory. A stray `config.json` in a recipe folder no longer
+  hides the runs below it (they get rows; the outer row or skip names
+  them). A run-named directory with a zero-byte or foreign
+  `config.json` is an aborted row with the problem, not a skip; a BOM
+  and an integral float budget are read as written. Flat-layout runs
+  report their root `best_model.mp4` as `files.best_model_video`, and an
+  on-policy summary's `Best eval (at N steps, SB3 n_updates K)` step is
+  parsed (it read as missing).
+- **PPO round 2, reporting only.** A reward-selected run with
+  `info_dict_eval=False` records no update count, so a best from the
+  first one-rollout evaluation went unflagged; an evaluation within
+  `resolved_training.rollout_env_steps` now counts 0 updates. A
+  warm-started run's zero-update best is "the warm-start source's
+  policy, not updated by this run", not "the untrained initial policy",
+  and a carried `log_std` is said to differ from `log_std_init`, not to
+  have drifted. The cadence refusal now gives the real reason (a fixed
+  number of updates between evaluations and checkpoints, so the stop
+  floor and gate advances line up); SB3 runs a whole-rollout
+  evaluation after the rollout's data and before its update, so the
+  old "between a rollout's data and its update" was wrong. The README
+  no longer claims a nightly probe job.
+- **Two campaign notes were short.** LH1b (`20260820_013545`) ran
+  2,000,000 steps at patience 60 against the frozen 1M and 20: a fourth
+  budget override, now in the design doc's S2 count. The L2 replication
+  (`20260815_015143`) changed patience 20 to 60 along with seed and
+  `n_envs`.
+
 ### Run records and manifests are the source of truth; the index is regenerated — *implemented (unreleased, 2026-10-17); design L1, second half*
 `design_campaign_structure_20261016.md` step L1 and its rule "don't
 co-append to one Drive index". No env stream, training or run-directory
@@ -774,9 +870,15 @@ first half declared).
   archaeology). Its directory trained the full 2M budget: the summary says so and the last
   checkpoint is at 2M. The map's note records this; the doc is left
   unchanged.
-- **Open.** Index the full Drive archive. The mirror skipped the text
-  of 22 WallBall runs and the out-of-scope `WallBall/` and `TennisWall/`
-  folders, and its checkpoint and video counts are lower bounds.
+- **The full archive indexes cleanly** (verifier pass, entry above).
+  All 60 directories: 59 rows (the 47 in scope plus 12 from the
+  out-of-scope `WallBall/` folder, which the campaign map does not
+  name), 9 aborted (the 8 above plus `WallBall/20260710_021630`, a best
+  and a final model at about 9 minutes and no summary: aborted, not a
+  stub), the same 7 stubs, all 47 map entries joined, no warnings.
+  `TennisWall/sac/20260502_025419` is skipped: it predates `config.json`
+  (its config is `run_config.json`). All 50 rows with a summary agree
+  with their source files.
 
 ### A run directory says what ran and seals itself; a mirror is trusted only through its manifest — *implemented (unreleased, 2026-10-17); design L1, first half*
 `design_campaign_structure_20261016.md` R3: 7 of about 48 archived run
@@ -804,15 +906,19 @@ layout list, which gains `run_record` and `sync_manifest`).
 - **Status is finer than the summary's.** The record separates
   `early_stop` from `completed`; `stage_summary.txt` keeps
   `completed` for both, because the campaign resumes (re-scores) a
-  leg only from that line. A guard whose condition first holds at
-  the last scheduled evaluation trained the whole budget: `completed`,
-  with a `full_budget: ...` reason that quotes the guard. A callback
-  that stops early without a reason gets one that says so.
+  leg only from that line. A guard that fires once the run has trained
+  its whole budget (`num_timesteps >= total_timesteps`, e.g. at the
+  final evaluation of a budget that is a multiple of `eval_freq`) is
+  `completed`, with a `full_budget: ...` reason that quotes the guard;
+  one at the final scheduled evaluation of any other budget left steps
+  untrained and is `early_stop`. A callback that stops early without a
+  reason gets one that says so.
 - **Unlisted files are reported, not fatal by default.** The notebooks
   write plots, the replay video and the long-horizon audit into the run
   directory after `train()` sealed it. Failing those would make every
   notebook run incomplete. Every file `train()` wrote is still checked,
-  and `--strict` fails extras. A partial *mirror* still never verifies:
+  and `--strict` fails extras. (Narrowed by the verifier pass above:
+  only the post-training locations are tolerated.) A partial *mirror* still never verifies:
   its terminal record only arrives in the final pass, and a pass that
   dies leaves the previous manifest, which then lists a changed file
   or a `running` record.

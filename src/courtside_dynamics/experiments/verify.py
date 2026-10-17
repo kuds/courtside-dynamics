@@ -8,7 +8,9 @@ Usage::
 Prints one verdict per directory (``--json``: one JSON object per line)
 and exits 0 only when every directory is complete
 (:func:`~courtside_dynamics.experiments.records.verify_run_dir`), 1
-otherwise. ``--strict`` also fails files the manifest does not list.
+otherwise. A file the manifest does not list fails the directory unless
+it is a post-training plot, audit or replay video (``reports/``,
+``media/best_model.mp4``); ``--strict`` fails those too.
 """
 
 from __future__ import annotations
@@ -31,8 +33,8 @@ def _describe(result) -> list[str]:
         lines.extend(f"  - {problem}" for problem in result.problems)
     if result.unlisted:
         lines.append(
-            f"  {len(result.unlisted)} file(s) not in the manifest (written "
-            f"after it): " + ", ".join(result.unlisted[:10])
+            f"  {len(result.unlisted)} file(s) not in the manifest: "
+            + ", ".join(result.unlisted[:10])
             + (" ..." if len(result.unlisted) > 10 else "")
         )
     return lines
@@ -44,7 +46,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="also fail files the manifest does not list",
+        help=(
+            "also fail post-training files (reports/, media/best_model.mp4) "
+            "the manifest does not list"
+        ),
     )
     parser.add_argument(
         "--json", action="store_true", help="one JSON verdict per line"

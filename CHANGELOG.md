@@ -18,6 +18,71 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **Run-record, mirror and index fixes from the L1 verifiers, plus the
+  PPO round-2 leftovers (2026-10-17).** No env stream or training
+  change: golden digests 22/22, recipe snapshot unchanged, and the
+  trainer digest against `09f202a` matches every training component of
+  the SAC, DemoSAC, PaddleTennis-SAC and PPO jobs, `run_layout_artifacts`
+  differing only by `run_record` and `sync_manifest` as declared. The
+  PPO changes are summary and message text.
+  - **A run that raises never reads `completed`.** An exception after
+    the run reported its outcome (an env close or the SB3 logger's
+    TensorBoard flush failing after a completed run) left the record
+    `completed` with no stop reason while `train()` raised. The record
+    now says `crashed` (`interrupted` for a `KeyboardInterrupt`) with
+    `crashed after the run ended as completed: <error>`.
+  - **`reuse_log_dir=True` rotates every run-layout artifact but
+    `config.json`** (the model files, `metrics/`, `reports/`, `media/`,
+    `checkpoints/`, summary, record and manifest), not just the logs:
+    an attempt that crashed before its first evaluation recorded the
+    previous attempt's selection and models as its own.
+  - **Mirrors.** `train()` mirrors to and records the `sync_dir` it
+    validated (`~` expanded, resolved once); a `~/Drive/run` used to land
+    in a literal `./~/Drive/run`. `RunDirMirror` and `sync_run_dir`
+    expand and resolve both paths, refuse one inside the other, and
+    never delete or overwrite a file they cannot prove is this run's
+    (copied by the mirror, listed by its manifest for this run id, or
+    byte-identical to the source): a destination holding anything else,
+    or another run's mirror, raises `SyncError` before anything is
+    written, instead of silently deleting every unrelated file under a
+    mistyped path. The final pass must reproduce the local manifest's
+    files, or it is redone without the change cache.
+  - **`verify_run_dir` / `experiments.verify` fail stray files by
+    default.** An unlisted file is tolerated only at the post-training
+    locations (`reports/`, `media/best_model.mp4`) and only without
+    `--strict`; any other unlisted file, and a writer's temporary
+    leftover (`.x.tmp-<pid>`, `.x.sync-tmp`, `*.tmp`) anywhere, makes
+    the directory incomplete. Problem messages name files relative to
+    the run directory; `read_json_object` takes a `label`, reads a
+    UTF-8 byte-order mark, and no longer puts a file's bytes into its
+    error.
+  - **Run index.** A run record that still says `running` is flagged in
+    `index.problems` with or without verification (training or dead
+    without a manifest; a mid-run mirror snapshot with one), is a stub
+    without a final model, and is counted on the CLI line. A summary
+    that exists but cannot be decoded leaves the status `null` with a
+    short problem instead of `aborted`. A stray `config.json` in a
+    non-run folder no longer hides the runs beneath it; a run-named
+    directory with a zero-byte or foreign `config.json` is an aborted
+    row carrying the problem; a BOM and an integral float budget are
+    read as written; `files.best_model_video` reports the replay video,
+    at the root of a pre-0.14 run; an on-policy summary's `Best eval`
+    step (`(at N steps, SB3 n_updates K)`) is parsed instead of read as
+    missing. The full 60-directory archive
+    indexes to 59 rows, 9 aborted, 7 stubs, 47 of 47 map entries joined,
+    no warnings.
+  - **`stage_summary.txt` is written as UTF-8** whatever the locale.
+  - **PPO round 2.** A reward-selected on-policy run with
+    `info_dict_eval=False` gets its best's 0 updates from
+    `resolved_training.rollout_env_steps` (the zero-update warning used
+    to be skipped); a warm-started run's zero-update notes name the
+    warm-start source's policy instead of an untrained one, and a
+    `log_std` carried from the source is reported as differing from
+    `log_std_init`, not as drift; the on-policy cadence refusal states
+    its real reason; the README no longer promises a nightly probe.
+  - `legacy_levers.toml`: LH1b's note records its undeclared 2M /
+    patience-60 override (now counted in the campaign design's S2), and
+    the L2 replication's its patience change.
 - **The regenerated run index and the legacy backfill (design L1,
   second half; 2026-10-17).** No env stream, training or run-directory
   change: golden digests 22/22, recipe snapshot unchanged, and the
@@ -116,9 +181,13 @@ supersedes it (see the ground-rules bullet).
     VM down and leaves it up when the flush fails (critic-4);
     `check_run_artifacts` and the summary's Artifacts section count an
     empty directory artifact, such as `media/videos/`, as missing and
-    say so (training-data-5); a guard whose condition first holds at the
-    last scheduled evaluation now reads `completed` with a
-    `full_budget: ...` stop reason that quotes it, and `train()` warns
+    say so (training-data-5); a guard that fires once the run has
+    trained its whole budget (`num_timesteps >= total_timesteps`, e.g.
+    at the final evaluation of a budget that is a multiple of
+    `eval_freq`) now reads `completed` with a `full_budget: ...` stop
+    reason that quotes it (one at the final scheduled evaluation of any
+    other budget left steps untrained and reads `early_stop`), and
+    `train()` warns
     before any output (and `config.json`'s
     `resolved_training.early_stop_reachability` and the run record keep
     it) when patience or the degenerate guard cannot fire inside the

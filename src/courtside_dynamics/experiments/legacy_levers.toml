@@ -75,7 +75,7 @@ campaign = "paddle_tennis"
 lever = "npoint"
 verdict = "stop/pivot (2026-08-15): from scratch, continuous play un-samples contact; transfer collects the credit. n-point play adopted 2026-08-16"
 doc = "docs/paddle_tennis_npoint_pilot_20260815_review.md"
-note = "L2 full-budget replication; seed 1 and n_envs 8 changed together, so it is not a clean replicate"
+note = "L2 full-budget replication; seed 1, n_envs 8 and early_stop_patience 60 (the pilot ran 20) changed together, so it is not a clean replicate"
 
 [runs."20260815_180815"]
 campaign = "paddle_tennis"
@@ -122,7 +122,7 @@ campaign = "paddle_tennis"
 lever = "hold_escrow"
 verdict = "closed without adoption (2026-08-22)"
 doc = "docs/design_paddle_tennis_postswing_hold.md"
-note = "LH1b: hold_shaping 0.5, travel 4.0 m; trained byte-identical to LH1 through 175k (doubling a zero), so void as a dose test. The doc records it as stopped early; its directory trained the full 2M budget"
+note = "LH1b: hold_shaping 0.5, travel 4.0 m; trained byte-identical to LH1 through 175k (doubling a zero), so void as a dose test. The doc records it as stopped early; its directory trained the full 2M budget. Its config.json has total_timesteps 2,000,000 and early_stop_patience 60 against the frozen 1M and 20 (design §4a/§4b): an undeclared fourth budget override"
 
 [runs."20260821_013700"]
 campaign = "paddle_tennis"

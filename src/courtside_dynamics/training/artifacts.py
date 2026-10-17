@@ -951,6 +951,7 @@ def on_policy_health_flags(
     target_kl: float | None,
     log_std_init: float | None,
     n_epochs: int | None = None,
+    log_std_carried: bool = False,
 ) -> list[str]:
     """Training Health flags for an on-policy run's ``train/*`` series.
 
@@ -965,7 +966,10 @@ def on_policy_health_flags(
       returns worse than their mean, so the advantages are noise;
     - the final ``train/std`` more than 1 nat from ``log_std_init``
       (``train/std`` is SB3's mean of ``exp(log_std)``, so the drift is
-      read on the log of that mean);
+      read on the log of that mean). ``log_std_carried`` (a warm start
+      that transferred the source's ``log_std`` rather than resetting
+      it) words the flag as a difference from ``log_std_init`` that
+      the run started with, not as this run's drift;
     - mean epochs completed per update (:func:`epochs_per_update`)
       below half of ``n_epochs``: ``target_kl`` ends the updates so
       early that the configured epochs never act, while approx_kl,
@@ -1020,7 +1024,16 @@ def on_policy_health_flags(
             flags.append(f"std: final value {final} is not a positive number")
         else:
             drift = math.log(final) - float(log_std_init)
-            if abs(drift) > ON_POLICY_LOG_STD_DRIFT_MAX:
+            if abs(drift) > ON_POLICY_LOG_STD_DRIFT_MAX and log_std_carried:
+                flags.append(
+                    f"log std {math.log(final):+.3g} differs from "
+                    f"log_std_init {float(log_std_init):+.3g} by "
+                    f"{drift:+.3g} nats (limit "
+                    f"{ON_POLICY_LOG_STD_DRIFT_MAX}); log_std was carried "
+                    f"from the warm-start source, so this run may have "
+                    f"started that far away"
+                )
+            elif abs(drift) > ON_POLICY_LOG_STD_DRIFT_MAX:
                 flags.append(
                     f"log std {math.log(final):+.3g} vs log_std_init "
                     f"{float(log_std_init):+.3g}: drifted {drift:+.3g} nats "
@@ -1426,11 +1439,17 @@ def write_run_summary(
     trains whole rollouts, so the last one can run past the budget),
     the SB3 update count behind its best evaluation and its
     ``best_model.zip`` (flagged and printed when that is 0: the
-    untrained initial policy), its resolved reward normalization under
+    untrained initial policy, or for a warm start the source's policy
+    not updated by this run), its resolved reward normalization under
     Hyperparameters, its epochs per update, and
     :func:`on_policy_health_flags` under Training Health, checked
     against the ``target_kl``, ``log_std_init`` and ``n_epochs`` its
-    ``config.json`` recorded; flags are printed too.
+    ``config.json`` recorded; flags are printed too. The update count at
+    an evaluation comes from ``best_model_meta.json`` or
+    ``eval_info.csv``'s ``n_updates`` row; a run that writes neither (a
+    reward-selected run with ``info_dict_eval=False``) still gets its
+    0 from ``config.json``'s ``resolved_training.rollout_env_steps``:
+    an evaluation inside the first rollout precedes every update.
     """
     env_name = _env_display_name(cfg)
     git_sha = _git_sha()
@@ -1497,6 +1516,13 @@ def write_run_summary(
         )
     else:
         lines.append(_kv("Timesteps", f"{cfg.total_timesteps:,}"))
+    # A warm-started run starts from its source's policy, not an
+    # untrained one: with no update, that is what every model holds.
+    initial_policy = (
+        "the untrained initial policy"
+        if cfg.warm_start is None
+        else "the warm-start source's policy, not updated by this run"
+    )
     if n_updates is not None:
         lines.append(
             _kv(
@@ -1504,7 +1530,7 @@ def write_run_summary(
                 f"{n_updates:,} (optimization epochs over all rollouts)"
                 + (
                     "  <-- WARNING: no update ran; every saved model is "
-                    "the untrained initial policy"
+                    + initial_policy
                     if n_updates == 0
                     else ""
                 ),
@@ -1544,19 +1570,38 @@ def write_run_summary(
     # initial policy, however much the run trained after it: a PPO
     # quick test on BallBalance, whose near-zero initial action
     # balances well, deployed exactly that while its summary read
-    # "SB3 n_updates 70" and "deploy best_model.zip".
+    # "SB3 n_updates 70" and "deploy best_model.zip". A run that logs
+    # neither (reward selection with info_dict_eval=False) still knows
+    # the zero: an evaluation inside the first rollout
+    # (resolved_training.rollout_env_steps) precedes every update.
+    run_config_payload = (
+        _read_run_config_payload(log_dir) if n_updates is not None else None
+    )
+    resolved_training = (run_config_payload or {}).get("resolved_training")
+    first_rollout = (
+        resolved_training.get("rollout_env_steps")
+        if isinstance(resolved_training, dict)
+        else None
+    )
+    if isinstance(first_rollout, bool) or not isinstance(first_rollout, int):
+        first_rollout = None
+
     def updates_at(step: int) -> int | None:
         if n_updates is None:
             return None
         value = _read_eval_info_at_step(log_dir, step).get("n_updates")
-        return None if value is None else int(value)
+        if value is not None:
+            return int(value)
+        if first_rollout is not None and 0 < step <= first_rollout:
+            return 0
+        return None
 
     def updates_note(updates: int | None) -> str:
         return "" if updates is None else f", SB3 n_updates {updates:,}"
 
     untrained_best_warning = (
         "  <-- WARNING: selected before any update; best_model.zip is "
-        "the untrained initial policy"
+        + initial_policy
     )
     # Which checkpoint best_model.zip holds: the headline evaluator's
     # selection (best_model_meta.json) or the reward EvalCallback's.
@@ -1606,7 +1651,7 @@ def write_run_summary(
                 if regressed and best_eval_updates == 0:
                     note = (
                         "  <-- policy regressed after best, but the best "
-                        "scored the untrained initial policy (SB3 n_updates 0)"
+                        f"scored {initial_policy} (SB3 n_updates 0)"
                     )
                 elif regressed:
                     note = (
@@ -1866,6 +1911,9 @@ def write_run_summary(
                 target_kl=target_kl,
                 log_std_init=log_std_init,
                 n_epochs=n_epochs,
+                log_std_carried=(
+                    cfg.warm_start is not None and not cfg.warm_start.reset_log_std
+                ),
             )
             epochs = epochs_per_update(health_series)
             if epochs:
@@ -1906,21 +1954,23 @@ def write_run_summary(
         lines.extend(artifact_lines)
 
     out = artifact_path(log_dir, "stage_summary")
-    with open(out, "w") as f:
+    # UTF-8 whatever the locale: the run index reads it as UTF-8, and a
+    # non-ASCII character written in another encoding made it unreadable.
+    with open(out, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     if n_updates == 0:
         # Also on the console: the cell output is where a quick test's
         # "completed" is read.
         print(
             f"[train] WARNING: {cfg.algo} ran no update (SB3 n_updates 0) "
-            f"in {steps_trained:,} env steps; every saved model is the "
-            f"untrained initial policy (see {out})"
+            f"in {steps_trained:,} env steps; every saved model is "
+            f"{initial_policy} (see {out})"
         )
     if untrained_best_step is not None:
         print(
             f"[train] WARNING: best_model.zip was selected at "
             f"{untrained_best_step:,} steps, before any {cfg.algo} update "
-            f"(SB3 n_updates 0): it is the untrained initial policy "
+            f"(SB3 n_updates 0): it is {initial_policy} "
             f"(see {out})"
         )
     for flag in health_flags:

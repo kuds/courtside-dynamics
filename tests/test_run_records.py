@@ -268,17 +268,84 @@ def test_a_listed_file_that_changed_makes_the_run_dir_incomplete(
 
 
 def test_unlisted_files_are_reported_and_fail_only_strict(tmp_path):
-    """A notebook's post-training plots land beside a sealed run: they
-    are listed as unlisted, and only ``strict`` refuses them."""
+    """A notebook's post-training plots and replay video land beside a
+    sealed run: they are listed as unlisted, and only ``strict``
+    refuses them."""
     run_dir = _sealed_run_dir(tmp_path / "run")
     (run_dir / "reports").mkdir()
     (run_dir / "reports" / "learning_curve.png").write_bytes(b"png")
+    (run_dir / "reports" / "eval_headline_2.png").write_bytes(b"png")
+    (run_dir / "media").mkdir()
+    (run_dir / "media" / "best_model.mp4").write_bytes(b"mp4")
     lenient = verify_run_dir(run_dir)
     assert lenient.complete
-    assert lenient.unlisted == ("reports/learning_curve.png",)
+    assert lenient.unlisted == (
+        "media/best_model.mp4",
+        "reports/eval_headline_2.png",
+        "reports/learning_curve.png",
+    )
     strict = verify_run_dir(run_dir, strict=True)
     assert not strict.complete
     assert "strict" in strict.problems[0]
+
+
+@pytest.mark.parametrize(
+    "stray",
+    [
+        "stray.txt",
+        "model/stray.zip",
+        ".hidden_tmp",
+        "metrics/x/deep.bin",
+        "media/videos/late.mp4",
+        # A writer's temporary leftover fails even where plots may land.
+        ".run_record.json.tmp-4242",
+        "model/.best_model.zip.sync-tmp",
+        "reports/.learning_curve.png.tmp-17",
+        "reports/tmpk2j3h4.tmp",
+    ],
+)
+def test_an_unlisted_file_outside_the_post_training_locations_fails(
+    tmp_path, stray
+):
+    """Verifier r1: by default every stray file passed with exit code 0,
+    an interrupted write's hidden leftover included. Only the
+    post-training locations are tolerated now."""
+    run_dir = _sealed_run_dir(tmp_path / "run")
+    path = run_dir / stray
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x")
+    result = verify_run_dir(run_dir)
+    assert not result.complete
+    assert result.manifest == "verified"
+    assert result.unlisted == (stray,)
+    assert stray in result.problems[0]
+    assert "outside the post-training locations" in result.problems[0]
+    assert verify_main([str(run_dir)]) == 1
+
+
+def test_the_post_training_locations_are_the_notebooks_layout():
+    """What a notebook writes after train() (RUN_LAYOUT's plots, audits
+    and replay video) is tolerated; nothing train() itself writes is."""
+    from courtside_dynamics.training.artifacts import RUN_LAYOUT
+
+    post_training = {
+        "learning_curve",
+        "training_health_plot",
+        "eval_headline",
+        "eval_terminations",
+        "eval_rewards",
+        "eval_diagnostics",
+        "best_long_eval",
+        "best_long_eval_episodes",
+        "best_model_video",
+    }
+    for name, relative in RUN_LAYOUT.items():
+        expected = name in post_training or (
+            # Written during training, but under reports/ like the plots.
+            name in ("curriculum_stages", "ladder_certification", "diagnosis_dir")
+        )
+        probe = relative if os.path.splitext(relative)[1] else f"{relative}/x.json"
+        assert records.is_post_training_path(probe) is expected, name
 
 
 def test_an_intact_snapshot_of_an_unfinished_run_is_incomplete(tmp_path):
@@ -400,11 +467,12 @@ def test_mirror_copies_changes_only_and_seals_each_pass(tmp_path, monkeypatch):
         build_run_record({}, run_id="run", created_at="t", status=records.COMPLETED),
     )
     write_sync_manifest(source)
-    (mirror_dir / "stale.tmp").write_text("left by a failed pass")
+    leftover = mirror_dir / "model" / ".best_model.zip.sync-tmp"
+    leftover.write_text("left by a copy a failed pass cut short")
     mirror.sync()
     # Only what changed, and the source's own manifest is never copied.
     assert copied == ["model/best_model.zip", RUN_RECORD_NAME]
-    assert not (mirror_dir / "stale.tmp").exists()
+    assert not leftover.exists()
     final = verify_run_dir(mirror_dir, strict=True)
     assert final.complete and final.status == "completed"
     assert mirror.passes == 2 and mirror.failures == 0
@@ -449,6 +517,120 @@ def test_a_failed_mirror_pass_keeps_the_previous_manifest_and_never_verifies(
     monkeypatch.setattr(sync, "_copy_and_hash", copy_and_hash)
     mirror.sync()
     assert verify_run_dir(mirror_dir).complete
+
+
+def test_a_mirror_never_deletes_files_it_did_not_write(tmp_path):
+    """Verifier r1: sync_run_dir (the public manual re-sync) deleted
+    every file under its destination that the source lacked, so one
+    slip in the path -- the Drive root -- wiped unrelated files without
+    a word. A pass now refuses, before writing anything."""
+    source = _sealed_run_dir(tmp_path / "local" / "20261017_000001")
+    drive = tmp_path / "MyDrive"
+    unrelated = [
+        drive / "other_project" / "notes.txt",
+        drive / "photo.jpg",
+        drive / "training_runs" / "PaddleTennis" / "sac" / "20260810_211754"
+        / "model" / "best_model.zip",
+    ]
+    for path in unrelated:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"keep me")
+    before = sorted(records.run_files(drive))
+    with pytest.raises(SyncError, match=r"3 file\(s\) this run's mirror did not write"):
+        sync_run_dir(source, drive)
+    assert sorted(records.run_files(drive)) == before
+    assert not (drive / SYNC_MANIFEST_NAME).exists()
+    for path in unrelated:
+        assert path.read_bytes() == b"keep me"
+
+    # A file of the same name that differs from the source's is not
+    # overwritten either.
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "config.json").write_text('{"someone": "else"}\n')
+    with pytest.raises(SyncError, match="config.json"):
+        sync_run_dir(source, other)
+    assert (other / "config.json").read_text() == '{"someone": "else"}\n'
+
+
+def test_a_mirror_refuses_another_runs_mirror(tmp_path):
+    first = _sealed_run_dir(tmp_path / "local" / "a")
+    second = _sealed_run_dir(tmp_path / "local" / "b")
+    mirror_dir = tmp_path / "drive" / "a"
+    sync_run_dir(first, mirror_dir)
+    sealed = (mirror_dir / SYNC_MANIFEST_NAME).read_text()
+    with pytest.raises(SyncError, match="the mirror of run 'a', not 'b'"):
+        sync_run_dir(second, mirror_dir)
+    assert (mirror_dir / SYNC_MANIFEST_NAME).read_text() == sealed
+    (mirror_dir / SYNC_MANIFEST_NAME).write_text("{")
+    with pytest.raises(SyncError, match="cannot read"):
+        sync_run_dir(first, mirror_dir)
+    with pytest.raises(ValueError, match="neither may contain the other"):
+        RunDirMirror(first, first / "mirror")
+    with pytest.raises(ValueError, match="neither may contain the other"):
+        RunDirMirror(first, first.parent)
+
+
+def test_a_manual_resync_finishes_a_mirror_a_failed_pass_left_unsealed(
+    tmp_path, monkeypatch
+):
+    """The final mirror failed before any manifest existed (no
+    checkpoint pass, a Drive error mid-copy): the copies it left are
+    byte-identical to the source, so the re-sync the error message
+    names may overwrite them and completes the mirror."""
+    source = _sealed_run_dir(tmp_path / "run")
+    mirror_dir = tmp_path / "drive" / "run"
+    copy_and_hash = sync._copy_and_hash
+
+    def dies_on_the_record(src: Path, dst: Path):
+        if src.name == RUN_RECORD_NAME:
+            raise OSError("Transport endpoint is not connected")
+        return copy_and_hash(src, dst)
+
+    monkeypatch.setattr(sync, "_copy_and_hash", dies_on_the_record)
+    with pytest.raises(OSError, match="Transport endpoint"):
+        RunDirMirror(source, mirror_dir).sync()
+    assert (mirror_dir / "config.json").is_file()
+    assert not (mirror_dir / SYNC_MANIFEST_NAME).exists()
+    monkeypatch.setattr(sync, "_copy_and_hash", copy_and_hash)
+    sync_run_dir(source, mirror_dir)
+    assert verify_run_dir(mirror_dir, strict=True).complete
+
+
+def test_the_final_pass_redoes_a_mirror_its_change_cache_left_stale(tmp_path):
+    """Verifier r1: a file rewritten with the same size and mtime_ns
+    kept its stale copy, and the mirror's manifest repeated the cached
+    digest, so the stale mirror verified complete. train()'s final pass
+    checks the mirror's file list against the sealed local manifest and
+    redoes the pass without the cache when they differ."""
+    import importlib
+
+    train_module = importlib.import_module("courtside_dynamics.training.train")
+    source = tmp_path / "run"
+    source.mkdir()
+    (source / "a.bin").write_bytes(b"AAAA")
+    mirror = RunDirMirror(source, tmp_path / "drive" / "run")
+    mirror.sync()
+    stat = (source / "a.bin").stat()
+    (source / "a.bin").write_bytes(b"BBBB")
+    os.utime(source / "a.bin", ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    write_run_record(
+        source,
+        build_run_record({}, run_id="run", created_at="t", status=records.COMPLETED),
+    )
+    write_sync_manifest(source)
+    # The bare cached pass keeps the stale bytes ...
+    assert mirror.sync()["files"] != json.loads(
+        (source / SYNC_MANIFEST_NAME).read_text()
+    )["files"]
+    assert (mirror.destination / "a.bin").read_bytes() == b"AAAA"
+    # ... the final pass does not.
+    lifecycle = object.__new__(train_module._RunLifecycle)
+    lifecycle.log_dir = source
+    lifecycle.mirror = mirror
+    lifecycle._final_pass()
+    assert (mirror.destination / "a.bin").read_bytes() == b"BBBB"
+    assert verify_run_dir(mirror.destination, strict=True).complete
 
 
 def test_a_copy_that_does_not_rehash_fails_the_pass(tmp_path, monkeypatch):
@@ -651,6 +833,72 @@ def test_a_failure_after_config_json_but_before_learn_is_recorded(tmp_path):
     assert record["budget"]["trained_timesteps"] is None
 
 
+@pytest.mark.parametrize("closing", ["sb3_logger", "train_env"])
+def test_a_failure_while_closing_an_ended_run_is_recorded(
+    tmp_path, monkeypatch, closing
+):
+    """Verifier r1 (blocker): an exception after the run reported its
+    outcome -- an env close in the inner finally, the SB3 logger's
+    TensorBoard and progress.csv flush in the outer one, straight onto
+    the Drive mount by default -- escaped train() while the record
+    said completed with no stop_reason, and the directory verified
+    complete. The record now says crashed, quoting the outcome."""
+    from stable_baselines3.common.logger import Logger
+    from stable_baselines3.common.vec_env import VecNormalize
+
+    owner, real_close = (
+        (Logger, Logger.close) if closing == "sb3_logger" else (VecNormalize, VecNormalize.close)
+    )
+    failed = {"n": 0}
+
+    def close_then_fail(self):
+        real_close(self)
+        if not failed["n"]:
+            failed["n"] += 1
+            raise OSError("Transport endpoint is not connected")
+
+    monkeypatch.setattr(owner, "close", close_then_fail)
+    log_dir = tmp_path / closing
+    with pytest.raises(OSError, match="Transport endpoint"):
+        train(_cfg(log_dir))
+    record = _assert_sealed(log_dir, "crashed")
+    assert record["stop_reason"].startswith(
+        "crashed after the run ended as completed: OSError("
+    )
+    assert "Transport endpoint is not connected" in record["stop_reason"]
+    assert record["budget"]["trained_timesteps"] == 400
+
+
+def test_a_reused_log_dir_that_crashes_early_records_only_its_own_attempt(
+    tmp_path,
+):
+    """Verifier r1: reuse_log_dir rotated the CSVs and logs but not the
+    model files, so an attempt that crashed before its first
+    evaluation recorded the previous attempt's selection (timestep 100
+    for a run that trained 50 steps) and its best and final models as
+    its own artifacts."""
+    log_dir = tmp_path / "run"
+    train(_cfg(log_dir, total_timesteps=300))
+    assert _record(log_dir)["selection"]["timestep"] == 100
+    with pytest.raises(RuntimeError, match="early crash"):
+        train(
+            _cfg(
+                log_dir,
+                total_timesteps=300,
+                reuse_log_dir=True,
+                extra_callbacks=(_RaiseAt(RuntimeError("early crash"), at=50),),
+            )
+        )
+    record = _assert_sealed(log_dir, "crashed")
+    assert record["budget"]["trained_timesteps"] < 100
+    assert record["selection"] is None
+    names = {artifact["name"] for artifact in record["artifacts"]}
+    assert not names & {"best_model", "best_model_meta", "best_vec_normalize"}
+    # The crash salvage's own model and normalizer are this attempt's.
+    assert {"final_model", "vec_normalize"} <= names
+    assert len(list((log_dir / "model").glob("best_model.attempt_*.zip"))) == 1
+
+
 def test_a_sigkilled_run_leaves_an_incomplete_run_dir(tmp_path):
     """No terminal path runs under SIGKILL (a dead Colab VM): the record
     still says "running" and there is no manifest."""
@@ -794,6 +1042,31 @@ def test_a_final_mirror_that_keeps_failing_raises_after_sealing_locally(
     monkeypatch.setattr(RunDirMirror, "sync", real_sync)
     sync_run_dir(log_dir, sync_dir)
     assert verify_run_dir(sync_dir, strict=True).complete
+
+
+def test_a_tilde_sync_dir_is_mirrored_where_it_was_validated(
+    tmp_path, monkeypatch
+):
+    """Verifier r1: validate_sync_target checked '~/Drive/run' against
+    $HOME, but the mirror was built from the raw string, so the run was
+    mirrored into a literal './~/Drive/run' under the working directory
+    (local disk on Colab) and said it had succeeded."""
+    home = tmp_path / "home"
+    (home / "Drive").mkdir(parents=True)
+    working = tmp_path / "cwd"
+    working.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(working)
+    log_dir = tmp_path / "local" / "run"
+    train(_cfg(log_dir, total_timesteps=200, sync_dir="~/Drive/run"))
+    target = (home / "Drive" / "run").resolve()
+    assert verify_run_dir(target, strict=True).complete
+    assert not (working / "~").exists()
+    record = _assert_sealed(log_dir, "completed")
+    assert record["sync"]["dir"] == str(target)
+    # config.json keeps the value as configured.
+    config = json.loads((log_dir / "config.json").read_text())
+    assert config["train_config"]["sync_dir"] == "~/Drive/run"
 
 
 def test_a_used_sync_dir_is_refused_before_any_output(tmp_path):

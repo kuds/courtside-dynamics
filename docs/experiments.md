@@ -17,25 +17,44 @@ wrong).
 | `run_record.json` | By `train()` at start (`running`), rewritten on every terminal path | What ran and how it ended (`courtside-run-record/1`): status `completed`, `early_stop`, `interrupted` or `crashed` with a `stop_reason`; budget; algorithm; task fingerprints; comparability key; seeds; git; versions; warm start; selection; wall clock |
 | `sync_manifest.json` | Last, after the final record | Path, size and sha256 of every other file (`courtside-sync-manifest/1`) |
 
-A directory is **complete** when its manifest verifies and the record it
-lists is terminal. Complete means "exactly what `train()` left", a
-crashed run included; it does not mean the run succeeded. Without a
-manifest (still training, killed, a dead runtime, or older than run
-records) a directory is incomplete by definition.
+A directory is **complete** when its manifest verifies, the record it
+lists is terminal, and every file the manifest does not list is a
+post-training file (below). Complete means "exactly what `train()`
+left", a crashed run included; it does not mean the run succeeded.
+Without a manifest (still training, killed, a dead runtime, or older
+than run records) a directory is incomplete by definition. A failure
+while the run closes after it ended (an env or the TensorBoard flush
+raising after a completed run) makes `train()` raise and the record
+read `crashed`, its stop reason quoting the outcome the run had
+reached.
 
 ```bash
 python -m courtside_dynamics.experiments.verify <run_dir> [<run_dir> ...]
 python -m courtside_dynamics.experiments.verify --strict --json <run_dir>
 ```
 
-Exit 0 only when every directory is complete. Files written after the
-manifest (the notebooks' plots and replay video) are listed as unlisted
-and fail only `--strict`.
+Exit 0 only when every directory is complete. Every file the manifest
+does not list is reported. Those at the post-training locations (the
+notebooks' plots, audits and gate reports under `reports/`, and the
+replay video `media/best_model.mp4`) fail only `--strict`; any other,
+and a writer's temporary leftover such as `.x.tmp-<pid>` or
+`.x.sync-tmp` anywhere, fails the directory.
 
 With `TrainConfig.sync_dir` (the notebooks' `LOCAL_THEN_SYNC`), a run
 trains on local disk and mirrors itself to Drive at every checkpoint and
 at the end; the mirror gets its own manifest only after every copied
-file re-hashes, so a partial mirror never verifies.
+file re-hashes, so a partial mirror never verifies. `sync_dir` is
+resolved once (`~` expanded) before any output, and that directory is
+the one mirrored and recorded. The final pass must reproduce the local
+manifest's files exactly, or it is redone without the change cache.
+
+`experiments.sync.sync_run_dir(local_run_dir, mirror_dir)` re-runs a
+mirror by hand (the notebooks' last step). It never deletes or
+overwrites a file it cannot prove is this run's (one it copied, one the
+mirror's manifest for this run id lists, or one byte-identical to the
+local file): a destination holding anything else, or another run's
+mirror, is refused before anything is written, so a slip in the path
+(the Drive root) costs nothing.
 
 ## The run index
 
@@ -49,8 +68,9 @@ Writes `<root>/index/runs.jsonl` (or `--out`): one JSON object per run
 directory, sorted by its path under the root, keys sorted. Running it
 twice over unchanged directories gives the same bytes. It prints how
 many rows came from run records and how many were backfilled, how many
-are aborted and stubs, how many joined the campaign map, every skipped
-directory with its reason, and a `WARNING` per row problem.
+are aborted, how many run records still say `running`, how many rows
+are stubs, how many joined the campaign map, every skipped directory
+with its reason, and a `WARNING` per row problem.
 
 Every row has the run record's keys plus two:
 
@@ -58,16 +78,21 @@ Every row has the run record's keys plus two:
   `legacy`), `version_inferred`, `inferred` (the fields derived rather
   than copied), `stub`, `verification` (the manifest verdict of a
   run-record directory), `files` (which model files exist, the
-  checkpoint count and latest step, the video count), `run_config` (the
-  TOML's basename and sha256), `summary` (the parsed head of
-  `stage_summary.txt`) and `problems`.
+  checkpoint count and latest step, the periodic video count, and
+  `best_model_video` for the replay, at the root of a pre-0.14 run),
+  `run_config` (the TOML's basename and sha256), `summary` (the parsed
+  head of `stage_summary.txt`) and `problems`.
 - `campaign`: the curated map's entry for this run id, or `null`.
 
 **What becomes a row.**
 
 - A directory with `run_record.json`: the record as written, plus its
   manifest verdict. `--skip-verify` leaves the verdict `not_checked`
-  (verifying re-reads every checkpoint, slow on a Drive mount).
+  (verifying re-reads every checkpoint, slow on a Drive mount). A
+  record that still says `running` gets a problem either way: without
+  a manifest the run is still training or died (a killed VM), with one
+  it is a mid-run mirror snapshot. It is a stub when no final model
+  exists, like a backfilled launch.
 - A directory with a courtside `config.json` and no record (every run
   before run records): backfilled into the record's shape. Algorithm,
   recipe, task fingerprints, seeds, git, versions, warm start and budget
@@ -79,16 +104,28 @@ Every row has the run record's keys plus two:
   (the train-3 label) becomes `completed` with a `full_budget: ...`
   reason, as `train()` records it now.
 - No `stage_summary.txt`: the run never reached a terminal path.
-  Status `aborted`; a **stub** when no final model was saved either.
-- An empty directory named like a run (`YYYYMMDD_HHMMSS`): an aborted
-  stub, a launch that died before `config.json`.
+  Status `aborted`; a **stub** when no final model was saved either. A
+  summary that exists but cannot be read leaves the status `null`,
+  with a problem: the run may have finished.
+- A run-named directory (`YYYYMMDD_HHMMSS`) whose `config.json` cannot
+  be read or is not a courtside config (a zero-byte file from a partial
+  sync): a row without the config's fields, the problem recorded.
+  A UTF-8 byte-order mark and an integral float budget (`1e6`) are
+  read as written.
+- An empty directory named like a run: an aborted stub, a launch that
+  died before `config.json`.
 
 Anything else is never parsed as a run: a directory holding files but
-no run marker, a `config.json` without a courtside `train_config`, or a
-run-named directory without `config.json` is listed as skipped.
+no run marker, a `config.json` without a courtside `train_config`
+outside a run-named directory, or a run-named directory without
+`config.json` is listed as skipped. A run (or skipped) directory is
+searched further only when a subdirectory holds a run marker; then the
+nested runs get rows of their own and the outer row or skip names
+them, so a stray `config.json` in a recipe folder hides nothing.
 
 A backfilled row holds no machine path. The warm start is named by its
-source directory's basename, the run config by its basename.
+source directory's basename, the run config by its basename, and every
+problem names files relative to the run directory.
 
 **The campaign map.** `experiments/legacy_levers.toml` (package data)
 maps each pre-spec run id to `campaign`, `lever`, `verdict`, `doc` and

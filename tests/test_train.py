@@ -2848,7 +2848,11 @@ def test_reuse_log_dir_rotates_the_previous_attempts_records_and_logs(
         )
     )
     out = capsys.readouterr().out
-    assert out.count("reuse_log_dir=True: rotated the previous attempt's") == 5
+    # Every layout artifact but config.json: the summary, record and
+    # manifest, the three model files (normalize_obs is off), and
+    # progress, evaluations, eval_info, monitor and TensorBoard.
+    assert out.count("reuse_log_dir=True: rotated the previous attempt's") == 11
+    assert "11 artifact(s) of the previous attempt rotated aside" in out
     (old_monitor,) = metrics.glob("monitor.attempt_*")
     assert sorted(path.name for path in old_monitor.iterdir()) == first_monitors
     assert sorted(path.name for path in (metrics / "monitor").iterdir()) == [
@@ -2862,6 +2866,10 @@ def test_reuse_log_dir_rotates_the_previous_attempts_records_and_logs(
     assert old_record.read_text() == first_record
     (old_manifest,) = tmp_path.glob("sync_manifest.attempt_*.json")
     assert old_manifest.read_text() == first_manifest
+    rotated_models = sorted(
+        path.name.split(".attempt_")[0] for path in (tmp_path / "model").glob("*.attempt_*")
+    )
+    assert rotated_models == ["best_model", "best_model_meta", "final_model"]
     assert verify_run_dir(tmp_path, strict=True).complete
 
 
@@ -4827,6 +4835,96 @@ def test_run_summary_reads_the_headline_best_from_its_meta(tmp_path, capsys):
     text = summary({**selected, "timestep": 8_192})
     assert "Best model:     step 8,192, SB3 n_updates 10 (touches_ep_mean" in text
     assert "WARNING: selected before" not in text
+
+
+def test_run_summary_flags_a_first_rollout_best_without_eval_info(
+    tmp_path, capsys
+):
+    """PPO verifier round 2: a reward-selected run with
+    info_dict_eval=False writes neither best_model_meta.json nor
+    eval_info.csv, so a best picked at the first one-rollout evaluation
+    (0 updates) went unflagged. config.json's rollout_env_steps decides
+    it: an evaluation inside the first rollout precedes every update.
+    A warm-started run's zero-update best is its source's policy, not
+    an untrained one, and the summary says so."""
+    from courtside_dynamics.training.artifacts import artifact_path, write_run_summary
+
+    with open(artifact_path(str(tmp_path), "config"), "w") as stream:
+        json.dump({"resolved_training": {"rollout_env_steps": 128}}, stream)
+    npz_path = artifact_path(str(tmp_path), "evaluations")
+    os.makedirs(os.path.dirname(npz_path), exist_ok=True)
+
+    def summary(rewards: list[float], **overrides: Any) -> str:
+        results = np.array([[reward] for reward in rewards])
+        np.savez(
+            npz_path,
+            timesteps=np.array([128 * (index + 1) for index in range(len(rewards))]),
+            results=results,
+            ep_lengths=np.ones_like(results),
+        )
+        cfg = TrainConfig(
+            env_fn=lambda: BallBalanceEnv(episode_len=8),
+            algo="PPO",
+            log_dir=str(tmp_path),
+            total_timesteps=384,
+            info_dict_eval=False,
+            **overrides,
+        )
+        write_run_summary(
+            cfg,
+            str(tmp_path),
+            final_mean_reward=200.0,
+            final_std_reward=0.0,
+            duration_seconds=1.0,
+            actual_timesteps=384,
+            n_updates=20,
+        )
+        return (tmp_path / "stage_summary.txt").read_text()
+
+    assert not (tmp_path / "metrics" / "eval_info.csv").exists()
+    text = summary([428.0, 300.0, 250.0])
+    assert (
+        "Best eval:      428.000 +/- 0.000 (at 128 steps, SB3 n_updates 0)"
+        "  [periodic eval series]  <-- WARNING: selected before any update; "
+        "best_model.zip is the untrained initial policy\n"
+    ) in text
+    assert "before any PPO update (SB3 n_updates 0): it is the untrained" in (
+        capsys.readouterr().out
+    )
+    # A best past the first rollout: the count is unknown, never guessed.
+    text = summary([300.0, 428.0, 250.0])
+    assert "(at 256 steps)  [periodic eval series]\n" in text
+    assert "WARNING" not in text
+
+    text = summary(
+        [428.0, 300.0, 250.0], warm_start=WarmStartConfig(source_run_dir="source")
+    )
+    assert (
+        "<-- WARNING: selected before any update; best_model.zip is the "
+        "warm-start source's policy, not updated by this run\n"
+    ) in text
+    assert "but the best scored the warm-start source's policy" in text
+    assert "untrained" not in text
+    assert "it is the warm-start source's policy, not updated by this run" in (
+        capsys.readouterr().out
+    )
+
+
+def test_a_carried_log_std_is_not_called_this_runs_drift():
+    """PPO verifier round 2: a warm start that keeps the source's
+    log_std measured it against log_std_init and called the gap
+    'drifted', though a learning-rate-0 run cannot move it."""
+    from courtside_dynamics.training.artifacts import on_policy_health_flags
+
+    series = {"train/std": [float(np.exp(-1.0))]}
+    (own,) = on_policy_health_flags(series, target_kl=None, log_std_init=0.5)
+    assert "drifted -1.5 nats" in own
+    (carried,) = on_policy_health_flags(
+        series, target_kl=None, log_std_init=0.5, log_std_carried=True
+    )
+    assert "drifted" not in carried
+    assert carried.startswith("log std -1 differs from log_std_init +0.5 by -1.5")
+    assert "carried from the warm-start source" in carried
 
 
 def test_run_summary_states_the_resolved_reward_normalization(tmp_path):

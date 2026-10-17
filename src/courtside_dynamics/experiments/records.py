@@ -21,8 +21,9 @@ a partial one (``repo_review_20261016.md`` R3). Two files close that:
 Both are written atomically: a temporary file in the same directory is
 renamed over the target, so a reader never sees half of one.
 
-A run directory is **complete** when its manifest verifies and the run
-record it lists carries a terminal status (:func:`verify_run_dir`).
+A run directory is **complete** when its manifest verifies, the run
+record it lists carries a terminal status, and every file it does not
+list is one a notebook writes after training (:func:`verify_run_dir`).
 Complete means the directory is exactly what ``train()`` left when the
 run ended -- a crashed or interrupted run included, its status says
 how it ended -- not that the run succeeded. Without a manifest (a
@@ -38,6 +39,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -57,9 +59,13 @@ SYNC_MANIFEST_NAME = "sync_manifest.json"
 
 #: Written at ``train()`` start; never terminal.
 RUNNING = "running"
-#: Trained the whole budget. A guard whose condition held only at the
-#: final scheduled evaluation ends here too, and its ``stop_reason``
-#: says so (``repo_review_20261016`` train-3).
+#: Trained the whole budget (``num_timesteps >= total_timesteps``). A
+#: guard that fires once the run has trained its whole budget -- at the
+#: final evaluation of a budget that is a multiple of ``eval_freq``, say
+#: -- ends here too, and its ``stop_reason`` says so
+#: (``repo_review_20261016`` train-3). A guard that fires at the final
+#: scheduled evaluation of a budget that is *not* such a multiple left
+#: steps untrained: ``early_stop``.
 COMPLETED = "completed"
 #: A guard ended training before the budget: early-stop patience (the
 #: headline or the reward path), the degenerate-signal guard, or a
@@ -69,12 +75,33 @@ EARLY_STOP = "early_stop"
 #: what it could.
 INTERRUPTED = "interrupted"
 #: An exception: the crash salvage, or a failure before or after
-#: ``learn()`` once ``config.json`` existed. ``stop_reason`` carries the
-#: error.
+#: ``learn()`` once ``config.json`` existed -- including one while the
+#: run was closing after it had ended another way (an env or the SB3
+#: logger failing to close after a completed run: ``train()`` raises,
+#: so the record must not read ``completed``). ``stop_reason`` carries
+#: the error, and the earlier outcome when there was one.
 CRASHED = "crashed"
 
 RUN_STATUSES = (RUNNING, COMPLETED, EARLY_STOP, INTERRUPTED, CRASHED)
 TERMINAL_STATUSES = frozenset({COMPLETED, EARLY_STOP, INTERRUPTED, CRASHED})
+
+#: Where the notebooks write after ``train()`` returned and sealed the
+#: run directory: the plots, audits and gate reports under ``reports/``
+#: and the replay video (``training.artifacts.RUN_LAYOUT``'s
+#: ``learning_curve``, ``eval_*``, ``training_health_plot``,
+#: ``best_long_eval*`` and ``best_model_video``; a test pins the
+#: agreement). :func:`verify_run_dir` reports an unlisted file there
+#: and fails it only under ``strict``; an unlisted file anywhere else
+#: fails the directory.
+POST_TRAINING_DIRS = ("reports/",)
+POST_TRAINING_FILES = frozenset({"media/best_model.mp4"})
+
+#: Basename suffixes of the temporary files this repository's writers
+#: rename into place (``write_json_atomic``'s ``.<name>.tmp-<pid>``, the
+#: mirror's ``.<name>.sync-tmp``, the callbacks' ``<name>.tmp`` and
+#: ``<name>.tmp.npz``, ``NamedTemporaryFile``'s ``tmp*.tmp``). One left
+#: behind is an interrupted write: it always fails verification.
+_TEMPORARY_SUFFIX = re.compile(r"\.(tmp(-\d+)?|sync-tmp|tmp\.npz)$")
 
 _HASH_CHUNK = 1024 * 1024
 
@@ -269,15 +296,37 @@ def write_run_record(
     return write_json_atomic(Path(run_dir) / RUN_RECORD_NAME, dict(record))
 
 
-def read_json_object(path: str | os.PathLike[str]) -> dict[str, Any]:
-    """Load a JSON object; ``ValueError`` (naming the file) on anything else."""
+def describe_read_error(error: BaseException) -> str:
+    """An I/O or decode error's type and message, without a path or bytes.
+
+    ``repr(UnicodeDecodeError)`` embeds the whole file's bytes and an
+    ``OSError``'s message its absolute path; neither belongs in a row,
+    a record or a problem line.
+    """
+    if isinstance(error, OSError) and error.strerror:
+        return f"{type(error).__name__}: {error.strerror}"
+    return f"{type(error).__name__}: {error}"
+
+
+def read_json_object(
+    path: str | os.PathLike[str], *, label: str | None = None
+) -> dict[str, Any]:
+    """Load a JSON object; ``ValueError`` (naming the file) on anything else.
+
+    The error names the file as ``label`` (default: ``path`` itself), so
+    a caller can keep machine paths out of what it reports.
+    """
+    name = str(path) if label is None else label
     try:
-        with open(path, encoding="utf-8") as stream:
+        # utf-8-sig: a byte-order mark (a Windows editor's) is not damage.
+        with open(path, encoding="utf-8-sig") as stream:
             payload = json.load(stream)
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"{path} is unreadable: {error!r}") from error
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"{name} is unreadable: {describe_read_error(error)}"
+        ) from error
     if not isinstance(payload, dict):
-        raise ValueError(f"{path} does not hold a JSON object")
+        raise ValueError(f"{name} does not hold a JSON object")
     return payload
 
 
@@ -350,10 +399,11 @@ class RunDirVerification:
     ``manifest`` is ``"verified"`` (every listed file matches),
     ``"mismatch"``, ``"missing"`` or ``"unreadable"``. ``status`` is the
     run record's status when one is readable (the listed one when the
-    manifest verifies). ``unlisted`` names files on disk the manifest
-    does not list: written after it (a notebook's plots and replay
-    video), or by a sync that failed before its new manifest.
-    ``problems`` says, in words, why the directory is incomplete.
+    manifest verifies). ``unlisted`` names every file on disk the
+    manifest does not list: written after it (a notebook's plots and
+    replay video, :func:`is_post_training_path`), by a sync that failed
+    before its new manifest, or by anything else. ``problems`` says, in
+    words, why the directory is incomplete.
     """
 
     run_dir: str
@@ -420,20 +470,41 @@ def _record_status(path: Path) -> str | None:
     return status if isinstance(status, str) else None
 
 
+def is_temporary_path(relative: str) -> bool:
+    """Whether ``relative`` names a writer's temporary file (a leftover)."""
+    return bool(_TEMPORARY_SUFFIX.search(PurePosixPath(relative).name))
+
+
+def is_post_training_path(relative: str) -> bool:
+    """Whether a notebook writes ``relative`` after ``train()`` sealed the run.
+
+    The post-training plots, audits and gate reports under ``reports/``
+    and the replay video (:data:`POST_TRAINING_DIRS`,
+    :data:`POST_TRAINING_FILES`); never a temporary file.
+    """
+    if is_temporary_path(relative):
+        return False
+    return relative in POST_TRAINING_FILES or relative.startswith(
+        POST_TRAINING_DIRS
+    )
+
+
 def verify_run_dir(
     run_dir: str | os.PathLike[str], *, strict: bool = False
 ) -> RunDirVerification:
     """Check a run directory against its ``sync_manifest.json``.
 
     Complete when the manifest exists, every file it lists is on disk
-    with its recorded size and sha256, it lists ``run_record.json``, and
-    that record's status is terminal. Files the manifest does not list
-    are reported in ``unlisted``; they make the directory incomplete
-    only under ``strict`` (by default a notebook's post-training plots
-    beside a sealed run do not, while every file ``train()`` wrote is
-    still checked). A mid-run Drive mirror whose manifest verifies is
-    an intact snapshot of an unfinished run: its listed record says
-    ``"running"``, so it is incomplete too.
+    with its recorded size and sha256, it lists ``run_record.json``, that
+    record's status is terminal, and every file it does not list is a
+    post-training file (:func:`is_post_training_path`: a notebook's
+    plots, audits and replay video beside a sealed run). Every unlisted
+    file is reported in ``unlisted``; one anywhere else (a stray file,
+    a writer's temporary leftover such as ``.x.tmp-<pid>`` or
+    ``.x.sync-tmp``, even under ``reports/``) fails the directory, and
+    under ``strict`` every unlisted file does. A mid-run Drive mirror
+    whose manifest verifies is an intact snapshot of an unfinished run:
+    its listed record says ``"running"``, so it is incomplete too.
     """
     root = Path(run_dir)
     record_path = root / RUN_RECORD_NAME
@@ -469,7 +540,9 @@ def verify_run_dir(
             ),
         )
     try:
-        entries = _manifest_entries(read_json_object(manifest_path))
+        entries = _manifest_entries(
+            read_json_object(manifest_path, label=SYNC_MANIFEST_NAME)
+        )
     except ValueError as error:
         return RunDirVerification(
             run_dir=str(root),
@@ -516,11 +589,22 @@ def verify_run_dir(
                 f"{RUN_RECORD_NAME} status is {status!r}: the listed files are "
                 f"a snapshot of a run that had not finished"
             )
-    if strict and unlisted:
+    refused = (
+        unlisted
+        if strict
+        else tuple(path for path in unlisted if not is_post_training_path(path))
+    )
+    if refused:
+        where = (
+            "(strict)"
+            if strict
+            else "outside the post-training locations (reports/, "
+            "media/best_model.mp4) or left by an interrupted write"
+        )
         problems.append(
-            f"{len(unlisted)} file(s) are not in {SYNC_MANIFEST_NAME} "
-            f"(strict): " + ", ".join(unlisted[:5])
-            + (" ..." if len(unlisted) > 5 else "")
+            f"{len(refused)} file(s) are not in {SYNC_MANIFEST_NAME} "
+            f"{where}: " + ", ".join(refused[:5])
+            + (" ..." if len(refused) > 5 else "")
         )
     return RunDirVerification(
         run_dir=str(root),
