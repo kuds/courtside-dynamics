@@ -569,6 +569,37 @@ def test_gate_history_records_window_mean_promotion_evidence(tmp_path):
         eval_env.close()
 
 
+def test_an_interrupted_stage_history_write_leaves_no_temporary(
+    tmp_path, monkeypatch
+):
+    """L1 verifier r2: a KeyboardInterrupt (or any error) inside the
+    history write left curriculum_stages.json.tmp, which fails the run
+    directory's verification; the previous history stands."""
+    train_env = make_vec_env(_StagedEnv, n_envs=1)
+    eval_env = make_vec_env(_StagedEnv, n_envs=1)
+    history = tmp_path / "curriculum_stages.json"
+    try:
+        info_eval = _FakeInfoEval(eval_env)
+        gate = _gate(train_env, info_eval, stage_history_path=str(history))
+        gate._on_training_start()
+        gate._write_stage_history()
+        before = history.read_text()
+        real_dump = json.dump
+
+        def interrupted(payload, stream, *args, **kwargs):
+            real_dump(payload, stream, *args, **kwargs)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(json, "dump", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            gate._write_stage_history()
+        assert sorted(path.name for path in tmp_path.iterdir()) == [history.name]
+        assert history.read_text() == before
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
 def test_gate_skips_archiving_a_stage_with_zero_evaluations(tmp_path):
     """Training ending right after a promotion must not file the
     PREVIOUS stage's champion under the new stage's label: the on-disk

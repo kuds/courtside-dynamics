@@ -401,6 +401,163 @@ def test_a_run_named_directory_with_a_broken_config_is_a_row(
     assert message.endswith("; the row has none of its fields")
 
 
+@pytest.mark.parametrize(
+    "marker", ["run_config.toml", "metrics/monitor/0.monitor.csv"]
+)
+def test_a_launch_that_died_before_config_json_is_an_aborted_stub(
+    tmp_path, capsys, marker
+):
+    """Verifier r2: train() writes run_config.toml a fraction of a second
+    before config.json (Drive shows 0.1-0.2 s between them), so a launch
+    that died in between held files but no config.json and was skipped:
+    missing from the aborted rows and the stub count. Another project's
+    run-named layout (TennisWall: run_config.json and a root monitor/)
+    is still skipped, never parsed."""
+    run = tmp_path / "PaddleTennis" / "sac" / "20260828_114038"
+    (run / marker).parent.mkdir(parents=True, exist_ok=True)
+    (run / marker).write_text("[train]\n")
+    tennis_wall = tmp_path / "TennisWall" / "sac" / "20260502_025419"
+    (tennis_wall / "monitor").mkdir(parents=True)
+    (tennis_wall / "monitor" / "0.monitor.csv").write_text("#\n")
+    (tennis_wall / "run_config.json").write_text("{}")
+    result = build_index(tmp_path)
+    (row,) = result.rows
+    assert row["index"]["path"] == "PaddleTennis/sac/20260828_114038"
+    assert row["status"] == ABORTED
+    assert row["index"]["stub"] is True
+    assert row["campaign"]["lever"] == "temperature_skip"
+    assert row["index"]["problems"] == [run_index._NO_CONFIG]
+    (skipped,) = result.skipped
+    assert skipped.path == "TennisWall/sac/20260502_025419"
+    assert skipped.reason.startswith("named like a run but holds no config.json")
+    assert main(["--root", str(tmp_path)]) == 0
+    assert "(1 aborted); 1 stub(s)" in capsys.readouterr().out
+
+
+def _set(path: tuple[str, ...], value):
+    def edit(document: dict) -> None:
+        for key in path[:-1]:
+            document = document[key]
+        document[path[-1]] = value
+
+    return edit
+
+
+@pytest.mark.parametrize(
+    ("config_edit", "meta_edit", "problem"),
+    [
+        (
+            _set(("train_config", "warm_start"), "20260809_211147"),
+            None,
+            "config.json train_config.warm_start is a string, not an object; "
+            "read as missing",
+        ),
+        (
+            _set(("env",), ["PaddleTennisEnv"]),
+            None,
+            "config.json env is a list, not an object; read as missing",
+        ),
+        (
+            _set(("versions",), "sb3 2.9.0"),
+            None,
+            "config.json versions is a string, not an object; read as missing",
+        ),
+        (
+            _set(("algorithm",), "SAC"),
+            None,
+            "config.json algorithm is a string, not an object; read as missing",
+        ),
+        (
+            None,
+            _set(("selection_keys",), 3),
+            "best_model_meta.json selection_keys is a number, not a list; "
+            "read as missing",
+        ),
+        (
+            None,
+            _set(("selection_values",), [0.5]),
+            "best_model_meta.json selection_values is a list, not an object; "
+            "read as missing",
+        ),
+    ],
+)
+def test_a_field_of_the_wrong_type_is_a_row_problem_never_a_crash(
+    tmp_path, config_edit, meta_edit, problem
+):
+    """Verifier r2: one config.json or best_model_meta.json field of the
+    wrong type made the whole index build fail with a bare AttributeError
+    or TypeError naming no file. The field is read as missing and the
+    row says which file and field."""
+    run = tmp_path / "Env" / "sac" / "20260101_000001"
+    shutil.copytree(FIXTURE_ROOT / L2W, run)
+    for edit, relative in (
+        (config_edit, "config.json"),
+        (meta_edit, "model/best_model_meta.json"),
+    ):
+        if edit is not None:
+            document = json.loads((run / relative).read_text())
+            edit(document)
+            (run / relative).write_text(json.dumps(document))
+    (row,) = build_index(tmp_path, legacy_levers={}).rows
+    assert row["index"]["problems"] == [problem]
+    assert row["status"] == records.COMPLETED
+    assert row["algo"]["name"] == "SAC"
+    if meta_edit is not None:
+        assert row["selection"]["timestep"] is not None
+
+
+def test_a_record_row_of_unexpected_types_is_flagged_never_a_crash(tmp_path):
+    """A run record whose status is not a string, or which has none, is a
+    row with a problem; neither fails the index or its CLI line."""
+    for name, status in (("20260101_000001", ["completed"]), ("20260101_000002", None)):
+        run = tmp_path / "Env" / "sac" / name
+        run.mkdir(parents=True)
+        record = build_run_record({}, run_id=name, created_at="t", status=records.RUNNING)
+        if status is None:
+            del record["status"]
+        else:
+            record["status"] = status
+        write_run_record(run, record)
+    result = build_index(tmp_path, legacy_levers={}, verify=False)
+    for row in result.rows:
+        assert row["index"]["problems"][-1].startswith(
+            f"{RUN_RECORD_NAME} has no known status"
+        )
+        assert row["index"]["stub"] is True
+    assert main(["--root", str(tmp_path), "--skip-verify"]) == 0
+
+
+def test_an_unbound_selection_in_a_run_record_is_a_row_problem(tmp_path):
+    """A record whose best-model meta no longer binds its files (an
+    interrupt between the triple's renames) says so in the index."""
+    run = tmp_path / "Env" / "sac" / "20260101_000001"
+    (run / "model").mkdir(parents=True)
+    (run / "model" / "best_model.zip").write_bytes(b"new")
+    meta = {
+        "timestep": 100,
+        "selection_keys": ["steps_alive_ep_mean"],
+        "artifacts": {"best_model.zip": {"sha256": "0" * 64}},
+    }
+    record = build_run_record(
+        {},
+        run_id=run.name,
+        created_at="t",
+        status=records.INTERRUPTED,
+        best_model_meta=meta,
+        best_model_dir=run / "model",
+    )
+    assert record["selection"]["bindings"] == "unbound"
+    write_run_record(run, record)
+    write_sync_manifest(run)
+    (row,) = build_index(tmp_path, legacy_levers={}).rows
+    assert row["index"]["verification"]["complete"] is True
+    (problem,) = row["index"]["problems"]
+    assert problem.startswith(
+        "the best model is unbound (best_model_meta.json does not bind the "
+        "files beside it: best_model.zip (sha256 differs)"
+    )
+
+
 def test_a_bom_or_an_integral_float_budget_is_a_courtside_config(tmp_path):
     """Verifier r1: a UTF-8 byte-order mark or ``total_timesteps`` 1e6
     written as a float made a run's config.json "not courtside"."""

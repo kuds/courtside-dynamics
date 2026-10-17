@@ -10,7 +10,9 @@ and exits 0 only when every directory is complete
 (:func:`~courtside_dynamics.experiments.records.verify_run_dir`), 1
 otherwise. A file the manifest does not list fails the directory unless
 it is a post-training plot, audit or replay video (``reports/``,
-``media/best_model.mp4``); ``--strict`` fails those too.
+``media/best_model.mp4``); ``--strict`` fails those too. A writer's
+temporary leftover (``.x.tmp-<pid>``, ``x.tmp.npz`` ...) fails it
+whether the manifest lists it or not.
 """
 
 from __future__ import annotations

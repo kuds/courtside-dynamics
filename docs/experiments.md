@@ -14,7 +14,7 @@ wrong).
 
 | File | Written | Says |
 |---|---|---|
-| `run_record.json` | By `train()` at start (`running`), rewritten on every terminal path | What ran and how it ended (`courtside-run-record/1`): status `completed`, `early_stop`, `interrupted` or `crashed` with a `stop_reason`; budget; algorithm; task fingerprints; comparability key; seeds; git; versions; warm start; selection; wall clock |
+| `run_record.json` | By `train()` at start (`running`), rewritten on every terminal path | What ran and how it ended (`courtside-run-record/1`): status `completed`, `early_stop`, `interrupted` or `crashed` with a `stop_reason`; budget; algorithm; task fingerprints; comparability key; seeds; git; versions; warm start; selection, checked against `best_model_meta.json`'s sha256 bindings; wall clock |
 | `sync_manifest.json` | Last, after the final record | Path, size and sha256 of every other file (`courtside-sync-manifest/1`) |
 
 A directory is **complete** when its manifest verifies, the record it
@@ -28,6 +28,20 @@ raising after a completed run) makes `train()` raise and the record
 read `crashed`, its stop reason quoting the outcome the run had
 reached.
 
+On both selection paths the best-model files (`best_model.zip`,
+`best_vec_normalize.pkl` and, under headline selection,
+`best_model_meta.json`) are written under temporary names and renamed
+into place, the meta last: an interrupt (a stopped Colab cell) inside a
+write leaves the previous best whole. One that lands between two
+renames leaves a meta whose sha256s no longer bind the files beside it.
+The record then says so instead of copying the meta:
+`selection.bindings` is `unbound` with an `unbound_reason`, its
+timestep and values are `null` (never the previous best's), and the
+triple is left out of `artifacts`; `stage_summary.txt` says the same
+and `train()` prints a warning. Otherwise `bindings` is `verified`
+(`not_checked` in rows the index backfills). A reward-selected run
+writes no meta, so nothing binds its pair.
+
 ```bash
 python -m courtside_dynamics.experiments.verify <run_dir> [<run_dir> ...]
 python -m courtside_dynamics.experiments.verify --strict --json <run_dir>
@@ -36,9 +50,14 @@ python -m courtside_dynamics.experiments.verify --strict --json <run_dir>
 Exit 0 only when every directory is complete. Every file the manifest
 does not list is reported. Those at the post-training locations (the
 notebooks' plots, audits and gate reports under `reports/`, and the
-replay video `media/best_model.mp4`) fail only `--strict`; any other,
-and a writer's temporary leftover such as `.x.tmp-<pid>` or
-`.x.sync-tmp` anywhere, fails the directory.
+replay video `media/best_model.mp4`) fail only `--strict`; any other
+fails the directory. A writer's temporary leftover (`.x.tmp-<pid>`,
+`.x.sync-tmp`, `x.tmp.npz`, `x.tmp`) anywhere fails it too, whether
+or not the manifest lists it: one listed was already there when the run
+was sealed. The writers remove their temporaries when a write fails or
+is interrupted. A directory whose record is terminal but which has no
+manifest was never sealed: a mirror pass that did not finish (re-run
+`sync_run_dir`) or a run that died while sealing itself.
 
 With `TrainConfig.sync_dir` (the notebooks' `LOCAL_THEN_SYNC`), a run
 trains on local disk and mirrors itself to Drive at every checkpoint and
@@ -112,16 +131,23 @@ Every row has the run record's keys plus two:
   sync): a row without the config's fields, the problem recorded.
   A UTF-8 byte-order mark and an integral float budget (`1e6`) are
   read as written.
-- An empty directory named like a run: an aborted stub, a launch that
-  died before `config.json`.
+- A directory named like a run with no `config.json`: an aborted stub
+  when it is empty or holds a courtside launch file, `run_config.toml`
+  (written a fraction of a second before `config.json`) or the 0.14
+  layout's `metrics/`: a launch that died before writing `config.json`.
+- A field of `config.json` or `best_model_meta.json` with an
+  unexpected type (a string where an object belongs) is read as
+  missing and named in the row's problems; it never fails the index.
+  A run record whose selection is `unbound` gets a problem too.
 
 Anything else is never parsed as a run: a directory holding files but
 no run marker, a `config.json` without a courtside `train_config`
-outside a run-named directory, or a run-named directory without
-`config.json` is listed as skipped. A run (or skipped) directory is
-searched further only when a subdirectory holds a run marker; then the
-nested runs get rows of their own and the outer row or skip names
-them, so a stray `config.json` in a recipe folder hides nothing.
+outside a run-named directory, or a run-named directory of another
+layout (TennisWall's `run_config.json` runs) is listed as skipped. A
+run (or skipped) directory is searched further only when a
+subdirectory holds a run marker; then the nested runs get rows of
+their own and the outer row or skip names them, so a stray
+`config.json` in a recipe folder hides nothing.
 
 A backfilled row holds no machine path. The warm start is named by its
 source directory's basename, the run config by its basename, and every

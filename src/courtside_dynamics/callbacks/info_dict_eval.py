@@ -47,6 +47,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecEnv
 
 from courtside_dynamics.callbacks._info import _scalar_info_keys
+from courtside_dynamics.experiments.records import ReplaceTogether
 
 #: Offset between a paired evaluation's standard batch and its
 #: ``confirm_best`` batch: standard episode ``i`` resets with seed
@@ -720,11 +721,11 @@ class InfoDictEvalCallback(BaseCallback):
         self._npz_timesteps.append(int(timestep))
         self._npz_results.append(list(rewards))
         self._npz_ep_lengths.append(list(lengths))
+        temporary = f"{destination}.tmp.npz"
         try:
             parent = os.path.dirname(destination)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            temporary = f"{destination}.tmp.npz"
             np.savez(
                 temporary,
                 timesteps=np.asarray(self._npz_timesteps, dtype=np.int64),
@@ -732,7 +733,17 @@ class InfoDictEvalCallback(BaseCallback):
                 ep_lengths=np.asarray(self._npz_ep_lengths, dtype=np.int64),
             )
             os.replace(temporary, destination)
-        except OSError as error:  # pragma: no cover - disk-level failure
+        except BaseException as error:
+            # Any failure, a KeyboardInterrupt (a stopped Colab cell)
+            # included, removes the temporary: a leftover fails the run
+            # directory's verification (experiments.records). Only a
+            # disk-level failure is logged and survived.
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            if not isinstance(error, OSError):
+                raise
             print(
                 f"[InfoDictEvalCallback] could not write "
                 f"{destination}: {error}"
@@ -1432,24 +1443,49 @@ class InfoDictEvalCallback(BaseCallback):
         metrics: Mapping[str, float],
         confirmation: Mapping[str, float] | None = None,
     ) -> None:
-        """Write best_model.zip + paired normalizer stats + meta json."""
+        """Write best_model.zip + paired normalizer stats + meta json.
+
+        Each file is written under a temporary name beside its target
+        and the three are renamed into place together, the meta last
+        (``experiments.records.ReplaceTogether``): an interrupt inside a
+        write (a stopped Colab cell) leaves the previous best whole and
+        no temporary behind. One between two renames leaves a meta whose
+        sha256s no longer bind the files, which the run record reports
+        instead of the meta's selection.
+        """
         if self.best_model_save_path is None:
             return
         os.makedirs(self.best_model_save_path, exist_ok=True)
+        with ReplaceTogether() as staged:
+            self._stage_best(staged, metrics, confirmation)
+            staged.commit()
+
+    def _stage_best(
+        self,
+        staged: ReplaceTogether,
+        metrics: Mapping[str, float],
+        confirmation: Mapping[str, float] | None,
+    ) -> None:
+        """Write the best triple's temporaries (``_save_best`` renames them)."""
+        assert self.best_model_save_path is not None
         model_path = os.path.join(self.best_model_save_path, "best_model.zip")
-        self.model.save(os.path.splitext(model_path)[0])
-        artifact_paths = {"best_model.zip": model_path}
+        # SB3 appends ".zip" only to a path without a suffix; the
+        # temporary's ".tmp-<pid>" keeps it as given.
+        artifact_paths = {"best_model.zip": staged.stage(model_path)}
+        self.model.save(artifact_paths["best_model.zip"])
         get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
         vec_norm = get_vec_norm() if get_vec_norm is not None else None
         if vec_norm is not None:
             # Paired stats snapshot: replaying best_model against
             # end-of-training stats is a silent obs-distribution
-            # mismatch (see _SaveVecNormalizeOnNewBest in train.py).
+            # mismatch (see _SaveBestOnNewBest in train.py).
             normalizer_path = os.path.join(
                 self.best_model_save_path, "best_vec_normalize.pkl"
             )
-            vec_norm.save(normalizer_path)
-            artifact_paths["best_vec_normalize.pkl"] = normalizer_path
+            artifact_paths["best_vec_normalize.pkl"] = staged.stage(
+                normalizer_path
+            )
+            vec_norm.save(artifact_paths["best_vec_normalize.pkl"])
         meta = {
             "timestep": int(self.num_timesteps),
             "selection_keys": list(self.best_metric_keys),
@@ -1505,6 +1541,7 @@ class InfoDictEvalCallback(BaseCallback):
             # Bind the checkpoint and its observation statistics to this
             # selection event. A same-shape normalizer from another run would
             # otherwise load successfully while silently changing every input.
+            # Hashed from the temporaries: the bytes the renames publish.
             "artifacts": {
                 name: {"sha256": _sha256_file(path)}
                 for name, path in artifact_paths.items()
@@ -1513,7 +1550,7 @@ class InfoDictEvalCallback(BaseCallback):
         meta_path = os.path.join(
             self.best_model_save_path, "best_model_meta.json"
         )
-        with open(meta_path, "w") as f:
+        with open(staged.stage(meta_path), "w") as f:
             json.dump(meta, f, indent=2)
             f.write("\n")
 

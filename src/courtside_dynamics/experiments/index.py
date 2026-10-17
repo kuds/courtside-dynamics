@@ -40,18 +40,25 @@ What becomes a row:
   ``config.json`` cannot be read or is not a courtside run config (a
   zero-byte file from a partial Drive sync): backfilled without the
   config's fields, the config problem in ``index.problems``.
-- An empty directory named like a run: an aborted stub, a launch that
-  died before writing ``config.json``.
+- A directory named like a run with no ``config.json``: an aborted
+  stub when it is empty or holds a courtside launch file --
+  ``run_config.toml`` (written a fraction of a second before
+  ``config.json``) or the 0.14 layout's ``metrics/`` -- a launch that
+  died before writing ``config.json`` (the row says so in its
+  problems).
 
 Nothing else is parsed. A directory that holds files but none of
-these, or whose ``config.json`` is not a courtside run config, is
-listed under ``skipped`` with the reason, and its contents are never
-read as a run. A run directory is not searched for further runs unless
-a subdirectory holds a run marker (``config.json``, ``run_record.json``
-or a run-named directory): then the scan goes on into it and the outer
-row (or skip) names the nested directories, because a stray
-``config.json`` in a recipe folder would otherwise hide every run
-beneath it.
+these (a run-named directory of another layout, such as TennisWall's
+``run_config.json`` runs), or whose ``config.json`` is not a courtside
+run config, is listed under ``skipped`` with the reason, and its
+contents are never read as a run. A field of ``config.json`` or
+``best_model_meta.json`` with an unexpected type is read as missing and
+named in ``index.problems``; it never fails the index. A run directory
+is not searched for further runs unless a subdirectory holds a run
+marker (``config.json``, ``run_record.json`` or a run-named
+directory): then the scan goes on into it and the outer row (or skip)
+names the nested directories, because a stray ``config.json`` in a
+recipe folder would otherwise hide every run beneath it.
 
 Every row joins the curated campaign map (``legacy_levers.toml``,
 package data: run id -> campaign, lever, verdict, doc) under
@@ -79,6 +86,7 @@ from pathlib import Path
 from typing import Any
 
 from courtside_dynamics.experiments.records import (
+    BINDINGS_UNBOUND,
     COMPLETED,
     CRASHED,
     EARLY_STOP,
@@ -90,6 +98,7 @@ from courtside_dynamics.experiments.records import (
     build_run_record,
     describe_read_error,
     read_json_object,
+    shape_problems,
     verify_run_dir,
 )
 
@@ -129,6 +138,20 @@ _LAYOUT: dict[str, tuple[str, str]] = {
 #: older runs name only ``train_config.algo``, whose family this maps
 #: (``training.algos.algo_family``; a test pins the agreement).
 _ALGO_FAMILIES = {"SAC": "SAC", "DemoSAC": "SAC", "PPO": "PPO"}
+
+#: Courtside launch files: ``run_config.toml``, which ``train()`` writes
+#: a fraction of a second before ``config.json``, and the 0.14 layout's
+#: ``metrics/``. A run-named directory holding one but no
+#: ``config.json`` is a courtside launch that died early, not another
+#: project's layout (TennisWall's runs hold ``run_config.json`` and a
+#: root ``monitor/``).
+_LAUNCH_MARKERS = ("run_config.toml", "metrics")
+
+_NO_CONFIG = (
+    "config.json is missing (a launch that died before writing it leaves "
+    "only run_config.toml: train() writes that file first); the row has "
+    "none of its fields"
+)
 
 _RUN_ID = re.compile(r"\d{8}_\d{6}")
 _CHECKPOINT_STEP = re.compile(r"_(\d+)_steps\.zip$")
@@ -295,16 +318,19 @@ def _scan(root: Path, out: Path | None) -> _Scan:
             continue
         if run_named:
             subdirs[:] = _nested_runs(here, subdirs)
-            if _has_files(here):
+            if not _has_files(here):
+                scan.runs.append((here, "empty"))
+            elif any((here / marker).exists() for marker in _LAUNCH_MARKERS):
+                scan.runs.append((here, "launch"))
+            else:
                 scan.skipped.append(
                     SkippedDir(
                         rel,
-                        "named like a run but holds no config.json or "
-                        f"{RUN_RECORD_NAME}",
+                        "named like a run but holds no config.json, "
+                        f"{RUN_RECORD_NAME} or courtside launch file "
+                        f"({', '.join(_LAUNCH_MARKERS)})",
                     )
                 )
-            else:
-                scan.runs.append((here, "empty"))
             continue
         if names and here != root:
             scan.skipped.append(
@@ -551,6 +577,8 @@ def _legacy_row(
             meta = _read_json(run_dir, meta_path.relative_to(run_dir).as_posix())
         except ValueError as error:
             problems.append(f"the selection is omitted: {error}")
+    # A field of the wrong type is read as missing; the row says which.
+    problems.extend(shape_problems(config, meta))
     train_config = config.get("train_config") or {}
     status, stop_reason, trained = _legacy_outcome(
         summary,
@@ -578,10 +606,17 @@ def _legacy_row(
         inferred.append("stop_reason")
     if trained is not None:
         inferred.append("budget.trained_timesteps")
-    if not config.get("algorithm") and train_config.get("algo"):
+    algorithm = config.get("algorithm")
+    if not (isinstance(algorithm, Mapping) and algorithm) and train_config.get(
+        "algo"
+    ):
         name = train_config["algo"]
-        versions = config.get("versions") or {}
-        sb3 = versions.get("stable_baselines3")
+        versions = config.get("versions")
+        sb3 = (
+            versions.get("stable_baselines3")
+            if isinstance(versions, Mapping)
+            else None
+        )
         record["algo"] = {
             "name": name,
             "family": _ALGO_FAMILIES.get(name),
@@ -653,7 +688,17 @@ def _record_row(
         }
     files = _files(run_dir)
     status = record.get("status")
-    terminal = status in TERMINAL_STATUSES
+    terminal = isinstance(status, str) and status in TERMINAL_STATUSES
+    selection = record.get("selection")
+    if (
+        isinstance(selection, Mapping)
+        and selection.get("bindings") == BINDINGS_UNBOUND
+    ):
+        problems.append(
+            f"the best model is unbound ({selection.get('unbound_reason')}): "
+            f"the record reports no selection, and best_model.zip is not the "
+            f"one best_model_meta.json describes"
+        )
     if status == RUNNING and files["sync_manifest"]:
         problems.append(
             f"{RUN_RECORD_NAME} says 'running' and {SYNC_MANIFEST_NAME} "
@@ -768,7 +813,9 @@ def build_index(
             row = _record_row(run_dir, rel, verify=verify, problems=problems)
         if row is None:
             config: dict[str, Any] | None = None
-            if kind != "empty" and _locate(run_dir, "config") is not None:
+            if kind == "launch":
+                problems.append(_NO_CONFIG)
+            elif kind != "empty" and _locate(run_dir, "config") is not None:
                 try:
                     config = _read_json(run_dir, "config.json")
                 except ValueError as error:
@@ -844,9 +891,9 @@ def main(argv: list[str] | None = None) -> int:
     running = sum(
         1
         for row in rows
-        if row["index"]["source"] == "run_record" and row["status"] == RUNNING
+        if row["index"]["source"] == "run_record" and row.get("status") == RUNNING
     )
-    aborted = sum(1 for row in rows if row["status"] == ABORTED)
+    aborted = sum(1 for row in rows if row.get("status") == ABORTED)
     stubs = sum(1 for row in rows if row["index"]["stub"])
     joined = sum(1 for row in rows if row["campaign"] is not None)
     print(

@@ -13,6 +13,7 @@ their bounce/hit-count diagnostics "for free". These tests verify:
 from __future__ import annotations
 
 import csv
+import os
 
 import numpy as np
 import pytest
@@ -538,13 +539,17 @@ def test_video_callback_preserves_selective_normalizer_contract(
         train_env.close()
 
 
-class TestSaveVecNormalizeOnNewBest:
-    """The new-best snapshot is what makes ``best_model.zip`` replayable.
+class TestSaveBestOnNewBest:
+    """The reward path's new-best save: the model and its paired stats.
 
-    Without it, ``vec_normalize.pkl`` is only written at end of training,
+    The stats snapshot is what makes ``best_model.zip`` replayable:
+    without it, ``vec_normalize.pkl`` is only written at end of training,
     so its running stats reflect the final train_env state — not the
     moment best_model was saved. ``record_best_model_video`` would then
-    feed best_model obs normalized by mismatched stats.
+    feed best_model obs normalized by mismatched stats. Both files are
+    written under temporary names and renamed together, so an interrupt
+    inside a write never leaves a torn file (verifier r2: a real SIGINT
+    left a 16 kB ``best_model.zip`` the run directory then sealed).
     """
 
     @staticmethod
@@ -564,9 +569,7 @@ class TestSaveVecNormalizeOnNewBest:
         )
 
         from courtside_dynamics.envs import BallBalanceEnv
-        from courtside_dynamics.training.train import (
-            _SaveVecNormalizeOnNewBest,
-        )
+        from courtside_dynamics.training.train import _SaveBestOnNewBest
 
         vec_norm = self._build_vec_normalize()
         # Step a few times so obs_rms has a non-default running mean —
@@ -575,14 +578,20 @@ class TestSaveVecNormalizeOnNewBest:
         for _ in range(5):
             vec_norm.step(np.zeros((1, 6), dtype=np.float32))
 
-        model = _FakeModel(action_dim=6)
+        model = _FakeSavableModel(action_dim=6)
         model.get_vec_normalize_env = lambda: vec_norm  # type: ignore[attr-defined]
 
-        save_path = tmp_path / "best_vec_normalize.pkl"
-        cb = _SaveVecNormalizeOnNewBest(str(save_path))
-        cb.model = model  # type: ignore[assignment]
+        model_path = tmp_path / "model" / "best_model.zip"
+        save_path = tmp_path / "model" / "best_vec_normalize.pkl"
+        cb = _SaveBestOnNewBest(str(model_path), str(save_path))
+        cb.init_callback(model)  # type: ignore[arg-type]
         assert cb._on_step() is True
+        assert model_path.read_bytes() == b"fake-model"
         assert save_path.exists()
+        assert sorted(path.name for path in model_path.parent.iterdir()) == [
+            "best_model.zip",
+            "best_vec_normalize.pkl",
+        ]
 
         # Loading should reconstruct an equivalent VecNormalize. obs_rms
         # mean must match the one we just trained, not the default zeros.
@@ -593,20 +602,68 @@ class TestSaveVecNormalizeOnNewBest:
         dummy.close()
         vec_norm.close()
 
-    def test_noop_when_model_has_no_vec_normalize(self, tmp_path):
-        """A model trained without VecNormalize must not raise or write."""
-        from courtside_dynamics.training.train import (
-            _SaveVecNormalizeOnNewBest,
-        )
+    def test_no_normalizer_when_model_has_no_vec_normalize(self, tmp_path):
+        """A model trained without VecNormalize saves the model alone."""
+        from courtside_dynamics.training.train import _SaveBestOnNewBest
 
-        model = _FakeModel(action_dim=6)
+        model = _FakeSavableModel(action_dim=6)
         model.get_vec_normalize_env = lambda: None  # type: ignore[attr-defined]
 
         save_path = tmp_path / "best_vec_normalize.pkl"
-        cb = _SaveVecNormalizeOnNewBest(str(save_path))
-        cb.model = model  # type: ignore[assignment]
+        cb = _SaveBestOnNewBest(str(tmp_path / "best_model.zip"), str(save_path))
+        cb.init_callback(model)  # type: ignore[arg-type]
         assert cb._on_step() is True
         assert not save_path.exists()
+        assert sorted(path.name for path in tmp_path.iterdir()) == [
+            "best_model.zip"
+        ]
+
+    @pytest.mark.parametrize("torn", ["model", "normalizer"])
+    def test_an_interrupted_write_leaves_the_previous_pair_whole(
+        self, tmp_path, torn
+    ):
+        """A KeyboardInterrupt inside either write (half the bytes
+        written) leaves the previous best pair untouched and no
+        temporary file behind."""
+        from courtside_dynamics.training.train import _SaveBestOnNewBest
+
+        class TearingModel(_FakeSavableModel):
+            tear = False
+
+            def save(self, path) -> None:
+                if self.tear and torn == "model":
+                    with open(path, "wb") as handle:
+                        handle.write(b"fake-")
+                    raise KeyboardInterrupt
+                super().save(path)
+
+        class TearingNormalizer:
+            tear = False
+
+            def save(self, path) -> None:
+                with open(path, "wb") as handle:
+                    if self.tear and torn == "normalizer":
+                        handle.write(b"new-")
+                        raise KeyboardInterrupt
+                    handle.write(b"normalizer-1")
+
+        model = TearingModel(action_dim=6)
+        normalizer = TearingNormalizer()
+        model.get_vec_normalize_env = lambda: normalizer  # type: ignore[attr-defined]
+        model_path = tmp_path / "best_model.zip"
+        save_path = tmp_path / "best_vec_normalize.pkl"
+        cb = _SaveBestOnNewBest(str(model_path), str(save_path))
+        cb.init_callback(model)  # type: ignore[arg-type]
+        assert cb._on_step() is True
+        model.tear = normalizer.tear = True
+        with pytest.raises(KeyboardInterrupt):
+            cb._on_step()
+        assert model_path.read_bytes() == b"fake-model"
+        assert save_path.read_bytes() == b"normalizer-1"
+        assert sorted(path.name for path in tmp_path.iterdir()) == [
+            "best_model.zip",
+            "best_vec_normalize.pkl",
+        ]
 
 
 def test_info_dict_eval_callback_aggregates(tmp_path):
@@ -987,7 +1044,8 @@ def test_info_dict_eval_episode_sum_matches_hand_summed_paddle_tennis():
 
 
 class _FakeSavableModel(_FakeModel):
-    """_FakeModel plus SB3's ``save`` contract (appends ``.zip``)."""
+    """_FakeModel plus SB3's ``save`` contract (appends ``.zip`` to a
+    path without a suffix, ``save_util.open_path_pathlib``)."""
 
     def __init__(self, action_dim: int = 1) -> None:
         super().__init__(action_dim)
@@ -995,7 +1053,7 @@ class _FakeSavableModel(_FakeModel):
 
     def save(self, path) -> None:
         path = str(path)
-        if not path.endswith(".zip"):
+        if not os.path.splitext(path)[1]:
             path += ".zip"
         with open(path, "wb") as f:
             f.write(b"fake-model")

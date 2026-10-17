@@ -718,7 +718,89 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
-### The run-record verifier pass: a run that raises never reads completed, and a mirror deletes only its own files — *implemented (unreleased, 2026-10-17)*
+### The best model is replaced whole, and a record never certifies a split one — *implemented (unreleased, 2026-10-17)*
+The L1 verifiers' second round on `d273409`, `4445669` and `9f54ae5`:
+three majors and the minors. Every env stream and training path is
+unchanged: golden digests 22/22, recipe snapshot unchanged (96), and
+the trainer digest against `9f54ae5` matches every component of all
+four jobs, the best-model, evaluation and layout ones included.
+- **Stage every file, then rename them all.** `_save_best` (headline
+  selection) and the reward path's new-best callback write each file to
+  `.<name>.tmp-<pid>` beside its target, hash the temporaries for the
+  meta, and only then rename them into place, the meta last
+  (`records.ReplaceTogether`; leaving the block early removes every
+  temporary). Renaming each file as soon as it is written would leave
+  a split triple whenever a later write is interrupted; staging first
+  confines the split to the gap between two renames, and an interrupt
+  inside any write (the torn 16 kB `best_model.zip` a real SIGINT left)
+  leaves the previous best whole.
+- **The reward path saves in its new-best callback.** SB3's
+  `EvalCallback` wrote `best_model.zip` in place and offers no hook
+  around its save, so it now gets `best_model_save_path=None` and
+  `_SaveBestOnNewBest` (which replaces `_SaveVecNormalizeOnNewBest`)
+  saves the model and its normalizer where SB3 did: the same model, at
+  the same point of the same `_on_step`, creating `model/` at init as
+  SB3 did. Copying SB3's `_on_step` into a subclass was the
+  alternative; it would fork about 70 lines of SB3 to change one call.
+- **Record a split triple, don't refuse to seal it.** The terminal path
+  checks `best_model_meta.json`'s sha256 bindings against the files
+  beside it (`records.best_model_meta_unbound`, the check the loaders
+  apply). When they do not bind, the record's `selection` is `unbound`
+  with the reason: timestep, values and update count `null` (the meta
+  describes another save, usually the previous best, so it is never
+  reported as these files'), the selection keys kept (they are the
+  rule, not the result), and the triple left out of `artifacts`.
+  `stage_summary.txt` says the same, `train()` prints a warning, the
+  index flags the row, and the loaders already refuse the pair.
+  Refusing to seal would leave the final model and every other file of
+  an otherwise faithful directory unverifiable; renaming the files
+  aside would rewrite the evidence. A sealed directory still means
+  "exactly what `train()` left", now with a record that says what is
+  wrong with it. Every selection `train()` records carries `bindings`
+  (`verified` or `unbound`); index backfills of older runs, whose
+  metas may bind nothing, say `not_checked`. The schema stays
+  `courtside-run-record/1`: the fields are additive.
+- **A leftover is an interrupted write wherever it is listed.**
+  `verify_run_dir` fails any temporary on disk or in the manifest; one
+  listed was present when the run was sealed. The writers that left
+  them now remove their temporaries on any failure or interrupt: the
+  merged-stream `evaluations.npz` writer (it caught only `OSError`), the
+  gate's stage history and the ladder certification report. Nothing
+  cleans a run directory before sealing it: deleting evidence to pass
+  verification is the wrong direction.
+- **The index never fails on one file's shape.** A `config.json` or
+  meta field of the wrong type is read as missing by `build_run_record`
+  and named in the row's problems (`records.shape_problems`), the
+  "never mis-parse" rule applied to types. A run-named directory with
+  `run_config.toml` or `metrics/` but no `config.json` is an aborted
+  stub row: `train()` writes the TOML copy 0.1-0.2 s before
+  `config.json`, so a launch can die in between. The verifier also
+  suggested a root `monitor/` as a marker; TennisWall's foreign
+  run-named layout has one, so it would turn that skip into a row.
+- **Wording.** A terminal record without a manifest was never sealed (a
+  mirror pass that did not finish: re-run `sync_run_dir`). An
+  interrupted final mirror prints that re-run before re-raising; the
+  local record stays `completed`, the local-then-sync contract, and the
+  previous entry's "never reads completed" covers failures while the run
+  closes, not the mirror after it is sealed. An on-policy guard holding
+  at the final evaluation reads "collected all N steps ... the last
+  rollout's update was skipped": SB3 stops before that update. The
+  campaign design's S2 row now credits the 3M override to LT1's
+  unregistered companion `20260828_113136`; the registered run trained
+  its frozen 1M.
+- **The PPO round-2 minors were already closed by `9f54ae5`**
+  (rechecked, with their tests): the first-rollout zero-update flag
+  from `rollout_env_steps`, the warm-start wording and carried
+  `log_std`, the cadence refusal's reason, and the README's probe
+  schedule.
+- **Open.** A reward-selected run writes no meta, so a pair split
+  between its two renames (a window of one `os.replace`) cannot be
+  detected; giving the reward path a meta would close it, but it adds
+  a file to the layout of every reward-selected run, so it belongs to
+  a step that declares that. The gate's stage-best archive copies the
+  triple with `shutil.copy2`, not atomically.
+
+### The run-record verifier pass: a run that raises while closing never reads completed, and a mirror deletes only its own files — *implemented (unreleased, 2026-10-17)*
 Verifiers re-ran the two L1 commits (`d273409`, `4445669`), and the
 PPO round-2 verifier's leftovers against `09f202a` came along. Every
 env stream and training path is unchanged: golden digests 22/22, recipe

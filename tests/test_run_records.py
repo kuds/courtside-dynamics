@@ -183,11 +183,14 @@ def test_run_record_is_built_from_config_json_and_the_outcome():
         "source_run_dir_name": "20260809_211147",
         "artifact_sha256": {"best_model.zip": "c" * 64, "config.json": "d" * 64},
     }
+    # Without the meta's directory its sha256 bindings go unchecked.
     assert record["selection"] == {
         "timestep": 450_000,
         "keys": ["episode_rally_returns_a_ep_mean", "success_rate"],
         "values": {"episode_rally_returns_a_ep_mean": 0.4},
         "n_updates": 120,
+        "bindings": "not_checked",
+        "unbound_reason": None,
     }
     assert record["experiment"] == {
         "id": None,
@@ -248,6 +251,130 @@ def test_a_run_dir_without_a_manifest_is_incomplete(tmp_path):
     assert not verify_run_dir(tmp_path / "absent").complete
 
 
+def test_a_terminal_record_without_a_manifest_was_never_sealed(tmp_path):
+    """Verifier r2: a mirror whose only (final) pass died before its
+    manifest quoted the record's terminal status, then said the run never
+    reached a terminal path. It was never sealed; the problem says so and
+    names the re-sync."""
+    run_dir = tmp_path / "mirror"
+    run_dir.mkdir()
+    write_run_record(
+        run_dir,
+        build_run_record({}, run_id="run", created_at="t", status=records.COMPLETED),
+    )
+    result = verify_run_dir(run_dir)
+    assert not result.complete
+    assert result.manifest == "missing"
+    assert result.status == "completed"
+    (problem,) = result.problems
+    assert problem.startswith(
+        "no sync_manifest.json, though its run record says 'completed': the "
+        "directory was never sealed"
+    )
+    assert "experiments.sync.sync_run_dir" in problem
+    assert "never reached a terminal path" not in problem
+
+
+def test_replace_together_renames_all_or_leaves_the_old_files(tmp_path):
+    first, second = tmp_path / "a.zip", tmp_path / "b.pkl"
+    first.write_bytes(b"old a")
+    second.write_bytes(b"old b")
+    with pytest.raises(KeyboardInterrupt):
+        with records.ReplaceTogether() as staged:
+            Path(staged.stage(first)).write_bytes(b"new a")
+            Path(staged.stage(second)).write_bytes(b"ne")
+            raise KeyboardInterrupt  # inside the second write
+    assert (first.read_bytes(), second.read_bytes()) == (b"old a", b"old b")
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["a.zip", "b.pkl"]
+    with records.ReplaceTogether() as staged:
+        temporary = staged.stage(first)
+        assert records.is_temporary_path(Path(temporary).name)
+        Path(temporary).write_bytes(b"new a")
+        Path(staged.stage(second)).write_bytes(b"new b")
+        staged.commit()
+    assert (first.read_bytes(), second.read_bytes()) == (b"new a", b"new b")
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["a.zip", "b.pkl"]
+
+
+def test_best_model_meta_bindings_are_checked_against_the_files(tmp_path):
+    (tmp_path / "best_model.zip").write_bytes(b"model")
+    (tmp_path / "best_vec_normalize.pkl").write_bytes(b"stats")
+    meta = {
+        "timestep": 200,
+        "selection_keys": ["k"],
+        "selection_values": {"k": 1.0},
+        "artifacts": {
+            "best_model.zip": {"sha256": records.sha256_file(tmp_path / "best_model.zip")},
+            "best_vec_normalize.pkl": {
+                "sha256": records.sha256_file(tmp_path / "best_vec_normalize.pkl")
+            },
+        },
+    }
+    assert records.best_model_meta_unbound(meta, tmp_path) is None
+    selection = records.selection_from_best_model_meta(meta, directory=tmp_path)
+    assert selection is not None
+    assert (selection["timestep"], selection["bindings"]) == (200, "verified")
+    for damage, reason in (
+        (lambda: (tmp_path / "best_vec_normalize.pkl").write_bytes(b"older"),
+         "best_vec_normalize.pkl (sha256 differs)"),
+        (lambda: (tmp_path / "best_vec_normalize.pkl").unlink(),
+         "best_vec_normalize.pkl (missing)"),
+    ):
+        damage()
+        assert reason in records.best_model_meta_unbound(meta, tmp_path)
+        selection = records.selection_from_best_model_meta(meta, directory=tmp_path)
+        assert selection == {
+            "timestep": None,
+            "keys": ["k"],
+            "values": None,
+            "n_updates": None,
+            "bindings": "unbound",
+            "unbound_reason": records.best_model_meta_unbound(meta, tmp_path),
+        }
+    # A meta from before metas bound their files: nothing to check, as
+    # the loaders accept it.
+    legacy = {key: value for key, value in meta.items() if key != "artifacts"}
+    assert records.best_model_meta_unbound(legacy, tmp_path) is None
+    selection = records.selection_from_best_model_meta(legacy, directory=tmp_path)
+    assert selection is not None
+    assert (selection["timestep"], selection["bindings"]) == (200, "not_checked")
+    for artifacts, reason in (
+        ({}, "binds no files"),
+        ({"best_vec_normalize.pkl": {"sha256": "0" * 64}}, "does not bind best_model.zip"),
+        ({"best_model.zip": {"sha256": "0" * 64}, "../x.pkl": {}}, "'../x.pkl' (not a file name)"),
+    ):
+        assert reason in records.best_model_meta_unbound(
+            {**meta, "artifacts": artifacts}, tmp_path
+        )
+    # An unbound selection leaves the triple out of the record's artifacts.
+    record = build_run_record(
+        {},
+        run_id="r",
+        created_at="t",
+        status=records.INTERRUPTED,
+        best_model_meta=meta,
+        best_model_dir=tmp_path,
+        artifacts=(
+            {"name": "best_model", "path": "model/best_model.zip"},
+            {"name": "best_model_meta", "path": "model/best_model_meta.json"},
+            {"name": "final_model", "path": "model/final_model.zip"},
+        ),
+    )
+    assert record["selection"]["bindings"] == "unbound"
+    assert record["artifacts"] == [
+        {"name": "final_model", "path": "model/final_model.zip"}
+    ]
+
+
+def test_the_best_model_triple_names_are_run_layout_names():
+    from courtside_dynamics.training.artifacts import RUN_LAYOUT
+
+    assert records.BEST_MODEL_ARTIFACTS <= set(RUN_LAYOUT)
+    assert {
+        RUN_LAYOUT[name].rsplit("/", 1)[-1] for name in records.BEST_MODEL_ARTIFACTS
+    } == {"best_model.zip", "best_vec_normalize.pkl", "best_model_meta.json"}
+
+
 @pytest.mark.parametrize(
     "damage, problem",
     [
@@ -297,11 +424,6 @@ def test_unlisted_files_are_reported_and_fail_only_strict(tmp_path):
         ".hidden_tmp",
         "metrics/x/deep.bin",
         "media/videos/late.mp4",
-        # A writer's temporary leftover fails even where plots may land.
-        ".run_record.json.tmp-4242",
-        "model/.best_model.zip.sync-tmp",
-        "reports/.learning_curve.png.tmp-17",
-        "reports/tmpk2j3h4.tmp",
     ],
 )
 def test_an_unlisted_file_outside_the_post_training_locations_fails(
@@ -320,6 +442,44 @@ def test_an_unlisted_file_outside_the_post_training_locations_fails(
     assert result.unlisted == (stray,)
     assert stray in result.problems[0]
     assert "outside the post-training locations" in result.problems[0]
+    assert verify_main([str(run_dir)]) == 1
+
+
+@pytest.mark.parametrize("listed", [False, True], ids=["unlisted", "listed"])
+@pytest.mark.parametrize(
+    "leftover",
+    [
+        ".run_record.json.tmp-4242",
+        "model/.best_model.zip.sync-tmp",
+        "model/.best_model.zip.tmp-4242",
+        "metrics/evaluations.npz.tmp.npz",
+        # Even where plots may land.
+        "reports/.learning_curve.png.tmp-17",
+        "reports/tmpk2j3h4.tmp",
+    ],
+)
+def test_a_temporary_leftover_fails_whether_or_not_the_manifest_lists_it(
+    tmp_path, leftover, listed
+):
+    """Verifier r2 (major): the leftover rule applied only to unlisted
+    files, so a leftover present when train() sealed the run -- listed
+    by its own manifest -- verified complete under --strict. A leftover
+    is an interrupted write wherever it sits and whoever listed it."""
+    run_dir = _sealed_run_dir(tmp_path / "run")
+    path = run_dir / leftover
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x")
+    if listed:
+        write_sync_manifest(run_dir)
+    for strict in (False, True):
+        result = verify_run_dir(run_dir, strict=strict)
+        assert not result.complete
+        assert result.manifest == "verified"
+        assert result.unlisted == (() if listed else (leftover,))
+        assert result.problems == (
+            f"1 temporary file(s) left by an interrupted write, listed in "
+            f"{SYNC_MANIFEST_NAME} or not: {leftover}",
+        )
     assert verify_main([str(run_dir)]) == 1
 
 
@@ -899,6 +1059,242 @@ def test_a_reused_log_dir_that_crashes_early_records_only_its_own_attempt(
     assert len(list((log_dir / "model").glob("best_model.attempt_*.zip"))) == 1
 
 
+class _Improving(gym.Wrapper):
+    """BallBalance whose ``steps_alive`` (and, for reward selection, whose
+    reward) is the env's reset count: every evaluation scores higher than
+    the last, so every evaluation saves a new best."""
+
+    def __init__(self, env: gym.Env) -> None:
+        super().__init__(env)
+        self._resets = 0
+
+    def reset(self, **kwargs):
+        observation, info = self.env.reset(**kwargs)
+        self._resets += 1
+        return observation, {**info, "steps_alive": self._resets}
+
+    def step(self, action):
+        observation, _reward, terminated, truncated, info = self.env.step(action)
+        return (
+            observation,
+            float(self._resets),
+            terminated,
+            truncated,
+            {**info, "steps_alive": self._resets},
+        )
+
+
+def _improving_env() -> gym.Env:
+    return _Improving(BallBalanceEnv(episode_len=12))
+
+
+def _interrupt_best_save(monkeypatch, boundary: str, *, at_save: int = 2) -> None:
+    """Raise KeyboardInterrupt at ``boundary`` of the ``at_save``-th best save.
+
+    Inside a write (``model``, ``normalizer``, ``meta``) the temporary is
+    left torn -- half its bytes -- as a real interrupt would; between the
+    renames (``model_renamed``: the zip is in place, the normalizer and
+    meta are not; ``normalizer_renamed``: only the meta is not) and after
+    the last one (``meta_renamed``).
+    """
+    import stable_baselines3
+    from stable_baselines3.common.vec_env import VecNormalize
+
+    calls: dict[str, int] = {}
+
+    def due(name: str) -> bool:
+        calls[name] = calls.get(name, 0) + 1
+        return calls[name] == at_save
+
+    def tear(path: str) -> None:
+        size = os.path.getsize(path)
+        with open(path, "r+b") as handle:
+            handle.truncate(size // 2)
+        raise KeyboardInterrupt
+
+    def temporary_of(path: Any, name: str) -> bool:
+        return os.path.basename(str(path)).startswith(f".{name}.tmp-")
+
+    for owner in (stable_baselines3.SAC, VecNormalize):
+        written = "best_model.zip" if owner is not VecNormalize else (
+            "best_vec_normalize.pkl"
+        )
+        real_save = owner.save
+
+        def save(self, path, *args, _real=real_save, _name=written, **kwargs):
+            _real(self, path, *args, **kwargs)
+            if temporary_of(path, _name) and due(_name) and boundary == (
+                "model" if _name == "best_model.zip" else "normalizer"
+            ):
+                tear(str(path))
+
+        monkeypatch.setattr(owner, "save", save)
+
+    real_dump = json.dump
+
+    def dump(payload, stream, *args, **kwargs):
+        real_dump(payload, stream, *args, **kwargs)
+        name = getattr(stream, "name", "")
+        if temporary_of(name, "best_model_meta.json") and due("meta") and (
+            boundary == "meta"
+        ):
+            stream.flush()
+            tear(name)
+
+    monkeypatch.setattr(json, "dump", dump)
+
+    real_replace = os.replace
+    before = {
+        "model_renamed": "best_vec_normalize.pkl",
+        "normalizer_renamed": "best_model_meta.json",
+    }
+
+    def replace(source, target, *args, **kwargs):
+        if boundary in before and temporary_of(source, before[boundary]):
+            if due(f"rename {before[boundary]}"):
+                raise KeyboardInterrupt
+        real_replace(source, target, *args, **kwargs)
+        if boundary == "meta_renamed" and temporary_of(
+            source, "best_model_meta.json"
+        ):
+            if due("renamed meta"):
+                raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "replace", replace)
+
+
+def _temporaries(log_dir: Path) -> list[str]:
+    return [
+        relative
+        for relative in records.run_files(log_dir)
+        if records.is_temporary_path(relative)
+    ]
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "model",
+        "normalizer",
+        "meta",
+        "model_renamed",
+        "normalizer_renamed",
+        "meta_renamed",
+    ],
+)
+def test_an_interrupt_at_each_best_save_boundary_never_seals_a_torn_best(
+    tmp_path, monkeypatch, boundary
+):
+    """Verifier r2 (majors 1 and 2): a KeyboardInterrupt inside the
+    best-model save left a torn best_model.zip that the record listed and
+    the manifest sealed complete, and one between the triple's writes
+    left a record whose selection described the previous best beside the
+    new model. Every write now goes to a temporary that is renamed into
+    place, the meta last: an interrupt inside a write leaves the previous
+    best whole; one between the renames leaves a meta that no longer
+    binds the files, so the record's selection is unbound (never the
+    previous best's) and the triple is left out of its artifacts."""
+    from stable_baselines3 import SAC
+
+    from courtside_dynamics.notebook_utils import verify_best_checkpoint_pair
+
+    _interrupt_best_save(monkeypatch, boundary)
+    log_dir = tmp_path / boundary
+    model = train(_cfg(log_dir, env_fn=_improving_env))
+    assert model.num_timesteps == 200
+    record = _assert_sealed(log_dir, "interrupted")
+    assert _temporaries(log_dir) == []
+    selection = record["selection"]
+    names = {artifact["name"] for artifact in record["artifacts"]}
+    summary = (log_dir / "stage_summary.txt").read_text()
+    if boundary in ("model_renamed", "normalizer_renamed"):
+        assert selection["bindings"] == "unbound"
+        assert selection["timestep"] is None
+        assert selection["values"] is None
+        assert "best_model.zip (sha256 differs)" in selection["unbound_reason"]
+        assert not names & {"best_model", "best_vec_normalize", "best_model_meta"}
+        assert "Best model:     unbound: best_model_meta.json does not bind" in (
+            summary
+        )
+        with pytest.raises(ValueError, match="does not match the SHA-256"):
+            verify_best_checkpoint_pair(log_dir)
+        return
+    # The previous best (step 100) stands whole, or the new one (step
+    # 200) when every rename had landed.
+    expected = 200 if boundary == "meta_renamed" else 100
+    assert selection["bindings"] == "verified"
+    assert selection["unbound_reason"] is None
+    assert selection["timestep"] == expected
+    assert {"best_model", "best_vec_normalize", "best_model_meta"} <= names
+    assert f"Best model:     step {expected:,}" in summary
+    verify_best_checkpoint_pair(log_dir)
+    SAC.load(log_dir / "model" / "best_model.zip", device="cpu")
+
+
+@pytest.mark.parametrize("boundary", ["model", "normalizer"])
+def test_an_interrupted_reward_path_best_save_leaves_the_previous_pair(
+    tmp_path, monkeypatch, boundary
+):
+    """Reward selection: SB3's EvalCallback wrote best_model.zip in place,
+    and a real SIGINT left a 16 kB zip that no loader could open, sealed
+    complete (verifier r2). The pair is now written atomically too."""
+    from stable_baselines3 import SAC
+
+    _interrupt_best_save(monkeypatch, boundary)
+    log_dir = tmp_path / boundary
+    model = train(
+        _cfg(
+            log_dir,
+            env_fn=_improving_env,
+            info_dict_eval=False,
+            headline_key=None,
+        )
+    )
+    assert model.num_timesteps == 200
+    record = _assert_sealed(log_dir, "interrupted")
+    assert _temporaries(log_dir) == []
+    assert record["selection"] is None
+    names = {artifact["name"] for artifact in record["artifacts"]}
+    assert {"best_model", "best_vec_normalize"} <= names
+    best = SAC.load(log_dir / "model" / "best_model.zip", device="cpu")
+    first = SAC.load(log_dir / "model" / "final_model.zip", device="cpu")
+    # The step-100 best, not the step-200 policy the salvage saved.
+    assert best.num_timesteps == 100 < first.num_timesteps
+
+
+def test_an_interrupted_merged_stream_npz_write_leaves_no_temporary(
+    tmp_path, monkeypatch
+):
+    """Verifier r2 (major 3): the merged-stream evaluations.npz writer
+    caught only OSError, so a KeyboardInterrupt inside np.savez left
+    metrics/evaluations.npz.tmp.npz, which the manifest listed and
+    verification passed. It is removed now, and a listed leftover would
+    fail verification anyway."""
+    import numpy as np
+
+    real_savez = np.savez
+    calls = {"n": 0}
+
+    def savez(file, *args, **kwargs):
+        if str(file).endswith(".tmp.npz"):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                with open(file, "wb") as handle:
+                    handle.write(b"PK\x03\x04 torn")
+                raise KeyboardInterrupt
+        return real_savez(file, *args, **kwargs)
+
+    monkeypatch.setattr(np, "savez", savez)
+    log_dir = tmp_path / "merged"
+    model = train(_cfg(log_dir, final_info_eval=True))
+    assert calls["n"] == 2
+    assert model.num_timesteps == 200
+    _assert_sealed(log_dir, "interrupted")
+    assert _temporaries(log_dir) == []
+    with np.load(log_dir / "metrics" / "evaluations.npz") as data:
+        assert list(data["timesteps"]) == [100]
+
+
 def test_a_sigkilled_run_leaves_an_incomplete_run_dir(tmp_path):
     """No terminal path runs under SIGKILL (a dead Colab VM): the record
     still says "running" and there is no manifest."""
@@ -1042,6 +1438,42 @@ def test_a_final_mirror_that_keeps_failing_raises_after_sealing_locally(
     monkeypatch.setattr(RunDirMirror, "sync", real_sync)
     sync_run_dir(log_dir, sync_dir)
     assert verify_run_dir(sync_dir, strict=True).complete
+
+
+def test_an_interrupted_final_mirror_names_the_resync_and_reraises(
+    tmp_path, monkeypatch, capsys
+):
+    """Verifier r2: a KeyboardInterrupt during the final mirror propagated
+    with the local record sealed completed (the local-then-sync
+    contract), but without the sync_run_dir hint the failure path
+    prints."""
+    calls = {"n": 0}
+    real_sync = RunDirMirror.sync
+
+    def interrupted_at_the_end(self, **kwargs):
+        calls["n"] += 1
+        if calls["n"] > 2:  # both checkpoint passes succeed
+            raise KeyboardInterrupt
+        return real_sync(self, **kwargs)
+
+    monkeypatch.setattr(RunDirMirror, "sync", interrupted_at_the_end)
+    log_dir = tmp_path / "local" / "run"
+    sync_dir = tmp_path / "drive" / "run"
+    (tmp_path / "drive").mkdir()
+    with pytest.raises(KeyboardInterrupt):
+        train(
+            _cfg(
+                log_dir,
+                total_timesteps=200,
+                checkpoint_freq=100,
+                sync_dir=str(sync_dir),
+            )
+        )
+    _assert_sealed(log_dir, "completed")
+    assert not verify_run_dir(sync_dir).complete
+    out = capsys.readouterr().out
+    assert "was interrupted: " in out
+    assert f"sync_run_dir({str(log_dir)!r}, {str(sync_dir.resolve())!r})" in out
 
 
 def test_a_tilde_sync_dir_is_mirrored_where_it_was_validated(

@@ -2978,6 +2978,62 @@ def test_the_reward_path_stop_at_the_final_evaluation_completes_the_budget(
     assert "no new best mean reward" in record["stop_reason"]
 
 
+class _StopWithReasonAt(BaseCallback):
+    """Stop training with a ``stop_reason`` once ``at`` steps are done."""
+
+    def __init__(self, at: int) -> None:
+        super().__init__()
+        self.at = at
+        self.stop_reason: str | None = None
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps >= self.at:
+            self.stop_reason = "synthetic_guard: held"
+            return False
+        return True
+
+
+@pytest.mark.parametrize("guard", [False, True], ids=["no-guard", "guard"])
+def test_an_on_policy_stop_at_the_final_evaluation_says_the_update_was_skipped(
+    tmp_path, guard
+):
+    """L1 verifier r2: SB3 stops an on-policy run inside collect_rollouts,
+    before the final rollout's update, so "trained all 256 steps" was
+    wrong for a PPO guard that held at the final evaluation: the last
+    rollout was collected but never trained on (3 updates, not 4)."""
+    cfg = TrainConfig(
+        env_fn=lambda: BallBalanceEnv(episode_len=8),
+        algo="PPO",
+        log_dir=str(tmp_path),
+        n_envs=1,
+        seed=0,
+        total_timesteps=256,
+        eval_freq=64,
+        checkpoint_freq=0,
+        video_freq=0,
+        record_video=False,
+        info_dict_eval=False,
+        n_eval_episodes=1,
+        model_kwargs={"n_steps": 64, "batch_size": 64, "n_epochs": 1},
+        extra_callbacks=(_StopWithReasonAt(256),) if guard else (),
+    )
+    model = train(cfg)
+    assert model.num_timesteps == 256
+    record = json.loads((tmp_path / "run_record.json").read_text())
+    assert record["status"] == "completed"
+    if not guard:
+        assert model._n_updates == 4
+        assert record["stop_reason"] is None
+        return
+    assert model._n_updates == 3
+    assert record["stop_reason"] == (
+        "full_budget: collected all 256 steps; the stop condition held at "
+        "the final evaluation (synthetic_guard: held), so the last "
+        "rollout's update was skipped (SB3 n_updates 3)"
+    )
+    assert _summary_field(tmp_path, "Stop reason") == record["stop_reason"]
+
+
 def test_inert_early_stops_are_warned_before_output_and_recorded(
     tmp_path, capsys
 ):

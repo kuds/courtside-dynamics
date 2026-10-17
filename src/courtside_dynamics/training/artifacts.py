@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from courtside_dynamics.experiments.records import best_model_meta_unbound
+
 if TYPE_CHECKING:
     from courtside_dynamics.training.train import TrainConfig
 
@@ -1664,6 +1666,24 @@ def write_run_summary(
     # lines above describe a *different* checkpoint in that case.
     best_meta = _read_best_model_meta(log_dir)
     selected_step: int | None = None
+    # A meta whose sha256s no longer bind the files beside it (a
+    # best-model save interrupted between its renames) describes another
+    # save, the previous best: say so, and report no selection from it.
+    meta_path = locate_artifact(log_dir, "best_model_meta")
+    unbound = (
+        None
+        if best_meta is None or meta_path is None
+        else best_model_meta_unbound(best_meta, os.path.dirname(meta_path))
+    )
+    if unbound is not None:
+        lines.append(
+            _kv(
+                "Best model",
+                f"unbound: {unbound}  <-- WARNING: do not deploy "
+                "best_model.zip",
+            )
+        )
+        best_meta = None
     if best_meta is not None:
         try:
             selected_step = int(best_meta["timestep"])
@@ -1796,8 +1816,11 @@ def write_run_summary(
 
     # The section describes the checkpoint that best_model.zip actually
     # holds: the task-metric-selected step when meta exists, else the
-    # reward-best step.
+    # reward-best step; nothing when the meta is unbound (no step is
+    # known to be the one on disk).
     section_step = selected_step if selected_step is not None else best_step
+    if unbound is not None:
+        section_step = None
     if section_step is not None:
         lines.extend(
             _section(f"Best Checkpoint Evaluation (step {section_step:,})")

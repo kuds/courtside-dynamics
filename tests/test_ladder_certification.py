@@ -161,6 +161,18 @@ def test_certify_ladder_end_to_end_writes_a_complete_report():
     assert "LADDER CERTIFICATION" in lc.format_report(report)
 
 
+def test_a_failed_report_write_leaves_no_temporary(tmp_path):
+    """L1 verifier r2: the report's temporary must not outlive a failed or
+    interrupted write (a leftover fails the run directory's
+    verification); the previous report stands."""
+    output = tmp_path / "reports" / "ladder_certification.json"
+    lc._write_report(str(output), {"passed": True})
+    with pytest.raises(TypeError):
+        lc._write_report(str(output), {"passed": object()})
+    assert json.loads(output.read_text()) == {"passed": True}
+    assert sorted(path.name for path in output.parent.iterdir()) == [output.name]
+
+
 def test_certify_ladder_rejects_malformed_probes():
     with pytest.raises(ValueError, match="cover every stage"):
         lc.certify_ladder(

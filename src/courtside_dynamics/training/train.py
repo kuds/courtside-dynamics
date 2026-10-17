@@ -116,29 +116,49 @@ from courtside_dynamics.training.artifacts import (
 from courtside_dynamics.training.demo_sac import DemoSAC
 
 
-class _SaveVecNormalizeOnNewBest(BaseCallback):
-    """Snapshot the model's ``VecNormalize`` stats when EvalCallback saves a new best.
+class _SaveBestOnNewBest(BaseCallback):
+    """Save ``best_model.zip`` and its ``VecNormalize`` stats on a new best.
 
-    Wired in via ``EvalCallback(..., callback_on_new_best=...)``. Without
-    this, ``vec_normalize.pkl`` is only written at the very end of
-    training, so its running stats reflect the *final* train_env state —
-    not the moment ``best_model.zip`` was saved. Replaying ``best_model``
-    against final-step stats is a silent obs-distribution mismatch.
+    Wired in via ``EvalCallback(best_model_save_path=None,
+    callback_on_new_best=...)`` under reward selection, so it runs where
+    SB3's own best-model save did, on the same model. SB3 wrote
+    ``best_model.zip`` in place: a ``KeyboardInterrupt`` (a stopped Colab
+    cell) inside that write left a torn zip that no loader could open
+    and that the run directory then sealed. Here both files are written
+    under temporary names and renamed into place together
+    (``experiments.records.ReplaceTogether``), so an interrupt inside a
+    write leaves the previous pair whole and nothing behind.
+
+    The paired stats snapshot: without it, ``vec_normalize.pkl`` is only
+    written at the very end of training, so its running stats reflect
+    the *final* train_env state -- not the moment ``best_model.zip`` was
+    saved. Replaying ``best_model`` against final-step stats is a silent
+    obs-distribution mismatch. ``normalizer_path`` is ``None`` for a run
+    without ``VecNormalize``; a model without one writes no stats either.
     """
 
-    def __init__(self, save_path: str) -> None:
+    def __init__(self, model_path: str, normalizer_path: str | None) -> None:
         super().__init__()
-        self.save_path = save_path
+        self.model_path = model_path
+        self.normalizer_path = normalizer_path
+
+    def _init_callback(self) -> None:
+        # Where EvalCallback created its best_model_save_path.
+        os.makedirs(os.path.dirname(self.model_path) or ".", exist_ok=True)
 
     def _on_step(self) -> bool:
         get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
-        if get_vec_norm is None:
-            return True
-        vec_norm = get_vec_norm()
-        if vec_norm is None:
-            return True
-        os.makedirs(os.path.dirname(self.save_path) or ".", exist_ok=True)
-        vec_norm.save(self.save_path)
+        vec_norm = get_vec_norm() if get_vec_norm is not None else None
+        with run_records.ReplaceTogether() as staged:
+            # SB3 appends ".zip" only to a path without a suffix; the
+            # temporary's ".tmp-<pid>" keeps it as given.
+            self.model.save(staged.stage(self.model_path))
+            if vec_norm is not None and self.normalizer_path is not None:
+                os.makedirs(
+                    os.path.dirname(self.normalizer_path) or ".", exist_ok=True
+                )
+                vec_norm.save(staged.stage(self.normalizer_path))
+            staged.commit()
         return True
 
 
@@ -365,12 +385,31 @@ class _RunLifecycle:
             n_updates=n_updates,
             git_dirty=self.git_dirty,
             best_model_meta=best_meta,
+            # The selection is checked against the files the meta binds:
+            # a best-model save interrupted between its renames leaves
+            # the previous best's meta beside the new model.
+            best_model_dir=(
+                None if meta_path is None else os.path.dirname(meta_path)
+            ),
             wall_clock=wall_clock,
             preflight_warnings=self.preflight_warnings,
             artifacts=self._artifacts(),
             sync=sync,
             progress=progress,
         )
+        selection = record["selection"]
+        if (
+            finished
+            and selection is not None
+            and selection["bindings"] == run_records.BINDINGS_UNBOUND
+        ):
+            print(
+                f"[train] WARNING: the best model is unbound -- "
+                f"{selection['unbound_reason']}. The run record leaves its "
+                f"selection unbound and best_model / best_vec_normalize / "
+                f"best_model_meta out of its artifacts; do not deploy "
+                f"best_model.zip from {self.log_dir}"
+            )
         run_records.write_run_record(self.log_dir, record)
 
     def checkpoint_sync(self, num_timesteps: int) -> None:
@@ -457,7 +496,18 @@ class _RunLifecycle:
                 )
                 return
         if self.mirror is not None:
-            self._final_sync(error)
+            try:
+                self._final_sync(error)
+            except KeyboardInterrupt:
+                # The local directory is sealed (its record may well say
+                # completed); only the mirror is unfinished, and the
+                # caller gets the interrupt with the way to finish it.
+                print(
+                    f"[train] mirroring {self.log_dir} to {self.sync_dir} "
+                    f"was interrupted: {self.log_dir} is complete, but the "
+                    f"mirror does not verify. {self._resync_hint()}"
+                )
+                raise
 
     def _final_pass(self) -> dict[str, Any]:
         """One final mirror pass, checked against the local manifest.
@@ -488,6 +538,13 @@ class _RunLifecycle:
                 )
         return manifest
 
+    def _resync_hint(self) -> str:
+        return (
+            f"Re-run: from courtside_dynamics.experiments.sync import "
+            f"sync_run_dir; sync_run_dir({str(self.log_dir)!r}, "
+            f"{str(self.sync_dir)!r})"
+        )
+
     def _final_sync(self, error: BaseException | None) -> None:
         assert self.mirror is not None
         last: Exception | None = None
@@ -513,9 +570,7 @@ class _RunLifecycle:
         message = (
             f"{self.log_dir} is complete, but mirroring it to sync_dir "
             f"{self.sync_dir} failed {len(delays)} times (last: "
-            f"{last!r}), so the mirror does not verify. Re-run: from "
-            f"courtside_dynamics.experiments.sync import sync_run_dir; "
-            f"sync_run_dir({str(self.log_dir)!r}, {str(self.sync_dir)!r})"
+            f"{last!r}), so the mirror does not verify. {self._resync_hint()}"
         )
         if error is not None:
             print(f"[train] {message}")
@@ -3512,9 +3567,14 @@ def _train_in_log_dir(
                 final_eval_episodes = max(1, cfg.n_eval_episodes // 2)
 
         on_new_best: BaseCallback | None = None
-        if use_vec_normalize and not headline_selection:
-            on_new_best = _SaveVecNormalizeOnNewBest(
-                artifact_path(cfg.log_dir, "best_vec_normalize")
+        if not headline_selection:
+            on_new_best = _SaveBestOnNewBest(
+                artifact_path(cfg.log_dir, "best_model"),
+                (
+                    artifact_path(cfg.log_dir, "best_vec_normalize")
+                    if use_vec_normalize
+                    else None
+                ),
             )
 
         # PPO plan Step 6: an on-policy run's early stops wait until its
@@ -3556,18 +3616,18 @@ def _train_in_log_dir(
                 verbose=1,
             )
 
-        # SB3's EvalCallback/InfoDictEvalCallback join ``best_model.zip``
-        # onto their save directory themselves, so both are pointed at the
-        # layout's model/ folder; EvalCallback likewise writes
-        # ``evaluations.npz`` inside ``log_path``, i.e. metrics/.
+        # InfoDictEvalCallback joins ``best_model.zip`` onto its save
+        # directory itself, so it is pointed at the layout's model/
+        # folder; EvalCallback writes ``evaluations.npz`` inside
+        # ``log_path``, i.e. metrics/. EvalCallback never saves the best
+        # model itself: under reward selection on_new_best does, without
+        # SB3's in-place write.
         best_model_dir = os.path.dirname(artifact_path(cfg.log_dir, "best_model"))
         eval_callback: EvalCallback | None = None
         if not merge_reward_eval_into_final:
             eval_callback = EvalCallback(
                 eval_env,
-                best_model_save_path=(
-                    None if headline_selection else best_model_dir
-                ),
+                best_model_save_path=None,
                 log_path=os.path.dirname(
                     artifact_path(cfg.log_dir, "evaluations")
                 ),
@@ -4248,7 +4308,19 @@ def _train_in_log_dir(
             stop_reason = _stop_reason_of(callbacks)
             status = run_records.COMPLETED
             if int(model.num_timesteps) >= cfg.total_timesteps:
-                if stop_reason is not None:
+                if stop_reason is not None and _is_on_policy(cfg):
+                    # SB3 stops an on-policy run inside collect_rollouts,
+                    # before the update that consumes the rollout: the
+                    # final evaluation's rollout was collected, never
+                    # trained on.
+                    stop_reason = (
+                        f"full_budget: collected all "
+                        f"{cfg.total_timesteps:,} steps; the stop condition "
+                        f"held at the final evaluation ({stop_reason}), so "
+                        f"the last rollout's update was skipped "
+                        f"(SB3 n_updates {_on_policy_updates(cfg, model)})"
+                    )
+                elif stop_reason is not None:
                     # The guard fired once the run had trained its whole
                     # budget, so it is not an early stop (both
                     # 2026-08-28 runs were labeled one;

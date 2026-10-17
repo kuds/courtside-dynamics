@@ -613,10 +613,19 @@ class PerformanceGatedEnvStagesCallback(BaseCallback):
         if parent:
             os.makedirs(parent, exist_ok=True)
         temporary = self.stage_history_path + ".tmp"
-        with open(temporary, "w") as stream:
-            json.dump(payload, stream, indent=2)
-            stream.write("\n")
-        os.replace(temporary, self.stage_history_path)
+        try:
+            with open(temporary, "w") as stream:
+                json.dump(payload, stream, indent=2)
+                stream.write("\n")
+            os.replace(temporary, self.stage_history_path)
+        except BaseException:
+            # A failed or interrupted write leaves no temporary behind: a
+            # leftover fails the run directory's verification.
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            raise
 
     def finalize(self, *, salvage: bool = False) -> None:
         """Close out the current stage and write the history -- once.

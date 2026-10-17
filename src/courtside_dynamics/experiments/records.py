@@ -19,16 +19,20 @@ a partial one (``repo_review_20261016.md`` R3). Two files close that:
     (:mod:`courtside_dynamics.experiments.sync`).
 
 Both are written atomically: a temporary file in the same directory is
-renamed over the target, so a reader never sees half of one.
+renamed over the target, so a reader never sees half of one. The
+best-model triple is written the same way (:class:`ReplaceTogether`),
+and the record's ``selection`` says whether ``best_model_meta.json``'s
+sha256s bind the files beside it (:func:`best_model_meta_unbound`).
 
 A run directory is **complete** when its manifest verifies, the run
-record it lists carries a terminal status, and every file it does not
-list is one a notebook writes after training (:func:`verify_run_dir`).
-Complete means the directory is exactly what ``train()`` left when the
-run ended -- a crashed or interrupted run included, its status says
-how it ended -- not that the run succeeded. Without a manifest (a
-SIGKILL, a dead Colab VM, a run still training, a directory from before
-run records), or with one that does not verify, it is incomplete by
+record it lists carries a terminal status, every file it does not list
+is one a notebook writes after training, and it holds no writer's
+temporary leftover, listed or not (:func:`verify_run_dir`). Complete
+means the directory is exactly what ``train()`` left when the run
+ended -- a crashed or interrupted run included, its status says how it
+ended -- not that the run succeeded. Without a manifest (a SIGKILL, a
+dead Colab VM, a run still training, a directory from before run
+records), or with one that does not verify, it is incomplete by
 definition.
 
 Stable-Baselines3 and torch are never imported here.
@@ -63,7 +67,9 @@ RUNNING = "running"
 #: guard that fires once the run has trained its whole budget -- at the
 #: final evaluation of a budget that is a multiple of ``eval_freq``, say
 #: -- ends here too, and its ``stop_reason`` says so
-#: (``repo_review_20261016`` train-3). A guard that fires at the final
+#: (``repo_review_20261016`` train-3); for an on-policy run that reason
+#: says the budget was collected and the last rollout's update skipped,
+#: since SB3 stops before that update. A guard that fires at the final
 #: scheduled evaluation of a budget that is *not* such a multiple left
 #: steps untrained: ``early_stop``.
 COMPLETED = "completed"
@@ -97,10 +103,11 @@ POST_TRAINING_DIRS = ("reports/",)
 POST_TRAINING_FILES = frozenset({"media/best_model.mp4"})
 
 #: Basename suffixes of the temporary files this repository's writers
-#: rename into place (``write_json_atomic``'s ``.<name>.tmp-<pid>``, the
-#: mirror's ``.<name>.sync-tmp``, the callbacks' ``<name>.tmp`` and
+#: rename into place (:func:`temporary_path`'s ``.<name>.tmp-<pid>``,
+#: the mirror's ``.<name>.sync-tmp``, the callbacks' ``<name>.tmp`` and
 #: ``<name>.tmp.npz``, ``NamedTemporaryFile``'s ``tmp*.tmp``). One left
-#: behind is an interrupted write: it always fails verification.
+#: behind is an interrupted write: it fails verification whether or not
+#: a manifest lists it.
 _TEMPORARY_SUFFIX = re.compile(r"\.(tmp(-\d+)?|sync-tmp|tmp\.npz)$")
 
 _HASH_CHUNK = 1024 * 1024
@@ -125,6 +132,17 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def temporary_path(target: str | os.PathLike[str]) -> Path:
+    """The temporary file a writer here renames over ``target``.
+
+    ``.<name>.tmp-<pid>`` beside the target, so the rename is a
+    same-directory ``os.replace`` and a leftover is recognized
+    (:func:`is_temporary_path`).
+    """
+    target = Path(target)
+    return target.with_name(f".{target.name}.tmp-{os.getpid()}")
+
+
 def write_json_atomic(path: str | os.PathLike[str], payload: Any) -> Path:
     """Write ``payload`` as indented JSON via a temporary file and a rename.
 
@@ -135,7 +153,7 @@ def write_json_atomic(path: str | os.PathLike[str], payload: Any) -> Path:
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+    temporary = temporary_path(target)
     try:
         with open(temporary, "w", encoding="utf-8") as stream:
             json.dump(payload, stream, indent=2, default=repr)
@@ -152,6 +170,52 @@ def write_json_atomic(path: str | os.PathLike[str], payload: Any) -> Path:
     return target
 
 
+class ReplaceTogether:
+    """Write files under temporary names, then rename them all into place.
+
+    :meth:`stage` returns the temporary path (:func:`temporary_path`) to
+    write a target's new bytes to; :meth:`commit` renames every staged
+    file over its target, in staging order. Used as a context manager:
+    leaving the block without a commit -- an exception, or a
+    ``KeyboardInterrupt`` (a stopped Colab cell) inside a write --
+    removes every temporary still on disk, so the previous files stand
+    whole and nothing is left behind. Each rename is atomic, the set is
+    not: an interrupt between two renames leaves the earlier targets new
+    and the later ones old. The best-model triple therefore stages
+    ``best_model_meta.json`` last, binding the others by sha256, and
+    :func:`best_model_meta_unbound` catches such a split.
+    """
+
+    def __init__(self) -> None:
+        self._staged: list[tuple[Path, Path]] = []
+
+    def __enter__(self) -> ReplaceTogether:
+        return self
+
+    def stage(self, target: str | os.PathLike[str]) -> str:
+        """The temporary path to write ``target``'s new content to."""
+        temporary = temporary_path(target)
+        self._staged.append((temporary, Path(target)))
+        return str(temporary)
+
+    def commit(self) -> None:
+        """Rename every staged file over its target, in staging order."""
+        for temporary, target in self._staged:
+            os.replace(temporary, target)
+
+    def __exit__(self, *_exc_info: object) -> None:
+        for temporary, _target in self._staged:
+            try:
+                temporary.unlink()
+            except OSError:  # renamed already, or never written
+                pass
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    """``value`` when it is a JSON object; otherwise read as missing."""
+    return value if isinstance(value, Mapping) else {}
+
+
 def _kwargs_sha256(env_profile: Mapping[str, Any]) -> str | None:
     kwargs = env_profile.get("constructor_kwargs")
     return canonical_sha256(kwargs) if isinstance(kwargs, Mapping) else None
@@ -164,15 +228,14 @@ def _warm_start_section(config: Mapping[str, Any]) -> dict[str, Any] | None:
     built) carries the verified sha256s; before it exists the configured
     ``train_config.warm_start`` names the source.
     """
-    train_config = config.get("train_config") or {}
-    configured = train_config.get("warm_start") or {}
-    initialization = config.get("initialization") or {}
+    configured = _mapping(_mapping(config.get("train_config")).get("warm_start"))
+    initialization = _mapping(config.get("initialization"))
     if not configured and not initialization:
         return None
     source = initialization.get("source_run_dir") or configured.get(
         "source_run_dir"
     )
-    source_artifacts = initialization.get("source_artifacts") or {}
+    source_artifacts = _mapping(initialization.get("source_artifacts"))
     digests = {
         str(name): entry.get("sha256")
         for name, entry in source_artifacts.items()
@@ -186,8 +249,72 @@ def _warm_start_section(config: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+#: ``selection["bindings"]``: whether ``best_model_meta.json``'s
+#: sha256s were checked against the files beside it and match
+#: (``"verified"``), do not match (``"unbound"``), or were not checked
+#: (``"not_checked"``: the index's backfill of runs from before run
+#: records, or a meta written before metas bound their files, which has
+#: no ``artifacts`` block to check).
+BINDINGS_VERIFIED = "verified"
+BINDINGS_UNBOUND = "unbound"
+BINDINGS_NOT_CHECKED = "not_checked"
+
+#: The best-model triple's ``training.artifacts.RUN_LAYOUT`` names (a
+#: test pins the agreement). An unbound selection leaves all three out
+#: of the record's ``artifacts``: the files no longer form one save.
+BEST_MODEL_ARTIFACTS = frozenset(
+    {"best_model", "best_vec_normalize", "best_model_meta"}
+)
+
+
+def best_model_meta_unbound(
+    meta: Mapping[str, Any], directory: str | os.PathLike[str]
+) -> str | None:
+    """Why ``best_model_meta.json`` does not bind the files beside it.
+
+    ``None`` when it does: its ``artifacts`` names ``best_model.zip``
+    (and the normalizer, when the run had one) with a sha256, and every
+    file it names is in ``directory`` with that digest -- the check the
+    loaders apply before replaying a best model
+    (``notebook_utils.verify_best_checkpoint_pair``). Also ``None`` for a
+    meta written before metas bound their files (no ``artifacts`` at
+    all), which the loaders accept as legacy: there is nothing to check.
+    Otherwise the reason: a best-model save interrupted between its
+    renames (:class:`ReplaceTogether`) or a file replaced since leaves a
+    meta describing a selection that is not the files on disk.
+    """
+    bound = meta.get("artifacts")
+    if bound is None:
+        return None
+    if not isinstance(bound, Mapping) or not bound:
+        return "best_model_meta.json binds no files (an empty 'artifacts')"
+    if "best_model.zip" not in bound:
+        return "best_model_meta.json does not bind best_model.zip"
+    stale: list[str] = []
+    for name, entry in sorted(bound.items()):
+        expected = entry.get("sha256") if isinstance(entry, Mapping) else None
+        if _safe_relative(name) != name or "/" in name:
+            stale.append(f"{name!r} (not a file name)")
+            continue
+        path = Path(directory) / name
+        if not path.is_file():
+            stale.append(f"{name} (missing)")
+        elif sha256_file(path) != expected:
+            stale.append(f"{name} (sha256 differs)")
+    if stale:
+        return (
+            "best_model_meta.json does not bind the files beside it: "
+            + ", ".join(stale)
+            + " (a best-model save interrupted between its renames, or a "
+            "file replaced since)"
+        )
+    return None
+
+
 def selection_from_best_model_meta(
     meta: Mapping[str, Any] | None,
+    *,
+    directory: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any] | None:
     """The record's ``selection`` block from ``best_model_meta.json``.
 
@@ -195,15 +322,113 @@ def selection_from_best_model_meta(
     ``best_model.zip`` is SB3's reward argmax, which records no
     selection event. ``n_updates`` is the SB3 update count behind the
     selecting evaluation (on-policy runs record it; ``None`` otherwise).
+
+    With ``directory`` (the meta's own), the meta's sha256 bindings are
+    checked against the files there (:func:`best_model_meta_unbound`).
+    When they do not bind them, ``bindings`` is ``"unbound"`` with the
+    reason, and ``timestep``, ``values`` and ``n_updates`` are ``None``:
+    the meta then describes another save (the previous best, when a
+    save was interrupted), never the files on disk. Without
+    ``directory``, or for a meta that binds nothing (written before
+    metas bound their files), the bindings are ``"not_checked"``. A
+    field of the wrong type is read as missing (:func:`shape_problems`
+    names it).
     """
     if not isinstance(meta, Mapping):
         return None
+    keys = meta.get("selection_keys")
+    values = meta.get("selection_values")
+    checked = False
+    unbound: str | None = None
+    if directory is not None and meta.get("artifacts") is not None:
+        checked = True
+        unbound = best_model_meta_unbound(meta, directory)
+    if unbound is not None:
+        return {
+            "timestep": None,
+            "keys": list(keys) if isinstance(keys, list) else [],
+            "values": None,
+            "n_updates": None,
+            "bindings": BINDINGS_UNBOUND,
+            "unbound_reason": unbound,
+        }
     return {
         "timestep": meta.get("timestep"),
-        "keys": list(meta.get("selection_keys") or []),
-        "values": dict(meta.get("selection_values") or {}),
+        "keys": list(keys) if isinstance(keys, list) else [],
+        "values": dict(values) if isinstance(values, Mapping) else {},
         "n_updates": meta.get("n_updates"),
+        "bindings": BINDINGS_VERIFIED if checked else BINDINGS_NOT_CHECKED,
+        "unbound_reason": None,
     }
+
+
+#: The ``config.json`` objects :func:`build_run_record` reads fields
+#: from, as dotted paths.
+_CONFIG_OBJECTS = (
+    "train_config",
+    "train_config.warm_start",
+    "env",
+    "env.constructor_kwargs",
+    "evaluation_env",
+    "evaluation_env.constructor_kwargs",
+    "algorithm",
+    "initialization",
+    "initialization.source_artifacts",
+    "versions",
+)
+
+#: The ``best_model_meta.json`` fields the selection block reads, with
+#: the type each must have.
+_META_FIELDS: tuple[tuple[str, type, str], ...] = (
+    ("selection_keys", list, "a list"),
+    ("selection_values", Mapping, "an object"),
+)
+
+
+def _json_kind(value: Any) -> str:
+    """``value``'s type in JSON's words ("a string", "a list" ...)."""
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, list):
+        return "a list"
+    if isinstance(value, Mapping):
+        return "an object"
+    return f"a {type(value).__name__}"
+
+
+def shape_problems(
+    config: Mapping[str, Any] | None = None,
+    best_model_meta: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """The fields :func:`build_run_record` reads whose type is unexpected.
+
+    :func:`build_run_record` reads each as missing rather than failing;
+    the index reports them as row problems, naming the file and field
+    (``config.json train_config.warm_start is a string, not an object``).
+    ``null`` is never a problem.
+    """
+    problems: list[str] = []
+    for dotted in _CONFIG_OBJECTS:
+        value: Any = config or {}
+        for key in dotted.split("."):
+            value = value.get(key) if isinstance(value, Mapping) else None
+        if value is not None and not isinstance(value, Mapping):
+            problems.append(
+                f"config.json {dotted} is {_json_kind(value)}, not an object; "
+                f"read as missing"
+            )
+    for key, wanted, kind in _META_FIELDS:
+        value = (best_model_meta or {}).get(key)
+        if value is not None and not isinstance(value, wanted):
+            problems.append(
+                f"best_model_meta.json {key} is {_json_kind(value)}, not "
+                f"{kind}; read as missing"
+            )
+    return problems
 
 
 def build_run_record(
@@ -218,6 +443,7 @@ def build_run_record(
     n_updates: int | None = None,
     git_dirty: bool | None = None,
     best_model_meta: Mapping[str, Any] | None = None,
+    best_model_dir: str | os.PathLike[str] | None = None,
     wall_clock: Mapping[str, Any] | None = None,
     preflight_warnings: Sequence[str] = (),
     artifacts: Sequence[Mapping[str, str]] = (),
@@ -233,16 +459,34 @@ def build_run_record(
     The task's constructor kwargs are recorded as the sha256 of their
     canonical JSON. ``eval_protocol`` stays ``None`` until evaluation
     protocols are versioned, and the ``experiment`` block holds the
-    placeholders the spec system will fill.
+    placeholders the spec system will fill. A ``config.json`` object
+    of the wrong type is read as missing (:func:`shape_problems`).
+
+    ``best_model_dir`` is the directory holding ``best_model_meta.json``
+    (``train()`` passes it): the selection is then checked against the
+    files the meta binds (:func:`selection_from_best_model_meta`), and
+    an unbound selection leaves the best-model triple out of
+    ``artifacts`` (:data:`BEST_MODEL_ARTIFACTS`): those files are on
+    disk, but they are not one save.
     """
     if status not in RUN_STATUSES:
         raise ValueError(
             f"run status must be one of {list(RUN_STATUSES)}, got {status!r}"
         )
-    train_config = config.get("train_config") or {}
-    env = config.get("env") or {}
-    evaluation_env = config.get("evaluation_env") or {}
-    algorithm = config.get("algorithm") or {}
+    train_config = _mapping(config.get("train_config"))
+    env = _mapping(config.get("env"))
+    evaluation_env = _mapping(config.get("evaluation_env"))
+    algorithm = _mapping(config.get("algorithm"))
+    versions = config.get("versions")
+    selection = selection_from_best_model_meta(
+        best_model_meta, directory=best_model_dir
+    )
+    if selection is not None and selection["bindings"] == BINDINGS_UNBOUND:
+        artifacts = [
+            artifact
+            for artifact in artifacts
+            if artifact.get("name") not in BEST_MODEL_ARTIFACTS
+        ]
     return {
         "schema": RUN_RECORD_SCHEMA,
         "run_id": run_id,
@@ -278,9 +522,9 @@ def build_run_record(
             "evaluation_seeding": config.get("evaluation_seeding"),
         },
         "git": {"sha": config.get("git_sha"), "dirty": git_dirty},
-        "versions": config.get("versions"),
+        "versions": dict(versions) if isinstance(versions, Mapping) else None,
         "warm_start": _warm_start_section(config),
-        "selection": selection_from_best_model_meta(best_model_meta),
+        "selection": selection,
         "wall_clock": dict(wall_clock) if wall_clock else None,
         "preflight_warnings": list(preflight_warnings),
         "sync": dict(sync) if sync else None,
@@ -496,15 +740,21 @@ def verify_run_dir(
 
     Complete when the manifest exists, every file it lists is on disk
     with its recorded size and sha256, it lists ``run_record.json``, that
-    record's status is terminal, and every file it does not list is a
+    record's status is terminal, every file it does not list is a
     post-training file (:func:`is_post_training_path`: a notebook's
-    plots, audits and replay video beside a sealed run). Every unlisted
-    file is reported in ``unlisted``; one anywhere else (a stray file,
-    a writer's temporary leftover such as ``.x.tmp-<pid>`` or
-    ``.x.sync-tmp``, even under ``reports/``) fails the directory, and
-    under ``strict`` every unlisted file does. A mid-run Drive mirror
-    whose manifest verifies is an intact snapshot of an unfinished run:
-    its listed record says ``"running"``, so it is incomplete too.
+    plots, audits and replay video beside a sealed run), and no file on
+    disk or in the manifest is a writer's temporary leftover
+    (:func:`is_temporary_path`: ``.x.tmp-<pid>``, ``.x.sync-tmp``,
+    ``x.tmp.npz`` ...). A leftover is an interrupted write: it fails the
+    directory whether the manifest lists it (it was there when the run
+    was sealed) or not, even under ``reports/``. Every unlisted file is
+    reported in ``unlisted``; one outside the post-training locations
+    fails the directory, and under ``strict`` every unlisted file does.
+    A mid-run Drive mirror whose manifest verifies is an intact snapshot
+    of an unfinished run: its listed record says ``"running"``, so it is
+    incomplete too. A directory whose record is terminal but which has
+    no manifest was never sealed: a mirror pass that did not finish, or
+    a run that died while sealing itself.
     """
     root = Path(run_dir)
     record_path = root / RUN_RECORD_NAME
@@ -522,22 +772,32 @@ def verify_run_dir(
         record_status = (
             _record_status(record_path) if record_path.is_file() else None
         )
-        cause = (
-            f"its run record says {record_status!r}"
-            if record_status is not None
-            else "there is no readable run_record.json either"
-        )
+        if record_status in TERMINAL_STATUSES:
+            problem = (
+                f"no {SYNC_MANIFEST_NAME}, though its run record says "
+                f"{record_status!r}: the directory was never sealed -- a "
+                f"mirror pass that did not finish (re-run "
+                f"experiments.sync.sync_run_dir from the sealed local run "
+                f"directory), or a run that died while sealing itself"
+            )
+        else:
+            cause = (
+                f"its run record says {record_status!r}"
+                if record_status is not None
+                else "there is no readable run_record.json either"
+            )
+            problem = (
+                f"no {SYNC_MANIFEST_NAME} ({cause}): the run never reached a "
+                f"terminal path (still training, killed, a disconnected "
+                f"runtime) or predates run records"
+            )
         return RunDirVerification(
             run_dir=str(root),
             complete=False,
             manifest="missing",
             status=record_status,
             files_checked=0,
-            problems=(
-                f"no {SYNC_MANIFEST_NAME} ({cause}): the run never reached a "
-                f"terminal path (still training, killed, a disconnected "
-                f"runtime) or predates run records",
-            ),
+            problems=(problem,),
         )
     try:
         entries = _manifest_entries(
@@ -567,8 +827,12 @@ def verify_run_dir(
             mismatches.append(
                 ManifestMismatch(relative, "sha256", digest, actual_digest)
             )
-    unlisted = tuple(
-        relative for relative in run_files(root) if relative not in entries
+    on_disk = run_files(root)
+    unlisted = tuple(relative for relative in on_disk if relative not in entries)
+    leftovers = sorted(
+        relative
+        for relative in set(on_disk) | set(entries)
+        if is_temporary_path(relative)
     )
     problems: list[str] = []
     if mismatches:
@@ -589,17 +853,25 @@ def verify_run_dir(
                 f"{RUN_RECORD_NAME} status is {status!r}: the listed files are "
                 f"a snapshot of a run that had not finished"
             )
-    refused = (
-        unlisted
-        if strict
-        else tuple(path for path in unlisted if not is_post_training_path(path))
+    if leftovers:
+        problems.append(
+            f"{len(leftovers)} temporary file(s) left by an interrupted "
+            f"write, listed in {SYNC_MANIFEST_NAME} or not: "
+            + ", ".join(leftovers[:5])
+            + (" ..." if len(leftovers) > 5 else "")
+        )
+    refused = tuple(
+        path
+        for path in unlisted
+        if not is_temporary_path(path)
+        and (strict or not is_post_training_path(path))
     )
     if refused:
         where = (
             "(strict)"
             if strict
             else "outside the post-training locations (reports/, "
-            "media/best_model.mp4) or left by an interrupted write"
+            "media/best_model.mp4)"
         )
         problems.append(
             f"{len(refused)} file(s) are not in {SYNC_MANIFEST_NAME} "

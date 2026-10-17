@@ -18,6 +18,60 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **The best model is written atomically and the record checks what it
+  seals (L1 verifier round 2, 2026-10-17).** No env stream or training
+  change: golden digests 22/22, recipe snapshot unchanged (96), and the
+  trainer digest against `9f54ae5` matches every component of all four
+  jobs, the best-model ones included.
+  - **Best-model writes are atomic on both selection paths.**
+    `best_model.zip`, `best_vec_normalize.pkl` and
+    `best_model_meta.json` go to `.<name>.tmp-<pid>` files beside their
+    targets and are renamed into place together, the meta last
+    (`experiments.records.ReplaceTogether`). A `KeyboardInterrupt` inside
+    a write (a stopped Colab cell, the commonest interrupted run) left a
+    torn `best_model.zip` that the record listed and `verify --strict`
+    certified; now the previous best stands whole and nothing is left
+    behind. Under reward selection the save moved from SB3's
+    `EvalCallback` (an in-place write) into its new-best callback
+    (`_SaveBestOnNewBest`, which replaces `_SaveVecNormalizeOnNewBest`):
+    same model at the same moment, so the same content (the trainer
+    digest's best-model components match).
+  - **The record's selection is checked against the meta's sha256
+    bindings.** An interrupt between two renames leaves a meta that no
+    longer binds the files beside it; the record copied its selection,
+    describing the previous best beside the new model. `selection` now
+    carries `bindings` (`verified`, `unbound`, or `not_checked` for
+    backfilled index rows) and `unbound_reason`; an unbound selection has
+    `null` timestep, values and updates, and the best triple is left out
+    of `artifacts`. `stage_summary.txt` reports the best model as
+    unbound, `train()` prints a warning, and the index flags the row.
+  - **A temporary leftover fails verification whether or not the
+    manifest lists it.** The rule applied only to unlisted files, so a
+    leftover present when the run sealed itself verified complete. The
+    merged-stream `evaluations.npz` writer (which left
+    `evaluations.npz.tmp.npz` on any non-`OSError`, an interrupt
+    included), the gate's `curriculum_stages.json` and the ladder
+    certification report now remove their temporaries when a write fails
+    or is interrupted.
+  - **Index robustness.** A `config.json` or `best_model_meta.json` field
+    of the wrong type (a string `warm_start`, a list `env`, an integer
+    `selection_keys` ...) is read as missing and named in the row's
+    problems (`records.shape_problems`) instead of failing the whole
+    build with a bare `AttributeError`; so is a record whose status is
+    missing or not a string. A run-named directory holding
+    `run_config.toml` or `metrics/` but no `config.json` (a launch that
+    died in the 0.1-0.2 s between the two files) is an aborted stub row,
+    not a skip; TennisWall's `run_config.json` layout is still skipped.
+  - **Messages.** A directory whose record is terminal but which has no
+    manifest is "never sealed" (an unfinished mirror pass, re-run
+    `sync_run_dir`), not "never reached a terminal path". An interrupted
+    final mirror prints the `sync_run_dir` re-run before re-raising. An
+    on-policy guard that held at the final evaluation reads `full_budget:
+    collected all N steps ... the last rollout's update was skipped (SB3
+    n_updates K)`: SB3 stops before that rollout's update.
+  - The campaign design's S2 row credits the 3M override to LT1's
+    unregistered companion (`20260828_113136`), not the registered LT1
+    run, which trained its frozen 1M.
 - **Run-record, mirror and index fixes from the L1 verifiers, plus the
   PPO round-2 leftovers (2026-10-17).** No env stream or training
   change: golden digests 22/22, recipe snapshot unchanged, and the
@@ -25,12 +79,16 @@ supersedes it (see the ground-rules bullet).
   the SAC, DemoSAC, PaddleTennis-SAC and PPO jobs, `run_layout_artifacts`
   differing only by `run_record` and `sync_manifest` as declared. The
   PPO changes are summary and message text.
-  - **A run that raises never reads `completed`.** An exception after
-    the run reported its outcome (an env close or the SB3 logger's
-    TensorBoard flush failing after a completed run) left the record
-    `completed` with no stop reason while `train()` raised. The record
-    now says `crashed` (`interrupted` for a `KeyboardInterrupt`) with
-    `crashed after the run ended as completed: <error>`.
+  - **A run that raises while closing never reads `completed`.** An
+    exception after the run reported its outcome (an env close or the
+    SB3 logger's TensorBoard flush failing after a completed run) left
+    the record `completed` with no stop reason while `train()` raised.
+    The record now says `crashed` (`interrupted` for a
+    `KeyboardInterrupt`) with `crashed after the run ended as completed:
+    <error>`. The exception is the final mirror: the local directory is
+    sealed first, so a mirror that keeps failing (or is interrupted)
+    raises with the local record `completed`, which the record cannot
+    describe; the error names the `sync_run_dir` re-run.
   - **`reuse_log_dir=True` rotates every run-layout artifact but
     `config.json`** (the model files, `metrics/`, `reports/`, `media/`,
     `checkpoints/`, summary, record and manifest), not just the logs:
