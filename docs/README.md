@@ -74,6 +74,23 @@ mistaken for a point-in-time snapshot:
 > `wall_ball_depth_curriculum_run1_review.md`,
 > `design_revert_and_run_layout.md`) are not yet listed.
 
+## Spikes
+
+The feasibility spikes of the env-ladder design's section 5
+([`design_env_ladder_and_structure_20261016.md`](design_env_ladder_and_structure_20261016.md))
+are self-contained Colab notebooks under
+[`notebooks/spikes/`](../notebooks/spikes/). Each states its pass/fail
+bars at the top, installs a pinned `REPO_REF`, writes its results JSON
+under the Drive root's `diagnostics/` (never `training_runs/`) and ends
+with a verdict and the design's next step. Book each run's numbers and
+verdict in [`DECISIONS.md`](DECISIONS.md).
+`tests/test_spike_notebooks.py` keeps every spike notebook clean,
+compiling and pinned.
+
+| Spike | Notebook | Bars | Status |
+|---|---|---|---|
+| S1: GPU throughput | [`s1_gpu_throughput.ipynb`](../notebooks/spikes/s1_gpu_throughput.ipynb) | single G1 ≥ 2×10⁴ env steps/s; 4×G1 + ball ≥ 5×10³ control steps/s at 1 kHz physics | built and smoke-run on CPU (2026-10-17); not yet run on an L4 |
+
 ## Adding a new document
 
 - A recurring lesson, a bug worth remembering, or a "we tried X and rejected it"

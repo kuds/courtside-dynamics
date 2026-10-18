@@ -88,6 +88,28 @@ supersedes it (see the ground-rules bullet).
     README's run layout tells `checkpoints/` from `snapshots/`, and the
     PaddleTennis run file's header says evaluation runs without the
     escrows.
+- **Spike S1: a Colab notebook that decides whether the humanoid track
+  can train on Colab GPUs (design section 5).** No package, env stream
+  or training change. `notebooks/spikes/s1_gpu_throughput.ipynb`
+  measures, on an L4: MuJoCo Playground's G1 joystick env inside Brax's
+  training wrappers, on both MJX implementations (`warp` and classic
+  `jax`) at batch 1024, 4096 and 8192; mjlab's G1 velocity task when it
+  installs (in its own venv, since mjlab pins mujoco 3.11); and four
+  packaged G1s plus the packaged tennis ball, composed with MjSpec, on
+  MJX at 1 kHz physics. It states the design's bars up front (single G1
+  ≥ 2×10⁴ env steps/s; 4×G1 + ball ≥ 5×10³ 50 Hz control steps/s) and
+  ends with PASS or FAIL per bar and the design's next step. The results
+  JSON (GPU, CUDA, versions, timesteps, substeps, wall times, every
+  row) goes to the Drive root's `diagnostics/`, never `training_runs/`.
+  A row counts only when measured cleanly: no error, no MuJoCo Warp
+  buffer overflow, finite state. If MJX rejects the model, the scene
+  reports the rejection verbatim and falls back to a simplified
+  collision set; MJX 3.15 accepts the full set. `SMOKE = True` runs
+  every code path on CPU and never yields a verdict.
+  `tests/test_spike_notebooks.py` checks that every spike notebook is
+  clean, compiles and installs a pinned ref, and runs S1's verdict
+  rules, scene builder and results folder from the notebook's own
+  cells. See `docs/DECISIONS.md`.
 - **Offline evaluation fails loud where it cannot be faithful (phase-4
   verifier findings, 2026-10-17).** No env stream or training change:
   golden digests 22/22, recipe snapshot unchanged (96), and the trainer

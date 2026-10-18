@@ -2367,6 +2367,94 @@ scripted oracles); **learning feasibility was blocked as configured**. Statuses
 below were last updated at 0.16.0; items still marked open were spot-checked as
 still present in the current tree.
 
+### Spike S1 counts control steps and reads each bar's best clean configuration — *built (unreleased, 2026-10-17); not yet run on an L4*
+Design §5's spike S1 gates the whole humanoid half: single G1 ≥ 2×10⁴
+steps/s and 4×G1 + ball ≥ 5×10³ steps/s on a Colab L4.
+`notebooks/spikes/s1_gpu_throughput.ipynb` measures both. The design
+leaves four things open, and the notebook settles them as follows.
+- **A step is a control step.** Single G1 counts Playground's G1
+  joystick env steps (50 Hz control over 500 Hz physics) inside Brax's
+  training wrappers, and mjlab's G1 velocity steps (50 Hz over 200 Hz).
+  4×G1 counts one 50 Hz control period of the whole scene: 20 physics
+  steps at 1 kHz, the low end of the design's 1–2 kHz. 50 Hz is the G1
+  tracker's rate in the design's control hierarchy. Read this way,
+  4 seats × 5×10³ = 2×10⁴ agent steps/s, so both bars ask for the same
+  per-agent sample rate. Physics steps/s are reported beside each rate.
+  Neither rate includes a policy pass or a PPO update, so both bound
+  training throughput from above: a failed bar fails training too.
+- **Each bar takes its best clean configuration.** The bar can be met
+  by any stack (Playground or mjlab), MJX implementation (`warp` or
+  classic `jax`) and batch size (1024, 4096, 8192), because training
+  would pick the best one. A row counts only when it measured cleanly:
+  - no error and no skip;
+  - finite state;
+  - no MuJoCo Warp buffer overflow. Warp keeps a sticky per-world
+    bitmask, and dropped contacts or constraint rows would make a row
+    faster than the physics it claims.
+
+  The solver-iteration-cap bits are recorded but do not invalidate a
+  row: both GPU stacks cap on purpose (Playground's G1 at 3/5
+  iterations, mjlab's at 10/20). A FAIL with excluded rows says so,
+  since a row that errored or was skipped could have passed.
+- **The scene is built from packaged assets only.** It holds four
+  `assets/robots/unitree_g1_tennis.xml` G1s, rackets included, attached
+  with MjSpec under the prefixes `a0_`, `a1_`, `b0_` and `b1_`. The
+  ball geom, the floor's contact parameters and the ball-floor pair are
+  copied from `assets/humanoid_tennis.xml`. The test compares them with
+  the compiled court, so they cannot drift from the env.
+  - The floor is a plane, not the CPU env's slab: MJX's plane
+    collisions are the cheapest, and slab versus plane is an env
+    design choice.
+  - Robot-robot contacts stay masked by the model's categories, as in
+    the two-player env.
+  - Physics: implicitfast, 10/20 solver iterations (mjlab's G1 caps).
+    The CPU env's RK4 with MuJoCo's 100/50 would not fit here: a
+    vmapped solver loop runs to its cap in the slowest world.
+  - Controls: random targets at the standing pose ± 0.5 rad
+    (Playground's G1 action scale).
+- **Optional and failing parts stay loud.** mjlab 1.6.0 pins
+  `mujoco~=3.11`, so it runs in its own venv that shares the runtime's
+  torch. It runs first, while the GPU memory is still free; JAX also
+  allocates on demand. Its failures are printed and recorded, and the
+  bars then rest on Playground. A warp row refuses to run on a GPU
+  runtime when Warp sees no CUDA device. A bar with no clean row
+  raises after the results are saved. A SMOKE run never yields a
+  verdict. Results go to the Drive root's
+  `diagnostics/s1_gpu_throughput/` and are rewritten whole after every
+  section; the notebook refuses a folder inside `training_runs/`.
+- **Pins.** `REPO_REF` is `b9585e2`: the G1 assets, the court and
+  `robot_models` are unchanged since then. The GPU stack is pinned to
+  `jax[cuda12]==0.11.2`, `mujoco==3.15.0`, `mujoco-mjx==3.15.0`,
+  `warp-lang==1.18.0`, `playground==0.2.0` and `brax==0.14.2`, and the
+  optional stack to `mjlab==1.6.0`.
+- **CPU evidence (2026-10-17, SMOKE runs on jax 0.11.2 for CPU).** MJX
+  3.15 accepts the full collision set in both implementations: no
+  `NotImplementedError`, and both trace a step. So the simplified-set
+  fallback (visual meshes deleted, ellipsoid stringbeds made boxes,
+  ball-floor condim 6 → 3) ran only when the smoke runner forced a
+  rejection. The scene has nq 151, nv 146 and nu 116, with 142
+  colliding geoms and 105 pairs. Classic MJX evaluates 557 contact
+  slots and 2,070 constraint rows per world on every step, against 14
+  and 96 for Playground's feet-only G1. That is 1.2 MB of constraint
+  Jacobian per world, so batch 8192 may run out of L4 memory; an
+  out-of-memory error becomes that row's error. MuJoCo Warp sized
+  about 150 rows per standing world. A CPU MuJoCo rollout (4 s, six
+  seeds, every robot falling) peaks at 80 contacts and 436 rows per
+  world, which sets the Warp buffers at 160 and 900. For H0, those
+  dense slots are the cost to cut: Playground's G1 keeps contacts
+  feet-only.
+- **Not validated without a GPU:**
+  - every timing, including the "about 45 minutes" estimate;
+  - `jax[cuda12]` and Warp's CUDA 13.4-toolkit wheel against Colab's
+    driver;
+  - mjlab's venv creation and install on Colab (locally the mjlab
+    venv was installed by hand and reused);
+  - out-of-memory handling at large batches;
+  - Playground's own menagerie clone (locally, only the G1 meshes were
+    fetched at its pinned commit).
+- **Status.** Open until the maintainer runs it on an L4. Book the
+  numbers, the verdict and the GPU here.
+
 ### MuJoCo is capped below 3.16: its bounds refresh moves the Stage-1 oracle — *implemented (unreleased, 2026-10-16)*
 MuJoCo 3.16.0 (2026-10-14; changelog item 7, commit `d823f9212`) made
 `mj_setConst` compute the bounding volumes of bodies as well as geoms. The
