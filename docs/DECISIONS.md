@@ -718,6 +718,1458 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### The best model says which save it holds on both paths, final saves are atomic, and a protocol pins its device — *implemented (unreleased, 2026-10-17); phase-4 verifier findings, round 2*
+The round-2 verifiers of `17befbf`: four majors and six minors. No env
+stream or training path moved: golden digests 22/22, recipe snapshot
+unchanged (96), and the trainer digest against `17befbf` matches 83 of
+92 components, every policy, normalizer, monitor, RNG,
+`resolved_model`, evaluation, `eval_info.csv`, best-model weight,
+checkpoint-name and diagnosis component of the four jobs. The nine that
+differ are the reward-path meta below, three per reward-selected
+BallBalance job (SAC, DemoSAC off, PPO): `best_model_meta`,
+`best_model_meta_bindings` and `run_layout_artifacts`.
+- **The device is part of the protocol a run records; a run on CUDA
+  claims no CPU protocol's id.** `_inloop_protocol` built every in-loop
+  protocol on the default CPU, so a Colab GPU SAC run (SB3's `"auto"`,
+  the design's SAC norm) recorded `paddle-npoint@v3`, which pins CPU,
+  and GPU- and CPU-selected runs shared one fingerprint, the thing the
+  comparability key exists to separate. `eval_protocol_record` now
+  fingerprints the protocol on the device `train()` builds the model on
+  (`train.inloop_eval_device`, SB3's own `get_device` resolution, and
+  `train()` checks the built model against it before training), records
+  that `device`, and, when no registered protocol of the recipe has the
+  fingerprint, records `id: null` with `nearest` (the registered
+  protocol with the fewest differing fields) and `differs` (those
+  fields: `["device"]` for a stock GPU run, `["env_kwargs",
+  "n_episodes"]` for a quick test). `from_run_config` rebuilds a run on
+  its recorded device (`eval_protocol.device`, else
+  `resolved_model.device`, else CPU), so `inloop:<run>` of a GPU run is
+  a CUDA protocol and `rescore` refuses it on CPU before scoring
+  anything, pointing at `nearest`. Recording the device beside an
+  unchanged id was the verifier's other option; it would leave the id
+  naming a protocol the run never evaluated under, so every reader that
+  keys on the id (the index, a campaign table) would have to know to
+  check a second field. The shape is additive (`courtside-run-record/1`
+  unchanged); the notebook pins CPU, so the comparable number of a GPU
+  run is its CPU re-score under `nearest`.
+- **The reward path writes `best_model_meta.json` (reverses "an
+  in-memory ledger, not a reward-path meta").** The ledger told whether
+  the best files were one save, not which save: SB3 appends an
+  evaluation to `evaluations.npz` before its new-best callback runs, so
+  an interrupt inside the second save left `best_model.zip` holding
+  step 500 while the summary, from the npz argmax, read "Best
+  Checkpoint Evaluation (step 1,000)" and "deploy best_model.zip"
+  (verifier injection, rising rewards). `_SaveBestOnNewBest` now stages
+  a meta after the pair (`"selected_by": "reward"`, the timestep,
+  `selection_keys` `["mean_reward"]` with SB3's `best_mean_reward`, an
+  on-policy run's `n_updates`, the pair's sha256s), renamed last, and
+  every consumer reads the step from the bound meta: the summary's best
+  evaluation and Best Checkpoint Evaluation section (a series peak no
+  file holds is named, and with no completed save nothing suggests a
+  deploy), the notebooks' best-checkpoint marker (which also refuses a
+  meta that does not bind its files), the record (a `verified`
+  selection with keys `["mean_reward"]`, where it was `null`) and the
+  harness (the best row's step). Handing the ledger's committed step to
+  the summary was the verifier's narrower option; it would leave the
+  step in memory only, so the harness, the plot marker and anything
+  reading a copied run directory would still guess from the npz. The
+  layout cost the earlier entry named is paid and declared: every
+  reward-selected run gains the file, and the consumers that read its
+  presence as headline selection were rechecked: the plot marker is
+  right on both paths now, the WallBall long-horizon proof refuses a
+  reward meta by its keys as it refused a missing one, the index and
+  `records` read `mean_reward` as the keys, and a meta without
+  `selected_by` stays the headline evaluator's (every earlier meta). A
+  reward-selected pair copied out of its run is now bound by sha256 like
+  a headline pair.
+- **`verify` fails a complete directory that is not clean (reconciles
+  "Record a split best, and say so on verify").** A record marking the
+  best unbound, or naming unindexed snapshot files, printed a `WARNING`
+  and exited 0, so a CI step checking the exit code passed an unbound
+  best. The verdict is split instead of redefined: `complete` keeps
+  meaning "exactly what `train()` left" and `RunDirVerification.clean`
+  (complete, no warning) is new; the CLI prints `NOT CLEAN` with the
+  damage and exits 2 (1 stays "incomplete"), `--allow-warnings` accepts
+  it for the faithful-copy check the earlier entry cited, and
+  `--strict` (exclusive with it) still counts the damage as incomplete.
+  `--json` and the index's `verification` block carry `clean`. Making
+  `complete` false was the verifier's other option; it would make a
+  faithful copy of a damaged run indistinguishable from a damaged copy
+  in the API, which the earlier entry's reason still holds against.
+- **`final_model.zip`, `vec_normalize.pkl` and periodic checkpoints are
+  written atomically (closes the previous entry's Open item).** All were
+  written in place, on the completed path and both salvage paths, so an
+  injected interrupt inside the write sealed a torn zip or pickle that
+  the record listed and `verify` passed. `records.write_atomically`
+  stages each to a temporary beside its target and renames it;
+  `_AtomicCheckpointCallback` subclasses SB3's `CheckpointCallback` and
+  overrides only its save (same names, steps and contents, tested
+  against SB3's own; the normalizer, and a replay buffer if asked, are
+  renamed before the model, so an interrupt between renames leaves a
+  normalizer no reader pairs). An interrupt inside a write now leaves
+  that file absent, and the record, which lists only files on disk,
+  omits it. A cheap integrity probe in `verify` was the verifier's
+  fallback; with the writes atomic there is nothing for it to find in a
+  new run, and the harness opens every model zip before scoring (below).
+- **Smaller.** `harness.snapshot_gaps` names each snapshot the run
+  failed to save, printed by the rescore CLI before its `select()` line
+  and by the notebook beside its verdict (kept as the verdict's `gaps`);
+  a gap is a note, not a refusal, since the series is still bound.
+  `algos.checkpoint_zip_problem` opens every model zip whole (every
+  member's CRC, the `data` entry) before anything is scored, so a torn
+  August checkpoint refuses the run by name, every torn one listed,
+  instead of raising mid-run an hour in. The rescore notebook's QUICK
+  and resume reads sit inside its per-run `try` (`OSError` too), so an
+  unreadable snapshot index or `config.json` refuses that run, not the
+  cell (tested). Score rows name the algorithm by its class
+  (`DemoSAC`), as `config.json`'s `algorithm.name` does. The summary's
+  Artifacts section flags an unbound best's files (the record leaves
+  them out). The README's layout table tells `checkpoints/` from
+  `snapshots/` and says the meta binds on both paths; the PaddleTennis
+  run file's header says evaluation runs without the escrows.
+- **Open.** The rescore CLI has no `--device` (the Python API's
+  `device=` has), so an `inloop` re-score of a GPU run needs a GPU and
+  the API; the notebook pins CPU on purpose. The gate's stage-best
+  archive still copies with `shutil.copy2`. Runs from before this entry
+  keep their records: a reward-selected run without a meta reads its
+  best step from the series' argmax, as before.
+
+### Offline evaluation refuses what it cannot reproduce, and every best pair is bound — *implemented (unreleased, 2026-10-17); phase-4 verifier findings*
+The verifiers of `0be8d77` (M3 + L2) and `09779fa` (L3): two blockers,
+three majors (one of them the gated-run blocker's twin) and the minors. Every env stream and training path is
+unchanged: golden digests 22/22, recipe snapshot unchanged (96), and the
+trainer digest against `9f54ae5` differs only in the three PaddleTennis
+components the @v3 entry below declared (`eval_info.csv`,
+`best_model_meta.json`'s metrics, `run_layout_artifacts`).
+- **A gated run has no in-loop protocol; refuse, don't approximate.**
+  A performance gate writes stage 0 into the info evaluator's env at
+  training start and the next stage at every advance, stamps
+  `curriculum_stage_index` into every row, and resets the selection at
+  each advance. The harness built the recipe's eval env as constructed,
+  so `rescore(..., "inloop")` on a tiny gated run disagreed with
+  `eval_info.csv` (episode length 113.0 against 109.67) with nothing
+  printed, the five gated recipes registered ids for evaluations no run
+  of theirs selected under, and WallBallGoalRally and
+  WallBallDepthCurriculum shared a fingerprint while their stage-0
+  evaluations differed. Folding the stage ladder into a stage-indexed
+  protocol was the alternative; it would need rows that carry the stage
+  and a replay of the selection resets, for runs whose campaigns are
+  closed. So `_inloop_protocol` refuses a config with
+  `performance_gate` set (`GatedEvaluationError`, a `ValueError`, so
+  `protocol_for_run` and the rescore refuse the run before scoring),
+  `GATED_RECIPES` lists the five and `RECIPE_PROTOCOLS` drops them (a
+  test pins that every recipe is in exactly one), and
+  `eval_protocol_record` records `{"id": null, "fingerprint": null,
+  "reason": "performance_gate"}` without a warning: the gate is
+  configured, not a failure. Their ids existed only on this unreleased
+  branch.
+- **The bit-for-bit claim is scoped.** Under the run's own protocol a
+  snapshot's row equals its `eval_info.csv` row for every evaluation of
+  a paired run and for the first evaluation of an unpaired one (its
+  stream continues across evaluations; its confirmation block has no
+  in-loop counterpart): the harness docstring, `docs/experiments.md`,
+  the README and the CHANGELOG now say so, and the rescore CLI notes an
+  unpaired run. `in_loop_select` replays the paired, ungated rule only:
+  passed an unpaired protocol that confirms (whose callback banks the
+  weaker of two samples), it refuses; a bare rule is the caller's word.
+- **Bind every best pair: an in-memory ledger, not a reward-path meta.**
+  The reward path writes no meta, so an interrupt between its two
+  renames left a new model beside the previous normalizer that the
+  record listed, `verify` certified and the harness scored; a first
+  headline save interrupted before its meta's rename left a model with
+  no meta, sealed as a run with no selection. `records.BestSaveLedger`
+  keeps, for one `train()` call, the sha256s of the save being renamed
+  (`ReplaceTogether(ledger)` hashes the temporaries before its first
+  rename) and of the last committed one; the lifecycle checks the files
+  on disk against them when it writes the record, and the summary gets
+  the same verdict. Files matching neither (or present with nothing
+  committed) make the selection `unbound` with a reason naming each
+  file's save, a reward-selected run included (its selection is
+  otherwise `null`), and leave the best files out of `artifacts`. A
+  reward-path `best_model_meta.json` was the other option the verifier
+  offered; it would add a file to every reward-selected run's layout
+  and change what that file means to the consumers that read its
+  presence as "headline selection" (`notebook_utils`'s best-step
+  lookup, the WallBall selection proof, the index), so the ledger
+  closes the window with no layout change. Its limit: it is the
+  trainer's verdict, carried in the record; a reward-selected pair
+  copied out of its run has no binding. *(Reversed since: the reward
+  path writes a meta, because the ledger cannot say which step the
+  pair holds; entry above.)* The loaders
+  (`verify_best_checkpoint_pair`) and the harness now refuse a pair
+  whose record says `unbound`. Hashing a best save's temporaries reads
+  files only: no stream moves.
+- **Record a split best, and say so on verify (reconciles "Record a
+  split triple, don't refuse to seal it").** A complete directory is
+  still exactly what `train()` left, damage included; what the sealed
+  record reports wrong inside it (an unbound selection, unindexed
+  snapshot files) is now `RunDirVerification.warnings`, printed as
+  `WARNING` lines and failed by `--strict`, and the index lists the
+  same as row problems. Failing the directory outright was the
+  alternative; it would make a faithful Drive copy of a damaged run
+  indistinguishable from a damaged copy. *(Since round 2 the verdict is
+  split: such a directory stays complete but is not clean, and the CLI
+  exits 2 unless `--allow-warnings`; entry above.)*
+- **Snapshot orphans are named, never skipped.** An interrupt between a
+  snapshot's renames leaves complete files outside the index (no index
+  at all at the first snapshot). `snapshot_summary` lists them in
+  `unindexed` (and reports a missing index as a `problem`), and the
+  harness refuses them as problems, naming the files, unless `steps`
+  excludes them; the index stays last in the rename order, so it never
+  names a file that is not whole.
+- **Smaller.** A model outside a run is scored without a normalizer only
+  with `raw_observations=True` (`probe --raw-observations`): the zip
+  cannot say whether it trained normalized. `load_run_model` checks the
+  zip's policy family against a recorded algorithm too, and the harness
+  checks every artifact before scoring any, so a mislabeled run is
+  refused instead of raising a `TypeError` inside SB3 that the CLI and
+  the notebook did not catch. The notebook keeps each series' scores in
+  their own folder, compares normalizer digests too before skipping a
+  run, and merges `verdicts.json` across sessions (it was rewritten from
+  one session's picks). The summary's "deploy best_model.zip" hint is
+  gone when the best is unbound. `test_l2_toml_spelling_reaches_both_envs`
+  (failing since `09779fa`, which ran 18 test files, not the suite) now
+  pins the @v3 contract: an `[env]` contact escrow trains but does not
+  evaluate, and an `[eval_env]` table restoring both escrows evaluates
+  and records `paddle-npoint@v2`.
+- **Open.** Periodic checkpoints are hashed and recorded, never bound:
+  SB3's `CheckpointCallback` writes them in place, so one torn by an
+  interrupt seals and fails only at load time; a subclassed callback
+  that stages and renames (as the best model does) would close it. The
+  gate's stage-best archive still copies with `shutil.copy2`. *(The
+  checkpoints are closed since: written atomically, entry above.)*
+
+### PaddleTennis selects under `paddle-npoint@v3`: evaluation scores the task without its training aids — *implemented (unreleased, 2026-10-17); design L3, a selection-protocol era*
+`design_campaign_structure_20261016.md` finding S5 and step L3: the
+recipe's evaluation env carried the contact and reach escrows, so the
+last selection key, `episode_reward_mean` (delta 0.25), and every
+evaluation reward mixed shaping into task reward. An oracle batch under
+`paddle-npoint@v2` (2 episodes of 1,500 steps, seeds 5500+) scores
+12.52, of which 2.52 is shaping (1.625 contact paid, 0.25 clawed back,
+1.146 reach), the S5 range of +2.48 to +2.98 on task returns of 10-14.
+- **The protocol.** `paddle-npoint@v3` is `paddle-npoint@v2` with
+  `contact_shaping`, `reach_shaping` and `hold_shaping` at 0 in the
+  evaluation env (`protocols.PADDLE_TRAINING_AIDS_OFF`; the radius and
+  travel parameters stay, paying nothing at scale 0). It is derived
+  from the literal @v2 in code, so it is as frozen as @v2, and both
+  fingerprints are pinned in a test (`30526bfd...` for @v2, unchanged
+  by this step; `863bb384...` for @v3). Every other field is @v2's: 30
+  paired episodes on the run's block, alternating serves, the k≥2
+  headline, `success_rate` and reward with deltas 1/60, 1/60, 0.25, the
+  confirmation block 100,000 on, CPU. `hold_shaping` is 0 in @v2's env
+  too; it is set explicitly so a run file's `[env]` hold escrow (an
+  LH1-style pilot) stays out of evaluation, as the drill does.
+- **Why the bump is sound: the observations hold no escrow state.** The
+  48 observations are physical state, the rules' snapshot, the clock and
+  the contact latches; no escrow balance, no hold window. A test steps
+  @v2's and @v3's envs side by side under the oracle (seeds 5500 and
+  5501, both serves) and a random policy: observations, actions,
+  endings and every non-`rew_*` info value are bit-identical at every
+  step while an escrow is pending (over 50 pending steps per oracle
+  episode), and the reward differs by exactly the six escrow channels
+  (1e-12). So a policy acts identically under both protocols.
+- **The gate** (`tests/test_eval_harness.py`): for the oracle (full
+  episodes, both blocks; it converts k≥2 and collects shaping) and a
+  tiny trained SAC run's best model and four snapshots (both blocks),
+  every non-reward metric is identical under @v2 and @v3, the k≥2
+  headline and `success_rate` included, and `episode_reward_mean`
+  differs by the shaping collected (`rew_{shaping,reach,hold}[_clawback]`
+  episode sums) up to the float32 the VecEnv stores each step's reward
+  in (|Δ| < 1e-5); the task channels (`rew_return`, `rew_fault`,
+  `rew_unsafe`) are equal. So a selection under @v3 can differ from
+  @v2's only through the reward tie-break.
+- **Adopted as the recipe's in-loop protocol.** The PaddleTennis
+  recipe's `eval_env_overrides` gain the three zeros (they sit above a
+  run file's `[env]` table, below its `[eval_env]`), and
+  `RECIPE_PROTOCOLS["PaddleTennis"]` is `paddle-npoint@v3`; @v2 stays
+  registered and scorable. Training is untouched: the training env
+  keeps both escrows, golden digests 22/22, and the trainer digest
+  against `9f54ae5` matches 89 of 92 components: every policy,
+  normalizer, monitor, RNG, `resolved_model`, `evaluations.npz`,
+  best-model weight and normalizer and diagnosis-report component of
+  all four jobs. Three PaddleTennis components differ, as declared: `eval_info.csv` and
+  `best_model_meta.json`'s metrics, at the evaluation at 768 steps, where
+  @v2 read `episode_reward_mean` 3.7e-9 (a reach escrow of 0.054 paid and
+  clawed back, leaving a float32 residue) and @v3 reads 0.0 with the
+  `rew_reach*` metrics 0, the same model selected; and
+  `run_layout_artifacts`, which gained `snapshots_dir` in the previous
+  step (`9f54ae5` predates snapshots). The recipe snapshot was
+  re-recorded: the 12 PaddleTennis resolutions' `eval_env_fn` kwargs
+  read `contact_shaping` and `reach_shaping` 0.0 (were 0.25) and gain
+  `hold_shaping` 0.0; nothing else in the 96.
+- **The era boundary.** An era is (task fingerprint, protocol). The task
+  did not move; the protocol did. From now on a PaddleTennis run's
+  evaluation rewards (`eval_info.csv`, `evaluations.npz`, the closing
+  evaluation, the summary's Final and Best eval lines) are task reward,
+  and its `best_model` and early stop follow @v3's tie-break. Rewards
+  across the boundary compare only after re-scoring the older runs under
+  @v3; the k≥2 headline, `success_rate` and k=1 compare as they are.
+  Dropping `episode_reward_mean` from the selection keys (cardinal rule
+  4's advice) was the alternative; L3 keeps the key and makes it honest,
+  one change at a time.
+- **Runs record their protocol.** `config.json`'s
+  `comparability_key.eval_protocol` (null since L1) is
+  `{"id", "fingerprint"}` (`protocols.eval_protocol_record`): the in-loop
+  selection protocol's fingerprint, computed from the evaluation env
+  `write_run_config` already probes (no extra env is built), and the id
+  of the registered protocol of the run's recipe with that fingerprint
+  (its in-loop protocol first, then the literal ones declared for it).
+  A stock run records `paddle-npoint@v3`; an `[eval_env]` table
+  restoring the escrows records `paddle-npoint@v2`; a quick test or a
+  run file that changes evaluation episodes or env records `id: null`
+  with its fingerprint, so two runs compare only when both match. The
+  run record's `task.eval_protocol` copies it (one source), and a
+  wrong-typed value is read as missing and named in the index's
+  problems. Tests pin that the recorded fingerprint is the one
+  `protocol_for_run` rebuilds from `config.json`. Null for a run without
+  an info-dict evaluator and every run before this step; the schemas
+  stay `courtside-run-record/1` (additive).
+- **Re-scoring the history: `notebooks/rescore_runs.ipynb`.** Mounts
+  Drive, indexes `training_runs/PaddleTennis/sac` (the L1 index, written
+  with the scores), picks the 2026-08 runs that have a model (the
+  registered run `20260816_235141` must be among them), scores each
+  run's best model and every checkpoint under @v3 on CPU with both
+  blocks, and prints and plots the per-checkpoint k≥2 and k=1 curves
+  with a `select()` verdict per run beside its own `best_model`. Scores
+  go to `courtside-dynamics/rescores/<runs subdir>/<protocol>/`, beside
+  `training_runs/`, never inside it (a run directory stays what
+  `train()` sealed, and the index never meets a score file; the
+  notebook refuses an output folder inside the runs root). A run is
+  scored whole or refused with its reasons while the others go on, its
+  file lands when it is done, and a re-run skips runs already scored for
+  the same files (sha256). `QUICK` scores the best model and 3
+  checkpoints (first, middle, last) into a `-quick` folder. The harness
+  gained what this needed: `rescore(steps=...)`/`--steps` and
+  `run_artifacts(steps=...)` (a step the run lacks is refused, never
+  silently skipped) and `series_steps()` (the steps from file names,
+  nothing hashed). Validated locally (`tests/test_notebooks.py`) on a
+  runs folder holding the phase-3 index fixture's PaddleTennis runs
+  (placeholder model files: refused with "sha256 differs" and "has no
+  normalizer"; the LT1 stub: not picked), a tiny trained run's policies
+  in the August layout under the registered run's id (scored: best plus
+  four checkpoints on seed block 1,000,000, `run_seed_offset`), and the
+  tiny run itself; the runs folder's files hash the same before and
+  after. Cost: about 2.6 CPU-minutes per artifact (a default-size SAC
+  policy, both blocks), so about an hour per 2M-step run with
+  checkpoints every 100k; `QUICK` about 10 minutes.
+- **Open.** The August runs themselves are not re-scored here (they are
+  on the maintainer's Drive; the notebook is the step). The notebook's
+  `REPO_REF` is a placeholder (`0be8d77`, which predates @v3; its
+  protocol cell refuses until the week-1 wrap-up bumps the pin). The
+  lever "audit mode" waits for L6. The August runs' checkpoints are
+  every 100k against evaluations every 25k, so their offline pick can
+  differ from the in-loop one by granularity alone.
+
+### Offline evaluation: one evaluation code path, snapshots at every evaluation, versioned protocols, a pure select() — *implemented (unreleased, 2026-10-17); design M3 + L2*
+`design_env_ladder_and_structure_20261016.md` M3 and
+`design_campaign_structure_20261016.md` L2: new instruments and era
+bumps should mean re-scoring saved policies, not retraining. Every env
+stream and training path is unchanged: golden digests 22/22; the
+recipe snapshot differs only by the new `snapshot_evals` field (`false`
+in 80 resolutions, `true` in the 12 PaddleTennis ones); the trainer
+digest against `9f54ae5` matches 91 of 92 components, policy,
+normalizer, monitor, RNG, `resolved_model`, evaluation, `eval_info.csv`
+and best-model components included, and differs only in the
+PaddleTennis job's `run_layout_artifacts`, which gains `snapshots_dir`.
+- **The harness is the in-loop evaluator.** The body of
+  `InfoDictEvalCallback._collect_metrics` moved verbatim into
+  `callbacks.info_dict_eval.collect_episode_metrics` (with
+  `reset_eval_episode` and `is_episode_sum_key`); the callback calls it
+  with its own settings and `experiments.harness` with a protocol's, on
+  an eval env built as `train()` builds the info evaluator's
+  (`make_vec_env`, one Monitor-wrapped worker, the saved
+  `VecNormalize` frozen with raw rewards). The lexicographic comparison
+  moved to `experiments.select.improves`, which the callback's
+  `_improves` calls. A second implementation would have been checked
+  against the first forever; one cannot drift.
+- **Gate.** On fresh CPU tiny runs trained by `train()` (SAC and PPO,
+  the PaddleTennis recipe's paired evaluation with `confirm_best`,
+  300-step episodes, 2 evaluation episodes, 4 evaluations),
+  `harness.evaluate` on each snapshot equals that evaluation's
+  `eval_info.csv` row in all 132 metric columns, bit for bit (the CSV
+  writes `repr`, so floats round-trip); PPO's snapshot `n_updates`
+  equals the CSV's `n_updates` rows. An unpaired run (BallBalance)
+  reproduces its first evaluation's row. `tests/test_eval_harness.py`
+  runs both.
+- **Snapshots** (`TrainConfig.snapshot_evals`, on in the PaddleTennis
+  recipe only; `experiments.snapshots`). At every evaluation cadence
+  `snapshots/snapshot_<N>_steps.zip` and
+  `snapshot_vecnormalize_<N>_steps.pkl` (`model.save` and
+  `VecNormalize.save`, the best model's format, no replay buffer; SB3's
+  checkpoint naming, so one parser reads both), bound by sha256 in
+  `snapshots/index.json` and written like the best model (temporaries,
+  then renames, the index last). The callback runs first in the list,
+  before any evaluator or gate at that step: an evaluation only reads
+  the model, but a gate advance may reset the entropy temperature after
+  it. A disk error is printed and listed in the index's `failures`, and
+  training continues (like `evaluations.npz`): the snapshots are
+  evidence for offline selection, not the run. The run record gains an
+  additive `snapshots` block (schema still `courtside-run-record/1`),
+  the manifest hashes the files, `reuse_log_dir` rotates the folder and
+  treats a previous index as a previous attempt, and `load_run_model`
+  finds the run's `config.json` from `snapshots/`.
+- **Measured size: 3.5 MB per PaddleTennis SAC snapshot**, about 140 MB
+  per 1M steps at the 25k cadence, not the design's 1.6 MB and 64 MB:
+  that counted the policy weights; the zip also carries both critics,
+  their targets and three optimizer states, and SB3's `load` requires
+  them. A policy-only format would need its own loader.
+- **Protocols** (`experiments.protocols.EvalProtocol`, frozen, with a
+  fingerprint over everything but id, recipe and description). The env
+  is pinned by class and every resolved constructor argument (its
+  EzPickle kwargs, what `config.json` records), so a default that moves
+  does not move the protocol. `paddle-npoint@v2` is declared literally:
+  L3 will move the recipe to @v3 eval overrides while @v2 must stay
+  scorable, and a test pins that the recipe's in-loop evaluation (SAC
+  and PPO builds) still equals it. The 14 other recipes'
+  `<recipe>-inloop@v1` are derived from the live recipe and checked
+  against fingerprints pinned at registration: literal copies would be
+  weight without a consumer today, and the pin makes a recipe change
+  refuse loudly ("declare the old version literally, never re-pin").
+  For a reward-selected recipe the protocol is the reporting stream and
+  has no selection keys; a performance gate rescales its matched
+  evaluator per stage, which a protocol does not follow. *(Since the
+  phase-4 verifier pass, a gated run has no protocol at all, and the
+  gated recipes register none: entry above.)*
+- **The seed block is the run's.** Today's paired block derives from the
+  run (`eval_seed`, else `seed + 1,000,000`), so the registered
+  protocols carry `seed_start=None` and `resolve_seed_block` reads the
+  run's `config.json`: its recorded paired block, its `eval_seed`, or
+  the seed derivation for runs that evaluated unpaired (the August runs,
+  seed 0: block 1,000,000). Every score row records the block and its
+  source. An unpaired protocol scores one fresh stream from the info
+  evaluator's env seed (`seed + n_envs + 1`): reproducible offline, but
+  equal to the in-loop row only for a run's first evaluation, since an
+  unpaired stream continues across evaluations.
+- **rescore** writes `scores/<protocol>.jsonl` beside the run (a
+  post-training location now, like `reports/`), or one combined file.
+  It reads the best pair (its meta's step, refusing an unbound pair as
+  the loaders do), the snapshots and `checkpoints/<prefix>_<N>_steps.zip`
+  with `<prefix>_vecnormalize_<N>_steps.pkl`, in the 0.14 or the flat
+  layout, and checks every pair before scoring anything: one problem
+  refuses the whole rescore, so no partial set is written silently.
+  `--protocol inloop` rebuilds each run's own in-loop evaluation from
+  its `config.json` (refused when the record holds an object's repr,
+  as the humanoid runs' reward configs are).
+- **select() confirms within block; the in-loop rule is unchanged.**
+  `select(rows, protocol)` banks the first best's confirmation-block
+  score and compares each block with itself, the semantics
+  `repo_review_20261016.md` section 2.2 calls correct.
+  `InfoDictEvalCallback` still compares a candidate's confirmation with
+  the first best's standard-block score until a confirmed best exists;
+  changing it is the maintainer's call. `in_loop_select()` replays the
+  in-loop rule over the same rows. The tiny PPO gate run shows the
+  difference on its own (selection deltas 0, reward residues): the
+  in-loop kept step 1,024, whose confirmation (0.0) beat the first
+  best's standard score (−1.9e-9), where within block it loses to the
+  first best's confirmation (1.8e-8); `in_loop_select` reproduces 1,024
+  and `select` keeps 256. On the SAC run the two agree with the in-loop
+  pick. *(2026-10-17, after L3: this example predates @v3 and no longer
+  reproduces. The residues were @v2's escrow shaping; under @v3 the
+  same tiny PPO run selects 256 in-loop, and `in_loop_select` and
+  `select` both pick 256 with identical decisions. Only the synthetic
+  rows of `tests/test_select.py` exercise the divergence now.)*
+- **Probe CLI** (`python -m courtside_dynamics.experiments.probe`): the
+  golden digests' witnesses (now `digests.scripted_policy`) or a model
+  under a protocol; `--env` and `--episodes` derive an unregistered
+  protocol whose fingerprint is printed. It reproduces the RS1 table
+  (`design_paddle_tennis_reach_shaping.md` section 3a) from
+  `paddle-npoint@v2` with `points_per_episode=1`, `contact_shaping=0.0`,
+  100 episodes from seed 5500: statue (zero) mean reward −0.620, reach
+  paid 2.622 and clawed back; camper −0.530, paid 13.299; ground oracle
+  7.575 with 418 hits, 379 confirms, paid 75.025, clawed −1.511; the
+  stacked arm (contact 0.25) 8.523. Identical at the table's precision;
+  the means differ from the probe tool's float64 sums in the last bits
+  only because a VecEnv stores rewards as float32, as in-loop
+  evaluation does.
+- **Not here.** The lever "audit mode" waits for the levers (L6).
+  `comparability_key.eval_protocol` and the record's
+  `task.eval_protocol` stay `null` until L3 declares the eras. Scores
+  on another device are not a protocol's (it pins CPU). The reward
+  path's SB3 `EvalCallback` rows are not reproduced (its Monitor rounds
+  episode returns). The August runs themselves (on Drive) are not
+  re-scored in this step.
+
+### The best model is replaced whole, and a record never certifies a split one — *implemented (unreleased, 2026-10-17)*
+The L1 verifiers' second round on `d273409`, `4445669` and `9f54ae5`:
+three majors and the minors. Every env stream and training path is
+unchanged: golden digests 22/22, recipe snapshot unchanged (96), and
+the trainer digest against `9f54ae5` matches every component of all
+four jobs, the best-model, evaluation and layout ones included.
+- **Stage every file, then rename them all.** `_save_best` (headline
+  selection) and the reward path's new-best callback write each file to
+  `.<name>.tmp-<pid>` beside its target, hash the temporaries for the
+  meta, and only then rename them into place, the meta last
+  (`records.ReplaceTogether`; leaving the block early removes every
+  temporary). Renaming each file as soon as it is written would leave
+  a split triple whenever a later write is interrupted; staging first
+  confines the split to the gap between two renames, and an interrupt
+  inside any write (the torn 16 kB `best_model.zip` a real SIGINT left)
+  leaves the previous best whole.
+- **The reward path saves in its new-best callback.** SB3's
+  `EvalCallback` wrote `best_model.zip` in place and offers no hook
+  around its save, so it now gets `best_model_save_path=None` and
+  `_SaveBestOnNewBest` (which replaces `_SaveVecNormalizeOnNewBest`)
+  saves the model and its normalizer where SB3 did: the same model, at
+  the same point of the same `_on_step`, creating `model/` at init as
+  SB3 did. Copying SB3's `_on_step` into a subclass was the
+  alternative; it would fork about 70 lines of SB3 to change one call.
+- **Record a split triple, don't refuse to seal it.** The terminal path
+  checks `best_model_meta.json`'s sha256 bindings against the files
+  beside it (`records.best_model_meta_unbound`, the check the loaders
+  apply). When they do not bind, the record's `selection` is `unbound`
+  with the reason: timestep, values and update count `null` (the meta
+  describes another save, usually the previous best, so it is never
+  reported as these files'), the selection keys kept (they are the
+  rule, not the result), and the triple left out of `artifacts`.
+  `stage_summary.txt` says the same, `train()` prints a warning, the
+  index flags the row, and the loaders already refuse the pair.
+  Refusing to seal would leave the final model and every other file of
+  an otherwise faithful directory unverifiable; renaming the files
+  aside would rewrite the evidence. A sealed directory still means
+  "exactly what `train()` left", now with a record that says what is
+  wrong with it. Every selection `train()` records carries `bindings`
+  (`verified` or `unbound`); index backfills of older runs, whose
+  metas may bind nothing, say `not_checked`. The schema stays
+  `courtside-run-record/1`: the fields are additive.
+- **A leftover is an interrupted write wherever it is listed.**
+  `verify_run_dir` fails any temporary on disk or in the manifest; one
+  listed was present when the run was sealed. The writers that left
+  them now remove their temporaries on any failure or interrupt: the
+  merged-stream `evaluations.npz` writer (it caught only `OSError`), the
+  gate's stage history and the ladder certification report. Nothing
+  cleans a run directory before sealing it: deleting evidence to pass
+  verification is the wrong direction.
+- **The index never fails on one file's shape.** A `config.json` or
+  meta field of the wrong type is read as missing by `build_run_record`
+  and named in the row's problems (`records.shape_problems`), the
+  "never mis-parse" rule applied to types. A run-named directory with
+  `run_config.toml` or `metrics/` but no `config.json` is an aborted
+  stub row: `train()` writes the TOML copy 0.1-0.2 s before
+  `config.json`, so a launch can die in between. The verifier also
+  suggested a root `monitor/` as a marker; TennisWall's foreign
+  run-named layout has one, so it would turn that skip into a row.
+- **Wording.** A terminal record without a manifest was never sealed (a
+  mirror pass that did not finish: re-run `sync_run_dir`). An
+  interrupted final mirror prints that re-run before re-raising; the
+  local record stays `completed`, the local-then-sync contract, and the
+  previous entry's "never reads completed" covers failures while the run
+  closes, not the mirror after it is sealed. An on-policy guard holding
+  at the final evaluation reads "collected all N steps ... the last
+  rollout's update was skipped": SB3 stops before that update. The
+  campaign design's S2 row now credits the 3M override to LT1's
+  unregistered companion `20260828_113136`; the registered run trained
+  its frozen 1M.
+- **The PPO round-2 minors were already closed by `9f54ae5`**
+  (rechecked, with their tests): the first-rollout zero-update flag
+  from `rollout_env_steps`, the warm-start wording and carried
+  `log_std`, the cadence refusal's reason, and the README's probe
+  schedule.
+- **Open.** A reward-selected run writes no meta, so a pair split
+  between its two renames (a window of one `os.replace`) cannot be
+  detected; giving the reward path a meta would close it, but it adds
+  a file to the layout of every reward-selected run, so it belongs to
+  a step that declares that. The gate's stage-best archive copies the
+  triple with `shutil.copy2`, not atomically. *(The reward-path split
+  and a first headline save split before its meta are closed since by
+  the trainer's ledger, without a layout change; a sealed record's
+  unbound selection is a `verify` warning, failed by `--strict`: entry
+  "Offline evaluation refuses what it cannot reproduce" above.)*
+
+### The run-record verifier pass: a run that raises while closing never reads completed, and a mirror deletes only its own files — *implemented (unreleased, 2026-10-17)*
+Verifiers re-ran the two L1 commits (`d273409`, `4445669`), and the
+PPO round-2 verifier's leftovers against `09f202a` came along. Every
+env stream and training path is unchanged: golden digests 22/22, recipe
+snapshot unchanged, trainer digest against `09f202a` matching every
+policy, normalizer, monitor, evaluation, best-model, checkpoint,
+diagnosis, `resolved_model` and RNG component of all four jobs, with
+`run_layout_artifacts` differing only by `run_record` and
+`sync_manifest` as declared. The PPO fixes are reporting and message
+text only.
+- **A failure after the outcome is a crash.** An exception that escaped
+  `train()` after the body had reported its outcome (an env close, the
+  SB3 logger's TensorBoard and `progress.csv` flush -- straight onto the
+  Drive mount by default) kept `completed` with no stop reason, and
+  the directory verified complete: the R3 failure the record exists to
+  catch. `close()` now records `crashed` (`interrupted` for a
+  `KeyboardInterrupt`) with `crashed after the run ended as completed
+  (...): OSError(...)`, unless the error is the one the crash salvage
+  already recorded. A status change, not a `teardown_error` field:
+  `train()` raises, so the record must agree with the caller, and the
+  schema stays `courtside-run-record/1`. `stage_summary.txt`, written
+  before the failure, still says `completed`; the record is the
+  source of truth.
+- **A reused directory starts clean.** `reuse_log_dir=True` rotated the
+  logs but not the model files, so an attempt that crashed before its
+  first evaluation recorded the previous attempt's selection and its
+  best and final models as its own. Every run-layout artifact but
+  `config.json` now rotates aside (`*.attempt_<UTC time>`), rather than
+  having the record skip files older than the attempt: mtimes on a
+  FUSE Drive mount are coarse, and the directory itself must describe
+  one attempt, since loaders read `best_model.zip`, not the record.
+- **The validated mirror target is the mirrored one.** `train()` now
+  passes `validate_sync_target`'s resolved path to the mirror and the
+  record; `RunDirMirror` also expands and resolves both of its paths
+  and refuses one inside the other. A `~/Drive/run` had been validated
+  against `$HOME` and then mirrored into a literal `./~/Drive/run` on
+  local disk, reported as a success.
+- **A mirror deletes only what it wrote.** `sync_run_dir`, the public
+  manual re-sync the error message and notebook section 9d call,
+  deleted every destination file the source lacked: one slip in the
+  path (the Drive root) wiped unrelated files silently. A pass now
+  overwrites or removes only files it can prove are this run's: copied
+  by this mirror, listed by the destination's manifest for this run
+  id, byte-identical to the source's file, or a copy's temporary
+  leftover. Anything else, an unreadable manifest or another run's
+  manifest refuses the pass before it writes. Refusing, not keeping:
+  a kept stray would fail verification later, and the refusal names
+  the files now. A partial copy left before any manifest re-syncs,
+  because its files match the source.
+- **The final mirror checks itself.** The change cache trusts (size,
+  mtime); a file rewritten with both unchanged kept a stale copy that
+  verified complete. The final pass compares the mirror's file list
+  with the sealed local manifest and redoes the pass without the cache
+  when they differ.
+- **Default verification tolerates only the post-training locations.**
+  Stray files used to pass with exit 0, an interrupted write's hidden
+  `.x.tmp-<pid>` included. The notebook use case stays (rather than a
+  strict default plus an allowlist flag, which every notebook would
+  need): an unlisted file under `reports/` or at `media/best_model.mp4`
+  fails only `--strict`; any other unlisted file, and any writer's
+  temporary leftover anywhere, fails the directory.
+- **The index says when a run looks live.** A run record that still
+  says `running` gets a problem with or without verification
+  (`--skip-verify` is the Colab default): no manifest means training or
+  dead, a manifest means a mid-run mirror snapshot. It is a stub
+  without a final model, and the CLI counts these rows. A summary that
+  exists but is not UTF-8 is no longer `aborted` (status `null`, a short
+  problem); `train()` now writes the summary as UTF-8 whatever the
+  locale, which was the trigger. Problems name files relative to the
+  run directory. A stray `config.json` in a recipe folder no longer
+  hides the runs below it (they get rows; the outer row or skip names
+  them). A run-named directory with a zero-byte or foreign
+  `config.json` is an aborted row with the problem, not a skip; a BOM
+  and an integral float budget are read as written. Flat-layout runs
+  report their root `best_model.mp4` as `files.best_model_video`, and an
+  on-policy summary's `Best eval (at N steps, SB3 n_updates K)` step is
+  parsed (it read as missing).
+- **PPO round 2, reporting only.** A reward-selected run with
+  `info_dict_eval=False` records no update count, so a best from the
+  first one-rollout evaluation went unflagged; an evaluation within
+  `resolved_training.rollout_env_steps` now counts 0 updates. A
+  warm-started run's zero-update best is "the warm-start source's
+  policy, not updated by this run", not "the untrained initial policy",
+  and a carried `log_std` is said to differ from `log_std_init`, not to
+  have drifted. The cadence refusal now gives the real reason (a fixed
+  number of updates between evaluations and checkpoints, so the stop
+  floor and gate advances line up); SB3 runs a whole-rollout
+  evaluation after the rollout's data and before its update, so the
+  old "between a rollout's data and its update" was wrong. The README
+  no longer claims a nightly probe job.
+- **Two campaign notes were short.** LH1b (`20260820_013545`) ran
+  2,000,000 steps at patience 60 against the frozen 1M and 20: a fourth
+  budget override, now in the design doc's S2 count. The L2 replication
+  (`20260815_015143`) changed patience 20 to 60 along with seed and
+  `n_envs`.
+
+### Run records and manifests are the source of truth; the index is regenerated — *implemented (unreleased, 2026-10-17); design L1, second half*
+`design_campaign_structure_20261016.md` step L1 and its rule "don't
+co-append to one Drive index". No env stream, training or run-directory
+change (golden digests 22/22; trainer digest against `09f202a` as the
+first half declared).
+- **Derived, never appended.** `runs.jsonl` is rebuilt whole from the
+  run directories on every call: sorted by path, keys sorted, written
+  atomically, the same bytes over unchanged directories. Each run file
+  has one writer; a shared Drive file appended by two Colab sessions
+  would have two.
+- **One shape, two sources.** A run-record directory is its record as
+  written plus its manifest verdict. A pre-record directory goes
+  through the same `build_run_record` from its `config.json`, so a
+  field means the same thing in both. What the summary supplied
+  (status, stop reason, steps trained, wall clock) and the inferred
+  algorithm family are named in `index.inferred`, and
+  `version_inferred` is true.
+- **Statuses in record terms.** The summary's `completed` covers early
+  stops; its `X of Y budget (stopped early)` line separates them. A stop
+  reason on a full-budget run is the train-3 label: `completed` with
+  the `full_budget: ...` reason `train()` now writes. Five PaddleTennis
+  runs carry it (`20260815_180815`, `20260816_135919`,
+  `20260818_210727`, `20260828_113136`, `20260828_121324`).
+- **Aborted, and when a stub.** No summary means no terminal path was
+  reached: `aborted`. It is a stub when no final model was saved
+  either; a best model from the first evaluation does not make a run.
+  An empty run-named directory is a stub too. On the archive that gives
+  7 stubs (PaddleTennis `20260815_180638`, `20260816_135115` and
+  `20260828_112830` empty; `20260828_114038` and `20260828_114815`, the
+  LT1 CPU false starts; WallBall `20260717_164059` and
+  `20260717_165144`, config and monitor only) and one aborted salvage
+  (`20260728_224706`, final model at about 5 minutes). The count matches
+  the archaeology's 7 but not its dates: it put three on 07-17 and
+  missed the two empty 08-15/08-16 directories, which no doc names.
+- **Never mis-parse.** Only `run_record.json`, a courtside `config.json`
+  (a `train_config` with `algo` and `total_timesteps`) or an empty
+  run-named directory makes a row. Anything else is listed as skipped
+  with its reason. A malformed summary or meta file becomes a row
+  problem, printed as a warning; it is never dropped silently.
+- **The campaign map is curated data, joined by run id.**
+  `legacy_levers.toml` is package data with a strict loader. Every
+  PaddleTennis directory maps to exactly one lever, `baseline` or
+  `infra`. WallBall maps by recipe era, because that campaign changed
+  several things per recipe and its aids stay task versions. Runs
+  launched from specs will carry the lever in their record's
+  `experiment` block; the map covers only the pre-spec archive.
+- **Validated on the archive, which corrected a doc.** A text-only
+  mirror of 25 directories (all 20 PaddleTennis, 5 WallBall) indexed to
+  8 aborted, 7 stubs and 20 lever joins. For all 17 runs with a summary,
+  git sha, algorithm, budget against steps trained, best step and stop
+  reason agree with the source files. LH1b (`20260820_013545`) is
+  recorded in `design_paddle_tennis_postswing_hold.md` §4b as stopped
+  early once its first 175k matched LH1 (and as ~0.18M in the
+  archaeology). Its directory trained the full 2M budget: the summary says so and the last
+  checkpoint is at 2M. The map's note records this; the doc is left
+  unchanged.
+- **The full archive indexes cleanly** (verifier pass, entry above).
+  All 60 directories: 59 rows (the 47 in scope plus 12 from the
+  out-of-scope `WallBall/` folder, which the campaign map does not
+  name), 9 aborted (the 8 above plus `WallBall/20260710_021630`, a best
+  and a final model at about 9 minutes and no summary: aborted, not a
+  stub), the same 7 stubs, all 47 map entries joined, no warnings.
+  `TennisWall/sac/20260502_025419` is skipped: it predates `config.json`
+  (its config is `run_config.json`). All 50 rows with a summary agree
+  with their source files.
+
+### A run directory says what ran and seals itself; a mirror is trusted only through its manifest — *implemented (unreleased, 2026-10-17); design L1, first half*
+`design_campaign_structure_20261016.md` R3: 7 of about 48 archived run
+directories were stubs that looked live, one run lost all its videos
+with no trace, and nothing could tell a Drive copy from a partial one.
+Every env stream and training path is unchanged (golden digests 22/22;
+trainer digest against `09f202a`: every component matches but the
+layout list, which gains `run_record` and `sync_manifest`).
+- **Two files, one rule.** `run_record.json` says what ran and how it
+  ended; `sync_manifest.json` (path, size and sha256 of every other
+  file) is written last, after the final record, once every env and
+  the SB3 logger are closed. A directory is *complete* when its
+  manifest verifies and the record it lists is terminal. Complete
+  means "exactly what `train()` left when the run ended", a crashed
+  or interrupted run included; it does not mean "succeeded". A
+  SIGKILL, a dead VM or a run still training leaves no manifest, so
+  the directory is incomplete by definition.
+- **The record copies `config.json`, it never re-derives.** Algorithm,
+  task fingerprints, comparability key, seeds and versions come from
+  the `config.json` payload, so the two cannot disagree. The task's
+  constructor kwargs are recorded as the sha256 of their canonical
+  JSON, and the warm start by its source directory's *name*, not its
+  machine path. `eval_protocol` stays `null` until phase 4 versions
+  protocols.
+- **Status is finer than the summary's.** The record separates
+  `early_stop` from `completed`; `stage_summary.txt` keeps
+  `completed` for both, because the campaign resumes (re-scores) a
+  leg only from that line. A guard that fires once the run has trained
+  its whole budget (`num_timesteps >= total_timesteps`, e.g. at the
+  final evaluation of a budget that is a multiple of `eval_freq`) is
+  `completed`, with a `full_budget: ...` reason that quotes the guard;
+  one at the final scheduled evaluation of any other budget left steps
+  untrained and is `early_stop`. A callback that stops early without a
+  reason gets one that says so.
+- **Unlisted files are reported, not fatal by default.** The notebooks
+  write plots, the replay video and the long-horizon audit into the run
+  directory after `train()` sealed it. Failing those would make every
+  notebook run incomplete. Every file `train()` wrote is still checked,
+  and `--strict` fails extras. (Narrowed by the verifier pass above:
+  only the post-training locations are tolerated.) A partial *mirror* still never verifies:
+  its terminal record only arrives in the final pass, and a pass that
+  dies leaves the previous manifest, which then lists a changed file
+  or a `running` record.
+- **Mirror rules.** Opt-in (`sync_dir`, default off). The target must be
+  absent or empty at launch, so every file in it is this run's, and
+  its parent must exist, so an unmounted Drive fails before output
+  instead of filling a local folder of the same name. Each file is
+  hashed while it is read, written to a temporary file, renamed, then
+  read back and re-hashed. A checkpoint pass that fails is printed and
+  training continues. The final pass gets three attempts (5 s and 30
+  s apart), then raises once the local directory is sealed: the run
+  is safe locally, but the caller must learn that its durable copy is
+  not. `sync_dir` is refused in run-config files, like `log_dir`: it
+  belongs to the machine, not the experiment.
+- **The trust fixes, and why each is shaped as it is.**
+  `disconnect_runtime` keeps the VM up when `flush_and_unmount()`
+  fails: an idle GPU costs less than the last writes of a run.
+  `reuse_log_dir` rotates the monitor and TensorBoard *directories*
+  whole, because TensorBoard reads any file whose name contains
+  `tfevents`, so a renamed event file would still be read. A previous
+  attempt's run record now refuses reuse like its evaluation rows, so
+  an attempt that died before its first evaluation is caught. The
+  interrupt salvage saves the model and normalizer before the gate's
+  `finalize` (an `OSError` there used to lose all three).
+  `SubstepTennisEventSampler.reset()` discards an open control step;
+  a healthy trajectory never reaches it, so the goldens hold, and a
+  recovered PaddleTennis env replays a fresh env's stream byte for
+  byte. Early stops the budget cannot reach are warned before output
+  and recorded (`resolved_training.early_stop_reachability`); the
+  warm-up arithmetic moved into helpers that `train()` and the record
+  share.
+- **Eval share is measured, not estimated.** Each evaluation
+  callback's evaluating calls are timed on the instance with
+  `time.monotonic` (no stream or RNG moves), plus the closing
+  evaluation: the number L8 needs before trimming in-loop
+  evaluation. The checkpoint diagnosis is not counted.
+- **L1, second half.** The regenerated run index, the legacy backfill
+  and the PaddleTennis lever map: the entry above.
+
+### The PPO verifier pass: a deployable best states its updates, and nothing fails quietly — *implemented (unreleased, 2026-10-17)*
+Verifiers re-ran the phase-2 PPO commits (since `f920d8f`). The fixes
+keep every env stream and SAC-family training path unchanged (trainer
+digest: the SAC, DemoSAC and PaddleTennis-SAC jobs match).
+- **empirical-2, the other half.** Step 5 ended zero-update runs, but
+  `best_model.zip` could still be the untrained initial policy: an
+  evaluation runs before its rollout's update, and the quick test
+  evaluated every rollout, so evaluation 1 scored the initial
+  weights. On BallBalance that was the best score (438 at 4,096 steps,
+  then down to 206), and the summary said "deploy best_model.zip".
+  Two changes. The record and the warning: `best_model_meta.json`
+  carries the selecting evaluation's SB3 `n_updates` (top level, so
+  selection, the gate and TensorBoard still never see it), the
+  summary's "Best eval" and "Best model" lines print it, and a
+  `best_model.zip` selected at 0 is flagged on its line and printed.
+  Which checkpoint `best_model.zip` holds follows the selector:
+  `best_model_meta.json` under headline selection, the reward
+  stream's best otherwise (read from `eval_info.csv`'s `n_updates` row
+  at that step). And the cause: the quick test fits `n_steps` to
+  `eval_freq // (2 · n_envs)` and rounds its preset evaluation cadence
+  to at least two rollouts, so evaluation 1 follows one update (256 at
+  8 workers, 128 at 16; one worker unchanged at 2,048). Halving the
+  rollout, rather than doubling the cadence, keeps the quick test's
+  six evaluations and doubles its updates. Measured here: the
+  BallBalance quick test trains 13 rollouts (SB3 n_updates 130), its
+  best is evaluation 1 at 10 updates (385), and it still regresses
+  after it (to 133), which the summary now reports without the
+  untrained caveat; WallBallTrueBaseline selects at 10 updates.
+- **The last update reaches progress.csv.** SB3's on-policy `learn()`
+  dumps the logger before each `train()`, so every update's `train/*`
+  row is written with the next rollout's, and the final update's never
+  is. `train()` dumps once more after `learn()` returns (not after an
+  interrupt or crash) when a `train/*` value is pending, with
+  `time/total_timesteps` as the row's x value, as SB3's EvalCallback
+  does. Labelling the block "as of the last logged update" was the
+  alternative; the dump makes the health block, the flags and
+  `train/n_updates` agree with SB3's count instead.
+- **Epochs per update.** With gSDE, `target_kl` ended every update
+  inside its first epoch (PaddleTennis: one SB3 update per rollout at
+  `n_epochs` 10; humanoid Stage 0: 13 over 13 at 5) while the mean
+  approx_kl, averaged only over the minibatches that ran, sat under
+  the flag. The steps of the cumulative `train/n_updates` series are
+  the per-update epoch counts; a last-quarter mean below half of
+  `n_epochs` is flagged. The PaddleTennis quick test on the new
+  geometry raises it: 23 SB3 updates over 13 rollouts, 1.77 epochs per
+  update of 10. Calibrating these profiles' learning rate against
+  `target_kl` joins the plan's open probing item.
+- **Fail loud, by family.** A negative `degenerate_min_evals` used to
+  crash an SAC run inside the update-floor print (`f"{None:,}"`) after
+  `config.json`, and a PPO run accepted it; the callback-config
+  pre-flight now refuses a non-integer or negative value, and the floor
+  helper passes a warm-up through untouched when there is no floor.
+  `finalize(salvage=False)`: a pending advance that fails on a normal
+  training end raises after the stage history is written, while the
+  interrupt and crash salvage (which still have a model to save) only
+  report it. The gate's `stage_eval_budget` stop counts a stage's own
+  evaluations with no warm-up the floor could raise, so the pre-flight
+  refuses a stop budget at or below the floor on a multi-stage gate
+  (narrowing the docstring's "no early stop before K updates" was the
+  alternative). An actor-critic `net_arch` dict may name only `pi` and
+  `vf`. A checkpoint outside any run is checked against its zip's
+  recorded policy class (deserialized with SB3's own `json_to_data`)
+  before loading.
+- **Accepted as documented, no change.** Steps 6 and 13 added two
+  `TrainConfig` fields at their defaults to every snapshot entry, SAC
+  ones included; the verifier confirmed the change is purely additive
+  (no removed or changed value outside the documented humanoid SAC
+  entries). The humanoid notebook's default run refuses the pinned
+  `REPO_REF` (`b9585e2`, before `reset_log_std`) by design until the
+  week-1 pin bump, which is now a merge prerequisite in the plan's
+  Open list.
+
+### PPO is first-class: loaders follow the record, runs carry their family, and two learning bars guard it — *implemented (unreleased, 2026-10-17)*
+PPO plan Steps 10–12 and 14 (`design_ppo_first_class_20261016.md`,
+static-6/9/10/11, empirical-3, tests-gaps-9/13), which close the plan.
+PPO is now selected, configured, checked, run, recorded, loaded and
+tested per family like SAC; every env stream and SAC-family training
+path is unchanged (golden digests 22/22, recipe snapshot unchanged,
+trainer digest matches on the SAC, DemoSAC and PaddleTennis-SAC jobs).
+- **Loaders read the run's record.** `algos.load_run_model(path,
+  algo=None)` finds the run's `config.json` from the model path, looking
+  only where the run layout puts a model (the root of a pre-0.14 run,
+  `model/`, `checkpoints/`, a stage archive), and loads each family
+  through its root class: SAC and DemoSAC through `SAC.load`
+  (DemoSAC's inference path, which needs no demo library), PPO through
+  `PPO.load`. An explicit `algo` must name the recorded algorithm
+  (DemoSAC is not SAC there, although both load alike). A record that
+  says nothing (unreadable JSON, no `train_config.algo`) raises rather
+  than guessing, and a checkpoint outside any run needs `algo=` (the
+  tools' new `--algo`). It replaces `SAC.load` in
+  `native_checkpoint_policy` (and so in the diagnosis, post-swing, k=2
+  harvest and k=2 step-0 tools), the P5 champion loader,
+  `score_paddle_stage`, `_load_best_model` and `record_best_model_video`
+  (whose default was `algo="SAC"`, now `None`). `evaluate_best_wall_ball`
+  already followed the record but loaded DemoSAC through
+  `DemoSAC.load`; it uses the shared loader too. SAC keeps the exact
+  call it made.
+- **On-policy provenance.** `resolved_model` gains `target_kl`
+  (shared key list: SAC has no such attribute, so it is skipped there)
+  and, gated on `OnPolicyAlgorithm`, `sde_sample_freq` and the
+  policy's `log_std_init` and `ortho_init`. The gate matters: SAC
+  models do carry `sde_sample_freq` and `_n_updates`, and the trainer
+  digest freezes SAC's record. When an on-policy run's training ends
+  (also in the crash salvage), the block is re-recorded with SB3's
+  `n_updates` and `timesteps` (`trained` vs `budget`). PPO checks the
+  budget between whole rollouts, so it can overrun by up to one; the
+  summary's Timesteps line now says by how much (on-policy runs only).
+- **Family and comparability in `config.json`.** A top-level
+  `algorithm` block (`name` = the registered class, `family`,
+  `implementation` = `sb3==<version>`, since a GPU-stack PPO would be
+  another implementation under the same name) and a
+  `comparability_key` (`task` = recipe or env class, `eval_protocol`,
+  `algo_family`). `eval_protocol` is `null` until the evaluation
+  protocols are versioned. Both are top-level because `train_config`
+  must hold only configured fields and `resolved_model` is frozen for
+  SAC. The campaign scorer's report names the algorithm and copies the
+  key. No reader ranks runs yet; the run index (week 1, phase 3) must
+  key on the whole block, not on the task alone.
+- **Training Health flags (on-policy).** Four flags, each on the mean
+  of the last quarter of the logged updates, so one noisy update
+  neither raises nor clears one: approx_kl > max(2 · target_kl, 0.05)
+  (SB3 cuts an update's epochs at 1.5 · target_kl, so twice the target
+  means the cut is not holding); clip_fraction > 0.3; explained_variance
+  < 0; and the final `train/std` more than 1 nat from `log_std_init`
+  (`train/std` is SB3's mean of exp(log_std), read on its log). The
+  references come from the run's own `resolved_model`. A non-finite
+  window is flagged, never averaged away. Flags print as well as land
+  in the summary; the SAC summary is unchanged. A humanoid-shaped
+  progress.csv (approx_kl 0.22–1.71, clip_fraction 0.72–0.83, the log
+  std up 1.6 nats) fires all four. The BallBalance probe below fires
+  none: last-quarter approx_kl 0.013, clip_fraction 0.16,
+  explained_variance 0.38, log std −1.36 against −1.
+- **Characteristic: explained_variance is ill-conditioned once returns
+  stop varying.** In that probe's last quarter, after every episode had
+  reached 750, it swung between −2.0 and 0.98 and ended at −1.995 while
+  the value loss was 2e-5. A run kept going long past convergence can
+  raise the flag; read it next to the reward curve.
+- **Tests that cross the whole path.** A parametrized SAC/PPO
+  `train()` test on 12-step BallBalance (one worker, PPO on 8-step
+  rollouts) covers headline selection with `confirm_best` and a paired
+  `eval_seed`, the final-config stream, VecNormalize checkpoints, a
+  one-stage gate, the patience stop and the closing evaluation. It
+  checks the artifacts, `resolved_model`, the stop step (evaluation 4
+  for SAC, 7 for PPO, whose warm-up the update floor raises to 5),
+  `norm_reward` in every pickled normalizer, and that every saved model
+  reloads through its own class. Two seeded PPO runs train identical
+  weights and normalizers. A real tiny PPO PaddleTennis run trained by
+  `train()` is scored by `score_paddle_stage`.
+- **CI learning bar.** A 1-D reach defined in the test (reward
+  −|goal − x|, truncated at 40 steps, never terminated) learns through
+  `train()` with PPO on 4 × 256 rollouts, minibatch 256, lr 1e-3 and
+  reward normalization on, in about 11 s of one thread. Measured best
+  paired-evaluation return over 24,576 steps: −3.41, −3.22 and −3.23
+  for seeds 0, 1 and 2. The optimum, full speed to the goal and then
+  hold, averages about −3.3; the zero action −26.7. Max approx_kl was
+  0.014–0.022. The bar is best ≥ −6 and approx_kl < 0.1. Selection is
+  on the paired evaluator's reward (`best_metric_keys=
+  ("episode_reward_mean",)`), so the reloaded best pair replays the
+  selecting batch's seeds and must reproduce its mean exactly. The
+  plan's −1.8 was the audit run's unpaired reward stream (10 fresh
+  episodes per evaluation, −15.6 to −1.77), an easier draw than these
+  paired batches.
+- **Manual learning bar.** `tools/ppo_learning_probe.py` trains
+  BallBalance on its recipe's PPO profile as `build_train_config`
+  resolves it, capped at 330 s of wall clock, and scores the best model
+  behind its normalizer on held-out seeds 70,000–70,019 (bar: mean ≥
+  700 of 750). Run once here on one thread: 491,520 steps and 1,190 SB3
+  updates in the cap (349 s with the closing evaluation), evaluations
+  at 749.4 from 294,912 steps and 750.0 from 319,488, held-out mean
+  750.0 on all 20 seeds: PASS. Exit status 1 on a FAIL. Scheduling it
+  nightly or by workflow_dispatch is left open.
+- **Notebooks.** The campaign notebook admits `ALGO = "PPO"`. The legs
+  build on the recipe's PPO profile, at 8 workers with evaluations
+  every 24,576 steps and checkpoints every 98,304: the whole-rollout
+  cadences nearest the SAC plan's 25,000 and 100,000, so a PPO gate
+  reads about as many evaluations and diagnosis probes. The profile's
+  own 32,768 and 245,760 are sized for 16 workers too. No SAC key
+  reaches a PPO leg (no `learning_starts` on a warm-started one). The
+  settings cell refuses `REQUIRE_DEVICE` (PPO trains on the CPU), a
+  temperature skip, a package without first-class PPO (the pinned
+  `REPO_REF` included) and a geometry the on-policy pre-flight
+  refuses. After Drive mounts, every warm-start lineage must record a
+  PPO algorithm: train() would refuse the frozen SAC fallback only at
+  the main leg, a whole gate leg later. PPO campaigns live under
+  `PaddleTennisCampaign/ppo/`. `sb3_training` no longer gives a family
+  switch 16 workers when the recipe has a block for the new family:
+  its PPO profile sizes `n_envs` with `n_steps`, and BallBalance under
+  PPO used to train its measured 8 × 512 profile at 16 × 512.
+- **Left open.** A campaign `reset_log_std` knob (the PaddleTennis
+  profile has no measured warm-start story yet); the humanoid
+  notebook's own `resolve_algo(cfg.algo).load` (its automatic
+  advancement is PPO-only, so it already loads the recorded class);
+  the plan's section 4 items beyond Step 9.
+
+### PPO's stops count updates, and its task changes only between rollouts — *implemented (unreleased, 2026-10-17)*
+PPO plan Steps 6–9 and 13 (`design_ppo_first_class_20261016.md`,
+static-3/4/5, empirical-1/4, tests-gaps-8). The runtime still treated
+an on-policy run like SAC in five places: stops sized in evaluations,
+stage and schedule changes at any step, a reward normalizer
+discounting at 0.99 whatever the model's gamma, SB3's `"auto"` device,
+and a warm start that carried the source's exploration noise.
+- **Stops wait for K updates.** `TrainConfig.min_policy_updates_before_stop`
+  (K = 20) floors both early-stop warm-ups and `degenerate_min_evals`
+  at ceil(K · rollout / eval_freq) evaluations, as the plan specifies.
+  Each stop needs at least one evaluation past its warm-up, and
+  evaluation e sees e · R − 1 updates (R rollouts per evaluation), so
+  the earliest stop sees ≥ K + R − 1 ≥ K. A test reproduces the
+  audit's stop at `_n_updates == 0` with K = 0 and shows K = 3 moving
+  it to the 4th evaluation, 3 updates in. The floor adds to the
+  degenerate window rather than replacing it, so on PaddleTennis,
+  WallBallBootstrap, GoalRally and TrueBaseline the 6-evaluation
+  window (Step 3's sizing for ~20 updates) now first fires at 43
+  updates at 8 workers instead of 23; at 16 workers it fired at 11,
+  below the target, and fires at 31 now. WallBallBaseline's
+  schedule-derived warm-up already exceeds the floor at 8 workers (55
+  updates, unchanged) and moves from 27 to 31 at 16. Patience never
+  binds on a shipped profile. Retuning the windows now that the floor
+  exists is left to the profile work. An off-policy run that sets K to
+  anything but the default is refused: the field would otherwise be a
+  silent no-op there.
+- **`n_updates` means SB3's count.** The new `eval_info.csv` row is
+  SB3's `_n_updates`, the counter `progress.csv` logs as
+  `train/n_updates` and the summary as "SB3 n_updates" (optimization
+  epochs), not the rollout count K is measured in; with `n_epochs` E
+  and no `target_kl` cut it reads E × rollouts trained. A second row
+  for rollouts was left out: it follows from the timestep. The row is
+  written to the CSV only, not added to the metrics, so selection,
+  the gate and TensorBoard are unchanged (`best_model_meta.json`
+  gained a top-level `n_updates` in the verifier pass).
+- **Rollout boundaries, detected not configured.** The gate and the
+  schedule callback check `isinstance(model, OnPolicyAlgorithm)` at
+  training start; there is no knob that could put a PPO run back on
+  per-step changes. A gate advance earned mid-rollout waits for
+  `_on_rollout_end`. Under `train()` the pre-flight already makes every
+  evaluation end a rollout, so no step separates the two; the deferral
+  makes the callback correct by construction, also when it is wired by
+  hand. When another callback stops the run at the earning
+  evaluation, `finalize` applies the pending advance (a failure
+  raises on a normal training end and is only reported under the
+  salvage paths, since the verifier pass), so
+  `curriculum_stages.json` reads as an off-policy run's would.
+  Schedules apply `value_at(start)` at each rollout start.
+- **Normalizer gamma, on-policy with reward normalization only.** SB3
+  updates `ret_rms` whenever the normalizer trains, even with
+  `norm_reward=False`, so giving every run its model's gamma would
+  change SAC's pickled statistics. The four `SelectiveVecNormalize`
+  constructions all get the gamma, so a synced evaluation normalizer
+  never disagrees with its source, and `train()` checks the
+  normalizer's gamma against the built model.
+- **CPU by default** when SB3 itself would warn: its
+  `_maybe_recommend_cpu` compares the policy class name with
+  `ActorCriticPolicy`, so CNN and multi-input policies keep `"auto"`.
+  An explicit device or `require_device` wins. PaddleTennis's PPO
+  profile keeps its explicit `device="cpu"`, recorded as
+  `model_kwargs`.
+- **`reset_log_std`** refills `policy.log_std` in place (the optimizer
+  keeps its parameter) from the target policy's own `log_std_init`,
+  after the strict state-dict load. On-policy
+  `transfer_log_ent_coef=False`, a documented no-op until now, is
+  refused because it reads like an exploration restart and is not one.
+  The humanoid notebook needs the option, and its pinned `REPO_REF`
+  (`b9585e2`) predates it, so AUTO_ADVANCE refuses that package at
+  configuration time rather than at the first advance hours in. The
+  week-1 pin bump lifts that.
+- **Subprocess workers must not change the run.** Stock
+  `SubprocVecEnv` returns float64 rewards where `DummyVecEnv`'s buffers
+  hold float32, so VecNormalize's return statistics, and with them a
+  normalized PPO run, drift from step 1. Measured on BallBalance,
+  BallBounce, WallBall TrueBaseline, PaddleTennis and humanoid Stage 0
+  (2 workers, 600 to 1,700 steps, random actions): the stock streams
+  differ at step 1, and `DummyDtypeSubprocVecEnv`, which fills
+  DummyVecEnv's buffers by the same assignment, matches every
+  observation, reward, done and terminal observation. `check_env` runs
+  on a throwaway parent instance instead of worker 0; the same
+  measurement shows the streams match with that difference. A tiny
+  PPO run trains bit-identically on both (weights, normalizer,
+  monitors).
+- **Where the records go.** `config.json`'s `train_config` stays
+  exactly the configured fields (a test forbids derived keys), and the
+  trainer digest compares `resolved_model`, so new derived values go to
+  a new top-level `resolved_training` block. That also keeps the SAC
+  jobs' `resolved_model` identical.
+- **Snapshot.** Two new `TrainConfig` fields add a key to every resolved
+  entry, SAC ones included. The re-record was checked to be purely
+  additive: 184 inserted lines, two per entry, with every
+  pre-existing field byte-identical.
+
+### PPO runs are configured and checked in whole rollouts — *implemented (unreleased, 2026-10-17)*
+PPO plan Steps 3–5 (`design_ppo_first_class_20261016.md`, static-2,
+static-3(1), static-8, empirical-2). PPO updates once per rollout of
+`n_steps * n_envs` env steps, but every cadence and guard was set in
+env steps for SAC. At 8 workers × SB3's 2,048-step rollout, the
+degenerate stop at 5 evaluations × 25k fired after 0 to 7 updates, a
+25k-step quick test could finish "completed" with one update or none,
+and evaluations landed mid-rollout.
+- **Profiles.** Each recipe's `algo_cfg["PPO"]` holds the design's
+  section-3 values, with these choices where the design left room:
+  - Cadences are whole rollouts at the profile's worker count and at
+    16, sb3_training's PPO count. 25k is not a multiple of any
+    rollout, so `eval_freq` is 24,576 (6 rollouts of 4,096; 12 of
+    2,048) or 32,768 (4 of 8,192), and `checkpoint_freq` is 245,760
+    (98,304 on the humanoid stages).
+  - Guards are sized so none fires before about 20 updates at the
+    profile's own worker count. An evaluation ending rollout k runs
+    before rollout k's update, so evaluation e has seen
+    e × (rollouts per evaluation) − 1. The degenerate stop needs 6
+    evaluations (23 updates) instead of 5 (19); patience 20 first
+    stops at 159–479. At 16 workers an evaluation spans half as many
+    rollouts; Step 6 will floor the guards in code.
+  - The humanoid `ent_coef` is 0.001, the top of the design's 0–0.001
+    range: a token floor against std collapse at a tenth of the drift
+    measured at 0.01. The 1-env humanoid stages are refused at 16
+    workers (`eval_freq // n_envs` is less than `n_steps` 2,048) until
+    Step 13's 8 × 512 geometry.
+  - The design has no smoke row. HumanoidTennisCoopSmoke gets the
+    stage settings on 128-step rollouts, so its 10k budget sees about
+    80 updates.
+  - No profile pins gamma: the recipe's own (a flat `extra_cfg` gamma,
+    else SB3's 0.99) applies to both families. PPO's reward
+    normalization is pinned explicitly even where it equals the
+    default. `device="cpu"` is set on PaddleTennis only; Step 8 makes
+    it the on-policy default.
+- **Pre-flight.** `_validate_on_policy_config` refuses rather than
+  rounds. A config whose cadence is not a whole rollout says so, with
+  the nearest multiple; silently moving an evaluation would change
+  what selection compares. Besides the design's list it refuses
+  cadences that are not whole rollouts and non-integer
+  `n_steps`/`batch_size`. It runs in `train()` before any output and
+  in `build_train_config`, so a recipe refuses at build time. The
+  depth-ladder recipes' SAC-only gate levers make them PPO refusals
+  by design; giving a retired SAC ladder an invented PPO gate would be
+  a new experiment, not a port.
+- **Quick test.** The design's `n_steps` shrink alone left the 5,000-
+  and 10,000-step presets off the rollout grid, which the pre-flight
+  refuses. So the presets, never an explicit value, also round down to
+  whole rollouts. An explicit cadence that misses is refused instead.
+- **Zero updates** are flagged in the summary and on the console for
+  the PPO family only. SAC summaries stay byte-for-byte as they were.
+  The summary line is labelled "SB3 n_updates", not "policy updates":
+  SB3's `_n_updates` counts optimization epochs (`n_epochs` per
+  rollout, fewer under `target_kl`). A BallBalance quick test reads 70
+  after 7 rollouts.
+- **Starters stay family-safe.** A flat cadence in a starter beats the
+  recipe's PPO block and would be refused under PPO. So the starters
+  keep cadences in `[train.algo.*]` tables, and a test checks that
+  each starter resolves like its recipe under both families.
+
+### Recipes and run files configure each algorithm family separately — *implemented (unreleased, 2026-10-17)*
+PPO plan Step 2 (`design_ppo_first_class_20261016.md`, tests-gaps-1,
+static-1, empirical-9). A recipe carried one flat
+`extra_cfg["model_kwargs"]`, written for its default algorithm. PPO was
+therefore refused on PaddleTennis and WallBallBootstrap (their SAC
+bundles hold SAC-only keys), got SB3 defaults everywhere else, and an
+explicit SAC run of a humanoid stage inherited the PPO bundle's fixed
+`ent_coef`. SB3 2.9's SAC also accepts `n_steps`, so
+`validate_model_kwargs` cannot catch a shared key whose meaning differs
+between the two.
+- **Decision.** `Recipe.algo_cfg` maps a family (`algo_family`) to a
+  block of `TrainConfig` fields applied over `extra_cfg`, with
+  `model_kwargs` merged one level deep. Blocks are keyed by family,
+  not algorithm, so DemoSAC inherits SAC's calibration. `extra_cfg`
+  keeps only what both families share (WallBall's `gamma`, the
+  humanoid stages' `normalize_reward=False`). Run files get matching
+  `[train.algo.sac]` / `[train.algo.ppo]` tables, merged after `[train]`
+  for the run's family only, so one file can carry both profiles.
+- **Divergent shared keys are refused, not reinterpreted.**
+  `DIVERGENT_SHARED_KWARGS` lists the keys both constructors accept
+  with different meanings. A flat key from it (recipe or file) is
+  written for the recipe's default family, so under the other family
+  `build_train_config` refuses it and points to the family tables.
+  Warning instead would let a SAC `batch_size=512` silently become a
+  PPO minibatch. An explicit `model_kwargs=` argument is exempt: it
+  replaces every lower layer, flat keys included, and the hint says so.
+- **The one intended SAC-family change** is the humanoid Stage 0–2 ×
+  {SAC, DemoSAC} resolution: the gSDE + `ent_coef=0.01` bundle was
+  chosen and measured under PPO, and those recipes default to PPO. An
+  explicit SAC run now gets SB3's SAC defaults. It is off the campaign
+  path; every other SAC-family snapshot entry is byte-identical, and
+  the trainer digest matches.
+- **The snapshot records PPO too.** With every recipe now resolving
+  under PPO, `tools/recipe_snapshot.py` adds PPO to its matrix (96
+  resolutions), so each later PPO step's change is a reviewed diff
+  rather than an unrecorded one.
+- **Readers of the old location.** The campaign notebook and the
+  trainer digest's PaddleTennis job read the SAC bundle through
+  `build_train_config` rather than from `extra_cfg` or `algo_cfg`, so
+  they work against both the pinned `REPO_REF` and this package.
+
+### Algorithm-dependent code tests families derived from the registry — *implemented (unreleased, 2026-10-17)*
+PPO plan Step 1 (`design_ppo_first_class_20261016.md`, static-7). The
+trainer and the notebooks decided algorithm-dependent behaviour with
+hand-written strings (`algo.upper() == "PPO"`, `!= "PPO"`, a
+`("SAC", "DEMOSAC")` tuple, a hand-kept `OFF_POLICY_ALGOS`). Each
+string test is a place where a new registration can silently take the
+wrong branch, and one already did: `sb3_training` gave
+`ALGO="DemoSAC"` PPO's 16 workers because DemoSAC is not the string
+`"SAC"`.
+- **Decision.** `OFF_POLICY_ALGOS` and `ON_POLICY_ALGOS` are derived
+  with `issubclass` from SB3's `OffPolicyAlgorithm` and
+  `OnPolicyAlgorithm`, and an algorithm that is neither refuses at
+  import. `algo_family()` names an algorithm's config family after its
+  most general registered ancestor, so DemoSAC (a SAC subclass) is in
+  the SAC family and reads SAC's settings. Two unrelated registered
+  ancestors would make the family ambiguous and refuse at import.
+  Every resolved value is unchanged: the derived sets equal the old
+  set, and the recipe snapshot and trainer digest match.
+- **Notebooks** test the derived `OFF_POLICY_ALGOS`, not
+  `algo_family()`: they install the package at a pinned `REPO_REF`
+  (`b9585e2`), which exports that name but not the new function. The
+  humanoid notebook's `RESOLVED_ALGO != "PPO"` stays: automatic
+  advancement supports exactly PPO, not a family.
+
+### Golden digests and the freeze harness gate every refactor — *implemented (unreleased, 2026-10-16)*
+Week 1 restructures the env and training code by extraction (design
+M1 + L0, PPO plan Step 0). The rule is that nothing on the campaign path
+moves unless the change is declared, and three gates make that checkable:
+- **Env streams.** `courtside_dynamics.digests` hashes obs (float64),
+  reward, terminated, truncated, qpos and qvel at every reset and step.
+  Separate digests cover every info item (non-scalars recursively, by
+  type, dtype and shape) and the interface the float64 hash erases:
+  the spaces' dtype, shape and bounds, and the concrete obs, reward and
+  flag types. All nine `rew_*` keys are required at every PaddleTennis
+  step. `tools/golden_digest.py` checks against
+  `tests/golden/env_digests.json`, and `tests/test_golden_digests.py`
+  gates CI. The 22 CI cases take about 45 s serial: the recipe ×
+  {zero, random, oracle, camper}, one-point with alternating serves,
+  the +hold arm, `volley_rule="legal"` with the lead-charge oracle, the
+  k=2 drill in both launch arms, three NaN witnesses, the recipe's
+  random and oracle streams reset the way training resets them,
+  WallBall TrueBaseline (random, oracle, and the oracle reset the
+  training way), BallBounce, BallBalance and 300 humanoid steps.
+  `--full` runs five spaced seeds per case (two for the humanoid case;
+  the NaN witnesses stay on the one seed each is calibrated on).
+- **Reset modes.** The original cases reseed every episode
+  (`env.reset(seed=seed + episode)`), so each episode reproduces on its
+  own, but training never resets that way: SB3's `DummyVecEnv` seeds
+  its first reset and auto-resets with `reset()` (no seed, no options)
+  from then on, so the env RNG and any state the env keeps across
+  resets carry over. PaddleTennis keeps its serve alternation, which a
+  seeded reset restarts at side A. A refactor that, say, re-derived the
+  serve side on every reset would pass every reseeded case. A case's
+  `reset` field picks `"seed_each"` (the default, so every older
+  golden reproduces unchanged) or `"seed_once"`. Three seed-once CI
+  cases run the training path: the PaddleTennis recipe under random
+  and oracle play for 3,200 steps (two 1,500-step episodes and 200
+  steps of a third, so two unseeded resets), and the WallBall
+  TrueBaseline oracle for 3,000 steps (12 episodes). On seed 0 the
+  oracle's three episodes serve from sides A, B and A; a test pins
+  that seed-once resets alternate the serve and draw later serves
+  from the carried RNG, where seed-each resets serve from A every
+  time. The new cases are recorded as new entries; no existing entry
+  changed.
+- **SIMD dispatch.** numpy picks AVX-512, AVX2 or baseline ufunc
+  loops at import, and some of them round differently. On numpy 2.5.3
+  (x86-64, 2×10⁵ random inputs) these float64 loops give other last
+  bits without AVX-512: `exp` (4.7% of inputs), `log1p`, `expm1`,
+  `power`, `arcsin`, `arccos`, `arctan2`, `cbrt`, and rarely `log`,
+  `tan` and `arctan`. `tanh` differs without AVX2 (20%). Float64
+  `sin`, `cos`, `sqrt` and `hypot` do not move. The env code calls
+  only those four from numpy's math; its few other transcendentals
+  are Python `math` calls (libm, no dispatch), and the physics is
+  MuJoCo's compiled code. So the goldens, recorded on an AVX-512
+  machine, do not depend on numpy's dispatch on GitHub's runners,
+  which may lack AVX-512 (often an AMD EPYC 7763), though BLAS did
+  (next bullet). Measured: all 22 CI cases match
+  with AVX-512 disabled (`NPY_DISABLE_CPU_FEATURES="X86_V4 AVX512_ICL
+  AVX512_SPR"`, numpy 2.x names; numpy 1.26 calls them `AVX512F
+  AVX512CD AVX512_SKX AVX512_CLX`), with AVX2 disabled as well, and the
+  full set matches with AVX-512 disabled. `version_info()` now records
+  the dispatch (`numpy_simd`, e.g. `baseline X86_V2; dispatch X86_V3
+  X86_V4`), and a CI test replays one case per env family with every
+  dispatch target disabled, so a refactor that brings, say, an
+  `np.exp` into a stream is caught on any CPU before a runner with
+  other SIMD finds it.
+- **BLAS kernels (2026-10-18).** The SIMD bullet missed one path:
+  numpy hands float64 `np.linalg.norm(v)`, `np.dot(u, v)`, `u @ v` and
+  `A @ v` to its bundled OpenBLAS, which picks kernels from the CPU at
+  run time (`DYNAMIC_ARCH`), and they round 3-vectors differently. On
+  numpy 2.5's OpenBLAS 0.3.34, the AVX-512 (SkylakeX) `ddot` (norm,
+  1-D dot) and `A.T @ v` give other last bits than the Haswell (which
+  this build also runs for Zen) and pre-AVX2 kernels, which all sum
+  left to right; the Haswell and
+  SkylakeX `A @ v` agree with each other but not with the pre-AVX2
+  kernels. The goldens were recorded on an AVX-512 machine, and PR 81's
+  `pytest (3.12)` job landed on an AVX2 runner (`numpy_simd`
+  `baseline X86_V2; dispatch X86_V3`): five WallBall and BallBounce
+  cases failed, even with numpy's dispatch disabled. Forcing
+  `OPENBLAS_CORETYPE=Haswell`, `Zen` or `Sandybridge` reproduced the
+  failure locally; `SkylakeX` matched. The 300-step humanoid case
+  passed only because the first divergence (a ball-speed norm) falls
+  at step 409 of the full set's second episode.
+  The fix takes BLAS out of the streams rather than recording a golden
+  per kernel. A golden per kernel would leave training itself
+  CPU-dependent, and Colab's hosts vary. `courtside_dynamics.envs._linalg`
+  computes `dot`, `norm` and `matvec` on Python floats, left to right
+  from 0.0, which is the pre-AVX2 kernels' arithmetic. All 19 call
+  sites in the envs and the digest harness use it.
+  Proof: the old code run under `OPENBLAS_CORETYPE=Nehalem` was
+  recorded to a scratch golden file. The new code then matched it
+  bit for bit, 22/22 in both the CI and full sets, under each of
+  Nehalem, Haswell and SkylakeX. So the re-recorded goldens are
+  exactly the streams the old code produced on a pre-AVX2 kernel:
+  - **PaddleTennis and BallBalance** (all 14 + 2 cases in each set)
+    did not move.
+  - **WallBall and humanoid** (norm only) now give on every CPU the
+    stream the old code gave on any non-AVX-512 CPU.
+  - **BallBounce** (dot, `A.T @ v` and `A @ v`) moved by last bits on
+    AVX2 and AVX-512 hosts alike.
+  This is rounding of the same arithmetic, not a task change, so saved
+  policies and `VecNormalize` statistics stay comparable and no task
+  version moves. The re-record covers the five WallBall and BallBounce
+  entries in each set and the full set's humanoid entry. Two guards
+  keep it true:
+  - `tests/test_env_linalg.py` parses every env module, the scripted
+    policies and the digest harness, and fails on any `@`, `dot`,
+    `matmul`, `inner`, `vdot`, `tensordot`, `einsum` or `linalg` call.
+    It flags all 19 sites in the pre-fix code.
+  - `test_streams_do_not_depend_on_the_openblas_kernel` replays four
+    CI cases under each kernel the CPU can run (Nehalem always;
+    Haswell with AVX2 and FMA; SkylakeX with AVX-512). It asserts
+    OpenBLAS reports the forced core and that every case matches.
+  Still open: non-x86 BLAS (Apple Accelerate, ARM OpenBLAS) is not
+  exercised, though the env code no longer calls BLAS.
+- **NaN witnesses.** These sit on pending escrows, and a test re-proves
+  them from the stream's own info. A NaN action at step 250 of the
+  seed-0 recipe oracle stream claws back the contact escrow (−0.25). At
+  step 430 on the hold arm it claws back reach (−0.1753) and hold
+  (−0.0099) at once. At step 443 of the seed-1 hold-arm stream it claws
+  back reach (−0.17532) and hold (−0.01969), and that reward's bits
+  depend on the summation order.
+- **Reward summation order.** Float addition is not associative, and
+  L6 (TermStack) and M11 (`step()` split into terms) must re-associate
+  the PaddleTennis reward under a "digests identical" gate. Before this
+  fix no digested step was order-sensitive (the count is 0 for every
+  format-1 case in both sets), so swapping two terms passed the gate.
+  Three checks now hold the order:
+  - every digested PaddleTennis reward must equal the left-to-right sum
+    of its nine `rew_*` info terms, bit for bit;
+  - `reward_order_sensitive_steps` is a gated field, and the seed-1
+    witness keeps it at 1 in CI;
+  - two tests force every term of `step()` (nine) and of the nonfinite
+    guard (four) nonzero at once, with magnitudes searched so that any
+    exchange of two terms moves the bits. Only the first pair is
+    exempt, since float addition commutes. `math.fsum`, and `sum()`
+    from Python 3.12 on (compensated), fail those tests too.
+- **Drill cases.** The drill library is harvested in-process from
+  seed 1000 (two k=2 entries plus one clearance-violating copy), so no
+  pickle is committed. At `drill_fraction=0.5` both arms record
+  drilled points, undrilled policy-receiving points and the clearance
+  fallback, and the counts are gated fields. Two drill mutants stay
+  invisible. A `<` → `<=` eligibility test differs only when a uniform
+  draw equals 0.5 exactly. Dropping the full arm's solver warm-start
+  restore changes nothing at these two launch states, which hold a
+  single active constraint.
+- **Recipe snapshot** (`tools/recipe_snapshot.py`,
+  `tests/golden/recipe_snapshot.json`). It records 70 resolutions: every
+  recipe × {default algo, SAC, DEMOSAC} × quick_test, plus the seeded
+  PaddleTennis builds that keep paired evaluation. Env kwargs are
+  recovered from the factory closures; no env is built, and it runs in
+  0.05 s after import.
+- **Trainer digest** (`tools/trainer_digest.py --base <ref>`). It runs
+  four seeded `train()` jobs (SAC BallBalance, DemoSAC with demos off,
+  the PaddleTennis SAC quick path, PPO BallBalance) on this checkout
+  and on a temporary worktree of the ref. It compares policy weights,
+  `log_ent_coef`, normalizer stats, monitor, evaluations,
+  `eval_info.csv`, selection meta, diagnosis reports, RNG states and
+  `resolved_model`. It also compares the best-model artifacts that
+  replay, evaluation, warm start and promotion load: the policy weights
+  and torch variables (`log_ent_coef`) read back from `best_model.zip`,
+  `best_vec_normalize.pkl`'s stats and settings, and the selection
+  fields and bound artifact names of `best_model_meta.json`. The
+  meta's sha256s cannot be compared across sides, since SB3 zips embed
+  timestamps, so each side checks them against its own files, as the
+  loaders do, and a failed check never counts as a match. Finally it
+  compares which `RUN_LAYOUT` artifacts exist and the checkpoint file
+  names. Both sides take about 100 s together, under
+  different hash seeds (`PYTHONHASHSEED` 1 and 0), so a str-hash-order
+  dependence shows up as a mismatch.
+- **Typecheck.** Run mypy as CI does: `python -m mypy` in an
+  environment with the train extra (CI: Python 3.11). With
+  `ignore_missing_imports`, a mypy that cannot import numpy, Gymnasium
+  and SB3 (a global or `uv tool` install) treats them as `Any` and
+  passes. That is how three errors reached CI's typecheck (an
+  `Env.data` access, an `np.full` shape that may be `None`, and
+  `BaseAlgorithm.log_ent_coef`), each now narrowed with a typed check.
+  CI runs `python -m mypy`, and `tests/test_packaging.py` pins that and
+  the CPU-torch order, reading the workflow's install lines through
+  quoting and flag variants.
+- **Names.** The PPO design's Step 0 names `tests/test_sac_freeze.py`
+  and `tools/sac_freeze_digest.py`. Part 1 shipped as
+  `tools/recipe_snapshot.py` plus `tests/test_recipe_snapshot.py`, and
+  part 2 as `tools/trainer_digest.py` plus `tests/test_trainer_digest.py`.
+  A later step's "must pass Step 0" means those four files.
+- **Evidence.** Every paddle, WallBall, BallBounce and BallBalance
+  digest in both sets is bit-identical across MuJoCo 3.15.0/3.16.0,
+  Python 3.11/3.13 and numpy 2.4.6/2.5.x. The humanoid random stream
+  diverges at step 49 under 3.16, which is the body-BVH refresh behind
+  the `<3.16` cap (Humanoid section). Against `4e2e019`, every trainer
+  component matches, and DemoSAC-off equals SAC hash for hash.
+  Format 2 (all info items, the interface digest, four new cases)
+  re-recorded every entry, primaries under MuJoCo 3.15. All 30 format-1
+  entries kept their `stream_sha256`, step, episode, ending and
+  reward-sum values, so the re-record changed no stream. The format-2
+  CI set matches 19/19 under MuJoCo 3.12.0, 3.15.0 and 3.16.0, Python
+  3.11 and 3.13, numpy 1.26.4, 2.4.6 and 2.5.x, and gymnasium 1.1.1 and
+  1.4.0; the full set matches under 3.16. With HEAD and the base on
+  different hash seeds, every trainer component still matches. With
+  the seed-once cases, the 22-case CI set matches 22/22 under MuJoCo
+  3.12.0, 3.15.0 and 3.16.0, under Python 3.11 with numpy 2.4.6, and
+  with AVX-512 or all SIMD dispatch disabled.
+- **Decisions.**
+  - Primary digests are recorded under the supported MuJoCo (what CI
+    resolves). A version-specific difference lives only in a
+    declared-drift slot whose reason is in code (`DECLARED_DRIFT`), and
+    every other version must reproduce the primary.
+  - The PaddleTennis camper is the frozen reach-camper witness. A
+    camper "at the home target" is the zero action exactly (zero maps
+    to the pivot), so it would only duplicate the zero digest.
+  - `recipes.py` imports the training stack inside
+    `build_train_config`, so the registry, and therefore the digests,
+    load without SB3 or torch. All 70 resolutions are identical to
+    those of `4e2e019`, the commit before the import move.
+  - `--write` leaves every reproduced entry untouched, versions
+    included, and prints each change. The mismatch text says to
+    declare, never to re-record. Entries recorded before `numpy_simd`
+    joined `version_info()` keep versions without it: the CPU that
+    recorded them is unknown, so it is not backfilled.
+  - Info values with no canonical form raise instead of being skipped.
+    Every info key counts in the census, so adding, renaming or
+    removing an array- or tuple-valued item is visible.
+  - The digest and snapshot tools, and the test suite (in
+    `tests/conftest.py`), stop when `courtside_dynamics` imports from
+    outside this checkout's `src/`. In a git worktree the editable
+    install resolves to the main checkout, and a mutant there used to
+    pass the worktree's gates. Run them with `PYTHONPATH=src`.
+  - The recipe snapshot compares canonical JSON text, so a type-only
+    change (`8` to `8.0`, `True` to `1`, `0.0` to `0`) is a diff.
+- **Lesson: perturb in the precision the computation runs in.** The
+  self-test's one-ULP learning-rate bump (float64) on the PaddleTennis
+  recipe left every trained output bit-identical: 3e-4 and its float64
+  neighbour round to the same float32 step size. Only `resolved_model`
+  caught it, which is why that component exists. A float32 ULP moves
+  the policy, `log_ent_coef`, normalizer, evaluations, selection and
+  diagnosis.
+- **Not covered.**
+  - The trainer digest is a manual pre-merge gate, not CI, because it
+    takes minutes. It does not exercise warm start or resume, DemoSAC
+    with demos on, or the TOML run-config path.
+  - Monitor columns can stay equal under a real change when the tiny
+    budget's episodes end before learning matters; the weight and RNG
+    hashes carry those cases.
+  - Colab digests are not yet recorded (M1 asks for Colab vs local).
+    Run `python tools/golden_digest.py --full` in a Colab runtime and
+    record the result.
+
 ### The 2026-08-28 review's after-LT1 robustness findings are closed — *implemented (unreleased, commit `0cdd79f`)*
 Commit `0cdd79f` closes these findings from
 [`rl_pipeline_review_20260828.md`](rl_pipeline_review_20260828.md) (the
@@ -965,6 +2417,140 @@ scripted oracles); **learning feasibility was blocked as configured**. Statuses
 below were last updated at 0.16.0; items still marked open were spot-checked as
 still present in the current tree.
 
+### Spike S1 counts control steps and reads each bar's best clean configuration — *built (unreleased, 2026-10-17); not yet run on an L4*
+Design §5's spike S1 gates the whole humanoid half: single G1 ≥ 2×10⁴
+steps/s and 4×G1 + ball ≥ 5×10³ steps/s on a Colab L4.
+`notebooks/spikes/s1_gpu_throughput.ipynb` measures both. The design
+leaves four things open, and the notebook settles them as follows.
+- **A step is a control step.** Single G1 counts Playground's G1
+  joystick env steps (50 Hz control over 500 Hz physics) inside Brax's
+  training wrappers, and mjlab's G1 velocity steps (50 Hz over 200 Hz).
+  4×G1 counts one 50 Hz control period of the whole scene: 20 physics
+  steps at 1 kHz, the low end of the design's 1–2 kHz. 50 Hz is the G1
+  tracker's rate in the design's control hierarchy. Read this way,
+  4 seats × 5×10³ = 2×10⁴ agent steps/s, so both bars ask for the same
+  per-agent sample rate. Physics steps/s are reported beside each rate.
+  Neither rate includes a policy pass or a PPO update, so both bound
+  training throughput from above: a failed bar fails training too.
+- **Each bar takes its best clean configuration.** The bar can be met
+  by any stack (Playground or mjlab), MJX implementation (`warp` or
+  classic `jax`) and batch size (1024, 4096, 8192), because training
+  would pick the best one. A row counts only when it measured cleanly:
+  - no error and no skip;
+  - finite state;
+  - no MuJoCo Warp buffer overflow. Warp keeps a sticky per-world
+    bitmask, and dropped contacts or constraint rows would make a row
+    faster than the physics it claims.
+
+  The solver-iteration-cap bits are recorded but do not invalidate a
+  row: both GPU stacks cap on purpose (Playground's G1 at 3/5
+  iterations, mjlab's at 10/20). A FAIL with excluded rows says so,
+  since a row that errored or was skipped could have passed.
+- **The scene is built from packaged assets only.** It holds four
+  `assets/robots/unitree_g1_tennis.xml` G1s, rackets included, attached
+  with MjSpec under the prefixes `a0_`, `a1_`, `b0_` and `b1_`. The
+  ball geom, the floor's contact parameters and the ball-floor pair are
+  copied from `assets/humanoid_tennis.xml`. The test compares them with
+  the compiled court, so they cannot drift from the env.
+  - The floor is a plane, not the CPU env's slab: MJX's plane
+    collisions are the cheapest, and slab versus plane is an env
+    design choice.
+  - Robot-robot contacts stay masked by the model's categories, as in
+    the two-player env.
+  - Physics: implicitfast, 10/20 solver iterations (mjlab's G1 caps).
+    The CPU env's RK4 with MuJoCo's 100/50 would not fit here: a
+    vmapped solver loop runs to its cap in the slowest world.
+  - Controls: random targets at the standing pose ± 0.5 rad
+    (Playground's G1 action scale).
+- **Optional and failing parts stay loud.** mjlab 1.6.0 pins
+  `mujoco~=3.11`, so it runs in its own venv that shares the runtime's
+  torch. It runs first, while the GPU memory is still free; JAX also
+  allocates on demand. Its failures are printed and recorded, and the
+  bars then rest on Playground. A warp row refuses to run on a GPU
+  runtime when Warp sees no CUDA device. A bar with no clean row
+  raises after the results are saved. A SMOKE run never yields a
+  verdict. Results go to the Drive root's
+  `diagnostics/s1_gpu_throughput/` and are rewritten whole after every
+  section; the notebook refuses a folder inside `training_runs/`.
+- **Pins.** `REPO_REF` is `b9585e2`: the G1 assets, the court and
+  `robot_models` are unchanged since then. The GPU stack is pinned to
+  `jax[cuda12]==0.11.2`, `mujoco==3.15.0`, `mujoco-mjx==3.15.0`,
+  `warp-lang==1.18.0`, `playground==0.2.0` and `brax==0.14.2`, and the
+  optional stack to `mjlab==1.6.0`.
+- **CPU evidence (2026-10-17, SMOKE runs on jax 0.11.2 for CPU).** MJX
+  3.15 accepts the full collision set in both implementations: no
+  `NotImplementedError`, and both trace a step. So the simplified-set
+  fallback (visual meshes deleted, ellipsoid stringbeds made boxes,
+  ball-floor condim 6 → 3) ran only when the smoke runner forced a
+  rejection. The scene has nq 151, nv 146 and nu 116, with 142
+  colliding geoms and 105 pairs. Classic MJX evaluates 557 contact
+  slots and 2,070 constraint rows per world on every step, against 14
+  and 96 for Playground's feet-only G1. That is 1.2 MB of constraint
+  Jacobian per world, so batch 8192 may run out of L4 memory; an
+  out-of-memory error becomes that row's error. MuJoCo Warp sized
+  about 150 rows per standing world. A CPU MuJoCo rollout (4 s, six
+  seeds, every robot falling) peaks at 80 contacts and 436 rows per
+  world, which sets the Warp buffers at 160 and 900. For H0, those
+  dense slots are the cost to cut: Playground's G1 keeps contacts
+  feet-only.
+- **Not validated without a GPU:**
+  - every timing, including the "about 45 minutes" estimate;
+  - `jax[cuda12]` and Warp's CUDA 13.4-toolkit wheel against Colab's
+    driver;
+  - mjlab's venv creation and install on Colab (locally the mjlab
+    venv was installed by hand and reused);
+  - out-of-memory handling at large batches;
+  - Playground's own menagerie clone (locally, only the G1 meshes were
+    fetched at its pinned commit).
+- **Status.** Open until the maintainer runs it on an L4. Book the
+  numbers, the verdict and the GPU here.
+
+### MuJoCo is capped below 3.16: its bounds refresh moves the Stage-1 oracle — *implemented (unreleased, 2026-10-16)*
+MuJoCo 3.16.0 (2026-10-14; changelog item 7, commit `d823f9212`) made
+`mj_setConst` compute the bounding volumes of bodies as well as geoms. The
+env enlarges each racket stringbed 1.5× at construction and refreshes the
+geom's own bounds (entry below). Through 3.15, though, the racket *body's*
+BVH (`bvh_aabb`) kept the nominal stringbed: in the racket frame its root
+box spans |y| ≤ 0.152 m and z ≤ 0.322 m, against the scaled stringbed's
+0.195 m and 0.385 m. Contacts in that outer strip are still culled on
+≤3.15, so the 0.16.0 forgiveness fix is only partial there. The Stage-1
+oracle (129 steps, landed target) was calibrated on those stale bounds.
+On 3.16 it takes 138 steps and misses the target, which also aborts the
+humanoid notebook's Stage-1 preflight.
+- **Evidence.** Installing only the other version's `bvh_aabb` makes the
+  3.15 and 3.16 oracle streams bit-identical in both directions (obs and
+  reward sha256, both serve sides). No other compiled array the two
+  versions share differs, except the declarative `actuator_ctrlspec`.
+  PaddleTennis, WallBall and BallBounce per-step digests are identical
+  from 3.12 through 3.16 (`repo_review_20261016.md` §1).
+- **Floor evidence.** The golden CI set (22 cases, seed-once cases
+  included) matches 22/22 on 3.12.0 and 21/22 on 3.11.0, where the
+  humanoid random stream moves. On 3.10.0 it matches 1/22: every
+  PaddleTennis, BallBounce, BallBalance and humanoid case moves, and
+  so do both WallBall TrueBaseline oracle cases; only its random
+  stream reproduces. (The gates' review measured the format-1 set at
+  the same 1/15 there, the one match being that WallBall random case.)
+  On 3.3.0 the format-1 set matched 0/15, and the Stage-1 oracle takes
+  127 steps instead of 129.
+- **Decision.** Bound `mujoco>=3.12,<3.16`: the supported range is
+  exactly the range that reproduces the golden digests, so "every other
+  version must reproduce the primary" holds on all of it. 3.12 is also
+  the August training stack (`repo_review_20261016.md` §2.1). The floor was `>=3.3` until the gates'
+  review, which found it admitted versions the goldens fail on.
+  `tests/test_packaging.py` pins both ends. The oracle really misses on 3.16,
+  so this is not a test-expectation artifact, and the test is not
+  loosened. Refreshing the body BVH in the env would change the humanoid
+  stream on every supported version and still need a recalibrated oracle:
+  a declared task change, not hygiene. The review (§2.1) advised against a
+  global cap. On this evidence it costs the paddle work nothing, and
+  3.15.0 ships wheels for cp310–cp315.
+- **Lift when** the humanoid code is archived (design M8), or the env
+  refreshes the racket body's bounds itself and the oracle is
+  recalibrated on them. The golden digests (M1) then prove the paddle
+  streams unchanged under the new MuJoCo. Notebooks pinned to
+  `REPO_REF` = `b9585e2` still resolve 3.16 until that pin moves past
+  this change.
+
 ### Update `geom_rbound`/AABB when resizing a MuJoCo geom at runtime — *implemented (0.16.0)*
 The stringbed enlargement for "early contact forgiveness" writes `geom_size` and
 calls `mj_setConst`, which does **not** recompute the broadphase bounding sphere
@@ -978,7 +2564,8 @@ enlarged-only zone. *(0.16.0 recomputes both bounds from the scaled semi-axes
 when scaling — `mj_setConst` does not refresh them;
 `test_racket_forgiveness_band_generates_contacts` pins a ball contact in the
 enlarged-only annulus, and the stage-1 oracle was recalibrated for the
-corrected contact timing.)*
+corrected contact timing. Still partial on MuJoCo ≤3.15, where the racket
+body's BVH keeps the nominal size; see the entry above.)*
 
 ### Sparse reward + iid per-step Gaussian exploration at 100 Hz = zero gradient — *partially implemented (0.16.0)*
 0 valid hits / 0 nonzero rewards in 264 random episodes; the end-to-end 25k run

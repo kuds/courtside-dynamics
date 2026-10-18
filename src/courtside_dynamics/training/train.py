@@ -21,18 +21,21 @@ The helper builds vectorized train / eval envs, wires ``EvalCallback`` and
 from __future__ import annotations
 
 import difflib
+import functools
 import hashlib
 import inspect
 import json
 import math
 import os
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from gymnasium import spaces
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.callbacks import (
     BaseCallback,
@@ -48,10 +51,12 @@ from stable_baselines3.common.logger import Logger, make_output_format
 from stable_baselines3.common.running_mean_std import RunningMeanStd
 from stable_baselines3.common.utils import check_for_correct_spaces
 from stable_baselines3.common.vec_env import (
+    SubprocVecEnv,
     VecEnv,
     VecNormalize,
     sync_envs_normalization,
 )
+from stable_baselines3.common.vec_env.util import dict_to_obs, obs_space_info
 
 from courtside_dynamics.callbacks.env_attr_schedule import (
     LinearEnvAttrScheduleCallback,
@@ -71,8 +76,25 @@ from courtside_dynamics.callbacks.video_record import (
     InfoRowFn,
     VideoRecordCallback,
 )
+from courtside_dynamics.experiments import records as run_records
+from courtside_dynamics.experiments.snapshots import (
+    SNAPSHOT_INDEX_NAME,
+    SnapshotWriter,
+    snapshot_summary,
+)
+from courtside_dynamics.experiments.sync import (
+    RunDirMirror,
+    SyncError,
+    validate_sync_target,
+)
 from courtside_dynamics.training.algos import (
     OFF_POLICY_ALGOS as _OFF_POLICY_ALGOS,
+)
+from courtside_dynamics.training.algos import (
+    ON_POLICY_ALGOS as _ON_POLICY_ALGOS,
+)
+from courtside_dynamics.training.algos import (
+    algo_family as _algo_family,
 )
 from courtside_dynamics.training.algos import (
     resolve_algo as _resolve_algo,
@@ -80,10 +102,15 @@ from courtside_dynamics.training.algos import (
 from courtside_dynamics.training.algos import (
     validate_model_kwargs as _validate_model_kwargs,
 )
+from courtside_dynamics.training.algos import (
+    validate_policy_kwargs as _validate_policy_kwargs,
+)
 from courtside_dynamics.training.artifacts import (
     RUN_LAYOUT,
+    _git_dirty,
     artifact_path,
     env_observation_names,
+    is_empty_directory,
     locate_artifact,
     observation_fingerprint_mismatch,
     update_run_config_with_initialization,
@@ -94,29 +121,674 @@ from courtside_dynamics.training.artifacts import (
 from courtside_dynamics.training.demo_sac import DemoSAC
 
 
-class _SaveVecNormalizeOnNewBest(BaseCallback):
-    """Snapshot the model's ``VecNormalize`` stats when EvalCallback saves a new best.
+class _SaveBestOnNewBest(BaseCallback):
+    """Save ``best_model.zip``, its ``VecNormalize`` stats and a meta on a new best.
 
-    Wired in via ``EvalCallback(..., callback_on_new_best=...)``. Without
-    this, ``vec_normalize.pkl`` is only written at the very end of
-    training, so its running stats reflect the *final* train_env state —
-    not the moment ``best_model.zip`` was saved. Replaying ``best_model``
-    against final-step stats is a silent obs-distribution mismatch.
+    Wired in via ``EvalCallback(best_model_save_path=None,
+    callback_on_new_best=...)`` under reward selection, so it runs where
+    SB3's own best-model save did, on the same model. SB3 wrote
+    ``best_model.zip`` in place: a ``KeyboardInterrupt`` (a stopped Colab
+    cell) inside that write left a torn zip that no loader could open
+    and that the run directory then sealed. Here every file is written
+    under a temporary name and the set is renamed into place together,
+    the meta last (``experiments.records.ReplaceTogether``), so an
+    interrupt inside a write leaves the previous save whole and nothing
+    behind.
+
+    The paired stats snapshot: without it, ``vec_normalize.pkl`` is only
+    written at the very end of training, so its running stats reflect
+    the *final* train_env state -- not the moment ``best_model.zip`` was
+    saved. Replaying ``best_model`` against final-step stats is a silent
+    obs-distribution mismatch. ``normalizer_path`` is ``None`` for a run
+    without ``VecNormalize``; a model without one writes no stats either.
+
+    ``best_model_meta.json`` (``meta_path``) binds the pair by sha256
+    and records the save's step, as the headline evaluator's meta does,
+    marked ``"selected_by": "reward"`` with SB3's ``mean_reward`` as its
+    one selection key (and, with ``record_n_updates``, an on-policy
+    run's SB3 update count). SB3 appends the evaluation to
+    ``evaluations.npz`` before it calls this callback, so after an
+    interrupt inside a save the series' best is a step no file holds:
+    the summary, the run record and the harness read the step
+    ``best_model.zip`` holds from this meta. ``ledger`` (the run's
+    ``records.BestSaveLedger``) keeps every save's digests, so the run
+    record also catches a set split between its renames that the meta
+    alone could not (a first save with no meta yet).
     """
 
-    def __init__(self, save_path: str) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        normalizer_path: str | None,
+        *,
+        meta_path: str,
+        ledger: run_records.BestSaveLedger | None = None,
+        record_n_updates: bool = False,
+    ) -> None:
         super().__init__()
-        self.save_path = save_path
+        self.model_path = model_path
+        self.normalizer_path = normalizer_path
+        self.meta_path = meta_path
+        self.ledger = ledger
+        self.record_n_updates = record_n_updates
+
+    def _init_callback(self) -> None:
+        # Where EvalCallback created its best_model_save_path.
+        os.makedirs(os.path.dirname(self.model_path) or ".", exist_ok=True)
 
     def _on_step(self) -> bool:
+        # EvalCallback updates best_mean_reward before it calls back.
+        mean_reward = getattr(self.parent, "best_mean_reward", None)
+        if isinstance(mean_reward, bool) or not isinstance(mean_reward, (int, float)):
+            raise RuntimeError(
+                "_SaveBestOnNewBest runs as an EvalCallback's "
+                "callback_on_new_best, whose best_mean_reward its meta "
+                f"records; its parent holds {mean_reward!r}"
+            )
         get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
-        if get_vec_norm is None:
+        vec_norm = get_vec_norm() if get_vec_norm is not None else None
+        with run_records.ReplaceTogether(self.ledger) as staged:
+            # SB3 appends ".zip" only to a path without a suffix; the
+            # temporary's ".tmp-<pid>" keeps it as given.
+            written = {os.path.basename(self.model_path): staged.stage(self.model_path)}
+            self.model.save(written[os.path.basename(self.model_path)])
+            if vec_norm is not None and self.normalizer_path is not None:
+                os.makedirs(
+                    os.path.dirname(self.normalizer_path) or ".", exist_ok=True
+                )
+                name = os.path.basename(self.normalizer_path)
+                written[name] = staged.stage(self.normalizer_path)
+                vec_norm.save(written[name])
+            n_updates = getattr(self.model, "_n_updates", None)
+            if self.record_n_updates and (
+                isinstance(n_updates, bool) or not isinstance(n_updates, int)
+            ):
+                raise TypeError(
+                    f"record_n_updates: the model's _n_updates is "
+                    f"{n_updates!r}, not an SB3 update count"
+                )
+            meta = {
+                "selected_by": run_records.REWARD_SELECTED,
+                "timestep": int(self.num_timesteps),
+                "selection_keys": [run_records.REWARD_SELECTION_KEY],
+                "selection_values": {
+                    run_records.REWARD_SELECTION_KEY: float(mean_reward)
+                },
+                **({"n_updates": n_updates} if self.record_n_updates else {}),
+                # Hashed from the temporaries: the bytes the renames publish.
+                "artifacts": {
+                    name: {"sha256": run_records.sha256_file(path)}
+                    for name, path in written.items()
+                },
+            }
+            with open(staged.stage(self.meta_path), "w") as stream:
+                json.dump(meta, stream, indent=2)
+                stream.write("\n")
+            staged.commit()
+        return True
+
+
+class _AtomicCheckpointCallback(CheckpointCallback):
+    """SB3's ``CheckpointCallback``, each checkpoint written atomically.
+
+    The same files at the same steps with the same contents
+    (``<prefix>_<N>_steps.zip``, ``<prefix>_vecnormalize_<N>_steps.pkl``
+    and, when asked, the replay buffer), but each is written under a
+    temporary name beside its target and renamed into place
+    (``experiments.records.ReplaceTogether``), the model last. SB3 wrote
+    them in place, so a ``KeyboardInterrupt`` (a stopped Colab cell)
+    inside a write left a torn checkpoint that the run then sealed and
+    that failed only when loaded. Now an interrupt inside a write leaves
+    no file of that checkpoint, and one between the renames leaves its
+    normalizer without a model, which no reader pairs with anything
+    (the harness enumerates checkpoints by their model files).
+    """
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.save_freq != 0:
             return True
-        vec_norm = get_vec_norm()
-        if vec_norm is None:
+        model_path = self._checkpoint_path(extension="zip")
+        saved: list[tuple[str, str]] = []
+        with run_records.ReplaceTogether() as staged:
+            # SB3's own save calls on the temporaries: each keeps the
+            # ".tmp-<pid>" suffix it is given (no ".zip"/".pkl" added).
+            if (
+                self.save_replay_buffer
+                and getattr(self.model, "replay_buffer", None) is not None
+            ):
+                buffer_path = self._checkpoint_path("replay_buffer_", extension="pkl")
+                self.model.save_replay_buffer(staged.stage(buffer_path))  # type: ignore[attr-defined]
+                saved.append(("model replay buffer checkpoint", buffer_path))
+            vec_normalize = (
+                self.model.get_vec_normalize_env() if self.save_vecnormalize else None
+            )
+            if vec_normalize is not None:
+                normalizer_path = self._checkpoint_path("vecnormalize_", extension="pkl")
+                vec_normalize.save(staged.stage(normalizer_path))
+                saved.append(("model VecNormalize", normalizer_path))
+            self.model.save(staged.stage(model_path))
+            saved.insert(0, ("model checkpoint", model_path))
+            staged.commit()
+        if self.verbose >= 2:
+            for label, path in saved:
+                print(f"Saving {label} to {path}")
+        return True
+
+
+def _save_final_model(model: BaseAlgorithm, log_dir: str) -> None:
+    """``model/final_model.zip``, written atomically.
+
+    Under a temporary name, then renamed into place
+    (``records.write_atomically``): ``model.save`` in place left a torn
+    zip when an interrupt landed inside it, which the run then sealed.
+    """
+    run_records.write_atomically(artifact_path(log_dir, "final_model"), model.save)
+
+
+def _save_final_normalizer(train_env: VecNormalize, log_dir: str) -> None:
+    """``model/vec_normalize.pkl``, written atomically (see :func:`_save_final_model`)."""
+    run_records.write_atomically(artifact_path(log_dir, "vec_normalize"), train_env.save)
+
+
+class _SnapshotOnEvaluation(BaseCallback):
+    """Save the policy and its normalizer at every evaluation.
+
+    ``TrainConfig.snapshot_evals`` (``experiments.snapshots``): at every
+    ``eval_freq`` call -- the evaluators' cadence -- the model and its
+    ``VecNormalize`` statistics go to ``snapshots/`` in the format the
+    best model uses, bound in ``snapshots/index.json``. ``train()``
+    puts this callback first, so the snapshot at step N is taken before
+    any evaluator, gate or checkpoint callback runs at N: the policy
+    and observation statistics every evaluation at N scores (an
+    evaluation only reads the model; a gate's advance may reset the
+    entropy temperature after it). Saving only reads the model, so no
+    stream or RNG moves. A disk error is printed and listed in the
+    index's ``failures``, and training continues, like
+    ``evaluations.npz``; any other error propagates.
+    """
+
+    def __init__(self, directory: str, *, run_id: str, eval_freq: int) -> None:
+        super().__init__()
+        self.writer = SnapshotWriter(directory, run_id=run_id)
+        self.eval_freq = eval_freq
+
+    def _init_callback(self) -> None:
+        self.writer.open()
+
+    def _on_step(self) -> bool:
+        if self.eval_freq <= 0 or self.n_calls % self.eval_freq != 0:
             return True
-        os.makedirs(os.path.dirname(self.save_path) or ".", exist_ok=True)
-        vec_norm.save(self.save_path)
+        get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
+        vec_norm = get_vec_norm() if get_vec_norm is not None else None
+        n_updates = getattr(self.model, "_n_updates", None)
+        try:
+            self.writer.write(
+                self.num_timesteps,
+                save_model=self.model.save,
+                save_normalizer=None if vec_norm is None else vec_norm.save,
+                n_updates=(
+                    n_updates
+                    if isinstance(n_updates, int) and not isinstance(n_updates, bool)
+                    else None
+                ),
+            )
+        except OSError as error:
+            print(
+                f"[train] could not save the evaluation snapshot at "
+                f"{self.num_timesteps:,} steps ({error!r}); training "
+                f"continues, and snapshots/index.json lists it as failed"
+            )
+            self.writer.note_failure(self.num_timesteps, error)
+        return True
+
+
+class _StopOnNoRewardImprovement(StopTrainingOnNoModelImprovement):
+    """SB3's reward-path early stop, plus the ``stop_reason`` train() persists.
+
+    Reward selection (no ``headline_key``) hands ``early_stop_patience``
+    to SB3's ``StopTrainingOnNoModelImprovement`` as the reward
+    ``EvalCallback``'s ``callback_after_eval``. It printed why it
+    stopped and recorded nothing, so the summary of such a run read a
+    bare "(stopped early)" (``repo_review_20261016`` train-1). When it
+    stops it now sets ``stop_reason`` like ``InfoDictEvalCallback`` and
+    the gate; when it stops is SB3's own rule, unchanged (it fires once
+    the count of non-improving evaluations *exceeds* the patience).
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.stop_reason: str | None = None
+
+    def _on_step(self) -> bool:
+        continue_training = super()._on_step()
+        if not continue_training:
+            self.stop_reason = (
+                f"early_stop_patience: no new best mean reward for the last "
+                f"{self.no_improvement_evals} evaluations (reward selection: "
+                f"SB3 StopTrainingOnNoModelImprovement, patience "
+                f"{self.max_no_improvement_evals})"
+            )
+        return continue_training
+
+
+def _stop_reason_of(callbacks: Iterable[BaseCallback]) -> str | None:
+    """The first ``stop_reason`` any callback in ``callbacks`` recorded.
+
+    Walks nested callbacks too: SB3's ``EvalCallback`` holds its
+    ``callback_after_eval`` (where the reward-path early stop lives) as
+    ``.callback`` and its new-best hook as ``.callback_on_new_best``, and
+    a ``CallbackList`` holds ``.callbacks``.
+    """
+    for callback in callbacks:
+        reason = getattr(callback, "stop_reason", None)
+        if reason:
+            return str(reason)
+        nested = [
+            child
+            for child in (
+                getattr(callback, "callback", None),
+                getattr(callback, "callback_on_new_best", None),
+                *getattr(callback, "callbacks", ()),
+            )
+            if isinstance(child, BaseCallback)
+        ]
+        reason = _stop_reason_of(nested)
+        if reason:
+            return reason
+    return None
+
+
+class _EvalClock:
+    """Wall clock spent evaluating, for the run record's eval share.
+
+    :meth:`watch` wraps one evaluation callback's ``_on_step`` on the
+    instance and times the calls that evaluate (``n_calls`` a multiple
+    of its ``eval_freq``): the selection batch and any ``confirm_best``
+    batch, the final-config stream, SB3's reward evaluator.
+    ``closing_seconds`` collects the end-of-run closing evaluation. Only
+    ``time.monotonic`` is read, so no stream or RNG moves.
+    """
+
+    def __init__(self) -> None:
+        self.periodic_seconds = 0.0
+        self.closing_seconds = 0.0
+
+    def watch(self, callback: BaseCallback) -> None:
+        inner = callback._on_step
+
+        def timed() -> bool:
+            eval_freq = getattr(callback, "eval_freq", 0)
+            if eval_freq <= 0 or callback.n_calls % eval_freq:
+                return inner()
+            started = time.monotonic()
+            try:
+                return inner()
+            finally:
+                self.periodic_seconds += time.monotonic() - started
+
+        setattr(callback, "_on_step", timed)  # noqa: B010 -- instance override
+
+
+#: Seconds between attempts to mirror a finished run directory to
+#: ``sync_dir`` (three attempts in all): a Drive hiccup at the end of a
+#: multi-hour run should not cost its durable copy.
+_FINAL_SYNC_RETRY_SECONDS: tuple[float, ...] = (5.0, 30.0)
+
+
+class _RunLifecycle:
+    """One ``train()`` call's run record, sync manifest and mirror.
+
+    Created right after ``config.json``, when it writes the
+    ``"running"`` record (``experiments.records``). The training body
+    hands it the built model and reports how the run ended
+    (:meth:`note_outcome`); :meth:`close` runs once the body returned or
+    raised -- after every env and the SB3 logger are closed, so no file
+    is still being written -- and writes the final record, then
+    ``sync_manifest.json`` last, then mirrors the directory to
+    ``sync_dir`` when one is set.
+
+    ``sync_dir`` is the mirror target as :func:`validate_sync_target`
+    resolved and checked it (``~`` expanded, absolute), so the directory
+    validated is the directory mirrored and recorded, whatever the
+    working directory does later.
+    """
+
+    def __init__(
+        self,
+        cfg: TrainConfig,
+        *,
+        preflight_warnings: Sequence[str],
+        sync_dir: Path | None,
+    ) -> None:
+        self.cfg = cfg
+        self.log_dir = Path(cfg.log_dir)
+        self.run_id = self.log_dir.resolve().name
+        self.created_at = run_records.utc_now()
+        self.started = time.monotonic()
+        self.preflight_warnings = tuple(preflight_warnings)
+        self.git_dirty = _git_dirty()
+        self.eval_clock = _EvalClock()
+        self.sync_dir = sync_dir
+        self.mirror: RunDirMirror | None = (
+            None
+            if sync_dir is None
+            else RunDirMirror(cfg.log_dir, sync_dir, run_id=self.run_id)
+        )
+        # Every best-model save's digests (both selection paths): the
+        # record checks the best files on disk against them.
+        best_model = Path(artifact_path(cfg.log_dir, "best_model"))
+        self.best_ledger = run_records.BestSaveLedger(
+            best_model.parent,
+            names=tuple(
+                os.path.basename(artifact_path(cfg.log_dir, name))
+                for name in sorted(run_records.BEST_MODEL_ARTIFACTS)
+            ),
+        )
+        self.model: BaseAlgorithm | None = None
+        self.status: str | None = None
+        self.stop_reason: str | None = None
+        # The exception the body already recorded as the outcome (the
+        # crash salvage re-raises it): close() must not record it twice.
+        self.noted_error: BaseException | None = None
+        self._write_record(run_records.RUNNING)
+
+    def note_outcome(
+        self,
+        status: str,
+        stop_reason: str | None,
+        model: BaseAlgorithm,
+        *,
+        error: BaseException | None = None,
+    ) -> None:
+        self.status = status
+        self.stop_reason = stop_reason
+        self.model = model
+        self.noted_error = error
+
+    def _artifacts(self) -> list[dict[str, str]]:
+        """The layout artifacts present (an empty directory is not one)."""
+        present = []
+        for name in RUN_LAYOUT:
+            if name in ("run_record", "sync_manifest"):
+                continue
+            path = locate_artifact(self.log_dir, name)
+            if path is not None and not is_empty_directory(path):
+                present.append(
+                    {"name": name, "path": os.path.relpath(path, self.log_dir)}
+                )
+        return present
+
+    def _write_record(
+        self,
+        status: str,
+        *,
+        finished: bool = False,
+        progress: Mapping[str, Any] | None = None,
+    ) -> None:
+        config_path = locate_artifact(self.log_dir, "config")
+        if config_path is None:
+            raise FileNotFoundError(f"no config.json under {self.log_dir}")
+        config = run_records.read_json_object(config_path)
+        best_meta: dict[str, Any] | None = None
+        meta_path = locate_artifact(self.log_dir, "best_model_meta")
+        if meta_path is not None:
+            try:
+                best_meta = run_records.read_json_object(meta_path)
+            except ValueError as error:
+                print(f"[train] run record omits the selection: {error}")
+        trained: int | None = None
+        n_updates: int | None = None
+        if self.model is not None:
+            trained = int(self.model.num_timesteps)
+            updates = getattr(self.model, "_n_updates", None)
+            if isinstance(updates, int) and not isinstance(updates, bool):
+                n_updates = updates
+        wall_clock: dict[str, Any] | None = None
+        if finished:
+            total = time.monotonic() - self.started
+            evaluating = (
+                self.eval_clock.periodic_seconds + self.eval_clock.closing_seconds
+            )
+            wall_clock = {
+                "total_seconds": round(total, 3),
+                "periodic_eval_seconds": round(self.eval_clock.periodic_seconds, 3),
+                "closing_eval_seconds": round(self.eval_clock.closing_seconds, 3),
+                "eval_share": round(evaluating / total, 4) if total > 0 else None,
+            }
+        sync = (
+            None
+            if self.mirror is None
+            else {
+                "dir": str(self.sync_dir),
+                "checkpoint_mirrors": self.mirror.passes,
+                "failed_mirrors": self.mirror.failures,
+            }
+        )
+        record = run_records.build_run_record(
+            config,
+            run_id=self.run_id,
+            created_at=self.created_at,
+            status=status,
+            finished_at=run_records.utc_now() if finished else None,
+            stop_reason=self.stop_reason if finished else None,
+            trained_timesteps=trained,
+            n_updates=n_updates,
+            git_dirty=self.git_dirty,
+            best_model_meta=best_meta,
+            # The selection is checked against the files the meta binds:
+            # a best-model save interrupted between its renames leaves
+            # the previous best's meta beside the new model.
+            best_model_dir=(
+                None if meta_path is None else os.path.dirname(meta_path)
+            ),
+            wall_clock=wall_clock,
+            preflight_warnings=self.preflight_warnings,
+            artifacts=self._artifacts(),
+            sync=sync,
+            progress=progress,
+            snapshots=snapshot_summary(self.log_dir),
+            # The files on disk against the saves this run committed:
+            # the only check of a first save interrupted before its
+            # meta's rename (no meta is on disk to bind it).
+            best_unbound=self.best_ledger.unbound(),
+        )
+        selection = record["selection"]
+        if (
+            finished
+            and selection is not None
+            and selection["bindings"] == run_records.BINDINGS_UNBOUND
+        ):
+            print(
+                f"[train] WARNING: the best model is unbound -- "
+                f"{selection['unbound_reason']}. The run record marks its "
+                f"selection unbound and leaves best_model / best_vec_normalize "
+                f"/ best_model_meta out of its artifacts; do not deploy "
+                f"best_model.zip from {self.log_dir}"
+            )
+        run_records.write_run_record(self.log_dir, record)
+
+    def checkpoint_sync(self, num_timesteps: int) -> None:
+        """Refresh the running record's progress and mirror the run dir.
+
+        Never raises: a failed pass is printed, training continues, and
+        the mirror keeps its previous manifest until a pass succeeds.
+        """
+        assert self.mirror is not None
+        try:
+            self._write_record(
+                run_records.RUNNING,
+                progress={
+                    "trained_timesteps": int(num_timesteps),
+                    "updated_at": run_records.utc_now(),
+                },
+            )
+            self.mirror.sync()
+        except Exception as error:
+            print(
+                f"[train] mirroring {self.log_dir} to {self.sync_dir} "
+                f"failed at {num_timesteps:,} steps ({error!r}); training "
+                f"continues, and the mirror stays incomplete until a later "
+                f"pass succeeds"
+            )
+
+    def close(self, error: BaseException | None) -> None:
+        """Write the final record, the manifest, then the final mirror.
+
+        ``error`` is the exception ``train()`` is about to re-raise, or
+        ``None``. A run that never reported an outcome failed outside
+        ``learn()`` (after ``config.json`` existed): ``"crashed"``, or
+        ``"interrupted"`` for a ``KeyboardInterrupt``. A run that did
+        report one and then raised something else -- an env, the SB3
+        logger's TensorBoard flush or a salvage step failing after a
+        completed run -- is recorded the same way, its ``stop_reason``
+        quoting the outcome it had reached: ``train()`` raises, so the
+        record must not read ``completed``. While ``error`` propagates,
+        a failure here is printed and never masks it; otherwise it
+        raises, because a run directory that cannot seal itself is
+        incomplete and the caller must know.
+        """
+        if error is not None and error is not self.noted_error:
+            reached = (
+                ""
+                if self.status is None
+                else f" after the run ended as {self.status}"
+                + (f" ({self.stop_reason})" if self.stop_reason else "")
+            )
+            if isinstance(error, KeyboardInterrupt):
+                self.status = run_records.INTERRUPTED
+                self.stop_reason = (
+                    f"interrupted outside learn(){reached}: KeyboardInterrupt"
+                )
+            else:
+                self.status = run_records.CRASHED
+                self.stop_reason = f"crashed{reached}: {error!r}"
+        elif self.status is None:
+            # Unreachable through train() (a body that returns noted an
+            # outcome), but a record must never be left "running".
+            self.status = run_records.CRASHED
+            self.stop_reason = "crashed: the run reported no outcome"
+        status = self.status
+        for label, action in (
+            (
+                run_records.RUN_RECORD_NAME,
+                lambda: self._write_record(status, finished=True),
+            ),
+            (
+                run_records.SYNC_MANIFEST_NAME,
+                lambda: run_records.write_sync_manifest(
+                    self.log_dir, run_id=self.run_id
+                ),
+            ),
+        ):
+            try:
+                action()
+            except Exception as close_error:
+                if error is None:
+                    raise
+                print(
+                    f"  could not write {label} ({close_error!r}); "
+                    f"{self.log_dir} stays incomplete"
+                )
+                return
+        if self.mirror is not None:
+            try:
+                self._final_sync(error)
+            except KeyboardInterrupt:
+                # The local directory is sealed (its record may well say
+                # completed); only the mirror is unfinished, and the
+                # caller gets the interrupt with the way to finish it.
+                print(
+                    f"[train] mirroring {self.log_dir} to {self.sync_dir} "
+                    f"was interrupted: {self.log_dir} is complete, but the "
+                    f"mirror does not verify. {self._resync_hint()}"
+                )
+                raise
+
+    def _final_pass(self) -> dict[str, Any]:
+        """One final mirror pass, checked against the local manifest.
+
+        The pass trusts its change cache (size, mtime); a file rewritten
+        with both unchanged would keep a stale copy whose cached digest
+        the mirror's manifest repeats. So the mirror's file list must
+        equal the sealed local ``sync_manifest.json``'s, path, bytes and
+        sha256; when it does not, the pass is redone with the cache off,
+        and a mirror that still differs raises.
+        """
+        assert self.mirror is not None
+        local = run_records.read_json_object(
+            self.log_dir / run_records.SYNC_MANIFEST_NAME
+        ).get("files")
+        manifest = self.mirror.sync()
+        if manifest["files"] != local:
+            print(
+                f"[train] the mirror's {run_records.SYNC_MANIFEST_NAME} "
+                f"differs from {self.log_dir}'s; re-copying every file"
+            )
+            manifest = self.mirror.sync(use_cache=False)
+            if manifest["files"] != local:
+                raise SyncError(
+                    f"the mirror's {run_records.SYNC_MANIFEST_NAME} still "
+                    f"differs from {self.log_dir}'s after re-copying every "
+                    f"file: the run directory changed after it was sealed"
+                )
+        return manifest
+
+    def _resync_hint(self) -> str:
+        return (
+            f"Re-run: from courtside_dynamics.experiments.sync import "
+            f"sync_run_dir; sync_run_dir({str(self.log_dir)!r}, "
+            f"{str(self.sync_dir)!r})"
+        )
+
+    def _final_sync(self, error: BaseException | None) -> None:
+        assert self.mirror is not None
+        last: Exception | None = None
+        delays = (0.0, *_FINAL_SYNC_RETRY_SECONDS)
+        for attempt, delay in enumerate(delays, start=1):
+            if delay > 0:
+                time.sleep(delay)
+            try:
+                manifest = self._final_pass()
+            except Exception as sync_error:
+                last = sync_error
+                print(
+                    f"[train] mirroring {self.log_dir} to {self.sync_dir} "
+                    f"failed (attempt {attempt} of {len(delays)}): "
+                    f"{sync_error!r}"
+                )
+                continue
+            print(
+                f"[train] mirrored {manifest['file_count']} file(s) to "
+                f"{self.sync_dir}, sealed by its {run_records.SYNC_MANIFEST_NAME}"
+            )
+            return
+        message = (
+            f"{self.log_dir} is complete, but mirroring it to sync_dir "
+            f"{self.sync_dir} failed {len(delays)} times (last: "
+            f"{last!r}), so the mirror does not verify. {self._resync_hint()}"
+        )
+        if error is not None:
+            print(f"[train] {message}")
+            return
+        raise RuntimeError(message) from last
+
+
+class _MirrorRunDirCallback(BaseCallback):
+    """Mirror the run directory to ``sync_dir`` at checkpoint cadence.
+
+    Ordered after the checkpoint (and diagnosis) callbacks, so each pass
+    carries the checkpoint just written. Never stops training; the
+    lifecycle prints a failed pass and the next one retries.
+    """
+
+    def __init__(self, lifecycle: _RunLifecycle, save_freq: int) -> None:
+        super().__init__()
+        self.lifecycle = lifecycle
+        self.save_freq = save_freq
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.save_freq == 0:
+            self.lifecycle.checkpoint_sync(self.num_timesteps)
         return True
 
 
@@ -168,8 +840,22 @@ class WarmStartConfig:
     the target's own ``ent_coef`` init (e.g. ``auto_0.02``) stands -- the
     "temperature-skip" warm start the PaddleTennis campaign routed to
     (``paddle_tennis_postswing_targets_20260822.md`` section 6). The
-    auto-vs-fixed mismatch still fails loudly either way; for PPO (no
-    temperature on either side) the flag is a documented no-op.
+    auto-vs-fixed mismatch still fails loudly either way. An on-policy
+    run has no temperature on either side, so ``False`` there is
+    refused rather than ignored: its exploration lives in
+    ``policy.log_std``, which ``reset_log_std`` restarts.
+
+    ``reset_log_std=True`` (on-policy only, PPO plan Step 9) refills the
+    transferred ``policy.log_std`` with the target policy's own
+    ``log_std_init`` after the weights load, so a stage starts from its
+    configured exploration noise instead of the source's: the source's
+    std is whatever its own entropy bonus drifted it to (under
+    ``ent_coef`` 0.01 every humanoid action column's log std rose by
+    0.04 to 0.18 within 26.6k steps, and masked dimensions feel only
+    that term, so the drift accumulates stage over stage). Every other
+    transferred tensor is untouched. The SAC family refuses it: its log
+    std is a network output, not a parameter, and its exploration
+    restart is ``transfer_log_ent_coef=False``.
 
     ``expected_artifact_sha256`` pins source artifacts by content: a mapping
     from artifact name (``best_model.zip``, ``best_vec_normalize.pkl``,
@@ -184,6 +870,7 @@ class WarmStartConfig:
     reset_observation_indices: tuple[int, ...] = ()
     transfer_log_ent_coef: bool = True
     expected_artifact_sha256: Mapping[str, str] | None = None
+    reset_log_std: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_run_dir, (str, os.PathLike)):
@@ -202,6 +889,8 @@ class WarmStartConfig:
         object.__setattr__(self, "reset_observation_indices", tuple(sorted(indices)))
         if not isinstance(self.transfer_log_ent_coef, bool):
             raise TypeError("transfer_log_ent_coef must be a bool")
+        if not isinstance(self.reset_log_std, bool):
+            raise TypeError("reset_log_std must be a bool")
         if self.expected_artifact_sha256 is not None:
             if not isinstance(self.expected_artifact_sha256, Mapping):
                 raise TypeError(
@@ -309,6 +998,71 @@ class SelectiveVecNormalize(VecNormalize):
         return result
 
 
+class DummyDtypeSubprocVecEnv(SubprocVecEnv):
+    """``SubprocVecEnv`` that returns exactly what ``DummyVecEnv`` returns.
+
+    ``DummyVecEnv`` writes every step into preallocated buffers: rewards
+    into a float32 array, observations into arrays of the observation
+    space's dtype. ``SubprocVecEnv`` stacks what the workers send back,
+    so an env returning Python-float rewards yields float64 rewards
+    there. Training does not round those away: ``VecNormalize`` updates
+    its return statistics from the raw vector rewards, so a stock
+    subprocess run drifts from the identical in-process run from its
+    first step (measured on BallBalance, BallBounce, WallBall,
+    PaddleTennis and humanoid Stage 0: the reward dtype differs at
+    step 1). This class casts both through the same buffer assignment
+    ``DummyVecEnv`` uses, so ``TrainConfig.vec_env`` changes where the
+    envs step, never what training sees.
+    """
+
+    def __init__(
+        self,
+        env_fns: list[Callable[[], Any]],
+        start_method: str | None = None,
+    ) -> None:
+        super().__init__(env_fns, start_method)
+        self._obs_keys, self._obs_shapes, self._obs_dtypes = obs_space_info(
+            self.observation_space
+        )
+
+    def _as_dummy_obs(self, obs: Any) -> Any:
+        # The same buffers DummyVecEnv allocates, filled by the same
+        # numpy assignment cast.
+        buffers = OrderedDict(
+            (
+                key,
+                np.zeros(
+                    (self.num_envs, *tuple(self._obs_shapes[key])),
+                    dtype=self._obs_dtypes[key],
+                ),
+            )
+            for key in self._obs_keys
+        )
+        for key in self._obs_keys:
+            buffers[key][...] = obs if key is None else obs[key]
+        return dict_to_obs(self.observation_space, buffers)
+
+    def reset(self) -> Any:
+        return self._as_dummy_obs(super().reset())
+
+    def step_wait(self) -> Any:
+        obs, rewards, dones, infos = super().step_wait()
+        return (
+            self._as_dummy_obs(obs),
+            np.asarray(rewards, dtype=np.float32),
+            np.asarray(dones, dtype=bool),
+            list(infos),
+        )
+
+
+#: ``TrainConfig.vec_env`` values: the training workers' VecEnv.
+VEC_ENV_KINDS = ("dummy", "subproc")
+
+#: ``TrainConfig.min_policy_updates_before_stop``'s default, and the
+#: only value an off-policy run may carry.
+DEFAULT_MIN_POLICY_UPDATES_BEFORE_STOP = 20
+
+
 @dataclass
 class TrainConfig:
     """All knobs for a single training run.
@@ -326,7 +1080,18 @@ class TrainConfig:
         disabled so checkpoint selection always measures complete episodes
         from the canonical starting state.
     algo:
-        ``"SAC"`` or ``"PPO"``.
+        A registered algorithm (``training.algos.ALGOS``, matched
+        case-insensitively): ``"SAC"``, ``"DemoSAC"`` (SAC with optional
+        demonstration injection; SAC family) or ``"PPO"`` (on-policy).
+        The family decides what applies: an on-policy run is checked in
+        whole rollouts before any output (``_validate_on_policy_config``),
+        floors its early stops at ``min_policy_updates_before_stop``
+        updates, changes curriculum stages and schedules only between
+        rollouts, defaults reward normalization on with the model's
+        gamma, and trains on the CPU unless a device is set. ``config.json``
+        records the algorithm, its family, its implementation and the
+        run's comparability key, and every loader reads that record
+        (``algos.load_run_model``).
     total_timesteps:
         Total env steps to train for (summed across workers).
     log_dir:
@@ -381,7 +1146,17 @@ class TrainConfig:
         at the final scheduled distribution (run 20260714_211111's
         schedule endpoint coincided exactly with its earliest
         reachable stop, guaranteeing zero time at the target
-        distribution). ``None`` (default) trains for the full budget.
+        distribution). An on-policy run also floors the warm-up at
+        ``min_policy_updates_before_stop`` policy updates (see there).
+        ``None`` (default) trains for the full budget. A patience (or
+        degenerate guard) whose earliest stop lies past the budget's last
+        evaluation is warned about before any output and recorded
+        (:func:`early_stop_reachability`); a stop that fires once the
+        run has trained its whole budget (``num_timesteps >=
+        total_timesteps``: at the final evaluation of a budget that is a
+        multiple of ``eval_freq``, say) records the run as
+        ``completed``, and one that leaves steps untrained (the final
+        scheduled evaluation of any other budget) as ``early_stop``.
         Motivation: the first real WallBall run kept training for 10+
         GPU-hours after its best checkpoint while the policy
         collapsed; run 20260712_190054 then spent 525k steps
@@ -402,6 +1177,12 @@ class TrainConfig:
         normalization on/off. ``None`` (default) picks the per-algo
         default: on for PPO (stabilizes value-function learning), off
         for SAC (interacts poorly with auto-tuned entropy temperature).
+        An on-policy run that normalizes rewards discounts the
+        normalizer's running return with the model's own ``gamma``
+        (SB3's ``VecNormalize`` otherwise uses 0.99 whatever the model
+        discounts at, PPO plan Step 7); every other run keeps
+        VecNormalize's default. ``config.json``'s ``resolved_training``
+        block records the resolved choice and the normalizer's gamma.
     clip_obs / clip_reward:
         Forwarded to ``VecNormalize``. Defaults match SB3 (10.0 each).
     normalize_obs_excluded_indices:
@@ -511,7 +1292,9 @@ class TrainConfig:
         Declarative linear schedules for numeric attributes on every training
         environment. Each mapping is forwarded to
         ``LinearEnvAttrScheduleCallback`` and is driven by SB3's global
-        timestep count. Evaluation environments are never modified.
+        timestep count. Evaluation environments are never modified. An
+        on-policy run moves the value only at rollout starts, so no
+        rollout (and no GAE estimate) mixes two settings.
     best_metric_keys:
         Optional override of the lexicographic selection score used when
         ``headline_key`` owns model selection. ``None`` (default) keeps
@@ -584,11 +1367,23 @@ class TrainConfig:
         append, so a second attempt used to mix its rows into the
         first's, and the stage summary joined the two by timestep;
         the best-model triple and checkpoints of the earlier attempt
-        would also sit beside the new ``config.json``. ``True`` opts in
-        to reusing the directory: the old evaluation CSVs are rotated
-        aside (``eval_info.attempt_<UTC time>.csv``) with a loud message,
-        and every other artifact is overwritten as the new attempt
-        writes it.
+        would also sit beside the new ``config.json``. A previous
+        attempt's ``run_record.json`` is refused the same way (every
+        attempt writes one first, so an attempt that died before its
+        first evaluation is caught too). ``True`` opts in to reusing the
+        directory: every run-layout artifact the previous attempt left
+        but ``config.json`` is rotated aside with a loud message
+        (``metrics/eval_info.attempt_<UTC time>.csv``,
+        ``metrics/monitor.attempt_<UTC time>``,
+        ``model/best_model.attempt_<UTC time>.zip``, ...), so the new
+        attempt's run record, manifest and summary describe it alone.
+        The monitor and TensorBoard directories move whole (SB3's
+        ``Monitor`` only overwrites the CSVs of this attempt's workers,
+        and TensorBoard reads every event file in its folder, so both
+        were read back into the new attempt's curves), and the model
+        files move too (an attempt that crashed before its first
+        evaluation recorded the previous attempt's selection as its
+        own). ``config.json`` is overwritten as this attempt starts.
     confirm_best_eval:
         When ``True``, a candidate best must also win an independent
         second eval batch before ``best_model.zip`` is overwritten
@@ -603,7 +1398,9 @@ class TrainConfig:
         ladder advances one stage each time the metric holds the
         threshold for the sustained number of consecutive evaluations.
         Requires ``info_dict_eval``. Unlike ``env_attr_schedules`` this
-        is earned progression, not a timestep clock.
+        is earned progression, not a timestep clock. An on-policy run
+        applies an earned advance at the end of the rollout its
+        evaluation landed in, never inside one.
     ladder_certification:
         Optional startup certification for the ``performance_gate``
         ladder (wall-ball recipes only), a mapping with keys
@@ -674,7 +1471,9 @@ class TrainConfig:
         patience window. ``degenerate_min_evals`` warms the guard up;
         when ``None`` (default) and ``env_attr_schedules`` exist, it
         is derived to cover the longest schedule's hold phase, where a
-        dead full-difficulty eval is still expected by design.
+        dead full-difficulty eval is still expected by design. An
+        on-policy run floors it at ``min_policy_updates_before_stop``
+        policy updates either way.
         Defaults (0 / empty) disable the guard.
     require_device:
         Opt-in device assertion. ``"cuda"`` makes ``train()`` fail in
@@ -686,7 +1485,93 @@ class TrainConfig:
         to CPU: runs ``20260828_114038`` and ``20260828_114815`` were
         shape-conformant launches on a CPU-only runtime (a ``+cpu``
         torch build passes the ``nvidia-smi`` check ``setup_colab``
-        makes) that could not finish in wall-clock.
+        makes) that could not finish in wall-clock. One exception
+        (PPO plan Step 8): an on-policy run with SB3's MLP
+        actor-critic policy and no ``model_kwargs["device"]`` trains
+        on the CPU, where SB3 itself says it belongs (its MLP updates
+        are too small to use a GPU, so ``"auto"`` on a GPU runtime only
+        adds transfers). ``config.json``'s ``resolved_training`` block
+        records the device asked for and why.
+    min_policy_updates_before_stop:
+        On-policy runs only (PPO plan Step 6). An on-policy model
+        updates once per rollout of ``n_steps * n_envs`` env steps, so
+        an early stop sized in evaluations can fire after almost no
+        updates: WallBall's degenerate stop at 5 evaluations of 25k fired
+        after 0 to 7 updates at 8 workers x 2,048 steps, and a quick
+        test could stop "completed" with none. ``train()`` floors the
+        early-stop warm-up (``early_stop_patience``'s ``min_evals``) and
+        ``degenerate_min_evals`` at
+        ``ceil(K * n_steps * n_envs / eval_freq)`` evaluations for
+        ``K = min_policy_updates_before_stop``, so no early stop can fire
+        before the policy has had K updates (whole-rollout cadences
+        make evaluation ``e`` see ``e * rollouts_per_eval - 1``). A
+        performance gate's ``stage_eval_budget`` stop has no warm-up to
+        floor, so the pre-flight refuses a budget at or below that many
+        evaluations instead. ``0`` disables the floor. Off-policy runs
+        update every step and must leave the default (20); any other
+        value is refused.
+    vec_env:
+        The training workers' VecEnv: ``"dummy"`` (default; every worker
+        steps in this process) or ``"subproc"`` (one process per worker,
+        :class:`DummyDtypeSubprocVecEnv`), which scales env collection
+        with cores -- collection, not the update, bounds CPU training
+        (632-832 steps/s measured on 4 shared cores). Both return
+        identical arrays for the same seeds, so a run trains the same
+        either way. Evaluation, video and diagnosis envs stay
+        single-worker and in-process. The factory is pickled to the
+        workers (cloudpickle), and ``check_env`` runs on a throwaway
+        instance in this process instead of on worker 0. A plain script
+        that calls ``train()`` with ``"subproc"`` must do so under
+        ``if __name__ == "__main__":``: SB3 starts the workers with
+        ``forkserver`` (``spawn`` where that is unavailable), which
+        re-imports the main module, and an unguarded script fails in
+        the VecEnv constructor (``EOFError``) after ``config.json`` is
+        written. Notebooks need no guard.
+    sync_dir:
+        Opt-in local-then-sync (``experiments.sync``). ``None``
+        (default) keeps every artifact where ``log_dir`` puts it. Set to
+        a directory (a Google Drive folder on Colab) and ``train()``
+        still writes everything under ``log_dir`` -- point that at local
+        disk -- but mirrors the run directory to it (``~`` expanded and
+        resolved once, before any output, so a later change of working
+        directory cannot move the mirror) at every checkpoint
+        (``checkpoint_freq``) and once more at the end, after the local
+        ``sync_manifest.json``. The mirror's own manifest is written
+        last, only after every copied file re-hashes correctly, so a
+        mirror cut short (a disconnected runtime, a Drive error) never
+        verifies as complete. It must be absent or empty at launch,
+        outside ``log_dir``, with an existing parent (checked before any
+        output). A failed checkpoint pass is printed and training
+        continues; a final mirror that still fails after three attempts
+        raises once the local run directory is complete (a run that is
+        already failing keeps its own exception, and the mirror failure
+        is printed).
+    snapshot_evals:
+        Save the policy and its ``VecNormalize`` statistics at every
+        evaluation (``eval_freq``) under ``snapshots/``
+        (``experiments.snapshots``): ``snapshot_<N>_steps.zip`` and
+        ``snapshot_vecnormalize_<N>_steps.pkl``, the format
+        ``best_model.zip`` / ``best_vec_normalize.pkl`` use (no replay
+        buffer), each pair bound by sha256 in ``snapshots/index.json``
+        and written atomically. Saved before that step's evaluations
+        run, so a snapshot is exactly the policy (and normalizer) the
+        in-loop evaluators score at that step; the offline harness
+        (``python -m courtside_dynamics.experiments.rescore``) re-scores
+        them under any evaluation protocol. Saving reads the model and
+        consumes no RNG, so training is unchanged. A PaddleTennis SAC
+        snapshot is about 3.5 MB (the zip carries the critics, their
+        targets and the optimizer states besides the policy), so about
+        140 MB per 1M steps at the recipe's 25k cadence. A snapshot that
+        fails on a disk error is printed and listed in the index's
+        ``failures``, and training continues. Default off; the
+        PaddleTennis recipe turns it on.
+
+    Every run directory also carries ``run_record.json`` (written right
+    after ``config.json`` with status ``"running"`` and rewritten on every
+    terminal path: completed, early stop, interrupted, crashed) and,
+    written last, ``sync_manifest.json`` (``experiments.records``); a run
+    directory without a manifest that verifies is incomplete
+    (``python -m courtside_dynamics.experiments.verify <run_dir>``).
     """
 
     env_fn: Callable
@@ -762,6 +1647,10 @@ class TrainConfig:
     eval_reset_options: Sequence[Mapping[str, Any]] | None = None
     monitor_info_keywords: Sequence[str] = field(default_factory=tuple)
     reuse_log_dir: bool = False
+    min_policy_updates_before_stop: int = DEFAULT_MIN_POLICY_UPDATES_BEFORE_STOP
+    vec_env: str = "dummy"
+    sync_dir: str | os.PathLike[str] | None = None
+    snapshot_evals: bool = False
 
 
 #: Offset of the derived paired-evaluation seed block from ``cfg.seed``
@@ -932,11 +1821,341 @@ def _validate_observation_indices(
 
 
 def _resolved_norm_reward(cfg: TrainConfig) -> bool:
+    """``normalize_reward``, with ``None`` resolved per algorithm family:
+    on for the on-policy PPO family, off for the SAC family (DemoSAC
+    included)."""
     return (
         cfg.normalize_reward
         if cfg.normalize_reward is not None
-        else cfg.algo.upper() == "PPO"
+        else _algo_family(cfg.algo) == "PPO"
     )
+
+
+def _is_on_policy(cfg: TrainConfig) -> bool:
+    return cfg.algo.upper() in _ON_POLICY_ALGOS
+
+
+def _algo_setting(cfg: TrainConfig, key: str) -> Any:
+    """The constructor setting ``key`` that ``cfg.algo`` will be built with.
+
+    ``model_kwargs[key]`` when given, else the algorithm constructor's
+    default (``inspect.signature``), else ``None`` (no such argument).
+    """
+    if key in cfg.model_kwargs:
+        return cfg.model_kwargs[key]
+    parameters = inspect.signature(_resolve_algo(cfg.algo).__init__).parameters
+    parameter = parameters.get(key)
+    if parameter is None or parameter.default is inspect.Parameter.empty:
+        return None
+    return parameter.default
+
+
+def _reward_normalizer_gamma(cfg: TrainConfig) -> float | None:
+    """The discount the training ``VecNormalize`` must use, or ``None``.
+
+    PPO plan Step 7 (static-4). VecNormalize normalizes rewards by the
+    running std of a return it discounts with its own ``gamma``, 0.99
+    unless told otherwise, so a 0.995 run scaled its rewards by the
+    statistics of a 100-step horizon instead of its 200-step one. An
+    on-policy run that normalizes rewards gets the model's own gamma.
+    ``None`` keeps VecNormalize's default for every other run: SB3
+    updates the return statistics even with ``norm_reward=False``, so
+    passing the model's gamma to an SAC run would change its pickled
+    normalizer, and those paths stay bit-identical.
+    """
+    if not (_is_on_policy(cfg) and _resolved_norm_reward(cfg)):
+        return None
+    gamma = _algo_setting(cfg, "gamma")
+    if isinstance(gamma, bool) or not isinstance(gamma, (int, float)):
+        raise ValueError(
+            f"{cfg.algo}'s gamma must be a number to discount the reward "
+            f"normalizer with, got {gamma!r}"
+        )
+    return float(gamma)
+
+
+def _device_request(cfg: TrainConfig) -> tuple[str, str]:
+    """The ``device`` ``train()`` builds the model with, and why.
+
+    PPO plan Step 8 (static-5). Returns ``(device, source)``: the
+    caller's ``model_kwargs["device"]`` (``"model_kwargs"``); ``"cpu"``
+    for an on-policy run with SB3's MLP actor-critic policy when
+    ``require_device`` is ``None`` (``"on_policy_mlp_cpu_default"``);
+    else SB3's ``"auto"`` (``"sb3_default"``). SB3 itself warns that
+    PPO/A2C with ``ActorCriticPolicy`` belong on the CPU (its
+    ``_maybe_recommend_cpu`` checks that exact class name, so CNN and
+    multi-input policies keep ``"auto"``); a GPU runtime only adds
+    host-device copies to updates this small. The off-policy family
+    always keeps ``"auto"``.
+    """
+    if "device" in cfg.model_kwargs:
+        return str(cfg.model_kwargs["device"]), "model_kwargs"
+    if _is_on_policy(cfg) and cfg.require_device is None:
+        policy_class: Any = cfg.policy
+        if isinstance(policy_class, str):
+            policy_class = _resolve_algo(cfg.algo).policy_aliases.get(policy_class)
+        if (
+            isinstance(policy_class, type)
+            and policy_class.__name__ == "ActorCriticPolicy"
+        ):
+            return "cpu", "on_policy_mlp_cpu_default"
+    return "auto", "sb3_default"
+
+
+def inloop_eval_device(cfg: TrainConfig) -> str:
+    """The device type ``train(cfg)`` builds the model on: ``"cpu"`` or ``"cuda"``.
+
+    The in-loop evaluators run the policy there, so it is the device of
+    the run's in-loop evaluation protocol (``config.json``'s
+    ``comparability_key.eval_protocol``, written before the model
+    exists). Resolved as SB3 resolves it (``get_device``: ``"auto"`` is
+    CUDA when torch sees a GPU, and a CUDA request without one falls
+    back to the CPU) from :func:`_device_request`; ``train()`` checks
+    the built model against it (:func:`_check_inloop_eval_device`).
+    """
+    from stable_baselines3.common.utils import get_device
+
+    device, _source = _device_request(cfg)
+    return get_device(device).type
+
+
+def _check_inloop_eval_device(model: BaseAlgorithm, recorded: str) -> None:
+    """The built model's device must be the one ``config.json`` recorded.
+
+    ``recorded`` is :func:`inloop_eval_device`'s answer, which
+    ``write_run_config`` fingerprinted the in-loop protocol on before
+    the model existed; a model elsewhere would leave the run claiming a
+    protocol it never evaluated under.
+    """
+    device = getattr(model, "device", None)
+    built = getattr(device, "type", None)
+    if built != recorded:
+        raise RuntimeError(
+            f"config.json records the in-loop evaluation protocol on "
+            f"{recorded!r}, but the model was built on {device}: the run "
+            f"would claim a protocol it never evaluated under"
+        )
+
+
+def _rollout_env_steps(cfg: TrainConfig) -> int | None:
+    """An on-policy run's rollout, ``n_steps * n_envs``; ``None`` otherwise."""
+    if not _is_on_policy(cfg):
+        return None
+    n_steps = _algo_setting(cfg, "n_steps")
+    if not _positive_int(n_steps):
+        return None
+    return int(n_steps) * cfg.n_envs
+
+
+def _policy_update_floor_evals(cfg: TrainConfig) -> int:
+    """Evaluations an on-policy run must complete before an early stop.
+
+    PPO plan Step 6 (static-3, empirical-1):
+    ``ceil(K * n_steps * n_envs / eval_freq)`` for
+    ``K = cfg.min_policy_updates_before_stop``. Both stop warm-ups are
+    floored at it, and each stop needs at least one evaluation past its
+    warm-up, so with the whole-rollout cadences the pre-flight enforces
+    (``R = eval_freq / rollout`` rollouts per evaluation; evaluation
+    ``e`` runs before its rollout's update and so sees ``e * R - 1``
+    updates) the earliest stop sees at least
+    ``(ceil(K / R) + 1) * R - 1 >= K`` updates. ``0`` for the off-policy
+    family, for ``K = 0``, and for a run without a rollout length.
+    """
+    rollout = _rollout_env_steps(cfg)
+    updates = cfg.min_policy_updates_before_stop
+    if rollout is None or updates <= 0 or cfg.eval_freq <= 0:
+        return 0
+    return math.ceil(updates * rollout / cfg.eval_freq)
+
+
+def _floor_stop_warmup(cfg: TrainConfig, evals: int) -> int:
+    """An early stop's warm-up after the on-policy update floor."""
+    floor = _policy_update_floor_evals(cfg)
+    return evals if floor == 0 or evals >= floor else floor
+
+
+def _degenerate_warmup_evals(
+    cfg: TrainConfig, schedules: Sequence[LinearEnvAttrScheduleCallback]
+) -> int:
+    """``degenerate_min_evals`` as ``train()`` arms it, before the floor.
+
+    The configured value; when that is ``None`` and ``env_attr_schedules``
+    exist, the evaluations up to the longest schedule's hold: while a
+    reset curriculum still holds its start distribution, a dead
+    full-difficulty eval is expected by design, so the guard arms only
+    once every schedule has begun tapering. Else 0.
+    """
+    evals = cfg.degenerate_min_evals
+    if evals is None and schedules:
+        evals = math.ceil(
+            max(schedule.hold_until_timesteps for schedule in schedules)
+            / cfg.eval_freq
+        )
+    return evals or 0
+
+
+def _headline_patience_warmup_evals(
+    cfg: TrainConfig, schedules: Sequence[LinearEnvAttrScheduleCallback]
+) -> int:
+    """The headline patience's warm-up (``min_evals``), before the floor.
+
+    The patience itself; with ``env_attr_schedules``, at least the
+    evaluations up to the last schedule's end, which guarantees a full
+    patience window of training at the final scheduled distribution:
+    without it, a schedule ending at the earliest reachable stop gets
+    zero post-taper training (run 20260714_211111's design flaw).
+    """
+    assert cfg.early_stop_patience is not None
+    min_evals = cfg.early_stop_patience
+    if schedules:
+        schedule_end = max(schedule.end_timesteps for schedule in schedules)
+        min_evals = max(min_evals, math.ceil(schedule_end / cfg.eval_freq))
+    return min_evals
+
+
+def _scheduled_evaluations(cfg: TrainConfig) -> int:
+    """How many evaluations ``cfg``'s budget runs.
+
+    Every evaluation stream fires when its callback's call count (one
+    per vec step) is a multiple of ``eval_freq // n_envs``.
+    ``learn()`` checks the budget between collections: an on-policy run
+    collects whole rollouts of ``n_steps`` vec steps, an off-policy run
+    ``train_freq`` vec steps at a time (one by default; a ``train_freq``
+    counted in episodes is taken as one step, which can only undercount).
+    """
+    n_envs = max(cfg.n_envs, 1)
+    rollout = _rollout_env_steps(cfg)
+    if rollout is not None:
+        vec_steps = math.ceil(cfg.total_timesteps / rollout) * (rollout // n_envs)
+    else:
+        chunk = 1
+        train_freq = _algo_setting(cfg, "train_freq")
+        if isinstance(train_freq, (tuple, list)) and len(train_freq) == 2:
+            if train_freq[1] == "step" and _positive_int(train_freq[0]):
+                chunk = int(train_freq[0])
+        elif _positive_int(train_freq):
+            chunk = int(train_freq)
+        vec_steps = math.ceil(math.ceil(cfg.total_timesteps / n_envs) / chunk) * chunk
+    return vec_steps // _env_steps_to_calls(cfg.eval_freq, cfg.n_envs)
+
+
+def early_stop_reachability(cfg: TrainConfig) -> dict[str, Any]:
+    """Whether each configured early stop can fire inside the budget.
+
+    Nothing said when a budget was too small for a stop to fire
+    (``repo_review_20261016`` train-3): BallBalance's reward-path
+    patience of 20 can never stop its 1M-step run at an evaluation every
+    25k steps (its earliest stop is evaluation 41 of 40). For the
+    early-stop patience (headline or reward selection) and the
+    degenerate-signal guard this returns the warm-up ``train()`` arms,
+    the earliest evaluation the stop can fire at, and whether that is
+    past the last evaluation the budget runs (``inert``); ``warnings``
+    words each inert one. ``train()`` prints the warnings before any
+    output, and ``config.json``'s ``resolved_training`` and the run
+    record carry them.
+    """
+    result: dict[str, Any] = {
+        "scheduled_evaluations": None,
+        "guards": {},
+        "warnings": [],
+    }
+    if cfg.eval_freq <= 0:
+        return result
+    schedules = tuple(
+        LinearEnvAttrScheduleCallback(**dict(schedule))
+        for schedule in cfg.env_attr_schedules
+    )
+    scheduled = _scheduled_evaluations(cfg)
+    result["scheduled_evaluations"] = scheduled
+    headline = bool(cfg.info_dict_eval and cfg.headline_key)
+    guards: dict[str, dict[str, Any]] = {}
+    patience = cfg.early_stop_patience
+    if _positive_int(patience):
+        assert patience is not None
+        if headline:
+            warmup = _floor_stop_warmup(
+                cfg, _headline_patience_warmup_evals(cfg, schedules)
+            )
+            earliest = warmup + patience
+        else:
+            # SB3's StopTrainingOnNoModelImprovement counts from
+            # evaluation min_evals + 1 and stops once the count exceeds
+            # the patience.
+            warmup = _floor_stop_warmup(cfg, patience)
+            earliest = warmup + patience + 1
+        guards["early_stop_patience"] = {
+            "selection": "headline" if headline else "reward",
+            "warmup_evals": warmup,
+            "earliest_stop_evaluation": earliest,
+            "inert": earliest > scheduled,
+        }
+    degenerate_evals = cfg.early_stop_degenerate_evals
+    if (
+        headline
+        and _positive_int(degenerate_evals)
+        and (
+            cfg.degenerate_min_evals is None
+            or isinstance(cfg.degenerate_min_evals, int)
+        )
+    ):
+        warmup = _floor_stop_warmup(cfg, _degenerate_warmup_evals(cfg, schedules))
+        earliest = warmup + degenerate_evals
+        guards["degenerate_signal"] = {
+            "warmup_evals": warmup,
+            "earliest_stop_evaluation": earliest,
+            "inert": earliest > scheduled,
+        }
+    result["guards"] = guards
+    result["warnings"] = [
+        f"{name} can never fire: its earliest stop is evaluation "
+        f"{guard['earliest_stop_evaluation']} (after a warm-up of "
+        f"{guard['warmup_evals']}), but total_timesteps "
+        f"{cfg.total_timesteps:,} at eval_freq {cfg.eval_freq:,} runs "
+        f"{scheduled} evaluation(s); this run trains its full budget "
+        f"whatever its evaluations read"
+        for name, guard in guards.items()
+        if guard["inert"]
+    ]
+    return result
+
+
+def resolved_training_settings(cfg: TrainConfig) -> dict[str, Any]:
+    """What ``train()`` resolves from ``cfg`` beyond its fields.
+
+    ``config.json``'s ``resolved_training`` block (the ``train_config``
+    block records the fields as configured, and ``resolved_model`` what
+    the built model reports): the reward normalization and the
+    discount of the normalizer's return statistics (``None`` without a
+    VecNormalize), the device asked of SB3 and why, for an on-policy
+    run the rollout and the evaluation floor the early stops get from
+    ``min_policy_updates_before_stop``, and whether each early stop can
+    fire inside the budget (:func:`early_stop_reachability`).
+    """
+    norm_reward = _resolved_norm_reward(cfg)
+    use_vec_normalize = bool(cfg.normalize_obs or norm_reward)
+    matched_gamma = _reward_normalizer_gamma(cfg)
+    gamma: float | None = None
+    gamma_source: str | None = None
+    if matched_gamma is not None:
+        gamma, gamma_source = matched_gamma, "model_gamma"
+    elif use_vec_normalize:
+        # VecNormalize's own default: what every other run pickles.
+        default = inspect.signature(VecNormalize.__init__).parameters["gamma"]
+        gamma, gamma_source = float(default.default), "vec_normalize_default"
+    device, device_source = _device_request(cfg)
+    return {
+        "normalize_reward_resolved": norm_reward,
+        "vec_normalize": use_vec_normalize,
+        "vec_normalize_gamma": gamma,
+        "vec_normalize_gamma_source": gamma_source,
+        "device_request": device,
+        "device_request_source": device_source,
+        "rollout_env_steps": _rollout_env_steps(cfg),
+        "policy_update_floor_evals": (
+            _policy_update_floor_evals(cfg) if _is_on_policy(cfg) else None
+        ),
+        "early_stop_reachability": early_stop_reachability(cfg),
+    }
 
 
 #: Devices ``TrainConfig.require_device`` can demand (``None`` disables).
@@ -1077,6 +2296,10 @@ def _validate_evaluation_config(cfg: TrainConfig) -> None:
         raise TypeError(
             f"reuse_log_dir must be a bool, got {cfg.reuse_log_dir!r}"
         )
+    if not isinstance(cfg.snapshot_evals, bool):
+        raise TypeError(
+            f"snapshot_evals must be a bool, got {cfg.snapshot_evals!r}"
+        )
 
 
 #: Keys a ``performance_gate`` mapping must set (the rest default).
@@ -1101,6 +2324,23 @@ def _validate_callback_config(cfg: TrainConfig) -> None:
     moved its logs before failing.
     """
     headline_selection = bool(cfg.info_dict_eval and cfg.headline_key)
+    if cfg.degenerate_min_evals is not None:
+        # InfoDictEvalCallback refuses these too, but only once train()
+        # has written config.json -- and an on-policy run's update floor
+        # used to accept a negative value silently, printing it as
+        # "raised from -1".
+        if isinstance(cfg.degenerate_min_evals, bool) or not isinstance(
+            cfg.degenerate_min_evals, int
+        ):
+            raise TypeError(
+                f"degenerate_min_evals must be None or an integer, got "
+                f"{cfg.degenerate_min_evals!r}"
+            )
+        if cfg.degenerate_min_evals < 0:
+            raise ValueError(
+                f"degenerate_min_evals must be nonnegative, got "
+                f"{cfg.degenerate_min_evals}"
+            )
     if cfg.reward_eval_episodes is not None:
         if not _positive_int(cfg.reward_eval_episodes):
             raise ValueError("reward_eval_episodes must be a positive integer")
@@ -1178,6 +2418,243 @@ def _validate_callback_config(cfg: TrainConfig) -> None:
             raise ValueError(
                 f"performance_gate must set {missing_gate_keys}"
             )
+
+
+def _validate_worker_and_stop_config(cfg: TrainConfig) -> None:
+    """Refuse a malformed ``vec_env`` or ``min_policy_updates_before_stop``.
+
+    Config-only, so it runs with the checks above, before any output.
+    ``min_policy_updates_before_stop`` acts on on-policy runs only; an
+    off-policy run updates every step, so any value but the default
+    there would be a silent no-op and is refused instead.
+    """
+    if cfg.vec_env not in VEC_ENV_KINDS:
+        raise ValueError(
+            f"vec_env must be one of {list(VEC_ENV_KINDS)}, got {cfg.vec_env!r}"
+        )
+    updates = cfg.min_policy_updates_before_stop
+    if isinstance(updates, bool) or not isinstance(updates, int) or updates < 0:
+        raise ValueError(
+            f"min_policy_updates_before_stop must be a nonnegative integer "
+            f"(0 disables the floor), got {updates!r}"
+        )
+    if not _is_on_policy(cfg) and updates != DEFAULT_MIN_POLICY_UPDATES_BEFORE_STOP:
+        raise ValueError(
+            f"min_policy_updates_before_stop={updates} applies to on-policy "
+            f"runs only: {cfg.algo} updates at every step, so its early "
+            f"stops are not counted in rollouts. Leave the default "
+            f"({DEFAULT_MIN_POLICY_UPDATES_BEFORE_STOP}); a run file sets "
+            f"it in [train.algo.ppo]"
+        )
+
+
+def _on_policy_updates(cfg: TrainConfig, model: BaseAlgorithm) -> int | None:
+    """A PPO-family model's SB3 ``_n_updates`` for the run summary.
+
+    SB3 counts optimization epochs there (``n_epochs`` per rollout).
+    ``None`` for the SAC family, so its summary is unchanged (PPO plan
+    Step 5 gates the zero-update warning on the PPO family).
+    """
+    if _algo_family(cfg.algo) != "PPO":
+        return None
+    return int(getattr(model, "_n_updates", 0))
+
+
+def _dump_final_update_logs(model: BaseAlgorithm) -> None:
+    """Write an on-policy run's last update metrics to its logger.
+
+    SB3's on-policy ``learn()`` dumps the logger before each
+    ``train()``, so an update's ``train/*`` metrics reach
+    ``progress.csv`` with the next rollout's row, and the last update's
+    never do. The summary's Training Health block and on-policy flags
+    then missed the final update, and its ``train/n_updates`` read one
+    rollout behind SB3's count (a BallBalance PPO quick test: 60
+    against 70). ``train()`` calls this once ``learn()`` has returned
+    (not after an interrupt or a crash); nothing is written when no
+    ``train/*`` value is pending (an evaluation's dump already flushed
+    them).
+    """
+    logger = model.logger
+    if not any(key.startswith("train/") for key in logger.name_to_value):
+        return
+    # Same x value an evaluation's dump gives its row (SB3 EvalCallback).
+    logger.record("time/total_timesteps", model.num_timesteps, exclude="tensorboard")
+    logger.dump(step=model.num_timesteps)
+
+
+#: Performance-gate levers that act on state only an off-policy model
+#: has: the update pause sets ``gradient_steps``, the wipe clears the
+#: replay buffer, and the reset restores an auto-tuned entropy
+#: temperature.
+_OFF_POLICY_GATE_LEVERS = (
+    "advance_update_pause_steps",
+    "clear_replay_buffer_on_advance",
+    "reset_entropy_on_advance",
+)
+
+
+def _validate_on_policy_config(cfg: TrainConfig) -> None:
+    """Refuse on-policy settings that cannot train as configured.
+
+    PPO plan Step 4 (static-2, static-8, static-3(1)). An on-policy
+    algorithm updates once per rollout of ``n_steps * n_envs`` env
+    steps and then discards it, so its geometry, cadences and budget
+    are counted in rollouts. Config-only, like the checks beside it, so
+    ``train()`` runs it before any env is built or artifact written, and
+    ``build_train_config`` runs it too. Off-policy algorithms return at
+    once. A setting absent from ``model_kwargs`` takes the algorithm
+    constructor's default (``inspect.signature``). Refused:
+
+    - the performance gate's SAC-only levers
+      (:data:`_OFF_POLICY_GATE_LEVERS`); the gate callback refused them
+      only at training start, after ``config.json`` was written;
+    - ``n_steps``/``batch_size`` that are not positive integers,
+      ``batch_size <= 1`` with advantage normalization (NaN advantages),
+      ``n_steps * n_envs <= 1``, and a rollout ``batch_size`` does not
+      divide (SB3 only warns, then trains a truncated minibatch in every
+      epoch);
+    - an evaluation every fewer env steps than one rollout
+      (``eval_freq // n_envs < n_steps``: evaluations repeat on an
+      unchanged policy) and a budget shorter than one rollout
+      (``learn()`` would still collect the whole rollout);
+    - evaluation and checkpoint cadences that are not whole rollouts:
+      every evaluation (which selects ``best_model.zip`` and drives the
+      stops) and every checkpoint must follow the same whole number of
+      updates, so the stops' update floor, the gate's advances and the
+      checkpoint series line up with updates (SB3 runs a whole-rollout
+      evaluation on the rollout's last step, after its data and before
+      its update);
+    - a performance gate whose ``stage_eval_budget`` stop would fire
+      before ``min_policy_updates_before_stop`` updates (a budget at or
+      below :func:`_policy_update_floor_evals`);
+    - ``policy_kwargs`` the policy class does not accept
+      (``algos.validate_policy_kwargs``);
+    - a non-numeric ``gamma`` when rewards are normalized (the
+      normalizer discounts with it, :func:`_reward_normalizer_gamma`).
+    """
+    name = cfg.algo.upper()
+    if name not in _ON_POLICY_ALGOS:
+        return
+
+    def setting(key: str) -> Any:
+        return _algo_setting(cfg, key)
+
+    if isinstance(cfg.performance_gate, Mapping):
+        levers = [
+            lever
+            for lever in _OFF_POLICY_GATE_LEVERS
+            if cfg.performance_gate.get(lever)
+        ]
+        if levers:
+            raise ValueError(
+                f"performance_gate sets {levers}, which act on an "
+                f"off-policy model's gradient steps, replay buffer or "
+                f"entropy temperature; {name} has none of them (it "
+                f"discards each rollout after its update). Drop them for "
+                f"a {name} run"
+            )
+
+    n_envs = cfg.n_envs
+    n_steps = setting("n_steps")
+    batch_size = setting("batch_size")
+    for key, value in (("n_steps", n_steps), ("batch_size", batch_size)):
+        if value is not None and not _positive_int(value):
+            raise ValueError(
+                f"model_kwargs['{key}'] must be a positive integer for "
+                f"{name}, got {value!r}"
+            )
+    if n_steps is None:
+        # An on-policy class without a rollout length has no rollout
+        # geometry to check (none is registered today).
+        return
+    rollout = n_steps * n_envs
+    if rollout <= 1:
+        raise ValueError(
+            f"n_steps * n_envs = {n_steps} * {n_envs} = {rollout}: a "
+            f"{name} rollout needs at least two transitions"
+        )
+    if batch_size is not None:
+        if setting("normalize_advantage") and batch_size <= 1:
+            raise ValueError(
+                f"batch_size {batch_size} with normalize_advantage: a "
+                f"one-sample minibatch has no advantage spread to "
+                f"normalize by (NaN advantages)"
+            )
+        if rollout % batch_size:
+            raise ValueError(
+                f"batch_size {batch_size} does not divide the rollout of "
+                f"n_steps * n_envs = {n_steps} * {n_envs} = {rollout} "
+                f"transitions: every epoch would end on a truncated "
+                f"minibatch of {rollout % batch_size}. Pick a batch_size "
+                f"that divides {rollout}"
+            )
+    if cfg.total_timesteps < rollout:
+        raise ValueError(
+            f"total_timesteps {cfg.total_timesteps:,} is shorter than one "
+            f"rollout (n_steps * n_envs = {rollout:,} env steps): learn() "
+            f"would still collect the whole rollout, overrunning the "
+            f"budget, for a single update"
+        )
+    per_worker = cfg.eval_freq // max(n_envs, 1)
+    if per_worker < n_steps:
+        raise ValueError(
+            f"eval_freq {cfg.eval_freq:,} is {per_worker} steps per worker, "
+            f"fewer than one rollout (n_steps {n_steps}): evaluations "
+            f"would repeat on a policy no update has changed. Evaluate "
+            f"every whole number of rollouts ({rollout:,} env steps each)"
+        )
+    cadences = (
+        ("eval_freq", cfg.eval_freq, "each evaluation (selection, early stops)"),
+        ("checkpoint_freq", cfg.checkpoint_freq, "each checkpoint"),
+    )
+    for field_name, cadence, consumer in cadences:
+        if field_name == "checkpoint_freq" and cadence <= 0:
+            continue
+        if cadence % rollout:
+            nearest = max(rollout, round(cadence / rollout) * rollout)
+            raise ValueError(
+                f"{field_name} {cadence:,} is not a whole number of "
+                f"rollouts (n_steps * n_envs = {n_steps} * {n_envs} = "
+                f"{rollout:,} env steps): {consumer} must follow the same "
+                f"whole number of updates, so the stop floor, gate advances "
+                f"and checkpoints line up with updates. Use "
+                f"a multiple of {rollout:,}, e.g. {nearest:,}"
+            )
+    if isinstance(cfg.performance_gate, Mapping):
+        # The gate's budget stop counts a stage's own evaluations, with
+        # no warm-up for the update floor to raise: a stage-0 budget at
+        # or below the floor would stop the run before K updates. Each
+        # other stop fires at least one evaluation past the floor, so
+        # the budget must exceed it too. (The final stage has no budget,
+        # so a one-stage gate's never fires.)
+        budget = cfg.performance_gate.get("stage_eval_budget")
+        stages = cfg.performance_gate.get("stages")
+        floor_evals = _policy_update_floor_evals(cfg)
+        if (
+            cfg.performance_gate.get("stage_eval_budget_action", "stop") == "stop"
+            and isinstance(stages, Sequence)
+            and len(stages) > 1
+            and isinstance(budget, int)
+            and _positive_int(budget)
+            and budget <= floor_evals
+        ):
+            raise ValueError(
+                f"performance_gate stage_eval_budget {budget} would stop the "
+                f"run at evaluation {budget}, before "
+                f"min_policy_updates_before_stop="
+                f"{cfg.min_policy_updates_before_stop} policy updates "
+                f"(rollouts of {rollout:,} env steps, an evaluation every "
+                f"{cfg.eval_freq:,}: the other early stops wait "
+                f"{floor_evals} evaluations and fire after one more). Use a "
+                f"budget of at least {floor_evals + 1}, the 'advance' "
+                f"action, or a lower min_policy_updates_before_stop"
+            )
+    policy_kwargs = cfg.model_kwargs.get("policy_kwargs")
+    if policy_kwargs:
+        _validate_policy_kwargs(name, cfg.policy, policy_kwargs)
+    # The reward normalizer's discount (Step 7): a gamma it cannot use
+    # fails here, not inside write_run_config's record of it.
+    _reward_normalizer_gamma(cfg)
 
 
 def _validate_monitor_info_keywords(cfg: TrainConfig) -> tuple[str, ...]:
@@ -1271,7 +2748,7 @@ def _has_data_rows(path: str) -> bool:
 
 
 def _check_log_dir_reuse(cfg: TrainConfig) -> None:
-    """Refuse (or, opted in, rotate) a previous attempt's evaluation logs.
+    """Refuse (or, opted in, rotate) a previous attempt's records and logs.
 
     ``InfoDictEvalCallback`` appends to ``eval_info.csv`` /
     ``eval_info_final.csv`` -- correct within one run, but a second
@@ -1282,7 +2759,28 @@ def _check_log_dir_reuse(cfg: TrainConfig) -> None:
     checkpoints would sit beside the new ``config.json`` until (if
     ever) the new attempt overwrites them. Every shipped caller already
     starts in a fresh directory (``resolve_run_dir`` timestamps one,
-    the campaign's ``next_stage_attempt_dir`` numbers one).
+    the campaign's ``next_stage_attempt_dir`` numbers one). A previous
+    attempt is recognized by its evaluation rows, by its
+    ``run_record.json``, which every attempt writes first, or by its
+    ``snapshots/index.json`` (whose entries a new attempt would
+    otherwise refuse mid-launch, ``TrainConfig.snapshot_evals``).
+
+    Under ``reuse_log_dir=True`` every run-layout artifact the previous
+    attempt left (``RUN_LAYOUT``: summary, run record, sync manifest,
+    the model files, the metrics, reports, media, checkpoints and
+    snapshots) but
+    ``config.json``, which this attempt rewrites first, rotates aside as
+    ``<name>.attempt_<UTC time>`` (a directory whole). The monitor and
+    TensorBoard directories were the first (``repo_review_20261016``
+    train-5): SB3's ``Monitor`` overwrites only the CSVs of the workers
+    this attempt has, and TensorBoard reads every event file in its
+    folder, so both were read back into the new attempt's curves and
+    summary; a directory moves whole because a renamed event file is
+    still read (TensorBoard matches any name containing ``tfevents``).
+    The rest followed: an attempt that crashed before its first
+    evaluation recorded the previous attempt's ``best_model_meta.json``
+    as its selection and listed the previous best, final model and
+    normalizer as its own artifacts, sealed by its manifest.
     """
     stale = [
         path
@@ -1292,19 +2790,44 @@ def _check_log_dir_reuse(cfg: TrainConfig) -> None:
         )
         if path is not None and _has_data_rows(path)
     ]
-    if not stale:
+    previous_record = locate_artifact(cfg.log_dir, "run_record")
+    snapshots_dir = locate_artifact(cfg.log_dir, "snapshots_dir")
+    previous_snapshots = (
+        os.path.join(snapshots_dir, SNAPSHOT_INDEX_NAME)
+        if snapshots_dir is not None
+        and os.path.isfile(os.path.join(snapshots_dir, SNAPSHOT_INDEX_NAME))
+        else None
+    )
+    if not stale and previous_record is None and previous_snapshots is None:
         return
     if not cfg.reuse_log_dir:
+        evidence = (
+            stale
+            + ([previous_record] if previous_record else [])
+            + ([previous_snapshots] if previous_snapshots else [])
+        )
         raise ValueError(
             f"log_dir {cfg.log_dir} already holds a previous training "
-            f"attempt's evaluation rows ({', '.join(stale)}); a new run "
-            f"would append to them and mix two attempts' artifacts. Use a "
-            f"fresh log_dir (resolve_run_dir() timestamps one), or pass "
-            f"reuse_log_dir=True to rotate those CSVs aside and overwrite "
-            f"the rest of the directory"
+            f"attempt ({', '.join(evidence)}); a new run would append to its "
+            f"evaluation rows and mix two attempts' artifacts. Use a fresh "
+            f"log_dir (resolve_run_dir() timestamps one), or pass "
+            f"reuse_log_dir=True to rotate its run-layout artifacts aside "
+            f"and overwrite its config.json"
         )
+    rotated: list[str] = []
+    for name in RUN_LAYOUT:
+        if name == "config":
+            continue
+        path = locate_artifact(cfg.log_dir, name)
+        if path is None:
+            continue
+        if os.path.isdir(path) and is_empty_directory(path):
+            continue
+        if any(path.startswith(os.path.join(parent, "")) for parent in rotated):
+            continue  # moves with its directory (pre-0.14 tensorboard/)
+        rotated.append(path)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    for path in stale:
+    for path in rotated:
         root, extension = os.path.splitext(path)
         destination = f"{root}.attempt_{stamp}{extension}"
         suffix = 1
@@ -1314,10 +2837,14 @@ def _check_log_dir_reuse(cfg: TrainConfig) -> None:
         os.replace(path, destination)
         print(
             f"[train] reuse_log_dir=True: rotated the previous attempt's "
-            f"{path} to {destination}; config.json, model/, checkpoints/ "
-            f"and the other artifacts in {cfg.log_dir} are overwritten as "
-            f"this attempt writes them"
+            f"{path} to {destination}"
         )
+    print(
+        f"[train] reuse_log_dir=True: {len(rotated)} artifact(s) of the "
+        f"previous attempt rotated aside; this attempt overwrites "
+        f"config.json in {cfg.log_dir}, and files outside the run layout "
+        f"stay as they are"
+    )
 
 
 def _resolve_warm_start_warmup(
@@ -1483,6 +3010,7 @@ def _salvage_crashed_run(
     gate_callback: PerformanceGatedEnvStagesCallback | None,
     start_time: float,
     error: BaseException,
+    best_unbound: Callable[[], str | None] = lambda: None,
 ) -> None:
     """Best-effort epilogue for a run whose ``learn()`` raised.
 
@@ -1491,25 +3019,35 @@ def _salvage_crashed_run(
     marked ``crashed`` -- skipping the closing evaluation (the env may
     be the thing that broke). Every step is isolated: a salvage
     failure is printed and never masks the original exception, which
-    the caller re-raises.
+    the caller re-raises. ``best_unbound`` is the run's best-model
+    verdict (``records.BestSaveLedger.unbound``), for the summary.
     """
     steps: list[tuple[str, Callable[[], object]]] = [
-        (
-            "final_model",
-            lambda: model.save(artifact_path(cfg.log_dir, "final_model")),
-        )
+        ("final_model", lambda: _save_final_model(model, cfg.log_dir))
     ]
     if isinstance(train_env, VecNormalize):
         steps.append(
             (
                 "vec_normalize",
-                lambda: train_env.save(
-                    artifact_path(cfg.log_dir, "vec_normalize")
-                ),
+                lambda: _save_final_normalizer(train_env, cfg.log_dir),
             )
         )
     if gate_callback is not None:
-        steps.append(("performance-gate stage history", gate_callback.finalize))
+        steps.append(
+            (
+                "performance-gate stage history",
+                functools.partial(gate_callback.finalize, salvage=True),
+            )
+        )
+    if _is_on_policy(cfg):
+        steps.append(
+            (
+                "config.json training progress",
+                lambda: update_run_config_with_model(
+                    model, cfg.log_dir, progress=True
+                ),
+            )
+        )
     steps.append(
         (
             "stage_summary",
@@ -1523,6 +3061,118 @@ def _salvage_crashed_run(
                 status="crashed",
                 actual_timesteps=int(model.num_timesteps),
                 stop_reason=f"crashed: {error!r}",
+                n_updates=_on_policy_updates(cfg, model),
+                best_unbound=best_unbound(),
+            ),
+        )
+    )
+    for label, action in steps:
+        try:
+            action()
+        except Exception as salvage_error:
+            print(f"  could not salvage {label}: {salvage_error!r}")
+
+
+def _salvage_interrupted_run(
+    cfg: TrainConfig,
+    model: BaseAlgorithm,
+    train_env: VecEnv,
+    eval_env: VecEnv,
+    *,
+    gate_callback: PerformanceGatedEnvStagesCallback | None,
+    start_time: float,
+    stop_reason: str,
+    eval_clock: _EvalClock,
+    best_unbound: Callable[[], str | None] = lambda: None,
+) -> None:
+    """Epilogue for a run stopped by ``KeyboardInterrupt``.
+
+    A stopped Colab cell must not vaporize hours of training, and one
+    I/O error in its epilogue must not either: the gate's ``finalize``
+    (which copies the best triple on the Drive mount) used to run first
+    and unguarded, so an ``OSError`` there lost the model, its
+    normalizer and the summary (``repo_review_20261016`` train-2). Like
+    :func:`_salvage_crashed_run`, the policy and its normalizer are
+    saved first and every step is isolated: a failure is printed and the
+    next step runs. Unlike it, the closing evaluation still runs (the
+    env stepped fine until the interrupt, and the tennis event sampler
+    now discards a control step the interrupt left open), and the
+    summary is marked ``interrupted``, reporting ``best_unbound``'s
+    verdict on the best model (an interrupt is when a best-model save
+    is split between its renames).
+    """
+    closing: dict[str, float] = {}
+
+    def closing_evaluation() -> None:
+        if isinstance(train_env, VecNormalize):
+            # The last evaluation synced eval_env's statistics up to
+            # eval_freq steps ago; normalize with the final ones.
+            sync_envs_normalization(train_env, eval_env)
+        started = time.monotonic()
+        try:
+            mean_reward, std_reward = evaluate_policy(
+                model, eval_env, n_eval_episodes=cfg.n_eval_episodes
+            )
+        finally:
+            eval_clock.closing_seconds += time.monotonic() - started
+        closing["mean"] = (
+            sum(mean_reward) / len(mean_reward)
+            if isinstance(mean_reward, list)
+            else float(mean_reward)
+        )
+        closing["std"] = (
+            sum(std_reward) / len(std_reward)
+            if isinstance(std_reward, list)
+            else float(std_reward)
+        )
+        print(f"Mean reward: {closing['mean']:.2f} +/- {closing['std']:.2f}")
+
+    steps: list[tuple[str, Callable[[], object]]] = [
+        ("final_model", lambda: _save_final_model(model, cfg.log_dir))
+    ]
+    if _is_on_policy(cfg):
+        steps.append(
+            (
+                "config.json training progress",
+                lambda: update_run_config_with_model(
+                    model, cfg.log_dir, progress=True
+                ),
+            )
+        )
+    if isinstance(train_env, VecNormalize):
+        steps.append(
+            (
+                "vec_normalize",
+                lambda: _save_final_normalizer(train_env, cfg.log_dir),
+            )
+        )
+    if gate_callback is not None:
+        # SB3 only calls on_training_end after a clean training loop, so
+        # the gate's in-flight stage row and final-stage archive come
+        # from here; a pending advance that fails to apply is reported,
+        # not raised (finalize(salvage=True)).
+        steps.append(
+            (
+                "performance-gate stage history",
+                functools.partial(gate_callback.finalize, salvage=True),
+            )
+        )
+    steps.append(("closing evaluation", closing_evaluation))
+    steps.append(
+        (
+            "stage_summary",
+            lambda: write_run_summary(
+                cfg,
+                cfg.log_dir,
+                final_mean_reward=closing.get("mean"),
+                final_std_reward=closing.get("std"),
+                duration_seconds=time.monotonic() - start_time,
+                device=str(getattr(model, "device", "")) or None,
+                status="interrupted",
+                actual_timesteps=int(model.num_timesteps),
+                stop_reason=stop_reason,
+                n_updates=_on_policy_updates(cfg, model),
+                best_unbound=best_unbound(),
             ),
         )
     )
@@ -1542,12 +3192,22 @@ def _sha256_file(path: Path) -> str:
 
 
 def _config_norm_reward(train_config: dict[str, Any]) -> bool:
+    """A recorded ``train_config``'s resolved reward normalization.
+
+    Mirrors :func:`_resolved_norm_reward` on ``config.json`` data, where
+    the algorithm is an unvalidated string: an unknown or missing one
+    resolves to off, as the hand-written ``== "PPO"`` test did.
+    """
     configured = train_config.get("normalize_reward")
     if configured is None:
-        return str(train_config.get("algo", "")).upper() == "PPO"
+        return str(train_config.get("algo", "")).upper() in _ON_POLICY_ALGOS
     if not isinstance(configured, bool):
         raise ValueError("source normalize_reward must be bool or null")
     return configured
+
+
+#: The algorithm families a policy-only warm start supports.
+_WARM_START_FAMILIES = ("PPO", "SAC")
 
 
 def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
@@ -1556,10 +3216,36 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
     if warm_start is None:
         return None
     algo = cfg.algo.upper()
-    if algo != "PPO" and algo not in _OFF_POLICY_ALGOS:
+    # train() resolves the algo first; a direct caller with an
+    # unregistered one belongs to no family and gets the same refusal.
+    try:
+        family: str | None = _algo_family(algo)
+    except ValueError:
+        family = None
+    if family not in _WARM_START_FAMILIES:
         raise ValueError(
             "policy-only warm start currently supports PPO and the SAC "
             f"family ({', '.join(sorted(_OFF_POLICY_ALGOS))}) only"
+        )
+    # Each family's exploration restart (PPO plan Step 9): an option of
+    # the other family would be a silent no-op, so it is refused here,
+    # before any output.
+    if algo in _ON_POLICY_ALGOS:
+        if not warm_start.transfer_log_ent_coef:
+            raise ValueError(
+                f"transfer_log_ent_coef=False skips an entropy temperature "
+                f"{algo} does not have; its exploration noise is the "
+                f"policy's own log_std, which transfers with the weights. "
+                f"To restart exploration at the target's log_std_init, set "
+                f"WarmStartConfig(reset_log_std=True) and leave "
+                f"transfer_log_ent_coef at True"
+            )
+    elif warm_start.reset_log_std:
+        raise ValueError(
+            f"reset_log_std applies to on-policy warm starts only: {algo}'s "
+            f"log std is an output of the actor network, not a parameter "
+            f"to refill. The SAC family restarts exploration with "
+            f"transfer_log_ent_coef=False"
         )
     if not cfg.normalize_obs:
         raise ValueError("policy-only warm start requires normalize_obs=True")
@@ -1604,13 +3290,15 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
     if not isinstance(source_train, dict) or not isinstance(source_env, dict):
         raise ValueError("warm-start config lacks train_config/env provenance")
     source_algo = str(source_train.get("algo", "")).upper()
-    # Same algo, or both in the SAC family: the policy container
-    # (actor/critics/targets/log_ent_coef) is shared across the family,
-    # so a DemoSAC pilot may start from a plain-SAC lineage and vice
-    # versa. PPO never crosses.
-    same_family = source_algo == algo or (
-        source_algo in _OFF_POLICY_ALGOS and algo in _OFF_POLICY_ALGOS
-    )
+    # Same family: the policy container (actor/critics/targets/
+    # log_ent_coef) is shared across the SAC family, so a DemoSAC pilot
+    # may start from a plain-SAC lineage and vice versa. PPO never
+    # crosses. An unknown recorded algo belongs to no family.
+    try:
+        source_family: str | None = _algo_family(source_algo)
+    except ValueError:
+        source_family = None
+    same_family = source_family == family
     if not same_family:
         raise ValueError(
             f"warm-start source algo must match the target "
@@ -1646,6 +3334,14 @@ def _prepare_warm_start(cfg: TrainConfig) -> _WarmStartArtifacts | None:
         target_class = type(target_env).__name__
         target_observation_shape = list(target_env.observation_space.shape or ())
         target_action_shape = list(target_env.action_space.shape or ())
+        if warm_start.reset_log_std and not isinstance(
+            target_env.action_space, spaces.Box
+        ):
+            raise ValueError(
+                f"reset_log_std needs a continuous (Box) action space, whose "
+                f"Gaussian policy carries a log_std; the target's is "
+                f"{target_env.action_space}"
+            )
         target_observation_names = env_observation_names(target_env)
         target_curriculum_value = getattr(target_env, "curriculum_metadata", None)
         target_curriculum = (
@@ -1756,8 +3452,15 @@ def _load_warm_start_normalizer(
     cfg: TrainConfig,
     *,
     norm_reward: bool,
+    gamma: float | None = None,
 ) -> VecNormalize:
-    """Attach source observation statistics and reset target-task state."""
+    """Attach source observation statistics and reset target-task state.
+
+    ``gamma`` (:func:`_reward_normalizer_gamma`; ``None`` keeps the
+    pickled value) replaces the source normalizer's return discount, so
+    the target's fresh return statistics accumulate at the target
+    model's horizon rather than whatever the source pickled.
+    """
     normalizer = VecNormalize.load(str(artifacts.normalizer_path), base_env)
     if normalizer.norm_obs is not True:
         raise ValueError("warm-start normalizer must have norm_obs=True")
@@ -1802,7 +3505,34 @@ def _load_warm_start_normalizer(
     normalizer.old_reward = np.array([])
     normalizer.old_obs = np.array([])
     normalizer.training = True
+    if gamma is not None:
+        normalizer.gamma = gamma
     return normalizer
+
+
+def _reset_policy_log_std(model: BaseAlgorithm) -> float:
+    """Refill a warm-started on-policy policy's ``log_std`` from its init.
+
+    SB3's Gaussian and gSDE action distributions create ``log_std`` as
+    ``ones(shape) * log_std_init`` (the policy's ``policy_kwargs``
+    value); the transferred state dict replaced it with the source's.
+    The refill is in place (``detach`` shares storage), so the
+    optimizer's param group keeps pointing at the same parameter. gSDE
+    resamples its exploration matrix from the new std at the next
+    rollout start. Returns the value written.
+    """
+    import torch
+
+    policy: Any = model.policy
+    log_std = getattr(policy, "log_std", None)
+    log_std_init = getattr(policy, "log_std_init", None)
+    if not isinstance(log_std, torch.nn.Parameter) or log_std_init is None:
+        raise ValueError(
+            f"reset_log_std: the {type(policy).__name__} policy has no "
+            f"log_std parameter (and log_std_init) to refill"
+        )
+    log_std.detach().fill_(float(log_std_init))
+    return float(log_std_init)
 
 
 def train(cfg: TrainConfig) -> BaseAlgorithm:
@@ -1812,7 +3542,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     TensorBoard events, evaluation npz, video MP4s, ``best_model`` /
     ``final_model`` checkpoints, plus ``config.json`` (provenance
     snapshot at start) and ``stage_summary.txt`` (eval / wall-clock
-    report at end) under ``cfg.log_dir``.
+    report at end) under ``cfg.log_dir``; ``run_record.json`` (written
+    right after ``config.json`` as ``"running"`` and rewritten on every
+    terminal path) and, last of all, ``sync_manifest.json``; and, with
+    ``cfg.sync_dir``, a verified mirror of the whole directory there.
 
     The SB3 logger ``train()`` installs (``progress.csv`` + TensorBoard)
     is closed on return; a caller that trains the returned model further
@@ -1831,6 +3564,8 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     _check_required_device(cfg)
     _validate_evaluation_config(cfg)
     _validate_callback_config(cfg)
+    _validate_worker_and_stop_config(cfg)
+    _validate_on_policy_config(cfg)
     env_attr_schedule_callbacks = tuple(
         LinearEnvAttrScheduleCallback(**dict(schedule))
         for schedule in cfg.env_attr_schedules
@@ -1845,18 +3580,62 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     monitor_info_keywords = _validate_monitor_info_keywords(cfg)
     resolved_eval_seed = resolve_eval_seed(cfg)
     _validate_eval_reset_options(cfg, resolved_eval_seed)
+    # The resolved target is the one mirrored and recorded: a "~" or a
+    # relative sync_dir means the same directory for the whole run.
+    sync_target = validate_sync_target(cfg.log_dir, cfg.sync_dir)
+    # An early stop the budget cannot reach is a silent no-op: say so
+    # now (config.json's resolved_training and the run record keep it).
+    reachability = early_stop_reachability(cfg)
+    for warning in reachability["warnings"]:
+        print(f"[train] warning: {warning}")
     # Last pre-output check: a refusal leaves the directory untouched,
     # and an opted-in rotation only happens once every config-only check
     # above passed (algo, model kwargs, device, evaluation, eval-stream,
-    # diagnosis and gate settings, warm start, monitor keys, reset
-    # options), so a misconfigured retry cannot strand the previous
-    # attempt. Checks that need the constructed evaluators (the
+    # diagnosis and gate settings, worker kind and update floor,
+    # on-policy rollout geometry, warm start, monitor keys, reset
+    # options, sync target), so a misconfigured retry cannot strand the
+    # previous attempt. Checks that need the constructed evaluators (the
     # selection-metric probe, the gate callback's value checks) and the
     # ladder certification still run after config.json is written.
     _check_log_dir_reuse(cfg)
 
     os.makedirs(cfg.log_dir, exist_ok=True)
     write_run_config(cfg, cfg.log_dir)
+    run = _RunLifecycle(
+        cfg, preflight_warnings=reachability["warnings"], sync_dir=sync_target
+    )
+    try:
+        model = _train_in_log_dir(
+            cfg,
+            run,
+            env_attr_schedule_callbacks=env_attr_schedule_callbacks,
+            warm_start_artifacts=warm_start_artifacts,
+            monitor_info_keywords=monitor_info_keywords,
+            resolved_eval_seed=resolved_eval_seed,
+        )
+    except BaseException as error:
+        run.close(error)
+        raise
+    run.close(None)
+    return model
+
+
+def _train_in_log_dir(
+    cfg: TrainConfig,
+    run: _RunLifecycle,
+    *,
+    env_attr_schedule_callbacks: tuple[LinearEnvAttrScheduleCallback, ...],
+    warm_start_artifacts: _WarmStartArtifacts | None,
+    monitor_info_keywords: tuple[str, ...],
+    resolved_eval_seed: int | None,
+) -> BaseAlgorithm:
+    """``train()`` once ``config.json`` and the running record exist.
+
+    Builds the envs, callbacks and model, runs ``learn()`` and its
+    epilogue (or the interrupt / crash salvage), and reports the
+    outcome to ``run``; every env and the SB3 logger are closed before
+    it returns or raises, so ``train()`` can seal the directory next.
+    """
     start_time = time.monotonic()
 
     if cfg.ladder_certification is not None:
@@ -1905,20 +3684,41 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
     opened_envs: list[VecEnv] = []
     sb3_logger: Logger | None = None
     try:
-        train_env = make_vec_env(
-            checked_train_env_fn,
-            n_envs=cfg.n_envs,
-            seed=cfg.seed,
-            monitor_dir=artifact_path(cfg.log_dir, "monitor_dir"),
-            # Extra per-episode columns (e.g. episode-cumulative
-            # counters) in every worker's monitor CSV; None keeps
-            # SB3's plain r,l,t rows.
-            monitor_kwargs=(
-                {"info_keywords": monitor_info_keywords}
-                if monitor_info_keywords
-                else None
-            ),
+        # Extra per-episode columns (e.g. episode-cumulative counters)
+        # in every worker's monitor CSV; None keeps SB3's plain r,l,t
+        # rows.
+        train_monitor_kwargs = (
+            {"info_keywords": monitor_info_keywords}
+            if monitor_info_keywords
+            else None
         )
+        if cfg.vec_env == "subproc":
+            # The workers build their envs in their own processes, so
+            # the one-time check runs here on a throwaway instance (a
+            # seeded reset fully re-initializes every shipped env, so
+            # the workers' streams match the in-process run's, whose
+            # worker 0 is the checked instance).
+            probe_env = cfg.env_fn()
+            try:
+                check_env(probe_env)
+            finally:
+                probe_env.close()
+            train_env = make_vec_env(
+                cfg.env_fn,
+                n_envs=cfg.n_envs,
+                seed=cfg.seed,
+                monitor_dir=artifact_path(cfg.log_dir, "monitor_dir"),
+                monitor_kwargs=train_monitor_kwargs,
+                vec_env_cls=DummyDtypeSubprocVecEnv,
+            )
+        else:
+            train_env = make_vec_env(
+                checked_train_env_fn,
+                n_envs=cfg.n_envs,
+                seed=cfg.seed,
+                monitor_dir=artifact_path(cfg.log_dir, "monitor_dir"),
+                monitor_kwargs=train_monitor_kwargs,
+            )
         opened_envs.append(train_env)
         eval_env = make_vec_env(
             checked_eval_env_fn,
@@ -1932,6 +3732,16 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         # per-algo default; True/False forces the choice.
         norm_reward = _resolved_norm_reward(cfg)
         use_vec_normalize = cfg.normalize_obs or norm_reward
+        # An on-policy run that normalizes rewards discounts the
+        # normalizer's return at the model's gamma (PPO plan Step 7);
+        # every other run keeps VecNormalize's default, so the SAC
+        # family's pickled statistics are untouched. All four
+        # normalizers get it, so a synced evaluation normalizer never
+        # disagrees with the one it copies.
+        normalizer_gamma = _reward_normalizer_gamma(cfg)
+        gamma_kwargs: dict[str, Any] = (
+            {} if normalizer_gamma is None else {"gamma": normalizer_gamma}
+        )
         if use_vec_normalize:
             if warm_start_artifacts is not None:
                 train_env = _load_warm_start_normalizer(
@@ -1939,6 +3749,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     warm_start_artifacts,
                     cfg,
                     norm_reward=norm_reward,
+                    gamma=normalizer_gamma,
                 )
             else:
                 train_env = SelectiveVecNormalize(
@@ -1948,6 +3759,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     clip_obs=cfg.clip_obs,
                     clip_reward=cfg.clip_reward,
                     normalize_obs_excluded_indices=(cfg.normalize_obs_excluded_indices),
+                    **gamma_kwargs,
                 )
             # Eval envs always read the env's true reward (norm_reward=False)
             # and freeze the running stats (training=False); SB3's EvalCallback
@@ -1959,6 +3771,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 clip_obs=cfg.clip_obs,
                 training=False,
                 normalize_obs_excluded_indices=(cfg.normalize_obs_excluded_indices),
+                **gamma_kwargs,
             )
 
         def _calls(env_steps: int) -> int:
@@ -2019,10 +3832,37 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 final_eval_episodes = max(1, cfg.n_eval_episodes // 2)
 
         on_new_best: BaseCallback | None = None
-        if use_vec_normalize and not headline_selection:
-            on_new_best = _SaveVecNormalizeOnNewBest(
-                artifact_path(cfg.log_dir, "best_vec_normalize")
+        if not headline_selection:
+            on_new_best = _SaveBestOnNewBest(
+                artifact_path(cfg.log_dir, "best_model"),
+                (
+                    artifact_path(cfg.log_dir, "best_vec_normalize")
+                    if use_vec_normalize
+                    else None
+                ),
+                meta_path=artifact_path(cfg.log_dir, "best_model_meta"),
+                ledger=run.best_ledger,
+                record_n_updates=_is_on_policy(cfg),
             )
+
+        # PPO plan Step 6: an on-policy run's early stops wait until its
+        # policy has had min_policy_updates_before_stop updates. 0 for
+        # the off-policy family, whose warm-ups stay exactly as wired.
+        update_floor_evals = _policy_update_floor_evals(cfg)
+
+        def _floored_warmup(label: str, evals: int) -> int:
+            # No floor (the off-policy family, K = 0): the warm-up goes
+            # to its callback untouched, which validates it as before.
+            if update_floor_evals == 0 or evals >= update_floor_evals:
+                return evals
+            print(
+                f"[train] {label} raised from {evals} to "
+                f"{update_floor_evals} evaluations: no early stop may fire "
+                f"before {cfg.min_policy_updates_before_stop} policy "
+                f"updates (rollouts of {_rollout_env_steps(cfg):,} env "
+                f"steps, an evaluation every {cfg.eval_freq:,})"
+            )
+            return update_floor_evals
 
         after_eval: BaseCallback | None = None
         if (
@@ -2033,25 +3873,29 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             # min_evals = patience gives the run a warm-up of the same
             # length as the patience window, so at least 2N evaluations
             # happen before the stop can fire. verbose=1 so the stop
-            # reason is visible in the Colab cell output.
-            after_eval = StopTrainingOnNoModelImprovement(
+            # reason is visible in the Colab cell output (and the
+            # subclass records it for the summary and the run record).
+            after_eval = _StopOnNoRewardImprovement(
                 max_no_improvement_evals=cfg.early_stop_patience,
-                min_evals=cfg.early_stop_patience,
+                min_evals=_floored_warmup(
+                    "early_stop_patience's warm-up (min_evals)",
+                    cfg.early_stop_patience,
+                ),
                 verbose=1,
             )
 
-        # SB3's EvalCallback/InfoDictEvalCallback join ``best_model.zip``
-        # onto their save directory themselves, so both are pointed at the
-        # layout's model/ folder; EvalCallback likewise writes
-        # ``evaluations.npz`` inside ``log_path``, i.e. metrics/.
+        # InfoDictEvalCallback joins ``best_model.zip`` onto its save
+        # directory itself, so it is pointed at the layout's model/
+        # folder; EvalCallback writes ``evaluations.npz`` inside
+        # ``log_path``, i.e. metrics/. EvalCallback never saves the best
+        # model itself: under reward selection on_new_best does, without
+        # SB3's in-place write.
         best_model_dir = os.path.dirname(artifact_path(cfg.log_dir, "best_model"))
         eval_callback: EvalCallback | None = None
         if not merge_reward_eval_into_final:
             eval_callback = EvalCallback(
                 eval_env,
-                best_model_save_path=(
-                    None if headline_selection else best_model_dir
-                ),
+                best_model_save_path=None,
                 log_path=os.path.dirname(
                     artifact_path(cfg.log_dir, "evaluations")
                 ),
@@ -2068,16 +3912,26 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 verbose=0 if headline_selection else eval_verbose,
             )
 
-        callbacks: list[BaseCallback] = (
-            [] if eval_callback is None else [eval_callback]
-        )
+        callbacks: list[BaseCallback] = []
+        if cfg.snapshot_evals:
+            # First: each snapshot is taken before any evaluator, gate
+            # or checkpoint callback runs at its step.
+            callbacks.append(
+                _SnapshotOnEvaluation(
+                    artifact_path(cfg.log_dir, "snapshots_dir"),
+                    run_id=run.run_id,
+                    eval_freq=_calls(cfg.eval_freq),
+                )
+            )
+        if eval_callback is not None:
+            callbacks.append(eval_callback)
         # Bound outside the gated-construction branch so the interrupt
         # salvage path can finalize the gate's stage history (or skip
         # cleanly for non-gated runs).
         gate_callback: PerformanceGatedEnvStagesCallback | None = None
         if cfg.checkpoint_freq > 0:
             callbacks.append(
-                CheckpointCallback(
+                _AtomicCheckpointCallback(
                     save_freq=_calls(cfg.checkpoint_freq),
                     save_path=artifact_path(cfg.log_dir, "checkpoints_dir"),
                     name_prefix=cfg.name_prefix,
@@ -2105,6 +3959,12 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     env_fn=resolved_eval_env_fn,
                     verbose=cfg.verbose,
                 )
+            )
+        if run.mirror is not None and cfg.checkpoint_freq > 0:
+            # After the checkpoint and its diagnosis, so each mirror
+            # pass carries them (experiments.sync; TrainConfig.sync_dir).
+            callbacks.append(
+                _MirrorRunDirCallback(run, save_freq=_calls(cfg.checkpoint_freq))
             )
         if cfg.record_video and cfg.video_freq > 0:
             callbacks.append(
@@ -2135,6 +3995,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     clip_obs=cfg.clip_obs,
                     training=False,
                     normalize_obs_excluded_indices=(cfg.normalize_obs_excluded_indices),
+                    **gamma_kwargs,
                 )
             if headline_selection:
                 # Selection duty: full episode count (a //4 sample
@@ -2147,6 +4008,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 selection_kwargs: dict[str, Any] = {
                     "best_metric_keys": _selection_metric_keys(cfg),
                     "best_model_save_path": best_model_dir,
+                    "best_ledger": run.best_ledger,
                     "best_metric_min_delta": cfg.best_metric_min_delta,
                     "confirm_best": cfg.confirm_best_eval,
                     "degenerate_flat_keys": cfg.degenerate_flat_keys,
@@ -2158,24 +4020,16 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     selection_kwargs["degenerate_guard_keys"] = tuple(
                         cfg.degenerate_guard_keys
                     )
-                    degenerate_min_evals = cfg.degenerate_min_evals
-                    if (
-                        degenerate_min_evals is None
-                        and env_attr_schedule_callbacks
-                    ):
-                        # While a reset curriculum still holds its start
-                        # distribution, a dead full-difficulty eval is
-                        # expected by design -- arm the guard only once
-                        # every schedule has begun tapering.
-                        degenerate_min_evals = math.ceil(
-                            max(
-                                callback.hold_until_timesteps
-                                for callback in env_attr_schedule_callbacks
-                            )
-                            / cfg.eval_freq
-                        )
+                    # Derived from the schedules' hold when unset (see
+                    # _degenerate_warmup_evals, which the run record's
+                    # reachability check shares).
                     selection_kwargs["degenerate_min_evals"] = (
-                        degenerate_min_evals or 0
+                        _floored_warmup(
+                            "degenerate_min_evals",
+                            _degenerate_warmup_evals(
+                                cfg, env_attr_schedule_callbacks
+                            ),
+                        )
                     )
                 if (
                     cfg.early_stop_patience is not None
@@ -2184,22 +4038,17 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     selection_kwargs["early_stop_patience"] = (
                         cfg.early_stop_patience
                     )
-                    min_evals = cfg.early_stop_patience
-                    if env_attr_schedule_callbacks:
-                        # Guarantee a full patience window of training
-                        # at the final scheduled distribution: without
-                        # this, a schedule ending at the earliest
-                        # reachable stop gets zero post-taper training
-                        # (run 20260714_211111's design flaw).
-                        schedule_end = max(
-                            callback.end_timesteps
-                            for callback in env_attr_schedule_callbacks
+                    # At least a full patience window at the final
+                    # scheduled distribution (see
+                    # _headline_patience_warmup_evals).
+                    selection_kwargs["early_stop_min_evals"] = (
+                        _floored_warmup(
+                            "early_stop_patience's warm-up (min_evals)",
+                            _headline_patience_warmup_evals(
+                                cfg, env_attr_schedule_callbacks
+                            ),
                         )
-                        min_evals = max(
-                            min_evals,
-                            math.ceil(schedule_end / cfg.eval_freq),
-                        )
-                    selection_kwargs["early_stop_min_evals"] = min_evals
+                    )
             else:
                 # Reporting only: a quarter of the eval budget keeps
                 # the extra rollout pass cheap.
@@ -2231,6 +4080,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 # resolve_eval_seed) keeps the legacy unpaired stream.
                 eval_seed=resolved_eval_seed,
                 eval_reset_options=cfg.eval_reset_options,
+                # On-policy runs: SB3's update count behind each
+                # evaluation, an eval_info.csv row (PPO plan Step 6).
+                record_n_updates=_is_on_policy(cfg),
                 **selection_kwargs,
             )
             if headline_selection or cfg.success_key is not None:
@@ -2315,6 +4167,7 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                         normalize_obs_excluded_indices=(
                             cfg.normalize_obs_excluded_indices
                         ),
+                        **gamma_kwargs,
                     )
                 callbacks.append(
                     InfoDictEvalCallback(
@@ -2364,6 +4217,10 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
         # refused by the pre-flight _validate_callback_config.)
         callbacks.extend(env_attr_schedule_callbacks)
         callbacks.extend(cfg.extra_callbacks)
+        # Evaluation wall clock for the run record's eval share.
+        for callback in callbacks:
+            if isinstance(callback, (EvalCallback, InfoDictEvalCallback)):
+                run.eval_clock.watch(callback)
 
         # cfg.seed / cfg.verbose are the first-class knobs; an explicit value in
         # model_kwargs still wins (setdefault), and routing both through
@@ -2395,6 +4252,11 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 source_model.action_space,
             )
 
+        # PPO plan Step 8: an on-policy MLP run with no device asked for
+        # trains on the CPU (recorded in config.json's resolved_training).
+        device, device_source = _device_request(cfg)
+        if device_source == "on_policy_mlp_cpu_default":
+            model_kwargs["device"] = device
         model = _build_algo(
             cfg.algo,
             train_env,
@@ -2402,7 +4264,21 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             policy=cfg.policy,
             **model_kwargs,
         )
+        run.model = model
         _check_model_device(model, cfg.require_device)
+        if cfg.info_dict_eval and not cfg.performance_gate:
+            _check_inloop_eval_device(model, inloop_eval_device(cfg))
+        if normalizer_gamma is not None:
+            # The normalizer was built before the model it serves; fail
+            # rather than train on a horizon the model does not use.
+            assert isinstance(train_env, VecNormalize)
+            model_gamma = float(getattr(model, "gamma", float("nan")))
+            if train_env.gamma != model_gamma:
+                raise RuntimeError(
+                    f"the reward normalizer discounts at gamma "
+                    f"{train_env.gamma}, but the built model uses "
+                    f"{model_gamma}"
+                )
         transferred_log_ent_coef: float | None = None
         if source_model is not None:
             if type(source_model.policy) is not type(model.policy):
@@ -2426,6 +4302,13 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             # critic target networks, so the transfer resumes from a
             # self-consistent TD state rather than fresh random targets.
             model.policy.load_state_dict(source_model.policy.state_dict(), strict=True)
+            assert cfg.warm_start is not None
+            # PPO plan Step 9: an on-policy target may restart its
+            # exploration noise at its own log_std_init (refused for the
+            # SAC family by _prepare_warm_start).
+            log_std_reset_to: float | None = None
+            if cfg.warm_start.reset_log_std:
+                log_std_reset_to = _reset_policy_log_std(model)
             # SAC's auto-tuned entropy temperature lives on the algorithm,
             # not the policy. A fresh "auto" restarts at ent_coef=1.0 --
             # a huge entropy bonus that would churn a converged policy
@@ -2440,7 +4323,6 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     "warm-start source and target entropy configurations "
                     "differ (auto-tuned vs fixed ent_coef)"
                 )
-            assert cfg.warm_start is not None
             log_ent_coef_skipped = False
             if source_log_ent is not None and target_log_ent is not None:
                 if cfg.warm_start.transfer_log_ent_coef:
@@ -2461,6 +4343,14 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
             source_env = warm_start_artifacts.source_config["env"]
             source_curriculum = source_env.get("curriculum")
             assert not isinstance(train_env.obs_rms, dict)
+            # An on-policy policy's exploration noise is its log_std
+            # parameter: named apart from the rest of the state dict as
+            # transferred or reset (PPO plan Step 9).
+            on_policy_log_std: dict[str, Any] = {}
+            if _is_on_policy(cfg):
+                on_policy_log_std["reset_log_std"] = cfg.warm_start.reset_log_std
+                if log_std_reset_to is not None:
+                    on_policy_log_std["log_std_reset_value"] = log_std_reset_to
             initialization = {
                 "mode": "policy_and_observation_stats",
                 "source_run_dir": str(warm_start_artifacts.source_run_dir),
@@ -2499,6 +4389,11 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 },
                 "transferred": [
                     "policy.state_dict",
+                    *(
+                        ["policy.log_std"]
+                        if on_policy_log_std and log_std_reset_to is None
+                        else []
+                    ),
                     "vec_normalize.obs_rms",
                     *(
                         ["log_ent_coef"]
@@ -2519,12 +4414,14 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     "vec_normalize.returns",
                     "logger_and_callback_state",
                     *(["log_ent_coef"] if log_ent_coef_skipped else []),
+                    *(["policy.log_std"] if log_std_reset_to is not None else []),
                 ],
                 "transfer_log_ent_coef": (
                     cfg.warm_start.transfer_log_ent_coef
                     if cfg.warm_start is not None
                     else True
                 ),
+                **on_policy_log_std,
                 **(
                     {"transferred_ent_coef": transferred_log_ent_coef}
                     if transferred_log_ent_coef is not None
@@ -2602,20 +4499,15 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 )
             except KeyboardInterrupt:
                 # A stopped Colab cell / ^C shouldn't vaporize hours of
-                # training. Salvage the run: fall through to save the model,
-                # normalization stats, final eval, and summary (marked
-                # "interrupted") so the run dir stays self-describing.
+                # training. Salvage the run below: the model, normalization
+                # stats, the gate's stage history, final eval, and summary
+                # (marked "interrupted") so the run dir stays
+                # self-describing.
                 interrupted = True
                 print(
                     "Training interrupted -- saving final_model and summary "
                     "for the partial run."
                 )
-                # SB3 only calls on_training_end after a clean training
-                # loop, so an interrupt would otherwise lose the gate's
-                # in-flight stage row and final-stage archive; finalize
-                # is idempotent, so a duplicate close cannot occur.
-                if gate_callback is not None:
-                    gate_callback.finalize()
             except Exception as error:
                 # Any other exception out of learn() -- an I/O error on
                 # the Drive mount, an env or callback bug -- used to skip
@@ -2626,6 +4518,9 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     f"Training crashed ({error!r}) -- saving final_model "
                     f"and the normalizer before re-raising."
                 )
+                run.note_outcome(
+                    run_records.CRASHED, f"crashed: {error!r}", model, error=error
+                )
                 _salvage_crashed_run(
                     cfg,
                     model,
@@ -2633,20 +4528,50 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                     gate_callback=gate_callback,
                     start_time=start_time,
                     error=error,
+                    best_unbound=run.best_ledger.unbound,
                 )
                 raise
-            model.save(artifact_path(cfg.log_dir, "final_model"))
+            if interrupted:
+                # Saves the model and normalizer before anything else,
+                # each salvage step isolated (repo_review_20261016 train-2).
+                interrupt_reason = (
+                    f"interrupted: KeyboardInterrupt at "
+                    f"{model.num_timesteps:,} of {cfg.total_timesteps:,} steps"
+                )
+                run.note_outcome(run_records.INTERRUPTED, interrupt_reason, model)
+                _salvage_interrupted_run(
+                    cfg,
+                    model,
+                    train_env,
+                    eval_env,
+                    gate_callback=gate_callback,
+                    start_time=start_time,
+                    stop_reason=interrupt_reason,
+                    eval_clock=run.eval_clock,
+                    best_unbound=run.best_ledger.unbound,
+                )
+                return model
+            if _is_on_policy(cfg):
+                _dump_final_update_logs(model)
+            _save_final_model(model, cfg.log_dir)
+            if _is_on_policy(cfg):
+                # The training progress (SB3 n_updates, env steps trained
+                # against the budget) exists only now; the off-policy
+                # record stays the construction-time one.
+                update_run_config_with_model(model, cfg.log_dir, progress=True)
             if use_vec_normalize:
                 assert isinstance(train_env, VecNormalize)
-                train_env.save(artifact_path(cfg.log_dir, "vec_normalize"))
+                _save_final_normalizer(train_env, cfg.log_dir)
                 # EvalCallback last synced eval_env's running stats up to
                 # eval_freq steps ago; re-sync so the final eval normalizes
                 # observations with the end-of-training statistics.
                 sync_envs_normalization(train_env, eval_env)
 
+            closing_started = time.monotonic()
             mean_reward, std_reward = evaluate_policy(
                 model, eval_env, n_eval_episodes=cfg.n_eval_episodes
             )
+            run.eval_clock.closing_seconds += time.monotonic() - closing_started
             mean_reward_value = (
                 sum(mean_reward) / len(mean_reward)
                 if isinstance(mean_reward, list)
@@ -2658,21 +4583,47 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 else float(std_reward)
             )
             print(f"Mean reward: {mean_reward_value:.2f} +/- {std_reward_value:.2f}")
-            # Which guard ended a stopped-early run (patience,
-            # degenerate signal, stage budget). The stopping callback
-            # printed it, but the console vanishes with the Colab
-            # runtime; the summary is the durable record.
-            stop_reason = next(
-                (
-                    reason
-                    for reason in (
-                        getattr(callback, "stop_reason", None)
-                        for callback in callbacks
+            # Which guard ended a stopped-early run (patience on either
+            # selection path, degenerate signal, stage budget). The
+            # stopping callback printed it, but the console vanishes with
+            # the Colab runtime; the summary and run record are the
+            # durable record.
+            stop_reason = _stop_reason_of(callbacks)
+            status = run_records.COMPLETED
+            if int(model.num_timesteps) >= cfg.total_timesteps:
+                if stop_reason is not None and _is_on_policy(cfg):
+                    # SB3 stops an on-policy run inside collect_rollouts,
+                    # before the update that consumes the rollout: the
+                    # final evaluation's rollout was collected, never
+                    # trained on.
+                    stop_reason = (
+                        f"full_budget: collected all "
+                        f"{cfg.total_timesteps:,} steps; the stop condition "
+                        f"held at the final evaluation ({stop_reason}), so "
+                        f"the last rollout's update was skipped "
+                        f"(SB3 n_updates {_on_policy_updates(cfg, model)})"
                     )
-                    if reason
-                ),
-                None,
-            )
+                elif stop_reason is not None:
+                    # The guard fired once the run had trained its whole
+                    # budget, so it is not an early stop (both
+                    # 2026-08-28 runs were labeled one;
+                    # repo_review_20261016 train-3).
+                    stop_reason = (
+                        f"full_budget: trained all {cfg.total_timesteps:,} "
+                        f"steps; the stop condition also held at the final "
+                        f"evaluation ({stop_reason})"
+                    )
+            else:
+                status = run_records.EARLY_STOP
+                if stop_reason is None:
+                    stop_reason = (
+                        f"stopped_early: a callback ended training at "
+                        f"{model.num_timesteps:,} of {cfg.total_timesteps:,} "
+                        f"steps without recording a stop_reason"
+                    )
+            # stage_summary.txt keeps "completed" for an early stop (the
+            # campaign resumes a leg only from that status); the run
+            # record says which.
             write_run_summary(
                 cfg,
                 cfg.log_dir,
@@ -2680,10 +4631,13 @@ def train(cfg: TrainConfig) -> BaseAlgorithm:
                 final_std_reward=std_reward_value,
                 duration_seconds=time.monotonic() - start_time,
                 device=str(getattr(model, "device", "")) or None,
-                status="interrupted" if interrupted else "completed",
+                status="completed",
                 actual_timesteps=int(model.num_timesteps),
                 stop_reason=stop_reason,
+                n_updates=_on_policy_updates(cfg, model),
+                best_unbound=run.best_ledger.unbound(),
             )
+            run.note_outcome(status, stop_reason, model)
         finally:
             train_env.close()
             eval_env.close()

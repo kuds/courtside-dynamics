@@ -16,12 +16,15 @@ total_timesteps = 1_500_000
 n_envs = 8
 early_stop_patience = 20  # evals without a new best before stopping
 
-[train.model_kwargs]
-# Deep-merged onto the recipe's calibrated exploration bundle
-# (learning_starts=10_000, buffer_size=500_000, gamma=0.995,
-# target_entropy=-1.5 all survive). The entropy floor is the single
-# most likely knob: raise to "auto_0.05" if the policy goes passive
-# early, lower to "auto_0.01" if late training stays jittery.
+[train.algo.sac.model_kwargs]
+# SAC (and DemoSAC) runs only: deep-merged onto the recipe's calibrated
+# SAC exploration bundle (learning_starts=10_000, buffer_size=500_000,
+# target_entropy=-1.5 and the shared gamma=0.995 all survive). A flat
+# [train.model_kwargs] ent_coef would be refused under PPO, where
+# ent_coef is a fixed loss weight rather than SAC's "auto" temperature.
+# The entropy floor is the single most likely knob: raise to
+# "auto_0.05" if the policy goes passive early, lower to "auto_0.01" if
+# late training stays jittery.
 ent_coef = "auto_0.02"
 
 [env]

@@ -15,6 +15,8 @@ from typing import Final
 
 import numpy as np
 
+from courtside_dynamics.envs import _linalg
+
 COURT_LENGTH: Final = 23.77
 COURT_WIDTH: Final = 8.23
 COURT_HALF_LENGTH: Final = COURT_LENGTH / 2.0
@@ -131,7 +133,7 @@ def ball_drag_force(linear_velocity: np.ndarray) -> np.ndarray:
     velocity = np.asarray(linear_velocity, dtype=np.float64)
     if velocity.shape != (3,):
         raise ValueError(f"linear_velocity must have shape (3,), got {velocity.shape}")
-    speed = float(np.linalg.norm(velocity))
+    speed = _linalg.norm(velocity)
     if speed == 0.0:
         return np.zeros(3, dtype=np.float64)
     scale = -0.5 * AIR_DENSITY * BALL_DRAG_COEFFICIENT

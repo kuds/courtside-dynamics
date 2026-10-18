@@ -1141,7 +1141,10 @@ class TestRecipeExplorationPackage:
     def test_model_kwargs_pin(self):
         from courtside_dynamics.recipes import RECIPES
 
-        assert RECIPES["PaddleTennis"].extra_cfg["model_kwargs"] == {
+        # SAC's own block (Recipe.algo_cfg): the package is SAC
+        # exploration, so it reaches SAC and DemoSAC runs only.
+        assert "model_kwargs" not in RECIPES["PaddleTennis"].extra_cfg
+        assert RECIPES["PaddleTennis"].algo_cfg["SAC"]["model_kwargs"] == {
             "use_sde": True,
             "ent_coef": "auto_0.02",
             "target_entropy": -1.5,
@@ -2363,7 +2366,10 @@ class TestNPointEpisodes:
         """The L2 pilot's TOML contract: TOML has no null, so the
         run-config loader's ``"none"`` sentinel is the fill-the-cap
         spelling — it must reach the training AND eval env
-        constructors as Python ``None``."""
+        constructors as Python ``None``. The ``[env]`` contact escrow
+        reaches training only: since ``paddle-npoint@v3`` the recipe's
+        ``eval_env_overrides`` zero the training aids above a run
+        file's ``[env]`` table (design L3)."""
         from courtside_dynamics.recipes import build_train_config
 
         config = tmp_path / "npoint_pilot.toml"
@@ -2376,13 +2382,47 @@ class TestNPointEpisodes:
             log_dir=str(tmp_path / "run"),
             config_file=str(config),
         )
-        for factory in (cfg.env_fn, cfg.eval_env_fn or cfg.env_fn):
+        assert cfg.eval_env_fn is not None
+        for factory, contact_shaping in (
+            (cfg.env_fn, 0.25),
+            (cfg.eval_env_fn, 0.0),
+        ):
             env = factory()
             try:
                 assert env.points_per_episode is None
-                assert env.contact_shaping == 0.25
+                assert env.contact_shaping == contact_shaping
             finally:
                 env.close()
+
+    def test_eval_env_table_restores_the_escrow_and_records_v2(self, tmp_path):
+        """An ``[eval_env]`` table sits above the recipe's @v3
+        overrides: restoring both escrows there reaches the evaluation
+        env, and the run records the protocol it now selects under,
+        ``paddle-npoint@v2``."""
+        from courtside_dynamics.experiments.protocols import eval_protocol_record
+        from courtside_dynamics.recipes import build_train_config
+
+        config = tmp_path / "v2_eval.toml"
+        config.write_text(
+            "[eval_env]\ncontact_shaping = 0.25\nreach_shaping = 0.25\n"
+        )
+        cfg = build_train_config(
+            "PaddleTennis",
+            total_timesteps=1_000,
+            log_dir=str(tmp_path / "run"),
+            config_file=str(config),
+            seed=0,  # a seeded run evaluates paired, as the protocols do
+        )
+        assert cfg.eval_env_fn is not None
+        env = cfg.eval_env_fn()
+        try:
+            assert env.contact_shaping == 0.25
+            assert env.reach_shaping == 0.25
+        finally:
+            env.close()
+        record = eval_protocol_record(cfg)
+        assert record is not None
+        assert record["id"] == "paddle-npoint@v2"
 
 
 class TestCertificationHarness:

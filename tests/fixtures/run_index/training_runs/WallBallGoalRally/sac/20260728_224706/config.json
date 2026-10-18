@@ -1,0 +1,265 @@
+{
+  "timestamp_utc": "2026-07-28T22:47:16+00:00",
+  "git_sha": "5f38c822bf4146b6f4648601ff875076260bf10b",
+  "versions": {
+    "python": "3.12.13",
+    "numpy": "2.0.2",
+    "stable_baselines3": "2.9.0",
+    "gymnasium": "1.3.0",
+    "mujoco": "3.11.0",
+    "torch": "2.11.0+cu128",
+    "courtside_dynamics": "0.24.0"
+  },
+  "gpu": {
+    "available": true,
+    "cuda_version": "12.8",
+    "cudnn_version": 91900,
+    "device_count": 1,
+    "devices": [
+      {
+        "index": 0,
+        "name": "NVIDIA L4",
+        "total_memory_bytes": 23659151360,
+        "capability": "8.9"
+      }
+    ]
+  },
+  "run_config_file": {
+    "path": "/scrubbed/courtside-dynamics/configs/wall_ball_goal_rally.toml",
+    "sha256": "4c1570bdb4966a971118f0a7cf0fac45013709345298f6069e73393081968fa4",
+    "content": {
+      "train": {
+        "total_timesteps": 6000000,
+        "n_envs": 8,
+        "early_stop_patience": 20
+      },
+      "env": {
+        "serve_speed_jitter": 0.5,
+        "serve_vy_max": 2.0
+      }
+    }
+  },
+  "recipe_name": "WallBallGoalRally",
+  "env": {
+    "class": "WallBallEnv",
+    "observation_shape": [
+      23
+    ],
+    "action_shape": [
+      3
+    ],
+    "constructor_kwargs": {
+      "episode_len": 750,
+      "min_force": 20.0,
+      "serve_speed": 7.0,
+      "serve_lob": 0.0,
+      "serve_speed_jitter": 0.5,
+      "serve_vy_min": 0.8,
+      "serve_vy_max": 2.0,
+      "paddle_hit_bonus": 0.25,
+      "track_shaping_scale": 0.5,
+      "out_of_bounds_penalty": 1.0,
+      "double_bounce_penalty": 1.0,
+      "stall_penalty": 1.0,
+      "style_violation_penalty": 1.0,
+      "floor_bounce_min_speed": 0.5,
+      "stall_steps": 200,
+      "rally_style": "open",
+      "paddle_home_x": -3.65,
+      "paddle_x_target_range": [
+        -4.7,
+        0.3
+      ],
+      "recovery_reset_probability": 0.0,
+      "post_bounce_reset_fraction": 0.5,
+      "recoverable_bounce_bonus": 0.0,
+      "recoverable_bounce_lateral_limit": 0.0,
+      "early_touch_penalty": null,
+      "weak_return_penalty": null,
+      "first_hit_bonus": 0.0,
+      "paddle_joint_damping": 8.0,
+      "serve_start_x": 1.0,
+      "paddle_start_x": -3.9,
+      "paddle_x_fence": [
+        -4.7,
+        -2.6
+      ],
+      "court_style": "diagnostic",
+      "wall_reward_increment": 0.0,
+      "return_shaping_scale": 0.15,
+      "render_mode": "rgb_array"
+    }
+  },
+  "evaluation_env": {
+    "class": "WallBallEnv",
+    "observation_shape": [
+      23
+    ],
+    "action_shape": [
+      3
+    ],
+    "constructor_kwargs": {
+      "episode_len": 750,
+      "min_force": 20.0,
+      "serve_speed": 7.0,
+      "serve_lob": 0.0,
+      "serve_speed_jitter": 0.5,
+      "serve_vy_min": 0.8,
+      "serve_vy_max": 2.0,
+      "paddle_hit_bonus": 0.25,
+      "track_shaping_scale": 0.5,
+      "out_of_bounds_penalty": 1.0,
+      "double_bounce_penalty": 1.0,
+      "stall_penalty": 1.0,
+      "style_violation_penalty": 1.0,
+      "floor_bounce_min_speed": 0.5,
+      "stall_steps": 200,
+      "rally_style": "open",
+      "paddle_home_x": -3.65,
+      "paddle_x_target_range": [
+        -4.7,
+        0.3
+      ],
+      "recovery_reset_probability": 0.0,
+      "post_bounce_reset_fraction": 0.5,
+      "recoverable_bounce_bonus": 0.0,
+      "recoverable_bounce_lateral_limit": 0.0,
+      "early_touch_penalty": null,
+      "weak_return_penalty": null,
+      "first_hit_bonus": 0.0,
+      "paddle_joint_damping": 8.0,
+      "serve_start_x": 1.0,
+      "paddle_start_x": -3.9,
+      "paddle_x_fence": [
+        -4.7,
+        -2.6
+      ],
+      "court_style": "diagnostic",
+      "wall_reward_increment": 0.0,
+      "return_shaping_scale": 0.15,
+      "render_mode": "rgb_array"
+    }
+  },
+  "train_config": {
+    "algo": "SAC",
+    "total_timesteps": 3000000,
+    "log_dir": "/scrubbed/courtside-dynamics/training_runs/WallBallGoalRally/sac/20260728_224706",
+    "name_prefix": "wall_ball_goal_rally_sac",
+    "n_envs": 8,
+    "seed": 0,
+    "verbose": 0,
+    "eval_verbose": 1,
+    "eval_freq": 25000,
+    "checkpoint_freq": 250000,
+    "video_freq": 250000,
+    "n_eval_episodes": 60,
+    "reward_eval_episodes": 5,
+    "final_eval_episodes": null,
+    "early_stop_patience": 20,
+    "video_length": 10000,
+    "record_video": true,
+    "normalize_obs": true,
+    "normalize_reward": null,
+    "clip_obs": 10.0,
+    "clip_reward": 10.0,
+    "normalize_obs_excluded_indices": [],
+    "policy": "MlpPolicy",
+    "model_kwargs": {
+      "gamma": 0.995
+    },
+    "warm_start": null,
+    "csv_header": null,
+    "info_dict_eval": true,
+    "info_eval_keys": null,
+    "info_eval_terminal_keys": [],
+    "info_eval_distribution_keys": [
+      "bounce_count"
+    ],
+    "info_eval_survival_thresholds": {
+      "bounce_count": [
+        2,
+        3,
+        5
+      ]
+    },
+    "success_key": "bounce_count",
+    "success_threshold": 3.0,
+    "headline_key": "bounce_count",
+    "phase_key": "rally_phase",
+    "phase_labels": {
+      "0": "await_bounce",
+      "1": "await_paddle",
+      "2": "await_wall"
+    },
+    "env_attr_schedules": [],
+    "best_metric_keys": [
+      "bounce_count_ep_mean",
+      "bounce_count_ep_ge_5_rate"
+    ],
+    "best_metric_min_delta": 0.008333333333333333,
+    "confirm_best_eval": true,
+    "early_stop_degenerate_evals": 5,
+    "degenerate_guard_keys": [
+      "paddle_hit_count_ep_mean"
+    ],
+    "degenerate_min_evals": null,
+    "performance_gate": {
+      "metric_key": "bounce_count_ep_mean",
+      "threshold": 3.0,
+      "sustain_evals": 3,
+      "promotion_rule": "window_mean",
+      "advance_update_pause_steps": 0,
+      "clear_replay_buffer_on_advance": false,
+      "reset_entropy_on_advance": false,
+      "entropy_reset_value": null,
+      "stages": [
+        {
+          "paddle_x_fence": [
+            -4.7,
+            -2.6
+          ],
+          "paddle_start_x": -3.9,
+          "paddle_home_x": -3.65,
+          "serve_start_x": 1.0,
+          "serve_speed": 7.0
+        }
+      ]
+    },
+    "ladder_certification": {
+      "episodes": 30,
+      "seed_start": 30000,
+      "oracle_probes": [
+        {
+          "lead_charge": 3.0
+        }
+      ]
+    },
+    "final_info_eval": false
+  },
+  "resolved_model": {
+    "algo_class": "SAC",
+    "device": "cuda",
+    "policy_class": "SACPolicy",
+    "net_arch": [
+      256,
+      256
+    ],
+    "activation_fn": "ReLU",
+    "policy_num_params": 365322,
+    "hyperparameters": {
+      "learning_rate": 0.0003,
+      "gamma": 0.995,
+      "batch_size": 256,
+      "seed": 0,
+      "tau": 0.005,
+      "buffer_size": 1000000,
+      "learning_starts": 100,
+      "train_freq": "TrainFreq(frequency=1, unit=<TrainFrequencyUnit.STEP: 'step'>)",
+      "gradient_steps": -1,
+      "ent_coef": "auto",
+      "target_entropy": -3.0,
+      "target_update_interval": 1,
+      "n_steps": 1
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "timestep": 600000,
+  "selection_keys": [
+    "bounce_count_ep_mean",
+    "success_rate",
+    "episode_reward_mean"
+  ],
+  "selection_values": {
+    "bounce_count_ep_mean": 1.0333333333333334,
+    "success_rate": 1.0,
+    "episode_reward_mean": 2.136153793759248
+  },
+  "artifacts": {
+    "best_model.zip": {
+      "sha256": "22f6292c3ba08d157d8bde80ce55b1f2bf9fcb969eb699cd6fff2216abcbe3ae"
+    },
+    "best_vec_normalize.pkl": {
+      "sha256": "b428c950bf84803fb83e963e6510bb5f0d6c8aa243d812c3aaf678fb69eaee4e"
+    }
+  }
+}

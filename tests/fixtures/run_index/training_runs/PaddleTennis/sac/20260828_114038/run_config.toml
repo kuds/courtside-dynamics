@@ -1,0 +1,13 @@
+# LT1 — temperature-skip warm start
+# (docs/paddle_tennis_lt1_prereg_20260823.md §2). Code-side
+# pairing: seed 0, total_timesteps 1_000_000, warm start from
+# training_runs/PaddleTennis/sac/20260816_235141 with
+# transfer_log_ent_coef = false and both artifact shas pinned.
+
+[train]
+n_envs = 4
+eval_freq = 25_000
+checkpoint_freq = 100_000
+
+[train.model_kwargs]
+learning_starts = 25_000

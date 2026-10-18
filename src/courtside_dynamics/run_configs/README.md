@@ -36,3 +36,10 @@ Conventions for these starters:
 - `[train.model_kwargs]` deep-merges onto the recipe's bundle, so
   tweaking one key never discards the rest. `performance_gate`
   replaces wholesale. `[env]` reaches both the training and eval envs.
+- `[train.algo.sac]` / `[train.algo.ppo]` hold settings for one
+  algorithm family only (DemoSAC reads `sac`); the run's family table
+  merges after `[train]` and the other is ignored. Family-specific
+  hyperparameters belong there: a flat `[train.model_kwargs]` key that
+  SAC and PPO read differently (`n_steps`, `batch_size`, `ent_coef`,
+  `use_sde`, `sde_sample_freq`) is refused when the run's family is not
+  the recipe's default.

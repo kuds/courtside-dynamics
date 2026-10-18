@@ -1,0 +1,16 @@
+[env]
+points_per_episode = "none"
+contact_shaping = 0.25
+
+[train]
+checkpoint_freq = 100_000                                 # 100k diagnosis-probe cadence, same as L2
+best_metric_min_delta = 0.25                              # above the ±0.2 opponent-crossings noise
+confirm_best_eval = true
+early_stop_degenerate_evals = 5                           # aborts a no-retention run ~125k in (~1 GPU-hour)
+degenerate_guard_keys = ["legal_hit_count_a_ep_mean"]
+info_eval_keys = ["crossings", "rally_count", "legal_hit_count", "legal_hit_count_a", "bounce_count"]
+success_key = "legal_hit_count_a"
+success_threshold = 1.0
+
+[train.model_kwargs]
+learning_starts = 25_000                                  # the warm-start docstring's "fresh data before the first update"

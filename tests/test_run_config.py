@@ -83,6 +83,60 @@ class TestLoader:
             with pytest.raises(ValueError, match=key):
                 load_run_config(path)
 
+    def test_algo_family_tables_load_like_train(self, tmp_path):
+        path = _write(
+            tmp_path,
+            "[train]\n"
+            "n_envs = 8\n"
+            "[train.algo.ppo]\n"
+            "eval_freq = 32_768\n"
+            'normalize_reward = "none"\n'
+            "[train.algo.ppo.model_kwargs]\n"
+            "n_steps = 1024\n"
+            "[train.algo.ppo.phase_labels]\n"
+            '0 = "serve"\n'
+            "[train.algo.sac.model_kwargs]\n"
+            'ent_coef = "auto_0.05"\n',
+        )
+        config = load_run_config(path)
+        # The family tables leave [train]; algo stays builder-owned.
+        assert config.train == {"n_envs": 8}
+        assert config.train_algo == {
+            "PPO": {
+                "eval_freq": 32_768,
+                "normalize_reward": None,
+                "model_kwargs": {"n_steps": 1024},
+                "phase_labels": {0: "serve"},
+            },
+            "SAC": {"model_kwargs": {"ent_coef": "auto_0.05"}},
+        }
+        assert config.raw["train"]["algo"]["ppo"]["eval_freq"] == 32_768
+
+    @pytest.mark.parametrize(
+        "text, message",
+        [
+            ("[train.algo.demosac]\nn_envs = 4\n", r"\[train.algo.sac\]"),
+            ("[train.algo.td3]\nn_envs = 4\n", r"unknown algorithm family"),
+            ("[train.algo.PPO]\nn_envs = 4\n", r"did you mean 'ppo'"),
+            ("[train.algo]\nppo = 3\n", r"\[train.algo.ppo\] must be a table"),
+            ('[train]\nalgo = "PPO"\n', r"per-family settings go in"),
+            ("[train.algo.ppo]\nseed = 1\n", r"\[train.algo.ppo\] key 'seed'"),
+            ("[train.algo.ppo]\nn_env = 4\n", r"unknown \[train.algo.ppo\] key"),
+            ('[train.algo.ppo]\nn_envs = "none"\n', r"\[train.algo.ppo\] n_envs"),
+            (
+                '[train.algo.sac.model_kwargs]\nuse_sde = "true"\n',
+                r"\[train.algo.sac.model_kwargs\] key 'use_sde'",
+            ),
+            (
+                "[train.algo.ppo.performance_gate]\nthreshold = 1.0\n",
+                r"\[train.algo.ppo\]: \[train.performance_gate\]",
+            ),
+        ],
+    )
+    def test_algo_family_tables_fail_loudly(self, tmp_path, text, message):
+        with pytest.raises(ValueError, match=message):
+            load_run_config(_write(tmp_path, text))
+
     def test_missing_file_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             load_run_config(tmp_path / "absent.toml")
@@ -592,7 +646,9 @@ class TestBuildTrainConfig:
         )
         assert cfg.n_envs == 4
         # The tweaked key wins; the recipe's calibrated bundle survives.
-        recipe_kwargs = RECIPES["WallBallBootstrap"].extra_cfg["model_kwargs"]
+        recipe_kwargs = RECIPES["WallBallBootstrap"].algo_cfg["SAC"][
+            "model_kwargs"
+        ]
         assert cfg.model_kwargs["ent_coef"] == "auto_0.05"
         assert cfg.model_kwargs["learning_starts"] == (
             recipe_kwargs["learning_starts"]
@@ -602,6 +658,70 @@ class TestBuildTrainConfig:
         assert recipe_kwargs["ent_coef"] == "auto_0.02"
         assert cfg.run_config_file is not None
         assert cfg.run_config_file.path == str(path)
+
+    def test_only_the_run_family_table_merges(self, tmp_path):
+        path = _write(
+            tmp_path,
+            "[train]\n"
+            "n_envs = 4\n"
+            "early_stop_patience = 30\n"
+            "[train.algo.sac]\n"
+            "early_stop_patience = 40\n"
+            "[train.algo.sac.model_kwargs]\n"
+            'ent_coef = "auto_0.05"\n'
+            "[train.algo.ppo]\n"
+            "early_stop_patience = 50\n"
+            "[train.algo.ppo.model_kwargs]\n"
+            "n_steps = 256\n",
+        )
+        sac = build_train_config(
+            "PaddleTennis", log_dir=str(tmp_path), seed=0, config_file=path
+        )
+        demosac = build_train_config(
+            "PaddleTennis",
+            algo="DemoSAC",
+            log_dir=str(tmp_path),
+            seed=0,
+            config_file=path,
+        )
+        ppo = build_train_config(
+            "PaddleTennis",
+            algo="PPO",
+            log_dir=str(tmp_path),
+            seed=0,
+            config_file=path,
+        )
+        recipe_sac = RECIPES["PaddleTennis"].algo_cfg["SAC"]["model_kwargs"]
+        for cfg in (sac, demosac):
+            # Flat [train], then the SAC table on top; DemoSAC reads sac.
+            assert cfg.n_envs == 4
+            assert cfg.early_stop_patience == 40
+            # Deep-merged onto the recipe's SAC block, one level.
+            assert cfg.model_kwargs == {**recipe_sac, "ent_coef": "auto_0.05"}
+        assert ppo.n_envs == 4
+        assert ppo.early_stop_patience == 50
+        assert ppo.model_kwargs["n_steps"] == 256
+        # No SAC-only key, and no SAC value, reaches the PPO run.
+        assert "target_entropy" not in ppo.model_kwargs
+        assert "train_freq" not in ppo.model_kwargs
+        assert ppo.model_kwargs.get("ent_coef") != "auto_0.05"
+
+    def test_quick_test_and_explicit_kwargs_beat_the_family_table(
+        self, tmp_path
+    ):
+        path = _write(
+            tmp_path,
+            "[train.algo.sac]\ntotal_timesteps = 999_999\nn_envs = 4\n",
+        )
+        cfg = build_train_config(
+            "WallBallBootstrap",
+            log_dir=str(tmp_path),
+            config_file=path,
+            quick_test=True,
+            n_envs=2,
+        )
+        assert cfg.total_timesteps < 999_999
+        assert cfg.n_envs == 2
 
     def test_quick_test_and_explicit_kwargs_beat_the_file(self, tmp_path):
         path = _write(
@@ -756,6 +876,36 @@ class TestBuildTrainConfig:
         }
 
 
+    def test_update_floor_and_worker_kind_load_per_family(self, tmp_path):
+        """PPO plan Steps 6 and 13: both fields are file-settable; the
+        update floor belongs in [train.algo.ppo], and a flat one is
+        refused at build time under the SAC family."""
+        path = _write(
+            tmp_path,
+            '[train]\nvec_env = "subproc"\n'
+            "[train.algo.ppo]\nmin_policy_updates_before_stop = 30\n",
+        )
+        ppo = build_train_config(
+            "BallBalance", algo="PPO", log_dir=str(tmp_path), config_file=path
+        )
+        sac = build_train_config(
+            "BallBalance", algo="SAC", log_dir=str(tmp_path), config_file=path
+        )
+        assert ppo.vec_env == sac.vec_env == "subproc"
+        assert ppo.min_policy_updates_before_stop == 30
+        assert sac.min_policy_updates_before_stop == 20
+        flat = _write(
+            tmp_path, "[train]\nmin_policy_updates_before_stop = 30\n", "flat.toml"
+        )
+        with pytest.raises(ValueError, match="applies to on-policy runs only"):
+            build_train_config(
+                "BallBalance", algo="SAC", log_dir=str(tmp_path), config_file=flat
+            )
+        bad = _write(tmp_path, '[train]\nvec_env = "threads"\n', "bad.toml")
+        with pytest.raises(ValueError, match="vec_env must be one of"):
+            build_train_config("BallBalance", log_dir=str(tmp_path), config_file=bad)
+
+
 class TestEvaluationFields:
     """Contract C3's new TrainConfig fields load from TOML and fail at load
     on the wrong shape (train() re-checks the semantics)."""
@@ -848,6 +998,10 @@ class TestEvaluationFields:
                 "[train]\nreuse_log_dir = true\n",
                 "reuse_log_dir.*not file-configurable",
             ),
+            (
+                '[train]\nsync_dir = "/mnt/mirror/runs"\n',
+                "sync_dir.*not file-configurable",
+            ),
         ],
     )
     def test_bad_shapes_fail_at_load(self, tmp_path, text, message):
@@ -919,6 +1073,49 @@ class TestStarterConfigs:
         stems = {path.stem for path in package_dir.glob("*.toml")}
         orphans = stems - {r.name_prefix for r in RECIPES.values()}
         assert not orphans, f"starters without a recipe: {orphans}"
+
+    @pytest.mark.parametrize("toml_path, recipe_name", _starter_params())
+    def test_starter_matches_its_recipe_under_the_other_family(
+        self, toml_path, recipe_name, tmp_path
+    ):
+        """A starter is family-safe: under the family its recipe does not
+        default to, it resolves exactly like the recipe does (or both
+        refuse alike), so its flat [train] table carries no key written
+        for one family only."""
+        from courtside_dynamics.training.algos import algo_family
+
+        default = algo_family(RECIPES[recipe_name].default_algo)
+        other = "SAC" if default == "PPO" else "PPO"
+
+        def build(**kwargs):
+            try:
+                return build_train_config(
+                    recipe_name,
+                    algo=other,
+                    log_dir=str(tmp_path),
+                    seed=0,
+                    **kwargs,
+                )
+            except ValueError as error:
+                return f"refused: {error}"
+
+        file_cfg, plain_cfg = build(config_file=toml_path), build()
+        if isinstance(plain_cfg, str):
+            assert isinstance(file_cfg, str), file_cfg
+            return
+        assert not isinstance(file_cfg, str), file_cfg
+        for field in dataclasses.fields(type(plain_cfg)):
+            if field.name in self._SKIP_FIELDS:
+                continue
+            file_value, plain_value = (
+                getattr(cfg, field.name) for cfg in (file_cfg, plain_cfg)
+            )
+            if isinstance(plain_value, (list, tuple)):
+                file_value, plain_value = tuple(file_value), tuple(plain_value)
+            assert file_value == plain_value, (
+                f"{toml_path.name}: TrainConfig.{field.name} drifted under "
+                f"{other}"
+            )
 
     @pytest.mark.parametrize("toml_path, recipe_name", _starter_params())
     def test_starter_matches_its_recipe(

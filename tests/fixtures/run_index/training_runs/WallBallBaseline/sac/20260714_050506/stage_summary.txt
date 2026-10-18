@@ -1,0 +1,103 @@
+courtside-dynamics: SAC on WallBall
+==================================================
+
+Project:        courtside-dynamics
+Environment:    WallBall
+Algorithm:      SAC
+Seed:           0
+Date:           2026-07-14 08:16:11
+Status:         completed
+Git SHA:        unknown
+Timesteps:      1,100,000 of 1,500,000 budget (stopped early)
+Duration:       3h 10m 54s
+Throughput:     96 FPS
+Final eval:     1.985 +/- 0.018
+Avg ep length:  257.6 +/- 20.1 steps
+Best eval:      2.132 +/- 0.801 (at 575,000 steps)
+Final vs best:  -0.147
+Best model:     step 600,000 (bounce_count_ep_mean 1.03)  [task-metric selection]
+Headline:       bounce_count_ep_mean
+Headline final: 1.00
+Headline best:  1.03 (at 600,000 steps)
+Recent train:   1.959 +/- 0.300 (last 100 episodes)
+
+Device
+----------------------------------------
+  Device:         cuda
+  GPU:            NVIDIA L4
+  VRAM:           22563 MB
+  Compute cap:    8.9
+  CUDA:           12.8
+  cuDNN:          91900
+  PyTorch:        2.11.0+cu128
+
+Hyperparameters
+----------------------------------------
+  total_timesteps    1500000
+  n_envs             8
+  ent_coef           0.02
+  buffer_size        2000000
+  gamma              0.995
+
+Best Checkpoint Evaluation (step 600,000)
+----------------------------------------
+  Reward:         1.989 +/- 0.016
+  Episode length: 266.1
+  bounce_count:              final 1.00  max 2.00
+  event_completed_return:    final 0.00  max 1.00
+  event_floor_bounce:        final 0.00  max 1.00
+  event_legal_paddle_hit:    final 0.00  max 1.00
+  event_style_violation:     final 0.00  max 0.00
+  floor_bounce_count:        final 1.00  max 2.00
+  floor_bounce_total:        final 2.00  max 3.00
+  legal_paddle_hit_count:    final 1.00  max 2.00
+  one_bounce_recovery_count: final 1.00  max 2.00
+  one_bounce_return_count:   final 1.00  max 2.00
+  paddle_hit_count:          final 1.00  max 3.00
+  paddle_touch:              final 0.00  max 387.78
+  rally_phase:               final 1.00  max 2.00
+  return_count:              final 1.00  max 2.00
+  rew_double_bounce:         final 0.00  max 0.00
+  rew_oob:                   final -1.00  max 0.00
+  rew_paddle:                final 0.00  max 0.25
+  rew_shaping:               final -1.23  max 0.06
+  rew_stall:                 final 0.00  max 0.00
+  rew_style_violation:       final 0.00  max 0.00
+  rew_wall:                  final 0.00  max 1.00
+  sensor_data:               final 0.00  max 435.63
+  stalled:                   final 0.00  max 0.00
+  term_double_bounce:        final 0.00  max 1.00
+  term_nonfinite:            final 0.00  max 0.00
+  term_oob:                  final 1.00  max 1.00
+  term_stall:                final 0.00  max 0.00
+  term_style_violation:      final 0.00  max 0.00
+  term_timeout:              final 0.00  max 0.00
+  wall_contact_count:        final 1.00  max 2.00
+  wall_touch:                final 0.00  max 435.63
+  Phase fractions:
+    await_bounce    39.0%
+    await_paddle    34.5%
+    await_wall      26.5%
+
+Training Health (final)
+----------------------------------------
+  train/actor_loss:    -2.175
+  train/critic_loss:   0.00224
+  train/ent_coef:      0.02
+  train/learning_rate: 0.0003
+  train/n_updates:     1.1e+06
+
+Artifacts
+----------------------------------------
+  config:         config.json
+  monitor_dir:    monitor
+  progress_csv:   tensorboard/progress.csv
+  evaluations:    evaluations.npz
+  eval_info_csv:  eval_info.csv
+  best_model:     best_model.zip
+  best_vec_normalize:best_vec_normalize.pkl
+  best_model_meta:best_model_meta.json
+  checkpoints_dir:checkpoints
+  videos_dir:     videos
+  final_model:    final_model.zip
+  vec_normalize:  vec_normalize.pkl

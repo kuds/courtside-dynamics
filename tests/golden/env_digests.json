@@ -1,0 +1,945 @@
+{
+  "format": "courtside-env-digests/2",
+  "note": "A golden digest mismatch is an era break or physics drift, never noise: the env stream (obs, reward, terminated, truncated, qpos, qvel), its info dicts or its interface (spaces, value types) changed for a seeded scripted rollout. If the recorded and live versions differ, suspect dependency drift (MuJoCo, numpy) and prove it before anything else. If the change is intended, it must be DECLARED -- a new task version, or a CHANGELOG and docs/DECISIONS.md entry naming the era break -- and only then re-recorded with `python tools/golden_digest.py --write` (add --full for the local set) in the same commit. Never re-record to make this check pass.",
+  "sets": {
+    "ci": {
+      "ball_balance/random": {
+        "episodes": 26,
+        "info_key_count": 0,
+        "info_keys_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "info_sha256": "8170d3b39c7de34fe888b1ae767d87085e344788b43c744f9e705bdc2e6245f1",
+        "interface_sha256": "42a59081f0d3c3dd8f7bf6ad5da00a5e3ff2a34f94424125f497af6f25fc9739",
+        "reward_sum": 3000.0,
+        "steps": 3000,
+        "stream_sha256": "ee4b0f9ea802d72973f378ee1bfe6868c3c71bc1a6dff4554970680085df97fe",
+        "terminations": 25,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "ball_balance/zero": {
+        "episodes": 7,
+        "info_key_count": 0,
+        "info_keys_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "info_sha256": "2085aff326b3eba53601656940c6ea0b8a87a943541218d0dca03d7bc325bc4f",
+        "interface_sha256": "a84dc6db90c52316b571c36c21fcc5aa2b841f1cc0f8a56b9240333f579a1d09",
+        "reward_sum": 3000.0,
+        "steps": 3000,
+        "stream_sha256": "aacb0191c6362b85eea19e40a0449c69a72068438c602824b33b3a8f38672294",
+        "terminations": 6,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "ball_bounce/oracle": {
+        "episodes": 7,
+        "info_key_count": 20,
+        "info_keys_sha256": "7b5a37567f022b7024ac6e90f6094ef84db9a8cd585ba96b461cfb583e027fee",
+        "info_sha256": "22bbb53c7a3d0cca8fb9b0d64bd73012aedbb8d09d1c25105a7f431265b06e90",
+        "interface_sha256": "dea8534c268b3b49a918a04e15db82d88513992b74cec03c98dacc16d6bb7f52",
+        "reward_sum": 78.0,
+        "steps": 3000,
+        "stream_sha256": "299a15ed221ffdb348e022ddcd151ca5355c20be7cfe530e8041d9bcfe0d0e9b",
+        "terminations": 6,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4 AVX512_ICL AVX512_SPR",
+          "python": "3.13.16"
+        }
+      },
+      "ball_bounce/random": {
+        "episodes": 33,
+        "info_key_count": 20,
+        "info_keys_sha256": "7b5a37567f022b7024ac6e90f6094ef84db9a8cd585ba96b461cfb583e027fee",
+        "info_sha256": "59e2bd6d18a9f06bf1df329e77dcd880aa0a409974f7dfbfa2c0a92542521d25",
+        "interface_sha256": "818f5c06b4a56d9a02b7dc763a8ece163f8035fd41bf9ff14224bf5102895f0e",
+        "reward_sum": 38.0,
+        "steps": 3000,
+        "stream_sha256": "cf4493c9ee3f94ed8c7a4d37a24c2efc738e46e6f8031fbf43525e7a09422b5b",
+        "terminations": 32,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4 AVX512_ICL AVX512_SPR",
+          "python": "3.13.16"
+        }
+      },
+      "humanoid_tennis_coop/random": {
+        "declared_drift": {
+          "mujoco 3.16": {
+            "episodes": 2,
+            "info_key_count": 183,
+            "info_keys_sha256": "e324ec2f44616f0403294fb71ab7324e25d9e4fd30706be1eb407321b4d99152",
+            "info_sha256": "145edf4eaba2cbaf63cf8aade76244268293d49f4ad0c694e7de7a5d9360db71",
+            "interface_sha256": "5f0bef6cc575a054c154513cb9c79867d512ac4ab9e528f141b27dbab40fbfd9",
+            "reason": "MuJoCo 3.16.0's mj_setConst refreshes body bounding volumes; the racket body's BVH stops culling contacts in the enlarged stringbed's outer strip, so random flailing diverges from 3.15 at step 49. The reason mujoco is capped <3.16; see docs/DECISIONS.md, 'MuJoCo is capped below 3.16'.",
+            "reward_sum": -1.0,
+            "steps": 300,
+            "stream_sha256": "57502f373b5d90de2dbdfccc6d4a7b4cc5b3e3f6823dc52402c0e74d64d36111",
+            "terminations": 1,
+            "truncations": 0,
+            "versions": {
+              "gymnasium": "1.4.0",
+              "machine": "x86_64",
+              "mujoco": "3.16.0",
+              "numpy": "2.5.3",
+              "python": "3.13.16"
+            }
+          }
+        },
+        "episodes": 2,
+        "info_key_count": 183,
+        "info_keys_sha256": "e324ec2f44616f0403294fb71ab7324e25d9e4fd30706be1eb407321b4d99152",
+        "info_sha256": "145edf4eaba2cbaf63cf8aade76244268293d49f4ad0c694e7de7a5d9360db71",
+        "interface_sha256": "5f0bef6cc575a054c154513cb9c79867d512ac4ab9e528f141b27dbab40fbfd9",
+        "reward_sum": -1.0,
+        "steps": 300,
+        "stream_sha256": "324e9a585c175f91853562888fbb64db7455fc945d1c15e371b63d6551110210",
+        "terminations": 1,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/drill_feed/random": {
+        "drill_drilled_steps": 483,
+        "drill_fallbacks": 1,
+        "drill_undrilled_receiving_steps": 898,
+        "episodes": 2,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "e23dbcd0168020f6770f2021f2ed9781376b5ad82695ec1caec98f2d4dadd861",
+        "interface_sha256": "053872531dd7155df2293e8372e13986faf76c174a60ee0f8527838fe511a7e2",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": -14.0,
+        "steps": 3000,
+        "stream_sha256": "b9dd26d01e0918f436090133bc45e4647094e4e89dc43873a778460fc71d93c1",
+        "terminations": 0,
+        "truncations": 2,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/drill_full/random": {
+        "drill_drilled_steps": 483,
+        "drill_fallbacks": 1,
+        "drill_undrilled_receiving_steps": 898,
+        "episodes": 2,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "37d8d6bbbbd7d22cfd175d97f8a12aa9b2f9a79fe762b6e3f4b9049fa282be03",
+        "interface_sha256": "053872531dd7155df2293e8372e13986faf76c174a60ee0f8527838fe511a7e2",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": -11.0,
+        "steps": 3000,
+        "stream_sha256": "7d21bb624424cfed73ba2a060002e876389a938b4d0199fd570cfaf86e3c71c3",
+        "terminations": 0,
+        "truncations": 2,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/hold/oracle": {
+        "episodes": 2,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "612becb38c9ba9f7cde72eb5ea2edd48d504eed4be805558d652336e1534c6e8",
+        "interface_sha256": "053872531dd7155df2293e8372e13986faf76c174a60ee0f8527838fe511a7e2",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 25.19746895096514,
+        "steps": 3000,
+        "stream_sha256": "4c35adea5662d615245435d591902bfdf7091efe4314c0287d96141de793dad7",
+        "terminations": 0,
+        "truncations": 2,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/hold/oracle_nan_order_sensitive": {
+        "episodes": 2,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "465bad32ec741f29589157e619ce45fc8abee4a0569519b509fb61679c6ce797",
+        "interface_sha256": "d70e6d400d68c00186c33914c394356bf78dcb72e8a438a935391e0e5972ed46",
+        "reward_order_sensitive_steps": 1,
+        "reward_sum": 1.4255020273533598,
+        "steps": 600,
+        "stream_sha256": "3f09d6b08b45666881d3955a64107d6f2c93f405695b9f92c09f5502ca910125",
+        "terminations": 1,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/hold/oracle_nan_reach_hold_escrow": {
+        "episodes": 2,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "827b8881f810f7962b27ba067d9f45d38b3567de1414b3c2122e8d2aa945ca54",
+        "interface_sha256": "68e9663ad67692403b0752fd2b97f47beaf410d9f6e477e90d7fec8f77530f83",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 1.4250689081668382,
+        "steps": 600,
+        "stream_sha256": "420f592f2f9a0ef190c23cae9826749d28f6bd1c00f7fe1690471fbc5df6bb02",
+        "terminations": 1,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/legal_volley/oracle": {
+        "episodes": 2,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "a6df8dd48e82e096545eb1f2a9e30624b4c73f4a3fa7a29891bbfe70c3c09591",
+        "interface_sha256": "053872531dd7155df2293e8372e13986faf76c174a60ee0f8527838fe511a7e2",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 22.5,
+        "steps": 3000,
+        "stream_sha256": "04283500c35b5766b5be70e5ec8bd2cdb6d012fdc2ec1ba2d984827cce8a58b0",
+        "terminations": 0,
+        "truncations": 2,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/one_point/oracle": {
+        "episodes": 4,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "8937e200611d6bb189fb49520a6921e4fca22681dd352455d95d63ecb99c7bca",
+        "interface_sha256": "09bc7d127e8715350c9d9b3f1185ad059d4ab254c51f8d5882f69ffded3484bf",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 25.032685904520562,
+        "steps": 3000,
+        "stream_sha256": "cff49375ed80b1a4d02e63271526a9586f002dc47f6c31bd2089e75efe4cee98",
+        "terminations": 2,
+        "truncations": 1,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/camper": {
+        "episodes": 2,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "304d22877e06fad900d4dfc725c21fa695b5c36eb3b5077daf6fa56e43c7b360",
+        "interface_sha256": "053872531dd7155df2293e8372e13986faf76c174a60ee0f8527838fe511a7e2",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": -6.0,
+        "steps": 3000,
+        "stream_sha256": "fc71fcfade77bdcbe12d510bc8b7cdf78c12a60f7a32e734446731b0d6211b0e",
+        "terminations": 0,
+        "truncations": 2,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/oracle": {
+        "episodes": 2,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "bddd3fdfe7ba2a42384d1f180126106cbdd55737e0b689da2056a5daeaf9a186",
+        "interface_sha256": "053872531dd7155df2293e8372e13986faf76c174a60ee0f8527838fe511a7e2",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 24.77907206942981,
+        "steps": 3000,
+        "stream_sha256": "099c81804a219b2380ff46bfdb873bcaeac53d25ede11b921705fadd7916343a",
+        "terminations": 0,
+        "truncations": 2,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/oracle_nan_contact_escrow": {
+        "episodes": 2,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "a55bbb3cf49455d9a52a446214f5cc3698b144dafff522a565ec5f31c81bc5ab",
+        "interface_sha256": "48dbdce488a7e41fdf21607d020ffd7058663211268ef37bd96c81ba7eeb363b",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 1.6005709355201985,
+        "steps": 600,
+        "stream_sha256": "016b5799f9801e5a41d84a4e15a8b07856cc0b2f79da90e29a6266545f3c3cbf",
+        "terminations": 1,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/oracle_seed_once": {
+        "episodes": 3,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "4204dbf85b29af6cdb744eaf7b6355f649872115849f29da0777ee729d475a76",
+        "interface_sha256": "dda97a03bcdca7555df05f208586c09f70dabedd5fb0d34ac67e39aad454cebb",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 25.02966147467599,
+        "steps": 3200,
+        "stream_sha256": "d3d3fd062244f5883ee688fd43883c71fab8322ee516d32875f29e551b76312e",
+        "terminations": 0,
+        "truncations": 2,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/random": {
+        "episodes": 2,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "ee947e59375bc07967cbb38303d5fab582639f786e554f82260e1c00791ba014",
+        "interface_sha256": "053872531dd7155df2293e8372e13986faf76c174a60ee0f8527838fe511a7e2",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": -12.0,
+        "steps": 3000,
+        "stream_sha256": "3bafaf544d6801da074c7e9cdcea9ecc4fe93784ea0c2462603f847d4af95c1e",
+        "terminations": 0,
+        "truncations": 2,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/random_seed_once": {
+        "episodes": 3,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "328b7d90f22f85cbc87969945157e2d7aa3ccaaf503ea6cd62b288768dbf484f",
+        "interface_sha256": "dda97a03bcdca7555df05f208586c09f70dabedd5fb0d34ac67e39aad454cebb",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": -14.0,
+        "steps": 3200,
+        "stream_sha256": "ba9d061444d6ffab758bba45fd14ea06b8f6f656d3989d2c8e0bc9ef198e5252",
+        "terminations": 0,
+        "truncations": 2,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/zero": {
+        "episodes": 2,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "817ce9b019705dcc349fad1f737c3c8b1d56e75a539732bc07ebcc63ac1f0eec",
+        "interface_sha256": "053872531dd7155df2293e8372e13986faf76c174a60ee0f8527838fe511a7e2",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": -13.0,
+        "steps": 3000,
+        "stream_sha256": "b3a8c83b8d8719cbae3cbc87b4764be2ecc97d454815b5e63a71476863aeb6c2",
+        "terminations": 0,
+        "truncations": 2,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "wall_ball_true_baseline/oracle": {
+        "episodes": 13,
+        "info_key_count": 58,
+        "info_keys_sha256": "6a978b71f6397d5c44f25c0d9e9a42ac9594bb09576cde407aa04a632c435f5a",
+        "info_sha256": "4077486cf1decf90cd3a66d921c43a03edf1f57386ab0bbd147b7ec2a05caecc",
+        "interface_sha256": "10d9905582ae3cd83ffbd6319ab56847231218221e61b4af4e2e62bde83e1bae",
+        "reward_sum": 76.66553296129214,
+        "steps": 3000,
+        "stream_sha256": "77f2bd4935af9a72f7a242818b10a0b538d896e6798832e71c5cad5a1e03adb4",
+        "terminations": 12,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4 AVX512_ICL AVX512_SPR",
+          "python": "3.13.16"
+        }
+      },
+      "wall_ball_true_baseline/oracle_seed_once": {
+        "episodes": 12,
+        "info_key_count": 58,
+        "info_keys_sha256": "6a978b71f6397d5c44f25c0d9e9a42ac9594bb09576cde407aa04a632c435f5a",
+        "info_sha256": "16bcce87d6a1a1130de212e2a9891d4a4a25b96fcdb6f4ee5d07a0fd2611242f",
+        "interface_sha256": "74a77fede15753d1dd0f11085ff2051ae5bdcdb69629198025c7f08cccd9a223",
+        "reward_sum": 79.01262518164873,
+        "steps": 3000,
+        "stream_sha256": "0f0f11fe51852895574c9a5d6a729bab4ada4523d0dca1bc43af6d24ed6e287b",
+        "terminations": 11,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4 AVX512_ICL AVX512_SPR",
+          "python": "3.13.16"
+        }
+      },
+      "wall_ball_true_baseline/random": {
+        "episodes": 28,
+        "info_key_count": 58,
+        "info_keys_sha256": "6a978b71f6397d5c44f25c0d9e9a42ac9594bb09576cde407aa04a632c435f5a",
+        "info_sha256": "41cd61d91760e8f2feece9f0e4312f0809c80c108860bc2b468d1ce214268b1e",
+        "interface_sha256": "94f5b62611dc84964f83e9aaf2c037da20a2bb763af06245fe9e738c80d17595",
+        "reward_sum": -23.28317087333242,
+        "steps": 3000,
+        "stream_sha256": "ff9d600e9e7accf3c59ffb0b83f41fcf8ea5b2b424732140f988ff600f514148",
+        "terminations": 27,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4 AVX512_ICL AVX512_SPR",
+          "python": "3.13.16"
+        }
+      }
+    },
+    "full": {
+      "ball_balance/random": {
+        "episodes": 127,
+        "info_key_count": 0,
+        "info_keys_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "info_sha256": "be763c8f7707fc9772cbb9e2b08c09fb809d6372d1566efbbaa298ec1b9613a9",
+        "interface_sha256": "f126bd27de17131d9756d93642b28d611dc78c0ff91070a087da8b18f1201815",
+        "reward_sum": 15000.0,
+        "steps": 15000,
+        "stream_sha256": "9aa4e710d4c36a0305a8a48706bffdedbbd3a517e88e84c7beb9c2addc770543",
+        "terminations": 122,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "ball_balance/zero": {
+        "episodes": 35,
+        "info_key_count": 0,
+        "info_keys_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "info_sha256": "638ba988e1b5e90e8d16be58c62bde5ca6ce7f0e44d90c1f0e5aee6804919586",
+        "interface_sha256": "f0afd8e4e4323e16dd02d78dd0c23b39a168766f82b9f9623ea1a587766be564",
+        "reward_sum": 15000.0,
+        "steps": 15000,
+        "stream_sha256": "f8a2bcd22c4616af81e21f1124da7c70fbc570238c8eee9cb93e675a7969a104",
+        "terminations": 30,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "ball_bounce/oracle": {
+        "episodes": 39,
+        "info_key_count": 20,
+        "info_keys_sha256": "7b5a37567f022b7024ac6e90f6094ef84db9a8cd585ba96b461cfb583e027fee",
+        "info_sha256": "fe99ef3a004ab0754e7973b77759fd87dc4bd4dfcd5f6810ae7f3f7573fdd26a",
+        "interface_sha256": "b4f528268d904a0ea042fd2dde4010c060f664eaea1b30265c2354c5daee5fa0",
+        "reward_sum": 394.0,
+        "steps": 15000,
+        "stream_sha256": "566ffe7ce7764b24daa23d507202378f643ddf98e3653954bfceeb047df15c22",
+        "terminations": 34,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4 AVX512_ICL AVX512_SPR",
+          "python": "3.13.16"
+        }
+      },
+      "ball_bounce/random": {
+        "episodes": 163,
+        "info_key_count": 20,
+        "info_keys_sha256": "7b5a37567f022b7024ac6e90f6094ef84db9a8cd585ba96b461cfb583e027fee",
+        "info_sha256": "5ac12a4f9e3680dd9c94ffc75069438ee6a553011368913d6a95e879b2fc97d6",
+        "interface_sha256": "617b71ee2703f3e20619fdaea1c1683a02dcaf3ba5505b1c9265076cbdbf15e1",
+        "reward_sum": 185.0,
+        "steps": 15000,
+        "stream_sha256": "1303101358948e48c5590fcccb258514f0278b4aa6e64dd0a58ba21e5baea87e",
+        "terminations": 158,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4 AVX512_ICL AVX512_SPR",
+          "python": "3.13.16"
+        }
+      },
+      "humanoid_tennis_coop/random": {
+        "declared_drift": {
+          "mujoco 3.16": {
+            "episodes": 6,
+            "info_key_count": 183,
+            "info_keys_sha256": "e324ec2f44616f0403294fb71ab7324e25d9e4fd30706be1eb407321b4d99152",
+            "info_sha256": "3a72bf44eaec69464f66d339b7f541e61fe230f6830900400959f68e909ab4d4",
+            "interface_sha256": "3b9e5acc3a86003eff485ed76235ecff9c1945b0af1b3bbab4f6891f2be64d3b",
+            "reason": "MuJoCo 3.16.0's mj_setConst refreshes body bounding volumes; the racket body's BVH stops culling contacts in the enlarged stringbed's outer strip, so random flailing diverges from 3.15 at step 49. The reason mujoco is capped <3.16; see docs/DECISIONS.md, 'MuJoCo is capped below 3.16'.",
+            "reward_sum": -4.0,
+            "steps": 1200,
+            "stream_sha256": "fb6a1b87ef914698eed15b0f3f9017285f62fd84a6a95ef577af24013c8de30b",
+            "terminations": 4,
+            "truncations": 0,
+            "versions": {
+              "gymnasium": "1.4.0",
+              "machine": "x86_64",
+              "mujoco": "3.16.0",
+              "numpy": "2.5.3",
+              "python": "3.13.16"
+            }
+          }
+        },
+        "episodes": 6,
+        "info_key_count": 183,
+        "info_keys_sha256": "e324ec2f44616f0403294fb71ab7324e25d9e4fd30706be1eb407321b4d99152",
+        "info_sha256": "3a72bf44eaec69464f66d339b7f541e61fe230f6830900400959f68e909ab4d4",
+        "interface_sha256": "3b9e5acc3a86003eff485ed76235ecff9c1945b0af1b3bbab4f6891f2be64d3b",
+        "reward_sum": -4.0,
+        "steps": 1200,
+        "stream_sha256": "0e793d24e812579f66aee3935d1e83d7638733a0f184452c9a3ced617a5f70de",
+        "terminations": 4,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4 AVX512_ICL AVX512_SPR",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/drill_feed/random": {
+        "drill_drilled_steps": 1901,
+        "drill_fallbacks": 5,
+        "drill_undrilled_receiving_steps": 3436,
+        "episodes": 10,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "18de75e2f2bf97288bb7ce7570e94d46773d708da26cb2c6986cebc127b55546",
+        "interface_sha256": "1c33da703cdab16a6f8a267933155bc718610a7fce5521d592f3ce5d3865bcfa",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": -50.0,
+        "steps": 15000,
+        "stream_sha256": "e1d04a0ee3b9e723b0dec23ebff6c0b1426b187b2515c1acd39a47028a053131",
+        "terminations": 0,
+        "truncations": 10,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/drill_full/random": {
+        "drill_drilled_steps": 1901,
+        "drill_fallbacks": 5,
+        "drill_undrilled_receiving_steps": 3436,
+        "episodes": 10,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "7acbf1e595b0361acef3fab84ad962eec37de7b86b7e84e2b7683c9d5f54b904",
+        "interface_sha256": "1c33da703cdab16a6f8a267933155bc718610a7fce5521d592f3ce5d3865bcfa",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": -38.0,
+        "steps": 15000,
+        "stream_sha256": "d024846ca34b3ce5fccfb32e9073449dcee3483fdd673cf9e78ac4aa5efeb2a8",
+        "terminations": 0,
+        "truncations": 10,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/hold/oracle": {
+        "episodes": 10,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "5603168911953226af36538d1bbfc8c59bb38da325601568f38ca28048b08a2d",
+        "interface_sha256": "1c33da703cdab16a6f8a267933155bc718610a7fce5521d592f3ce5d3865bcfa",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 131.41847136968573,
+        "steps": 15000,
+        "stream_sha256": "ec3352ed9ced6f4688ade0cbc879b554d59664de61a231d08e351fec1f0405da",
+        "terminations": 0,
+        "truncations": 10,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/hold/oracle_nan_order_sensitive": {
+        "episodes": 2,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "465bad32ec741f29589157e619ce45fc8abee4a0569519b509fb61679c6ce797",
+        "interface_sha256": "d70e6d400d68c00186c33914c394356bf78dcb72e8a438a935391e0e5972ed46",
+        "reward_order_sensitive_steps": 1,
+        "reward_sum": 1.4255020273533598,
+        "steps": 600,
+        "stream_sha256": "3f09d6b08b45666881d3955a64107d6f2c93f405695b9f92c09f5502ca910125",
+        "terminations": 1,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/hold/oracle_nan_reach_hold_escrow": {
+        "episodes": 2,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "827b8881f810f7962b27ba067d9f45d38b3567de1414b3c2122e8d2aa945ca54",
+        "interface_sha256": "68e9663ad67692403b0752fd2b97f47beaf410d9f6e477e90d7fec8f77530f83",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 1.4250689081668382,
+        "steps": 600,
+        "stream_sha256": "420f592f2f9a0ef190c23cae9826749d28f6bd1c00f7fe1690471fbc5df6bb02",
+        "terminations": 1,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/legal_volley/oracle": {
+        "episodes": 10,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "96e625ee032e6261b4a901495774cfb5d1d9cf0eae7da30d243afb6a4e2b2aba",
+        "interface_sha256": "1c33da703cdab16a6f8a267933155bc718610a7fce5521d592f3ce5d3865bcfa",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 100.5,
+        "steps": 15000,
+        "stream_sha256": "ee4e80688bb865c9c397e2dead7d1d85bd4fdbb9560a830ade226a87fa2575a0",
+        "terminations": 0,
+        "truncations": 10,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/one_point/oracle": {
+        "episodes": 18,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "4aecdb93db9c88c5bc158fe3081f79623648a1fe3a73aab6e1c2049ad70f6e4e",
+        "interface_sha256": "b2cc8ee432637b4631adaf584080515ed910bdf15f0811b63a23c723b7b64de7",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 131.9049398392817,
+        "steps": 15000,
+        "stream_sha256": "dbc27a531daeb093fd7f6c906bec9d16be9b3820b3f7691958bf6a0f3953a164",
+        "terminations": 9,
+        "truncations": 4,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/camper": {
+        "episodes": 10,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "cf17df1a74a2a30523fcb933253f4f39bf3b00eb026c7169e9e34cd02da938b6",
+        "interface_sha256": "1c33da703cdab16a6f8a267933155bc718610a7fce5521d592f3ce5d3865bcfa",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": -33.0,
+        "steps": 15000,
+        "stream_sha256": "f8dd0ad513ffb6541adf97107a71437bbf335ddb518ec8cda8a532affcf5c278",
+        "terminations": 0,
+        "truncations": 10,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/oracle": {
+        "episodes": 10,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "e62f2e9bcf6289e6ab6a0ea5504c44f3e2c462aec6ff6813715bed8e4d46d92b",
+        "interface_sha256": "1c33da703cdab16a6f8a267933155bc718610a7fce5521d592f3ce5d3865bcfa",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 129.1708721067822,
+        "steps": 15000,
+        "stream_sha256": "184f24ccaa84170793c8ab303912cf8590b111df87618ac3918a30a645c164c2",
+        "terminations": 0,
+        "truncations": 10,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/oracle_nan_contact_escrow": {
+        "episodes": 2,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "a55bbb3cf49455d9a52a446214f5cc3698b144dafff522a565ec5f31c81bc5ab",
+        "interface_sha256": "48dbdce488a7e41fdf21607d020ffd7058663211268ef37bd96c81ba7eeb363b",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 1.6005709355201985,
+        "steps": 600,
+        "stream_sha256": "016b5799f9801e5a41d84a4e15a8b07856cc0b2f79da90e29a6266545f3c3cbf",
+        "terminations": 1,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/oracle_seed_once": {
+        "episodes": 15,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "4d801cfb96fbb92090805b9a5f9e03fcab40af8cb0bf3c285013c35a3146aef3",
+        "interface_sha256": "51514d175436e1b3693aeff4408813d05a5b4e314c98b40d6bce23ef912fcabe",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": 128.67937387505427,
+        "steps": 16000,
+        "stream_sha256": "a59c2769f4f87418d054224d2c1d486a05d1693b5fd7d2ae1a0a3ec84c000e43",
+        "terminations": 0,
+        "truncations": 10,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/random": {
+        "episodes": 10,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "a289389ecfa52d1a9e354bce3e790fcb21d9b4d624aa66417081ceba482b4063",
+        "interface_sha256": "1c33da703cdab16a6f8a267933155bc718610a7fce5521d592f3ce5d3865bcfa",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": -53.0,
+        "steps": 15000,
+        "stream_sha256": "c6322bd53515bb921a442d70648a2cc60b208cfd6377fe8b44ca374b11a75224",
+        "terminations": 0,
+        "truncations": 10,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/random_seed_once": {
+        "episodes": 15,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "079a64b4f9daccb8120d16ea4545004a32c4b4e4c6168d64e9cf039fe256e00f",
+        "interface_sha256": "51514d175436e1b3693aeff4408813d05a5b4e314c98b40d6bce23ef912fcabe",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": -60.0,
+        "steps": 16000,
+        "stream_sha256": "7a08c4bb6511f5b547bc2a7919a10c81b2231ba0815f2880295966cb26ba2569",
+        "terminations": 0,
+        "truncations": 10,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4",
+          "python": "3.13.16"
+        }
+      },
+      "paddle_tennis/recipe/zero": {
+        "episodes": 10,
+        "info_key_count": 165,
+        "info_keys_sha256": "c7eb42f61276fe02e919a1f4a8ec569cf6a547d4dededde1220fdbaf74262512",
+        "info_sha256": "80a34f42140451e71701fd7c4ec5748ddb7ae5b1f3d483fc37fe84ee694034a4",
+        "interface_sha256": "1c33da703cdab16a6f8a267933155bc718610a7fce5521d592f3ce5d3865bcfa",
+        "reward_order_sensitive_steps": 0,
+        "reward_sum": -50.0,
+        "steps": 15000,
+        "stream_sha256": "2dee237623f86965f462ac2a1b73580579d559d7a6340986f9c10185eae45609",
+        "terminations": 0,
+        "truncations": 10,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.4",
+          "python": "3.13.16"
+        }
+      },
+      "wall_ball_true_baseline/oracle": {
+        "episodes": 65,
+        "info_key_count": 58,
+        "info_keys_sha256": "6a978b71f6397d5c44f25c0d9e9a42ac9594bb09576cde407aa04a632c435f5a",
+        "info_sha256": "25682a5252d1db3f346215b3d1ba6731fd2d9d34e3ba507f80163975da26058b",
+        "interface_sha256": "7b4354499a04685c4c5a896113de10c0cab5f26b9e5032d22fb5057cdbb81d88",
+        "reward_sum": 384.6213620622291,
+        "steps": 15000,
+        "stream_sha256": "eb2d536c764c8d024d534adc10b89d00771ea810dfca9801f3dfe2c52cd1f4da",
+        "terminations": 60,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4 AVX512_ICL AVX512_SPR",
+          "python": "3.13.16"
+        }
+      },
+      "wall_ball_true_baseline/oracle_seed_once": {
+        "episodes": 63,
+        "info_key_count": 58,
+        "info_keys_sha256": "6a978b71f6397d5c44f25c0d9e9a42ac9594bb09576cde407aa04a632c435f5a",
+        "info_sha256": "0e70e3fc9752342ff369bc6e8a2b131378b3c3189f9d048830827c63228af643",
+        "interface_sha256": "58bccf360874d0e5aa5c20d1896eb5947223748bd987e9f978ac81f6e3110d45",
+        "reward_sum": 387.41630685812066,
+        "steps": 15000,
+        "stream_sha256": "e3342656957bb332a9da23c3d5c4a61a16acc1cc7f7a780f71d982f790d6980c",
+        "terminations": 58,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4 AVX512_ICL AVX512_SPR",
+          "python": "3.13.16"
+        }
+      },
+      "wall_ball_true_baseline/random": {
+        "episodes": 140,
+        "info_key_count": 58,
+        "info_keys_sha256": "6a978b71f6397d5c44f25c0d9e9a42ac9594bb09576cde407aa04a632c435f5a",
+        "info_sha256": "40429eaa9d22295ed356d37b120bb51d6a84e673b0ff22cdcbec960a9510b48a",
+        "interface_sha256": "3b981c1c697b68cacbb9240a907f706f14744e07d159bca7113e2817f693c512",
+        "reward_sum": -118.20736719496821,
+        "steps": 15000,
+        "stream_sha256": "c0cd5b61733ed16ec33a683a1fd9c552eea23356eaa54139acd355144f7ade70",
+        "terminations": 135,
+        "truncations": 0,
+        "versions": {
+          "gymnasium": "1.4.0",
+          "machine": "x86_64",
+          "mujoco": "3.15.0",
+          "numpy": "2.5.3",
+          "numpy_simd": "baseline X86_V2; dispatch X86_V3 X86_V4 AVX512_ICL AVX512_SPR",
+          "python": "3.13.16"
+        }
+      }
+    }
+  }
+}

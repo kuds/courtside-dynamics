@@ -1,6 +1,6 @@
 # Spec: TOML run-configuration files
 
-Status: implemented (v1.1). Decisions: `warm_start` deferred to v2; one
+Status: implemented (v1.2). Decisions: `warm_start` deferred to v2; one
 file per experiment. v1 required the config path to always be explicit
 (never auto-discovered); v1.1 (0.13.0) softens this to
 *assisted-explicit* for the notebook only: `CONFIG_FILE = "auto"` calls
@@ -9,6 +9,10 @@ recipe's packaged starter into the Drive `configs/` root on first use,
 reuses the user's edited copy afterwards, and prints the resolved path +
 sha256 every run. `build_train_config` itself still never discovers
 anything -- it only receives the path the notebook visibly resolved.
+v1.2 (PPO plan Step 2, 2026-10-17) adds per-algorithm-family tables,
+`[train.algo.sac]` and `[train.algo.ppo]` (see Format and Merge
+semantics). The section "Per-family settings" (PPO plan Step 14) lists
+what belongs in each.
 
 ## Motivation
 
@@ -45,8 +49,14 @@ n_envs = 8
 early_stop_patience = 20
 
 [train.model_kwargs]         # DEEP-MERGED onto the recipe's model_kwargs
+gamma = 0.995                # shared by both algorithm families
+
+[train.algo.sac.model_kwargs]  # SAC and DemoSAC runs only
 ent_coef = "auto_0.05"       # tweak one key; the recipe's learning_starts,
                              # buffer_size, gamma etc. survive untouched
+
+[train.algo.ppo]             # PPO runs only; any [train] field
+eval_freq = 32_768
 
 [env]                        # merged into the recipe's env_kwargs
 serve_vy_max = 1.1
@@ -64,7 +74,10 @@ serve_vy_max = 1.1
   `recipe_name` (written into the kwargs before the file merges, so a
   file value would silently invert the "file < explicit arguments"
   precedence and falsify provenance — pass them to
-  `build_train_config` instead).
+  `build_train_config` instead), and `reuse_log_dir` / `sync_dir` (pass
+  them alongside `log_dir`: whether a run may overwrite an earlier
+  attempt's directory, and where its directory is mirrored, belong to
+  the caller and its machine, not to the experiment).
 - `[env]` / `[eval_env]` keys are environment constructor kwargs. TOML has
   no `None`: a kwarg whose meaning requires `None` (e.g.
   `early_touch_penalty = None` for the legacy terminal rule) uses the
@@ -84,6 +97,13 @@ serve_vy_max = 1.1
   are documented.
 - Nested tables under `[train]` (e.g. `performance_gate`) follow the merge
   rules below.
+- `[train.algo.<family>]` tables hold `[train]` fields for one algorithm
+  family (`training.algos.algo_family`): `sac` for SAC and DemoSAC, `ppo`
+  for PPO. Each is validated exactly like `[train]` (same rejected keys,
+  sentinels and nested-table checks). `algo` itself stays builder-owned:
+  a scalar `algo = "PPO"` is rejected as before, and an unknown family
+  table (`[train.algo.demosac]`, `[train.algo.td3]`) is rejected rather
+  than silently never matching.
 
 ## Precedence
 
@@ -94,6 +114,11 @@ recipe defaults  <  TOML file  <  quick_test presets  <  explicit
                                                          build_train_config
                                                          keyword arguments
 ```
+
+Within a layer, the family-specific part wins: the recipe's `extra_cfg`,
+then its `algo_cfg[<family>]` block; the file's `[train]` table, then
+its `[train.algo.<family>]` table for the run's family. The other
+family's table is ignored, so one file can carry both profiles.
 
 Rationale: `quick_test=True` is an explicit in-code declaration of "smoke
 test" and must shrink whatever the file asked for; explicit keyword
@@ -113,10 +138,65 @@ The layer-vs-layer footgun is *replacement*; the file layer fixes it:
 | `performance_gate` | Replace **wholesale** — stage ladders are ordered lists whose element-wise merging would be ambiguous; a file that touches the gate must state the whole gate |
 | `ladder_certification` | Replace **wholesale**, same reasoning (`oracle_probes` is stage-ordered). A file that replaces the gate with fewer stages should also restate matching probes — or set `ladder_certification = "none"`; a probe/stage count mismatch at startup records a skipped certification report rather than training uncertified silently |
 | `[env]` / `[eval_env]` tables | `[env]` merges into the kwargs of **both** the training and evaluation environments (a physics tweak must not silently split the two); the recipe's `eval_env_overrides` then re-assert the canonical evaluation setup, and `[eval_env]` wins last for evaluation |
+| `[train.algo.<family>]` | Merged after `[train]` with the same rules, for runs of that family only |
+
+A flat `model_kwargs` key that SAC and PPO both accept but read
+differently (`algos.DIVERGENT_SHARED_KWARGS`: `n_steps`, `batch_size`,
+`ent_coef`, `use_sde`, `sde_sample_freq`) is written for the recipe's
+default family. In the recipe's `extra_cfg` or the file's
+`[train.model_kwargs]`, such a key is **refused** when the run's family
+is not the recipe default's (`build_train_config`); put it in the
+family's table instead. An explicit `model_kwargs=` argument is exempt,
+since it replaces the whole merged bundle anyway.
 
 Explicit keyword arguments keep today's replace-wholesale semantics (no
 behavior change for existing code); the file is the recommended layer for
 partial tweaks precisely because it merges.
+
+## Per-family settings
+
+`[train.algo.sac]` (SAC and DemoSAC runs) and `[train.algo.ppo]` (PPO
+runs) accept any `[train]` field. The settings below mean something to
+one family only, or something different to each, so they belong in the
+family's table: a file then carries both profiles and each run reads
+its own.
+
+**`model_kwargs`** (`[train.algo.<family>.model_kwargs]`):
+
+| Setting | SAC family | PPO |
+|---|---|---|
+| `n_steps` | n-step returns (DemoSAC refuses more than 1 with a demo library) | rollout length per worker: one update consumes `n_steps × n_envs` env steps |
+| `batch_size` | replay sample per gradient step | minibatch; must divide `n_steps × n_envs` |
+| `ent_coef` | `"auto"` / `"auto_<init>"` (a tuned temperature) or a fixed float | a fixed entropy-loss weight; numbers only |
+| `use_sde`, `sde_sample_freq` | gSDE noise drawn at each `train_freq` collection (and every `sde_sample_freq` steps within it) | gSDE noise drawn at each rollout start (and every `sde_sample_freq` steps within it) |
+| Only this family (the main ones) | `buffer_size`, `learning_starts`, `train_freq`, `gradient_steps`, `tau`, `target_entropy`, `target_update_interval`, `use_sde_at_warmup`; DemoSAC's `demo_*` keys | `n_epochs`, `gae_lambda`, `clip_range`, `clip_range_vf`, `vf_coef`, `max_grad_norm`, `normalize_advantage`, `target_kl`; the policy's `log_std_init` and `ortho_init` (`policy_kwargs`) |
+
+The first four rows are `algos.DIVERGENT_SHARED_KWARGS`: a flat one (in
+the recipe's `extra_cfg` or the file's `[train.model_kwargs]`) is
+refused under the family the recipe does not default to. A key the
+run's algorithm does not accept is refused for every run
+(`algos.validate_model_kwargs`, `algos.validate_policy_kwargs`).
+
+**`TrainConfig` fields:**
+
+| Field | SAC family | PPO |
+|---|---|---|
+| `eval_freq`, `checkpoint_freq` | any env-step count | whole rollouts, with `eval_freq // n_envs >= n_steps`; anything else is refused, naming the nearest whole-rollout value |
+| `total_timesteps` | the budget | the budget, at least one rollout; PPO trains whole rollouts, so the last can run past it (the summary says by how much) |
+| `n_envs` | worker count | worker count, and with `n_steps` the rollout every cadence above is counted in |
+| `min_policy_updates_before_stop` | must stay at its default, 20 (refused otherwise) | K: every early stop waits ceil(K · rollout / `eval_freq`) evaluations; a `performance_gate` `stage_eval_budget` stop at or below that many is refused |
+| `normalize_reward` (unset) | off | on, with the model's gamma as the normalizer's discount |
+| `performance_gate` levers `advance_update_pause_steps`, `clear_replay_buffer_on_advance`, `reset_entropy_on_advance` | available | refused; a PPO gate advances between rollouts instead |
+| device (`model_kwargs["device"]`, `require_device` unset) | SB3's `"auto"` | the CPU, for SB3's MLP actor-critic |
+| `warm_start` (`TrainConfig` only, not file-configurable) | `transfer_log_ent_coef = False` skips the entropy temperature | `reset_log_std = True` restarts the exploration noise; `transfer_log_ent_coef = False` is refused |
+
+`vec_env` (`"dummy"` or `"subproc"`) and every other field mean the same
+for both families. A plain Python script that trains with `"subproc"`
+must call `train()` under `if __name__ == "__main__":`: SB3 starts the
+workers with `forkserver` (or `spawn`), which re-imports the main
+module, and an unguarded script fails with `EOFError` after
+`config.json` and `run_config.toml` are written. Notebooks need no
+guard.
 
 ## Validation and failure behavior
 
@@ -132,6 +212,8 @@ therefore fails loudly on everything:
   field names (`difflib.get_close_matches`).
 - A rejected field (`env_fn`, ...) → `ValueError` explaining why.
 - Unknown top-level table → `ValueError` (only `train`, `env`, `eval_env`).
+- Unknown family table under `[train.algo]`, or a non-table there →
+  `ValueError` naming the families (`sac`, `ppo`).
 - `[train.performance_gate]` is validated structurally at load: the four
   required keys (`metric_key`, `threshold`, `sustain_evals`, `stages`)
   must all be present with sane types; the optional keys
@@ -211,6 +293,7 @@ class RunFileConfig:
     env: dict[str, Any]
     eval_env: dict[str, Any]
     raw: dict[str, Any]
+    train_algo: dict[str, dict[str, Any]]  # family ("SAC"/"PPO") -> table
 
 def load_run_config(path: str | Path) -> RunFileConfig: ...
 ```

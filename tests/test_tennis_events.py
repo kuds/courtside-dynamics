@@ -602,3 +602,112 @@ def test_sampler_runs_on_a_robot_free_scene_with_a_custom_court():
     humanoid_model, _humanoid_data = _fresh_model()
     default_sampler = SubstepTennisEventSampler(humanoid_model)
     assert default_sampler.court is REGULATION_COURT
+
+
+# -- An interrupted control step (repo_review_20261016 rules-events-1) -------
+
+
+def test_reset_discards_an_abandoned_control_step():
+    """An exception escaping the env's step between ``begin_control_step``
+    and ``end_control_step`` (a stopped Colab cell, mostly) used to wedge
+    the sampler: ``reset`` raised, so every later reset and step failed.
+    ``reset`` now discards the open step, and the reset sampler then
+    produces exactly the batches of one that never saw it."""
+    import copy
+
+    streams = []
+    for abandon in (False, True):
+        model, data = _fresh_model()
+        _set_ball_state(
+            model, data, position=(-2.0, 0.0, 0.12), velocity=(0.0, 0.0, -2.0)
+        )
+        sampler = SubstepTennisEventSampler(model)
+        if abandon:
+            scratch = copy.deepcopy(data)
+            sampler.reset(scratch, ball_side=CourtSide.A)
+            sampler.begin_control_step(0)
+            for substep in range(40):
+                mujoco.mj_step(model, scratch)
+                sampler.sample_substep(scratch, control_substep=substep)
+            # The abandoned step buffered a real event (the bounce), so
+            # discarding it is observable, not vacuous.
+            assert sampler._buffer_events
+            with pytest.raises(RuntimeError, match="has not been drained"):
+                sampler.begin_control_step(1)
+        sampler.reset(data, ball_side=CourtSide.A)
+        streams.append(
+            [
+                _sample_steps(sampler, model, data, control_step=step, count=10)
+                for step in range(6)
+            ]
+        )
+    fresh, recovered = streams
+    assert any(batch.events for batch in fresh)
+    assert recovered == fresh
+
+
+def _env_stream(env, seed: int, actions: np.ndarray) -> list[bytes]:
+    """Every reset and step output of ``env``, as comparable bytes."""
+
+    def encode(value) -> bytes:
+        if isinstance(value, dict):
+            return b"{" + b",".join(
+                str(key).encode() + b":" + encode(value[key]) for key in sorted(value)
+            ) + b"}"
+        if isinstance(value, (list, tuple)):
+            return b"[" + b",".join(encode(item) for item in value) + b"]"
+        if isinstance(value, np.ndarray):
+            return value.dtype.str.encode() + value.tobytes()
+        return repr(value).encode()
+
+    observation, info = env.reset(seed=seed)
+    stream = [encode((observation, info))]
+    for action in actions:
+        observation, reward, terminated, truncated, info = env.step(action)
+        stream.append(encode((observation, reward, terminated, truncated, info)))
+        if terminated or truncated:
+            observation, info = env.reset()
+            stream.append(encode((observation, info)))
+    return stream
+
+
+def test_paddle_tennis_recovers_from_a_step_interrupted_mid_substep():
+    """End to end: a PaddleTennis step interrupted inside its substep loop
+    leaves the control step open; the next ``step`` refuses with the
+    clearer message, and after ``reset(seed)`` the env replays a fresh
+    env's stream byte for byte (healthy trajectories never take the new
+    branch: the golden digests are unchanged)."""
+    from courtside_dynamics.envs import PaddleTennisEnv
+
+    recovered, fresh = PaddleTennisEnv(), PaddleTennisEnv()
+    try:
+        rng = np.random.default_rng(7)
+        shape = recovered.action_space.shape
+        warmup = rng.uniform(-1.0, 1.0, size=(25, *shape))
+        actions = rng.uniform(-1.0, 1.0, size=(300, *shape))
+        recovered.reset(seed=3)
+        for action in warmup[:-1]:
+            recovered.step(action)
+        sampler = recovered._event_sampler
+        sample_substep = sampler.sample_substep
+        calls = {"n": 0}
+
+        def interrupted(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise KeyboardInterrupt
+            return sample_substep(*args, **kwargs)
+
+        sampler.sample_substep = interrupted
+        with pytest.raises(KeyboardInterrupt):
+            recovered.step(warmup[-1])
+        del sampler.sample_substep
+        assert sampler._control_step is not None
+        with pytest.raises(RuntimeError, match="reset\\(\\) the env"):
+            recovered.step(actions[0])
+        assert _env_stream(recovered, 11, actions) == _env_stream(
+            fresh, 11, actions
+        )
+    finally:
+        recovered.close()
+        fresh.close()

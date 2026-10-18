@@ -207,3 +207,51 @@ def test_schedule_metadata_is_json_serializable() -> None:
 def test_invalid_schedule_configuration_is_rejected(overrides, error, match) -> None:
     with pytest.raises(error, match=match):
         _callback(**overrides)
+
+
+def test_on_policy_schedule_moves_only_at_rollout_starts() -> None:
+    """PPO plan Step 6: an on-policy update estimates advantages over the
+    whole rollout, so a value may change only between rollouts."""
+    from stable_baselines3 import PPO
+
+    vec_env = make_vec_env(_ScheduledEnv, n_envs=2)
+    try:
+        callback = _callback()
+        callback.model = PPO(  # type: ignore[assignment]
+            "MlpPolicy", vec_env, n_steps=8, batch_size=16, device="cpu"
+        )
+        callback.num_timesteps = 0
+        callback._on_training_start()
+        assert callback.applies_at_rollout_starts is True
+        callback._on_rollout_start()
+        for timesteps in (100, 200, 350):  # steps inside the rollout
+            callback.num_timesteps = timesteps
+            assert callback._on_step() is True
+        assert callback.last_value == pytest.approx(0.6)
+        callback._on_rollout_start()  # the next rollout, from 350 steps
+        assert callback.last_value == pytest.approx(0.35)
+        for worker in vec_env.envs:
+            assert worker.unwrapped.setter_calls == [
+                pytest.approx(0.6),
+                pytest.approx(0.6),
+                pytest.approx(0.35),
+            ]
+    finally:
+        vec_env.close()
+
+
+def test_off_policy_schedule_ignores_rollout_starts() -> None:
+    callback = _callback()
+    training_env = _RecordingVecEnv()
+    callback.model = _FakeModel(training_env)  # type: ignore[assignment]
+    callback.num_timesteps = 0
+    callback._on_training_start()
+    assert callback.applies_at_rollout_starts is False
+    callback.num_timesteps = 350
+    callback._on_rollout_start()
+    assert len(training_env.calls) == 1
+    callback._on_step()
+    assert [value for _, value in training_env.calls] == [
+        pytest.approx(0.6),
+        pytest.approx(0.35),
+    ]

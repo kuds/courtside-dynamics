@@ -98,9 +98,10 @@ pipeline and is not a PettingZoo multi-agent environment.
 
 ### Recipes
 
-Recipes hold each task's constructor settings, algorithm defaults, training
-budget, evaluation metric, recording schema, and artifact schedule. The
-available recipe keys are:
+Recipes hold each task's constructor settings, its default algorithm, a
+calibrated settings block per algorithm family (see Algorithms below),
+training budget, evaluation metric, recording schema, and artifact
+schedule. The available recipe keys are:
 
 - `BallBalance`
 - `BallBounce`
@@ -121,7 +122,8 @@ available recipe keys are:
   rally on the probe-frozen paddle court vs the frozen scripted opponent,
   in continuous n-point play with the escrowed contact and reach
   shapings; selection and success follow the policy's own k≥2 rally
-  returns, `episode_rally_returns_a`, on paired, seeded evaluation)
+  returns, `episode_rally_returns_a`, on paired, seeded evaluation of
+  the bare task, the shapings off: protocol `paddle-npoint@v3`)
 - `HumanoidTennisStage0Intercept`
 - `HumanoidTennisStage1AnchoredReturn`
 - `HumanoidTennisStage2RandomizedReturn`
@@ -132,6 +134,42 @@ not evidence of learned convergence. SAC remains selectable, but its entropy
 tuner sees all 58 action dimensions and is not mask-aware; PPO also spends
 exploration on inactive coordinates. `HumanoidTennisCoopSmoke` is a 10,000-step
 integration and recording check, not a learning baseline.
+
+### Algorithms
+
+`algo` selects `"SAC"`, `"DemoSAC"` (SAC with optional demonstration
+injection, identical to SAC with it off) or `"PPO"`. SAC and DemoSAC
+form the SAC family; PPO is the on-policy family. Each recipe keeps one
+calibrated block per family, and `build_train_config(recipe, algo=...)`
+applies the block for the run's family, so an SAC bundle never reaches
+a PPO run. Every recipe carries a PPO profile (rollout geometry,
+`target_kl`, exploration noise and reward normalization; see the PPO
+design's section 3); the two historical depth ladders refuse PPO, since
+their gates use SAC-only levers. The trainer runs PPO by on-policy
+rules:
+
+- Evaluation and checkpoint cadences must be whole rollouts of
+  `n_steps × n_envs`, and the minibatch must divide the rollout.
+  `train()` refuses anything else before writing a file.
+- Early stops wait for `min_policy_updates_before_stop` (20) policy
+  updates, and curriculum gates and schedules change the task only
+  between rollouts.
+- An MLP-policy run trains on the CPU unless it sets a device, and a
+  reward-normalizing run discounts its return statistics with the
+  model's own gamma.
+
+Every loader (`best_model.zip` replay, the campaign scorer, the
+PaddleTennis tools) loads a checkpoint through the algorithm its run's
+`config.json` records (`training.algos.load_run_model`). `config.json`
+records the algorithm, its family and implementation (`sb3==<version>`),
+and a comparability key (task, evaluation protocol, algorithm family)
+that keeps SAC and PPO runs of one task apart. A PPO run's
+`stage_summary.txt` also flags trust-region and exploration trouble
+under Training Health. Two learning bars guard PPO: a CI test learns a
+1-D reach through `train()` in about 11 s, and
+`tools/ppo_learning_probe.py` (minutes; run by hand, a nightly job is
+planned) must balance BallBalance for at least 700 of 750 steps on 20
+held-out seeds. See [`docs/design_ppo_first_class_20261016.md`](docs/design_ppo_first_class_20261016.md).
 
 For full control, construct `TrainConfig` directly:
 
@@ -169,6 +207,11 @@ pip-installed sessions can bootstrap a config without cloning the repo.
   Colab driver for every recipe.
 - [`notebooks/humanoid_tennis_training.ipynb`](notebooks/humanoid_tennis_training.ipynb)
   runs the gated Stage 0–2 PPO transfer curriculum.
+- [`notebooks/rescore_runs.ipynb`](notebooks/rescore_runs.ipynb) re-scores a
+  Drive runs folder's best models and checkpoints under an evaluation
+  protocol on CPU (by default the August PaddleTennis runs under
+  `paddle-npoint@v3`), into a scores folder beside `training_runs/`, with
+  per-checkpoint curves and a `select()` verdict per run.
 
 The humanoid notebook advances after a passing canonical evaluation. It
 warm-starts the next stage from the passing policy and its matching observation
@@ -294,14 +337,45 @@ enabled.
 | `config.json` | Resolved training settings, environment class/space/curriculum metadata, resolved SB3 settings, versions, device, Git SHA, and warm-start identities |
 | `run_config.toml` | Byte-exact copy of the TOML run config, when one was used |
 | `stage_summary.txt` | Final evaluation and, when scheduled evaluation ran, best evaluation, plus duration, throughput, device, and final training-health metrics |
-| `model/` | The protected best pair (`best_model.zip`, `best_vec_normalize.pkl`) with `best_model_meta.json` binding them by sha256; the end-of-run `final_model.zip` and `vec_normalize.pkl`; and `stage_bests/`, one archived best per curriculum stage |
+| `run_record.json` | What ran and how it ended (`courtside-run-record/1`): status (`running`, then `completed`, `early_stop`, `interrupted` or `crashed`) and stop reason, budget, algorithm, task fingerprints, comparability key, seeds, git state, warm start, selection, evaluation snapshots, and wall clock with its evaluation share. Written when `train()` starts and rewritten on every terminal path |
+| `sync_manifest.json` | Path, size and sha256 of every other file, written last. A run directory without one that verifies is incomplete: `python -m courtside_dynamics.experiments.verify <run_dir>`. With `TrainConfig.sync_dir` (the notebooks' `LOCAL_THEN_SYNC`), a run trains on local disk and mirrors itself there at every checkpoint and at the end, each mirror sealed by its own manifest |
+| `model/` | The protected best pair (`best_model.zip`, `best_vec_normalize.pkl`) with `best_model_meta.json` binding them by sha256 and recording the step they hold, on both selection paths (a reward-selected run's meta reads `"selected_by": "reward"`), each written to a temporary file and renamed into place, the meta last, and checked against the saves `train()` committed when the run seals its record; the end-of-run `final_model.zip` and `vec_normalize.pkl`, written the same way; and `stage_bests/`, one archived best per curriculum stage |
 | `metrics/` | `eval_info.csv` (matched-stage info metrics), `eval_info_final.csv` (the unsynced goal-task stream), `evaluations.npz`, `progress.csv`, and the `tensorboard/` and `monitor/` directories |
-| `checkpoints/`, `media/videos/` | Periodic snapshots and milestone rollout recordings |
+| `checkpoints/` | Periodic checkpoints every `checkpoint_freq` steps (`<prefix>_<N>_steps.zip` with `<prefix>_vecnormalize_<N>_steps.pkl`), each written to a temporary file and renamed into place: hashed by the manifest, not bound to each other |
+| `media/videos/` | Milestone rollout recordings |
+| `snapshots/` | With `TrainConfig.snapshot_evals` (on in the PaddleTennis recipe): the policy and normalizer at every evaluation (not `checkpoints/`: those follow `checkpoint_freq` and nothing binds them), bound by sha256 in `snapshots/index.json`, for offline re-scoring |
+| `scores/` | Written after training by `python -m courtside_dynamics.experiments.rescore --protocol <id> <run_dir>`: one row per scored model under an evaluation protocol |
 | `reports/` | `curriculum_stages.json` (per-stage entry/exit, promotion windows, per-stage bests), `ladder_certification.json` (the startup scripted sweep of the gate's stages, 0.23.0+), the held-out long-horizon audit (`best_model_long_horizon_eval.json` and its per-episode CSV), and the diagnostic plots |
 
 `courtside_dynamics.notebook_utils` can replay the stage summary, audit a run
 directory, explain missing optional artifacts, and plot learning, evaluation,
 and training-health CSVs. The notebooks run these diagnostics after training.
+
+`python -m courtside_dynamics.experiments.index --root <training_runs>`
+regenerates `<root>/index/runs.jsonl`, one row per run directory: run records
+as written with their manifest verdict, and older directories backfilled from
+`config.json` and `stage_summary.txt` (aborted launches marked as stubs), each
+joined to the campaign map of what it tested. See
+[`docs/experiments.md`](docs/experiments.md), which also covers verification
+and Colab use.
+
+`python -m courtside_dynamics.experiments.rescore --protocol paddle-npoint@v3
+<run_dir>` re-scores a run's best model, evaluation snapshots and checkpoints
+offline under a versioned evaluation protocol, with the in-loop evaluator's
+own code (under the run's own protocol, a snapshot's row equals its
+`eval_info.csv` row bit for bit on CPU: every evaluation of a paired run, the
+first of an unpaired one; a performance-gated run has no such protocol);
+`experiments.select.select()` picks a best from the rows, and
+`python -m courtside_dynamics.experiments.probe` scores the scripted
+witnesses or any model under a protocol. `paddle-npoint@v3`, the PaddleTennis
+recipe's selection protocol since 2026-10-17, evaluates without the
+training shapings, so evaluation rewards are task reward; its k≥2 headline
+reads exactly what the earlier `paddle-npoint@v2` reads. Each run's
+`config.json` names its in-loop protocol (id and fingerprint) in the
+comparability key (a gated run says it has none). See
+[`docs/experiments.md`](docs/experiments.md) for the
+protocols, re-scoring a Drive folder with `notebooks/rescore_runs.ipynb`,
+and the probe CLI.
 
 ## Development
 
@@ -343,6 +417,48 @@ meshes, starter TOMLs) sit beside the code in a source tree whether or not
 they are packaged, so the test suite passes either way while wheel users
 fail at environment construction. CI runs it on every build.
 
+### Refactor gates
+
+Env and training refactors must leave the task's streams and the SAC
+training paths bit-identical unless the change is declared. Three gates
+check it, and a mismatch means "declare it", never "re-record it":
+
+1. **Env digests** (`tools/golden_digest.py`). Per-step digests of
+   seeded scripted streams: 22 cases in the CI set, or five spaced
+   seeds per case with `--full` (two for the humanoid case; the NaN
+   witnesses keep the one seed each is calibrated on). CI runs the CI
+   set through `tests/test_golden_digests.py`; run `--full` by hand.
+2. **Recipe snapshot** (`tools/recipe_snapshot.py`). Every resolved
+   `TrainConfig`. CI runs it through `tests/test_recipe_snapshot.py`.
+3. **Trainer digest** (`tools/trainer_digest.py --base <ref>`). Tiny
+   seeded `train()` jobs on this checkout and on a worktree of the ref.
+   It runs by hand only; in CI, `tests/test_trainer_digest.py` covers
+   its hashing, not the jobs.
+
+Before a merge that touches the envs or training, run all three by
+hand; CI covers only gate 1's CI set and gate 2:
+
+```bash
+OMP_NUM_THREADS=1 python tools/golden_digest.py           # gate 1, CI set (~45 s)
+OMP_NUM_THREADS=1 python tools/golden_digest.py --full    # gate 1, full set (~3.5 min)
+python tools/recipe_snapshot.py                            # gate 2
+python tools/trainer_digest.py --base main                 # gate 3 (~2 min)
+python -m mypy                                             # the typecheck, as CI runs it
+```
+
+Run mypy the way CI's typecheck job does: `python -m mypy`, in an
+environment with the train extra installed (`pip install -e
+".[train,dev]"`; CI uses Python 3.11). A mypy that cannot import
+numpy, Gymnasium and SB3, such as a global or `uv tool` install, treats
+them as `Any` under `ignore_missing_imports` and passes silently.
+
+In a git worktree, run the gates with
+`PYTHONPATH=src`: the editable install imports the main checkout's
+package there, and the tools and the test suite refuse to run against
+it. See
+[`docs/DECISIONS.md`](docs/DECISIONS.md), "Golden digests and the freeze
+harness gate every refactor".
+
 The suite covers Gymnasium registration and API invariants, MuJoCo physics and
 contact semantics, rally rules, fixed-stage curriculum and promotion metrics,
 SB3 training and callbacks, run artifacts, and notebook helpers. Rendering is
@@ -361,14 +477,17 @@ courtside-dynamics/
 │   ├── envs/                    # Gymnasium tasks and curriculum contracts
 │   ├── callbacks/               # Evaluation and video recording
 │   ├── training/                # SAC/PPO training, artifacts, and promotion
+│   ├── experiments/             # Run records, sync manifests, verification, run index,
+│   │                            #   snapshots, eval protocols, re-scoring harness, select, probe
 │   ├── run_configs/             # Packaged starter TOMLs, one per recipe
+│   ├── digests.py               # Golden env-stream digests (the refactor gate)
 │   ├── recipes.py               # Curated environment/training presets
 │   ├── run_config.py            # TOML run-config loading, merge, provenance
 │   ├── notebook_utils.py        # Colab setup, plots, replay, and audits
 │   └── scripted_policies.py     # Deterministic validation oracles
-├── tools/                       # Calibration sweeps and packaging checks
+├── tools/                       # Calibration sweeps, packaging checks, refactor gates
 ├── notebooks/
-└── tests/
+└── tests/                       # golden/: the recorded digests and snapshot
 ```
 
 For the engineering rationale behind the current design — the bugs, dead ends,

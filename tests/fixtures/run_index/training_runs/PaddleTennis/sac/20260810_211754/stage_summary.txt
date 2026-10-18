@@ -1,0 +1,82 @@
+courtside-dynamics: SAC on PaddleTennis
+==================================================
+
+Project:        courtside-dynamics
+Environment:    PaddleTennis
+Algorithm:      SAC
+Seed:           0
+Date:           2026-08-11 05:07:43
+Status:         completed
+Stop reason:    early_stop_patience: no improvement in crossings_ep_mean/success_rate/episode_reward_mean for the last 20 evaluations
+Git SHA:        2e597b1
+Run config:     paddle_tennis_npoint_pilot.toml (79f6f3a67a9c)
+Timesteps:      1,125,000 of 2,000,000 budget (stopped early)
+Duration:       7h 49m 36s
+Throughput:     39 FPS
+Final eval:     -3.267 +/- 0.573
+Avg ep length:  1500.0 +/- 0.0 steps
+Best eval:      -3.025 +/- 0.518 (at 525,000 steps)
+Final vs best:  -0.242
+Best model:     step 625,000 (crossings_ep_mean 3.30)  [task-metric selection]
+Headline:       crossings_ep_mean
+Headline final: 3.03
+Headline best:  3.30 (at 625,000 steps)
+Recent train:   -3.190 +/- 0.647 (last 100 episodes)
+
+Device
+----------------------------------------
+  Device:         cuda
+  GPU:            NVIDIA L4
+  VRAM:           22563 MB
+  Compute cap:    8.9
+  CUDA:           12.8
+  cuDNN:          91900
+  PyTorch:        2.11.0+cu128
+
+Hyperparameters
+----------------------------------------
+  total_timesteps    2000000
+  n_envs             4
+  use_sde            True
+  ent_coef           auto_0.02
+  target_entropy     -1.5
+  train_freq         (64, 'step')
+
+Best Checkpoint Evaluation (step 625,000)
+----------------------------------------
+  Reward:         -3.433 +/- 0.761
+  Episode length: 1500.0
+  bounce_count:    final 0.00  max 1.00
+  crossings:       final 3.00  max 4.00
+  legal_hit_count: final 0.00  max 2.00
+  rally_count:     final 0.00  max 1.00
+  Phase fractions:
+    awaiting_return     55.8%
+    initial_feed        18.2%
+    return_in_flight    25.6%
+    terminal            0.4%
+
+Training Health (final)
+----------------------------------------
+  train/actor_loss:    0.2853
+  train/critic_loss:   6.111e-05
+  train/ent_coef:      4.708e-05
+  train/ent_coef_loss: 0.2928
+  train/learning_rate: 0.0003
+  train/n_updates:     1.125e+06
+  train/std:           0.03185
+
+Artifacts
+----------------------------------------
+  config:         config.json
+  best_model:     model/best_model.zip
+  best_vec_normalize:model/best_vec_normalize.pkl
+  best_model_meta:model/best_model_meta.json
+  final_model:    model/final_model.zip
+  vec_normalize:  model/vec_normalize.pkl
+  monitor_dir:    metrics/monitor
+  progress_csv:   metrics/progress.csv
+  evaluations:    metrics/evaluations.npz
+  eval_info_csv:  metrics/eval_info.csv
+  videos_dir:     media/videos
+  checkpoints_dir:checkpoints

@@ -368,7 +368,8 @@ def test_k2_harvest_reproduces_only_its_own_library(monkeypatch, tmp_path):
 
     harvested = []
 
-    def fake_harvest(model, vec_normalize, seed_start, episodes, steps):
+    def fake_harvest(model, vec_normalize, seed_start, episodes, steps, *, algo):
+        assert algo is None  # the run's config.json decides by default
         harvested.append((seed_start, episodes))
         return {"entries": []}
 

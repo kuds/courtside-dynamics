@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,11 @@ CAMPAIGN_NOTEBOOK = (
 def _source(cell: dict[str, Any]) -> str:
     source = cell.get("source", "")
     return "".join(source) if isinstance(source, list) else str(source)
+
+
+#: A full commit SHA or a dated tag (``name-YYYYMMDD``) -- never a branch.
+_IMMUTABLE_REF = re.compile(r"[0-9a-f]{40}|[a-z0-9][a-z0-9.-]*-20[0-9]{6}")
+_PACKAGE_URL = "git+https://github.com/kuds/courtside-dynamics"
 
 
 def _load_humanoid_notebook() -> dict[str, Any]:
@@ -128,7 +134,17 @@ def test_humanoid_notebook_warm_starts_only_after_canonical_promotion() -> None:
     assert 'stage_dir / "promotion_report.json"' in notebook_source
     assert "report.eligible_for_manual_promotion and not extra_failures" in notebook_source
     assert "if not automatic_eligible:" in notebook_source
-    assert 'warm_start = WarmStartConfig(source_run_dir=str(stage_dir))' in notebook_source
+    # Each advance restarts exploration at the next stage's own
+    # log_std_init (PPO plan Step 9), and a package without the option
+    # is refused before any stage trains.
+    assert (
+        "warm_start = WarmStartConfig(source_run_dir=str(stage_dir), "
+        "reset_log_std=True)" in notebook_source
+    )
+    assert (
+        'if AUTO_ADVANCE and "reset_log_std" not in '
+        "WarmStartConfig.__dataclass_fields__:" in notebook_source
+    )
     assert "while " not in notebook_source
     assert "one_shot_canonical_evaluation" in notebook_source
     assert "Interrupted training was saved for recovery but cannot auto-promote" in (
@@ -233,10 +249,12 @@ def test_sb3_notebook_uses_run_config_files_not_pinned_model_kwargs() -> None:
     # Recipes carry the calibrated patience; the notebook defers.
     assert "EARLY_STOP_PATIENCE = None" in source
     assert "EARLY_STOP_PATIENCE = 20" not in source
-    # Overriding a recipe's default algorithm re-applies the per-algo
-    # worker-count suggestion (a recipe's n_envs is calibrated for its
-    # default algo only).
-    assert 'ALGO.upper() != RECIPES[ENV].default_algo.upper()' in source
+    # Overriding a recipe's default algorithm family re-applies the
+    # per-family worker-count suggestion (a recipe's n_envs is
+    # calibrated for its default algo's family only); see
+    # test_sb3_notebook_worker_count_follows_the_algorithm_family.
+    assert "in OFF_POLICY_ALGOS) != (" in source
+    assert 'ALGO.upper() == "SAC"' not in source
     assert "model_kwargs=MODEL_KWARGS" not in source
     # Discovery cell: recipes and packaged starters are listable, and
     # starters are copied (never edited in site-packages).
@@ -244,6 +262,80 @@ def test_sb3_notebook_uses_run_config_files_not_pinned_model_kwargs() -> None:
     assert "copy_starter_config" in source
     assert "WallBallBootstrap" in source
     assert "cfg.run_config_file" in source
+
+
+def _sb3_worker_override(algo: str, env: str) -> dict[str, Any]:
+    """Run the training cell's ``n_envs`` override block for ALGO/ENV."""
+    from courtside_dynamics.recipes import RECIPES
+    from courtside_dynamics.training.algos import OFF_POLICY_ALGOS
+
+    source = next(
+        _source(cell)
+        for cell in _load_sb3_notebook()["cells"]
+        if "overrides = {}" in _source(cell)
+    )
+    start = source.index("overrides = {}")
+    end = source.index("if EARLY_STOP_PATIENCE is not None:")
+    namespace: dict[str, Any] = {
+        "ALGO": algo,
+        "ENV": env,
+        "N_ENVS": None,
+        "RECIPES": RECIPES,
+        "OFF_POLICY_ALGOS": OFF_POLICY_ALGOS,
+    }
+    exec(compile(source[start:end], f"{SB3_NOTEBOOK}:overrides", "exec"), namespace)
+    return namespace["overrides"]
+
+
+def test_sb3_notebook_worker_count_follows_the_algorithm_family() -> None:
+    """DemoSAC is SAC family: it keeps the SAC worker count, not PPO's 16.
+
+    The cell used to test ``ALGO.upper() == "SAC"``, so DemoSAC on a
+    PPO-default recipe got 16 workers, and on a SAC-default recipe the
+    "algo differs" branch fired and handed it 16 as well.
+    """
+    # Same family as the recipe default: the recipe's calibrated count.
+    assert _sb3_worker_override("SAC", "PaddleTennis") == {}
+    assert _sb3_worker_override("DemoSAC", "PaddleTennis") == {}
+    assert _sb3_worker_override("PPO", "HumanoidTennisStage0Intercept") == {}
+    # Switching to a family the recipe has a block for keeps the block's
+    # geometry (PPO plan Step 14): the PPO profiles size n_envs with
+    # n_steps, so the table's 16 no longer overrides them (it used to
+    # train BallBalance's measured 8 x 512 profile at 16 x 512).
+    assert _sb3_worker_override("PPO", "PaddleTennis") == {}
+    assert _sb3_worker_override("PPO", "BallBalance") == {}
+    assert _sb3_worker_override("PPO", "HumanoidTennisCoopSmoke") == {}
+    # A family without a block applies the section-2 table.
+    assert _sb3_worker_override("SAC", "HumanoidTennisStage0Intercept") == {
+        "n_envs": 8
+    }
+    assert _sb3_worker_override(
+        "DemoSAC", "HumanoidTennisStage0Intercept"
+    ) == {"n_envs": 8}
+
+
+def test_sb3_notebook_worker_table_falls_back_on_a_package_without_blocks(
+    monkeypatch,
+) -> None:
+    """On a package from before per-family blocks (no ``algo_family``,
+    no ``algo_cfg``), a family switch still takes the section-2 table."""
+    from courtside_dynamics.training import algos
+
+    monkeypatch.delattr(algos, "algo_family")
+    assert _sb3_worker_override("PPO", "PaddleTennis") == {"n_envs": 16}
+    assert _sb3_worker_override("PPO", "BallBalance") == {"n_envs": 16}
+
+
+def test_sb3_notebook_ppo_guidance_matches_the_profiles() -> None:
+    """The section-2 worker table names the recipe's PPO profile, not a
+    flat 16, and the health section names the summary's PPO flags."""
+    source = "\n".join(_source(cell) for cell in _load_sb3_notebook()["cells"])
+    assert "| PPO  | **16**" not in source
+    assert "**the recipe's PPO profile**" in source
+    assert "whole rollouts" in source
+    assert 'vec_env = "subproc"' in source
+    assert "max(2 × `target_kl`, 0.05)" in source
+    assert "SAC | DemoSAC | PPO" in source
 
 
 def test_sb3_notebook_replay_uses_tennis_court_style() -> None:
@@ -407,10 +499,14 @@ def test_campaign_notebook_resumes_and_branches_via_helpers() -> None:
     source = "\n".join(
         _source(cell) for cell in _load_campaign_notebook()["cells"]
     )
-    # Manifest-driven resume on a stable (non-timestamped) root.
-    assert '"PaddleTennisCampaign", "sac", use_drive=USE_DRIVE, timestamp=False' in (
-        source
-    )
+    # Manifest-driven resume on a stable (non-timestamped) root, one
+    # folder per algorithm family.
+    assert (
+        '    "PaddleTennisCampaign",\n'
+        '    "ppo" if PPO_PLAN else "sac",\n'
+        "    use_drive=USE_DRIVE,\n"
+        "    timestamp=False,"
+    ) in source
     assert "load_campaign_manifest" in source
     assert "write_campaign_manifest" in source
     assert (
@@ -464,7 +560,10 @@ def test_campaign_notebook_resumes_and_branches_via_helpers() -> None:
     # The warm-started legs merge learning_starts INTO the recipe's
     # calibrated SAC bundle -- a bare {"learning_starts": ...} override
     # would silently drop use_sde / auto-entropy / train_freq.
-    assert '**RECIPES[RECIPE].extra_cfg["model_kwargs"],' in source
+    assert "**recipe_model_kwargs," in source
+    # ...read through the builder, wherever the recipe keeps the bundle.
+    assert "recipe_model_kwargs = build_train_config(" in source
+    assert 'extra_cfg["model_kwargs"]' not in source
     assert '"learning_starts": WARM_START_LEARNING_STARTS,' in source
     # Interrupted legs cannot gate; the retry lands in a fresh attempt.
     assert "cannot be gated or branched" in source
@@ -564,8 +663,7 @@ def test_campaign_notebook_plumbs_algo_and_model_kwargs() -> None:
     # never replace it wholesale.
     assert "if model_kwargs:" in source
     assert (
-        '**overrides.get(\n                "model_kwargs", '
-        'RECIPES[RECIPE].extra_cfg["model_kwargs"]\n            ),\n'
+        '**overrides.get("model_kwargs", recipe_model_kwargs),\n'
         "            **model_kwargs,"
     ) in source
     assert 'expected["model_kwargs"] = dict(model_kwargs)' in source
@@ -681,7 +779,7 @@ def test_campaign_default_plan_is_unchanged_by_the_algo_knobs(tmp_path) -> None:
     )
     assert set(adopted) == _LATE_FINGERPRINT_KEYS
     assert ns["RESOLVED_ALGO"] == "SAC"
-    recipe_bundle = RECIPES["PaddleTennis"].extra_cfg["model_kwargs"]
+    recipe_bundle = RECIPES["PaddleTennis"].algo_cfg["SAC"]["model_kwargs"]
 
     scratch = ns["make_leg_config"](
         log_dir=tmp_path / "leg1",
@@ -736,7 +834,7 @@ def test_campaign_demosac_plan_builds_and_validates(tmp_path) -> None:
     assert ns["FINGERPRINT"]["algo"] == "DemoSAC"
     assert ns["FINGERPRINT"]["leg1_model_kwargs"] == _DEMO_LEG_KWARGS
     assert "leg2_model_kwargs" not in ns["FINGERPRINT"]
-    recipe_bundle = RECIPES["PaddleTennis"].extra_cfg["model_kwargs"]
+    recipe_bundle = RECIPES["PaddleTennis"].algo_cfg["SAC"]["model_kwargs"]
 
     cfg = ns["make_leg_config"](
         log_dir=tmp_path / "leg1",
@@ -794,16 +892,157 @@ def test_campaign_demosac_plan_builds_and_validates(tmp_path) -> None:
         raise AssertionError("a mismatched demo library digest passed the plan")
 
 
+_PPO_PLAN = (
+    ("ALGO = None", 'ALGO = "PPO"'),
+    ('REQUIRE_DEVICE = "cuda"', "REQUIRE_DEVICE = None"),
+)
+
+
+def test_campaign_ppo_plan_builds_the_profile_legs(tmp_path) -> None:
+    """ALGO = "PPO" (PPO plan Step 14's notebook item): both legs build
+    with the recipe's PPO profile on the PPO_* whole-rollout geometry,
+    no SAC key reaches either leg (no learning_starts on the warm-started
+    one), the plan and fingerprint record that geometry, and a
+    config.json recorded from the leg passes the leg's plan."""
+    from courtside_dynamics.notebook_utils import validate_run_config_against_plan
+    from courtside_dynamics.recipes import build_train_config
+    from courtside_dynamics.training import WarmStartConfig
+    from courtside_dynamics.training.artifacts import write_run_config
+
+    ns = _exec_campaign_plan(_PPO_PLAN)
+    assert ns["PPO_PLAN"] is True
+    assert ns["RESOLVED_ALGO"] == "PPO"
+    fingerprint = ns["FINGERPRINT"]
+    assert fingerprint["algo"] == "PPO"
+    assert (fingerprint["n_envs"], fingerprint["eval_freq"]) == (8, 24_576)
+    assert fingerprint["checkpoint_freq"] == 98_304
+    profile = build_train_config(
+        "PaddleTennis", algo="PPO", log_dir=str(tmp_path / "unused"), seed=0
+    ).model_kwargs
+    assert profile["target_kl"] == 0.02 and profile["use_sde"] is True
+
+    sac_only = {"learning_starts", "buffer_size", "train_freq", "target_entropy"}
+    for name, warm_start in (
+        ("leg1", None),
+        ("leg2", WarmStartConfig(source_run_dir=str(tmp_path))),
+    ):
+        cfg = ns["make_leg_config"](
+            log_dir=tmp_path / name,
+            seed=0,
+            total_timesteps=1_000_000,
+            warm_start=warm_start,
+        )
+        assert cfg.algo == "PPO"
+        assert cfg.model_kwargs == profile, name
+        assert not sac_only & set(cfg.model_kwargs), name
+        assert (cfg.n_envs, cfg.eval_freq, cfg.checkpoint_freq) == (
+            8,
+            24_576,
+            98_304,
+        )
+        assert cfg.require_device is None
+    # A leg's own kwargs merge over the profile.
+    tuned = ns["make_leg_config"](
+        log_dir=tmp_path / "tuned",
+        seed=0,
+        total_timesteps=1_000_000,
+        model_kwargs={"target_kl": 0.01},
+    )
+    assert tuned.model_kwargs == {**profile, "target_kl": 0.01}
+
+    plan = ns["leg_expected_plan"](
+        seed=0, total_timesteps=1_000_000, warm_start=None
+    )
+    assert plan["algo"] == "PPO"
+    assert (plan["n_envs"], plan["eval_freq"], plan["checkpoint_freq"]) == (
+        8,
+        24_576,
+        98_304,
+    )
+    leg1 = ns["make_leg_config"](
+        log_dir=tmp_path / "leg1", seed=0, total_timesteps=1_000_000
+    )
+    (tmp_path / "leg1").mkdir()
+    validate_run_config_against_plan(
+        write_run_config(leg1, str(tmp_path / "leg1")), plan
+    )
+
+
+def test_campaign_ppo_plan_refuses_a_non_ppo_lineage(tmp_path) -> None:
+    """A PPO campaign checks every warm-start lineage's recorded
+    algorithm after Drive mounts and before the manifest exists: the
+    frozen SAC fallback would otherwise be refused by train() only when
+    the main leg starts, a whole gate leg later."""
+    import pytest
+
+    root = next(
+        _source(cell)
+        for cell in _load_campaign_notebook()["cells"]
+        if cell["cell_type"] == "code" and "FINGERPRINT = {" in _source(cell)
+    )
+    check = root[root.index("if PPO_PLAN:") : root.index("CAMPAIGN_ROOT.mkdir")]
+
+    def lineage(name: str, algo: str | None) -> str:
+        run_dir = tmp_path / name
+        run_dir.mkdir()
+        if algo is not None:
+            (run_dir / "config.json").write_text(
+                json.dumps({"train_config": {"algo": algo}})
+            )
+        return str(run_dir)
+
+    def run(fallback, leg1=None, ppo_plan=True):
+        namespace = {
+            "PPO_PLAN": ppo_plan,
+            "LEG1_WARM_START_RUN_DIR": leg1,
+            "FALLBACK_WARM_START_RUN_DIR": fallback,
+        }
+        exec(compile(check, f"{CAMPAIGN_NOTEBOOK}:lineages", "exec"), namespace)
+
+    ppo_run = lineage("ppo_run", "PPO")
+    sac_run = lineage("sac_run", "SAC")
+    run(ppo_run, leg1=ppo_run)
+    run(None)
+    with pytest.raises(ValueError, match="FALLBACK_WARM_START_RUN_DIR .* records SAC"):
+        run(sac_run)
+    with pytest.raises(ValueError, match="LEG1_WARM_START_RUN_DIR .* records DEMOSAC"):
+        run(ppo_run, leg1=lineage("demo_run", "DemoSAC"))
+    with pytest.raises(ValueError, match="records nothing"):
+        run(lineage("bare", None))
+    # The SAC family's campaigns never read a lineage here.
+    run(sac_run, ppo_plan=False)
+
+
 def test_campaign_settings_refuse_misconfigured_algo_knobs() -> None:
     """Each refusal fires in the settings cell -- before Drive is
     mounted and the manifest freezes a plan that could never launch."""
     import pytest
 
     demo = f"LEG1_MODEL_KWARGS = {_DEMO_LEG_KWARGS!r}"
+    ppo = ("ALGO = None", 'ALGO = "PPO"')
+    on_cpu = ('REQUIRE_DEVICE = "cuda"', "REQUIRE_DEVICE = None")
     cases = (
         # demo_* keys need ALGO = "DemoSAC".
         ((("LEG1_MODEL_KWARGS = {}", demo),), "not accepted by SAC"),
-        ((("ALGO = None", 'ALGO = "PPO"'),), "ALGO must be None"),
+        ((("ALGO = None", 'ALGO = "TD3"'),), "Unknown algo 'TD3'"),
+        # PPO trains on CPU (its profile pins the device) ...
+        ((ppo,), r"set REQUIRE_DEVICE = None"),
+        # ... has no temperature to skip ...
+        (
+            (ppo, on_cpu, ("LEG2_TRANSFER_LOG_ENT_COEF = True", "LEG2_TRANSFER_LOG_ENT_COEF = False")),
+            "no entropy temperature to skip",
+        ),
+        # ... refuses SAC keys in its legs ...
+        (
+            (ppo, on_cpu, ("LEG1_MODEL_KWARGS = {}", 'LEG1_MODEL_KWARGS = {"buffer_size": 1}')),
+            "not accepted by PPO",
+        ),
+        # ... and a cadence that is not a whole rollout (the on-policy
+        # pre-flight, run before the manifest freezes the plan).
+        (
+            (ppo, on_cpu, ("PPO_EVAL_FREQ = 24_576", "PPO_EVAL_FREQ = 25_000")),
+            "whole",
+        ),
         (
             (("LEG1_MODEL_KWARGS = {}", 'LEG1_MODEL_KWARGS = {"seed": 1}'),),
             r"may not set \['seed'\]",
@@ -1017,3 +1256,523 @@ def test_campaign_resume_retrains_an_interrupted_leg(tmp_path) -> None:
     assert trained == [ns["GATE_STAGE"]]
     assert scored == [fresh_dir]
     assert manifest["stages"][ns["GATE_STAGE"]]["run_dir"] == fresh_dir
+
+
+def test_every_notebook_installs_a_pinned_immutable_ref() -> None:
+    """A merge to ``main`` must never change what a Colab session trains.
+
+    Each notebook installs the package from ``REPO_REF``, which must be a
+    full commit SHA or a dated tag. Every install line goes through it.
+    """
+    for path in (
+        SB3_NOTEBOOK, CAMPAIGN_NOTEBOOK, HUMANOID_NOTEBOOK, RESCORE_NOTEBOOK
+    ):
+        notebook = json.loads(path.read_text())
+        install_cells = [
+            _source(cell)
+            for cell in notebook["cells"]
+            if cell["cell_type"] == "code" and _PACKAGE_URL in _source(cell)
+        ]
+        assert len(install_cells) == 1, path.name
+        source = install_cells[0]
+        refs = re.findall(r'^REPO_REF = "([^"]*)"$', source, flags=re.MULTILINE)
+        assert len(refs) == 1, path.name
+        assert _IMMUTABLE_REF.fullmatch(refs[0]), (path.name, refs[0])
+        installs = [
+            line
+            for line in source.splitlines()
+            if line.lstrip().startswith("!pip install") and _PACKAGE_URL in line
+        ]
+        assert installs, path.name
+        for line in installs:
+            assert line.rstrip().endswith(f'{_PACKAGE_URL}@{{REPO_REF}}"'), (
+                path.name,
+                line,
+            )
+
+
+# -- Local-then-sync knobs (design L1) ----------------------------------------
+
+
+def test_sb3_notebook_local_then_sync_is_opt_in_and_mirrors_last() -> None:
+    """LOCAL_THEN_SYNC ships off, reaches train() only when set, and the
+    post-training plots, video and audits are mirrored after they are
+    written and before the runtime disconnects."""
+    source = "\n".join(_source(cell) for cell in _load_sb3_notebook()["cells"])
+    assert "\nLOCAL_THEN_SYNC = False\n" in source
+    assert 'if SYNC_DIR is not None:\n    overrides["sync_dir"] = SYNC_DIR\n' in source
+    audit = source.index("missing = check_run_artifacts(")
+    mirror = source.index("sync_run_dir(LOG_DIR, SYNC_DIR)")
+    disconnect = source.index("disconnect_runtime(delay_seconds=30)")
+    assert audit < mirror < disconnect
+    assert "verify_run_dir(SYNC_DIR, strict=True)" in source
+
+
+def test_sb3_notebook_local_then_sync_needs_drive(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    run_dir_cell = next(
+        _source(cell)
+        for cell in _load_sb3_notebook()["cells"]
+        if "SYNC_DIR = None" in _source(cell)
+    )
+    monkeypatch.chdir(tmp_path)
+
+    def run(**settings: Any) -> dict[str, Any]:
+        namespace: dict[str, Any] = {
+            "ENV": "BallBalance",
+            "ALGO": None,
+            "USE_DRIVE": False,
+            "CONFIG_FILE": None,
+            **settings,
+        }
+        exec(compile(run_dir_cell, f"{SB3_NOTEBOOK}:run_dir", "exec"), namespace)
+        return namespace
+
+    with pytest.raises(ValueError, match="set USE_DRIVE = True"):
+        run(LOCAL_THEN_SYNC=True)
+    off = run(LOCAL_THEN_SYNC=False)
+    assert off["SYNC_DIR"] is None
+    assert Path(off["LOG_DIR"]).resolve().is_relative_to(
+        (tmp_path / "logs" / "BallBalance").resolve()
+    )
+
+
+def test_campaign_local_then_sync_is_operational_not_fingerprinted(
+    tmp_path,
+) -> None:
+    """The campaign knob ships off, never joins the fingerprint (a
+    campaign may switch it between resumes, like REQUIRE_DEVICE), needs
+    Drive, and hands each leg's Drive attempt dir to train() as its
+    sync_dir while the leg trains on local disk."""
+    import pytest
+
+    off = _exec_campaign_plan()
+    assert off["LOCAL_THEN_SYNC"] is False
+    on = _exec_campaign_plan((("LOCAL_THEN_SYNC = False", "LOCAL_THEN_SYNC = True"),))
+    assert on["FINGERPRINT"] == off["FINGERPRINT"]
+    with pytest.raises(ValueError, match="set USE_DRIVE = True"):
+        _exec_campaign_plan(
+            (
+                ("LOCAL_THEN_SYNC = False", "LOCAL_THEN_SYNC = True"),
+                ("USE_DRIVE = True", "USE_DRIVE = False"),
+            )
+        )
+    leg = on["make_leg_config"](
+        log_dir=tmp_path / "local" / "attempt_01",
+        seed=0,
+        total_timesteps=1_000_000,
+        sync_dir=tmp_path / "drive" / "attempt_01",
+    )
+    assert leg.sync_dir == str(tmp_path / "drive" / "attempt_01")
+    assert leg.log_dir == str(tmp_path / "local" / "attempt_01")
+    unsynced = off["make_leg_config"](
+        log_dir=tmp_path / "leg", seed=0, total_timesteps=1_000_000
+    )
+    assert unsynced.sync_dir is None
+    helpers = next(
+        _source(cell)
+        for cell in _load_campaign_notebook()["cells"]
+        if "def run_leg(" in _source(cell)
+    )
+    run_leg = helpers[helpers.index("def run_leg(") :]
+    assert 'log_dir = os.path.join("/content/runs", drive_relative)' in run_leg
+    assert "sync_dir = stage_dir" in run_leg
+    assert "sync_dir=sync_dir," in run_leg
+    # Everything after train() keeps reading the Drive attempt dir.
+    assert 'locate_artifact(stage_dir, "config")' in run_leg
+    assert "stage_summary_status(stage_dir)" in run_leg
+
+
+# -- Rescore notebook (design L3) ---------------------------------------------
+
+RESCORE_NOTEBOOK = REPOSITORY_ROOT / "notebooks" / "rescore_runs.ipynb"
+_FIXTURE_RUNS = (
+    REPOSITORY_ROOT / "tests" / "fixtures" / "run_index" / "training_runs"
+    / "PaddleTennis" / "sac"
+)
+#: The notebook's code cells in execution order, the install cell aside.
+_RESCORE_CELLS = (
+    "rs-settings",
+    "rs-protocol",
+    "rs-paths",
+    "rs-index",
+    "rs-pick",
+    "rs-rescore",
+    "rs-read",
+    "rs-plot",
+    "rs-verdict",
+)
+
+
+def _rescore_cells() -> dict[str, str]:
+    notebook = json.loads(RESCORE_NOTEBOOK.read_text())
+    return {
+        cell["id"]: _source(cell)
+        for cell in notebook["cells"]
+        if cell["cell_type"] == "code"
+    }
+
+
+def test_rescore_notebook_is_clean_and_code_cells_compile() -> None:
+    notebook = json.loads(RESCORE_NOTEBOOK.read_text())
+    assert notebook["nbformat"] == 4
+    assert notebook["nbformat_minor"] == 5
+    cells = notebook["cells"]
+    cell_ids = [cell["id"] for cell in cells]
+    assert len(cell_ids) == len(set(cell_ids))
+    code_ids = [cell["id"] for cell in cells if cell["cell_type"] == "code"]
+    assert code_ids == ["rs-install", *_RESCORE_CELLS]
+    for cell in cells:
+        if cell["cell_type"] != "code":
+            continue
+        assert cell["execution_count"] is None
+        assert cell["outputs"] == []
+        source = _source(cell)
+        if any(
+            line.lstrip().startswith(("!", "%"))
+            for line in source.splitlines()
+        ):
+            continue
+        compile(source, f"{RESCORE_NOTEBOOK}:{cell['id']}", "exec")
+
+
+def test_rescore_notebook_defaults_score_the_august_runs_beside_their_folder() -> None:
+    """The defaults are design L3's re-score (the August runs and the
+    registered run under @v3, every checkpoint, on CPU), and the scores
+    folder is built beside training_runs/, refused inside it."""
+    cells = _rescore_cells()
+    settings = cells["rs-settings"]
+    for line in (
+        'PROTOCOL_ID = "paddle-npoint@v3"',
+        "RUN_IDS = None",
+        'REGISTERED_RUN = "20260816_235141"',
+        'SERIES = "checkpoints"',
+        "QUICK = False",
+        "QUICK_CHECKPOINTS = 3",
+        "FORCE = False",
+        "USE_DRIVE = True",
+    ):
+        assert f"\n{line}\n" in f"\n{settings}\n", line
+    paths = cells["rs-paths"]
+    assert 'OUT_ROOT = PROJECT_ROOT / "rescores" / RUNS_SUBDIR' in paths
+    assert "OUT_ROOT.resolve().is_relative_to(TRAINING_RUNS.resolve())" in paths
+    rescore = cells["rs-rescore"]
+    assert "out_dir=out_dir" in rescore and 'device="cpu"' in rescore
+    assert "OUT_ROOT / 'index' / 'runs.jsonl'" in cells["rs-index"]
+
+
+def _august_layout_run(source: Path, run_dir: Path) -> list[int]:
+    """A run directory in the August layout holding a tiny trained run's
+    policies: the n-point pilot's ``config.json``, summary and run
+    config byte for byte (SAC, seed 0, normalized, evaluated unpaired),
+    its best pair replaced by the tiny run's and rebound by sha256 in
+    the meta, and the tiny run's evaluation snapshots renamed to the
+    August checkpoint names (``paddle_tennis_sac_<N>_steps.zip`` with
+    ``paddle_tennis_sac_vecnormalize_<N>_steps.pkl``)."""
+    import shutil
+
+    from courtside_dynamics.experiments.records import sha256_file
+    from courtside_dynamics.experiments.snapshots import read_snapshot_index
+
+    shutil.copytree(_FIXTURE_RUNS / "20260810_211754", run_dir)
+    for name in (
+        "best_model.zip",
+        "best_vec_normalize.pkl",
+        "final_model.zip",
+        "vec_normalize.pkl",
+    ):
+        shutil.copyfile(source / "model" / name, run_dir / "model" / name)
+    shutil.rmtree(run_dir / "checkpoints")
+    (run_dir / "checkpoints").mkdir()
+    steps = []
+    for entry in read_snapshot_index(source / "snapshots").entries:
+        assert entry.normalizer is not None
+        shutil.copyfile(
+            source / "snapshots" / entry.model,
+            run_dir / "checkpoints" / f"paddle_tennis_sac_{entry.timestep}_steps.zip",
+        )
+        shutil.copyfile(
+            source / "snapshots" / entry.normalizer,
+            run_dir
+            / "checkpoints"
+            / f"paddle_tennis_sac_vecnormalize_{entry.timestep}_steps.pkl",
+        )
+        steps.append(entry.timestep)
+    meta_path = run_dir / "model" / "best_model_meta.json"
+    meta = json.loads(meta_path.read_text())
+    tiny_meta = json.loads((source / "model" / "best_model_meta.json").read_text())
+    meta["timestep"] = tiny_meta["timestep"]
+    meta["artifacts"] = {
+        name: {"sha256": sha256_file(run_dir / "model" / name)}
+        for name in ("best_model.zip", "best_vec_normalize.pkl")
+    }
+    meta_path.write_text(json.dumps(meta, indent=2))
+    return steps
+
+
+def _tree_digest(root: Path) -> dict[str, str]:
+    from courtside_dynamics.experiments.records import sha256_file
+
+    return {
+        path.relative_to(root).as_posix(): sha256_file(path)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _exec_rescore_notebook(
+    namespace: dict[str, Any],
+    cells: tuple[str, ...] = _RESCORE_CELLS,
+    settings: tuple[tuple[str, str], ...] = (),
+) -> dict[str, Any]:
+    """Run the notebook's cells in ``namespace``: Drive off, and the
+    protocol cell's protocol shortened to 2 episodes of 150 steps (a
+    protocol derived from the registered one, all else equal)."""
+    sources = _rescore_cells()
+    for cell_id in cells:
+        source = sources[cell_id]
+        if cell_id == "rs-settings":
+            source = f"\n{source}\n".replace("\nUSE_DRIVE = True\n", "\nUSE_DRIVE = False\n")
+            for old, new in settings:
+                assert source.count(f"\n{old}\n") == 1, old
+                source = source.replace(f"\n{old}\n", f"\n{new}\n")
+        if cell_id == "rs-protocol":
+            line = "PROTOCOL = get_protocol(PROTOCOL_ID)\n"
+            assert source.count(line) == 1
+            source = source.replace(
+                line,
+                "PROTOCOL = get_protocol(PROTOCOL_ID).derive("
+                '"paddle-npoint-short@v3", env_overrides={"episode_len": 150}, '
+                "n_episodes=2)\n",
+            )
+        exec(compile(source, f"{RESCORE_NOTEBOOK}:{cell_id}", "exec"), namespace)
+    return namespace
+
+
+def test_rescore_notebook_scores_august_layout_runs_outside_their_folders(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """The notebook's whole code path, locally: a runs folder holding the
+    phase-3 index fixture's PaddleTennis runs (placeholder model files,
+    and a stub), a run in the August layout carrying a tiny trained
+    run's policies under the registered run's id, and the tiny run
+    itself (a run record, snapshots). The defaults pick the 2026-08
+    runs, score the registered one, report the placeholders as refused,
+    and write nothing inside the runs folder; re-running resumes (and
+    re-scores a run whose normalizer changed); QUICK and an explicit
+    snapshot series score into their own folders, and a later session's
+    verdicts merge into ``verdicts.json`` instead of replacing it."""
+    import shutil
+
+    import matplotlib
+    import pytest
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from courtside_dynamics.experiments.harness import read_scores
+    from courtside_dynamics.experiments.protocols import get_protocol
+    from courtside_dynamics.training.train import train
+    from tests._helpers import tiny_paddle_config
+
+    # Trained under a run id, so its record names the directory it is
+    # copied to.
+    tiny = tmp_path / "trained" / "20261017_101500"
+    train(tiny_paddle_config("SAC", tiny))
+    runs = tmp_path / "logs" / "PaddleTennis" / "sac"
+    for name in ("20260810_211754", "20260815_180815", "20260828_114038"):
+        shutil.copytree(_FIXTURE_RUNS / name, runs / name)
+    registered = "20260816_235141"
+    steps = _august_layout_run(tiny, runs / registered)
+    assert steps == [256, 512, 768, 1024]
+    shutil.copytree(tiny, runs / "20261017_101500")
+    before = _tree_digest(runs)
+    monkeypatch.chdir(tmp_path)
+
+    ns = _exec_rescore_notebook({})
+    out = capsys.readouterr().out
+    protocol = ns["PROTOCOL"]
+    assert protocol.fingerprint == get_protocol("paddle-npoint@v3").derive(
+        "x@v1", env_overrides={"episode_len": 150}, n_episodes=2
+    ).fingerprint
+    assert ns["PICKED"] == ["20260810_211754", "20260815_180815", registered]
+    assert list(ns["SCORED"]) == [registered]
+    assert sorted(ns["REFUSED"]) == ["20260810_211754", "20260815_180815"]
+    assert "sha256 differs" in ns["REFUSED"]["20260810_211754"]
+    assert "has no normalizer" in ns["REFUSED"]["20260815_180815"]
+    assert "REFUSED" in out
+    out_root = Path("rescores/PaddleTennis/sac/paddle-npoint-short@v3")
+    assert ns["OUT_ROOT"] == out_root
+    scores = (
+        out_root / registered / "checkpoints" / "scores" / "paddle-npoint-short@v3.jsonl"
+    )
+    rows = read_scores(scores)
+    best_step = json.loads(
+        (runs / registered / "model" / "best_model_meta.json").read_text()
+    )["timestep"]
+    assert [(row["artifact"], row["step"]) for row in rows] == [
+        ("best", best_step),
+        *(("checkpoint", step) for step in steps),
+    ]
+    for row in rows:
+        assert row["protocol_fingerprint"] == protocol.fingerprint
+        assert row["device"] == "cpu" and row["algo"] == "SAC"
+        # The August seeds: unpaired runs, seed 0, block seed + 1,000,000.
+        assert (row["seed_start"], row["seed_source"]) == (1_000_000, "run_seed_offset")
+        assert row["confirm_metrics"] is not None
+    # Nothing was written inside the runs folder.
+    assert _tree_digest(runs) == before
+    index = [
+        json.loads(line)
+        for line in (out_root / "index" / "runs.jsonl").read_text().splitlines()
+    ]
+    assert {row["run_id"] for row in index} == {
+        "20260810_211754",
+        "20260815_180815",
+        "20260828_114038",
+        registered,
+        "20261017_101500",
+    }
+    assert (out_root / "curves_checkpoints.png").stat().st_size > 0
+    verdicts = json.loads((out_root / "verdicts.json").read_text())
+    assert verdicts["protocol_fingerprint"] == protocol.fingerprint
+    assert verdicts["refused"] == {
+        run_id: {"checkpoints": reason} for run_id, reason in ns["REFUSED"].items()
+    }
+    assert list(verdicts["runs"]) == [registered]
+    verdict = verdicts["runs"][registered]["checkpoints"]
+    assert verdict["scored"] == 4 and verdict["series"] == "checkpoints"
+    assert verdict["select"]["step"] in steps
+    assert verdict["select"]["accepted_steps"][-1] == verdict["select"]["step"]
+    assert verdict["best_model"]["step"] == best_step
+    assert set(verdict["select"]["metrics"]) == set(protocol.selection_keys)
+    assert f"{registered}: select() over 4 checkpoints picks step" in out
+
+    # Re-running resumes: the scored run is not scored again.
+    written = scores.read_bytes()
+    _exec_rescore_notebook(ns, cells=("rs-rescore",))
+    assert f"{registered}: already scored" in capsys.readouterr().out
+    assert scores.read_bytes() == written
+    # ... unless a file changed: a checkpoint's normalizer (no meta binds
+    # it) is enough, and the run is scored again.
+    checkpoints = tmp_path / "copy" / "checkpoints"
+    shutil.copytree(runs / registered / "checkpoints", checkpoints)
+    normalizer = runs / registered / "checkpoints" / (
+        "paddle_tennis_sac_vecnormalize_256_steps.pkl"
+    )
+    shutil.copyfile(
+        checkpoints / "paddle_tennis_sac_vecnormalize_512_steps.pkl", normalizer
+    )
+    _exec_rescore_notebook(ns, cells=("rs-rescore",))
+    assert f"{registered}: already scored" not in capsys.readouterr().out
+    assert scores.read_bytes() != written
+    shutil.copyfile(
+        checkpoints / "paddle_tennis_sac_vecnormalize_256_steps.pkl", normalizer
+    )
+    assert _tree_digest(runs) == before
+
+    # QUICK: the best model and 3 checkpoints, first to last, elsewhere.
+    quick = _exec_rescore_notebook(
+        {}, settings=(("QUICK = False", "QUICK = True"),)
+    )
+    quick_rows = read_scores(
+        Path(f"{out_root}-quick")
+        / registered
+        / "checkpoints"
+        / "scores"
+        / "paddle-npoint-short@v3.jsonl"
+    )
+    assert [(row["artifact"], row["step"]) for row in quick_rows] == [
+        ("best", best_step),
+        ("checkpoint", 256),
+        ("checkpoint", 768),
+        ("checkpoint", 1024),
+    ]
+    assert quick["OUT_ROOT"] == Path(f"{out_root}-quick")
+    capsys.readouterr()
+
+    # An explicit run list: the tiny run's own snapshots (a run record).
+    explicit = _exec_rescore_notebook(
+        {},
+        settings=(
+            ("RUN_IDS = None", 'RUN_IDS = ["20261017_101500"]'),
+            ('SERIES = "checkpoints"', 'SERIES = "snapshots"'),
+        ),
+    )
+    assert list(explicit["SCORED"]) == ["20261017_101500"]
+    snapshot_rows = read_scores(explicit["SCORED"]["20261017_101500"])
+    assert [row["artifact"] for row in snapshot_rows] == ["best", *["snapshot"] * 4]
+    assert _tree_digest(runs) == before
+    # The snapshot session kept the checkpoint session's scores, curves,
+    # verdicts and refusals, and added its own beside them.
+    assert scores.is_file()
+    assert (out_root / "curves_checkpoints.png").is_file()
+    assert (out_root / "curves_snapshots.png").stat().st_size > 0
+    merged = json.loads((out_root / "verdicts.json").read_text())
+    assert merged["runs"][registered] == verdicts["runs"][registered]
+    assert merged["refused"] == verdicts["refused"]
+    assert merged["runs"]["20261017_101500"]["snapshots"]["scored"] == 4
+    # A run refused later (a snapshot replaced) loses its verdict for the
+    # series, and a later session that does not pick it never revives it
+    # from its now stale score file.
+    snapshot = runs / "20261017_101500" / "snapshots" / "snapshot_512_steps.zip"
+    original = snapshot.read_bytes()
+    snapshot.write_bytes(b"replaced")
+    snapshots_only = (('SERIES = "checkpoints"', 'SERIES = "snapshots"'),)
+    refused = _exec_rescore_notebook(
+        {},
+        settings=(("RUN_IDS = None", 'RUN_IDS = ["20261017_101500"]'), *snapshots_only),
+    )
+    assert list(refused["REFUSED"]) == ["20261017_101500"]
+    later = _exec_rescore_notebook(
+        {},
+        settings=(("RUN_IDS = None", f'RUN_IDS = ["{registered}"]'), *snapshots_only),
+    )
+    assert "20261017_101500" not in later["ALL_SCORES"]
+    merged = json.loads((out_root / "verdicts.json").read_text())
+    assert "snapshots" in merged["refused"]["20261017_101500"]
+    assert "snapshots" not in merged["runs"].get("20261017_101500", {})
+    assert merged["runs"][registered]["checkpoints"] == verdict
+    snapshot.write_bytes(original)
+    assert _tree_digest(runs) == before
+    capsys.readouterr()
+    plt.close("all")
+
+    # Phase-4 verifier r2: an unreadable snapshot index (QUICK reads the
+    # series' steps before scoring) refuses that run, not the cell, so
+    # the run after it is still scored.
+    index_path = runs / "20261017_101500" / "snapshots" / "index.json"
+    index_bytes = index_path.read_bytes()
+    index_path.write_text("{not json")
+    quick_snapshots = _exec_rescore_notebook(
+        {},
+        settings=(
+            ("RUN_IDS = None", f'RUN_IDS = ["20261017_101500", "{registered}"]'),
+            ('SERIES = "checkpoints"', 'SERIES = "snapshots"'),
+            ("QUICK = False", "QUICK = True"),
+        ),
+    )
+    assert list(quick_snapshots["REFUSED"]) == ["20261017_101500"]
+    assert "snapshots/index.json is unreadable" in (
+        quick_snapshots["REFUSED"]["20261017_101500"]
+    )
+    # The August-layout run has no snapshots: its best model alone.
+    assert list(quick_snapshots["SCORED"]) == [registered]
+    assert quick_snapshots["VERDICTS"][registered]["gaps"] == []
+    index_path.write_bytes(index_bytes)
+    assert _tree_digest(runs) == before
+    capsys.readouterr()
+
+    # Refusals before any scoring: an unknown protocol, a missing run.
+    with pytest.raises(ValueError, match="bump REPO_REF"):
+        _exec_rescore_notebook(
+            {},
+            cells=("rs-settings", "rs-protocol"),
+            settings=(
+                ('PROTOCOL_ID = "paddle-npoint@v3"', 'PROTOCOL_ID = "paddle-npoint@v9"'),
+            ),
+        )
+    shutil.rmtree(runs / registered)
+    with pytest.raises(ValueError, match="registered run 20260816_235141"):
+        _exec_rescore_notebook({}, cells=_RESCORE_CELLS[:5])

@@ -829,10 +829,19 @@ def _write_report(output_path: str, report: Mapping[str, Any]) -> None:
     if parent:
         os.makedirs(parent, exist_ok=True)
     temporary = output_path + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=2)
-        handle.write("\n")
-    os.replace(temporary, output_path)
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2)
+            handle.write("\n")
+        os.replace(temporary, output_path)
+    except BaseException:
+        # A failed or interrupted write leaves no temporary behind: a
+        # leftover fails the run directory's verification.
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def _skipped_report(

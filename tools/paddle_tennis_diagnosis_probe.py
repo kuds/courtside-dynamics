@@ -89,9 +89,17 @@ def main(argv: list[str] | None = None) -> int:
         help="instrument the ground oracle (reference row; the "
         "default when no --model is given)",
     )
-    parser.add_argument("--model", help="SB3 SAC checkpoint")
+    parser.add_argument(
+        "--model", help="SB3 checkpoint (SAC, DemoSAC or PPO)"
+    )
     parser.add_argument(
         "--vec-normalize", help="frozen normalizer (.pkl)"
+    )
+    parser.add_argument(
+        "--algo",
+        default=None,
+        help="algorithm that trained --model (default: the one its run's "
+        "config.json records; required for a checkpoint outside its run)",
     )
     args = parser.parse_args(argv)
     if args.model and not args.vec_normalize:
@@ -100,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.model:
         policy = native_checkpoint_policy(
-            args.model, args.vec_normalize
+            args.model, args.vec_normalize, algo=args.algo
         )
         label = f"checkpoint:{args.model}"
     else:

@@ -14,6 +14,16 @@ early_stop_patience = 20
 # Sparse hand-scaled reward (terminal outcomes plus an escrowed
 # contact pulse); see the stage-0 starter for rationale.
 normalize_reward = false
+
+# Cadences are per algorithm family. PPO's are whole rollouts (n_steps
+# 2048 x 1 worker = 2,048 env steps), so no evaluation or checkpoint
+# lands mid-rollout; the recipe's PPO profile sets the rest (rollout,
+# minibatch, target_kl, gSDE every episode, log_std_init -2).
+[train.algo.ppo]
+eval_freq = 24_576        # 12 rollouts
+checkpoint_freq = 98_304  # 48 rollouts
+
+[train.algo.sac]
 eval_freq = 25_000
 checkpoint_freq = 100_000
 

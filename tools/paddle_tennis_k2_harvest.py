@@ -148,8 +148,10 @@ def harvest(
     seed_start: int,
     episodes: int,
     continuation_steps: int,
+    *,
+    algo: str | None = None,
 ) -> dict:
-    policy = native_checkpoint_policy(model_path, vec_normalize_path)
+    policy = native_checkpoint_policy(model_path, vec_normalize_path, algo=algo)
     env = PaddleTennisEnv(
         episode_len=1500,
         court_style="diagnostic",
@@ -289,6 +291,12 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--model", required=True)
     parser.add_argument("--vec-normalize", required=True)
+    parser.add_argument(
+        "--algo",
+        default=None,
+        help="algorithm that trained --model (default: the one its run's "
+        "config.json records; required for a checkpoint outside its run)",
+    )
     parser.add_argument("--out", required=True)
     parser.add_argument("--seed-start", type=int, default=9030)
     parser.add_argument("--episodes", type=int, default=70)
@@ -303,6 +311,7 @@ def main(argv: list[str] | None = None) -> None:
         args.seed_start,
         args.episodes,
         args.continuation_steps,
+        algo=args.algo,
     )
     with open(args.out, "wb") as f:
         pickle.dump(library, f)

@@ -1,0 +1,361 @@
+{
+  "timestamp_utc": "2026-08-28T11:40:48+00:00",
+  "git_sha": "5b21273656a7c64ecc11f2bb144e6454f2266664",
+  "versions": {
+    "python": "3.13.15",
+    "numpy": "2.1.3",
+    "stable_baselines3": "2.9.0",
+    "gymnasium": "1.3.0",
+    "mujoco": "3.12.0",
+    "torch": "2.11.0+cpu",
+    "courtside_dynamics": "0.25.0"
+  },
+  "gpu": {
+    "available": false,
+    "cuda_version": null
+  },
+  "run_config_file": {
+    "path": "/scrubbed/courtside-dynamics/configs/paddle_tennis_lt1_tempskip.toml",
+    "sha256": "8ad31b39fe751f040feaef92e7c4350993f6e494de4600d7ef24422dce87ced9",
+    "content": {
+      "train": {
+        "n_envs": 4,
+        "eval_freq": 25000,
+        "checkpoint_freq": 100000,
+        "model_kwargs": {
+          "learning_starts": 25000
+        }
+      }
+    }
+  },
+  "recipe_name": "PaddleTennis",
+  "env": {
+    "class": "PaddleTennisEnv",
+    "observation_shape": [
+      48
+    ],
+    "action_shape": [
+      3
+    ],
+    "constructor_kwargs": {
+      "episode_len": 1500,
+      "serve_config": null,
+      "opponent_controller": null,
+      "court_style": "diagnostic",
+      "volley_rule": "fault",
+      "return_reward": 1.0,
+      "fault_penalty": 1.0,
+      "unsafe_physics_penalty": 2.0,
+      "contact_shaping": 0.25,
+      "reach_shaping": 0.25,
+      "reach_shaping_radius": 3.0,
+      "hold_shaping": 0.0,
+      "hold_shaping_travel": 4.0,
+      "points_per_episode": null,
+      "render_mode": "rgb_array"
+    }
+  },
+  "evaluation_env": {
+    "class": "PaddleTennisEnv",
+    "observation_shape": [
+      48
+    ],
+    "action_shape": [
+      3
+    ],
+    "constructor_kwargs": {
+      "episode_len": 1500,
+      "serve_config": null,
+      "opponent_controller": null,
+      "court_style": "diagnostic",
+      "volley_rule": "fault",
+      "return_reward": 1.0,
+      "fault_penalty": 1.0,
+      "unsafe_physics_penalty": 2.0,
+      "contact_shaping": 0.25,
+      "reach_shaping": 0.25,
+      "reach_shaping_radius": 3.0,
+      "hold_shaping": 0.0,
+      "hold_shaping_travel": 4.0,
+      "points_per_episode": null,
+      "render_mode": "rgb_array"
+    }
+  },
+  "train_config": {
+    "algo": "SAC",
+    "total_timesteps": 1000000,
+    "log_dir": "/scrubbed/courtside-dynamics/training_runs/PaddleTennis/sac/20260828_114038",
+    "name_prefix": "paddle_tennis_sac",
+    "n_envs": 4,
+    "seed": 0,
+    "verbose": 0,
+    "eval_verbose": 1,
+    "eval_freq": 25000,
+    "checkpoint_freq": 100000,
+    "video_freq": 250000,
+    "n_eval_episodes": 30,
+    "reward_eval_episodes": null,
+    "final_eval_episodes": null,
+    "early_stop_patience": 20,
+    "video_length": 10000,
+    "record_video": true,
+    "normalize_obs": true,
+    "normalize_reward": null,
+    "clip_obs": 10.0,
+    "clip_reward": 10.0,
+    "normalize_obs_excluded_indices": [
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47
+    ],
+    "policy": "MlpPolicy",
+    "model_kwargs": {
+      "use_sde": true,
+      "ent_coef": "auto_0.02",
+      "target_entropy": -1.5,
+      "train_freq": [
+        64,
+        "step"
+      ],
+      "learning_starts": 25000
+    },
+    "warm_start": {
+      "source_run_dir": "/scrubbed/courtside-dynamics/training_runs/PaddleTennis/sac/20260816_235141",
+      "reset_observation_indices": [],
+      "transfer_log_ent_coef": false,
+      "expected_artifact_sha256": {
+        "best_model.zip": "838997fbffc509a69b9d03219a6908f117ac303eb661628d6b8111bea5a15d4a",
+        "best_vec_normalize.pkl": "d0502c14f027a670e2caf4c3ddbd6565457ef58fb556791f9210d2f21ef67b07"
+      }
+    },
+    "csv_header": [
+      "serve_side_name",
+      "serve_side_is_policy",
+      "ball_side",
+      "expected_returner",
+      "rally_phase",
+      "rally_count",
+      "legal_hit_count",
+      "bounce_count",
+      "net_crossing_count",
+      "crossings",
+      "event_valid_racket_hit",
+      "event_valid_return",
+      "event_first_bounce",
+      "termination_reason",
+      "termination_reason_name",
+      "term_timeout",
+      "rew_return",
+      "rew_fault",
+      "rew_unsafe",
+      "rew_shaping",
+      "rew_shaping_clawback",
+      "rew_reach",
+      "rew_reach_clawback",
+      "rew_hold",
+      "rew_hold_clawback",
+      "points_played",
+      "completed_point_crossings",
+      "point_serve_nudged",
+      "reward",
+      "total_reward",
+      "done"
+    ],
+    "info_dict_eval": true,
+    "info_eval_keys": [
+      "crossings",
+      "rally_count",
+      "legal_hit_count",
+      "legal_hit_count_a",
+      "bounce_count",
+      "rew_return",
+      "rew_fault",
+      "rew_unsafe",
+      "rew_shaping",
+      "rew_shaping_clawback",
+      "rew_reach",
+      "rew_reach_clawback",
+      "rew_hold",
+      "rew_hold_clawback"
+    ],
+    "info_eval_terminal_keys": [
+      "duplicate_contact_suppressed_count",
+      "duplicate_event_suppressed_count",
+      "stale_event_suppressed_count",
+      "serve_side_is_policy",
+      "term_out_of_bounds",
+      "term_ball_net",
+      "term_second_bounce",
+      "term_failed_to_cross",
+      "term_illegal_hit",
+      "term_net_touch",
+      "term_volley",
+      "term_nonfinite",
+      "term_timeout",
+      "points_played",
+      "completed_point_crossings",
+      "point_serve_nudged",
+      "point_end_out_of_bounds",
+      "point_end_ball_net",
+      "point_end_second_bounce",
+      "point_end_failed_to_cross",
+      "point_end_illegal_hit",
+      "point_end_net_touch",
+      "point_end_volley"
+    ],
+    "info_eval_distribution_keys": [
+      "crossings"
+    ],
+    "info_eval_survival_thresholds": {},
+    "success_key": "legal_hit_count_a",
+    "success_threshold": 1.0,
+    "headline_key": "crossings",
+    "phase_key": "rally_phase",
+    "phase_labels": {
+      "0": "initial_feed",
+      "1": "awaiting_return",
+      "2": "return_in_flight",
+      "3": "terminal"
+    },
+    "env_attr_schedules": [],
+    "best_metric_keys": null,
+    "best_metric_min_delta": 0.25,
+    "confirm_best_eval": true,
+    "early_stop_degenerate_evals": 5,
+    "degenerate_guard_keys": [
+      "legal_hit_count_a_ep_mean"
+    ],
+    "degenerate_min_evals": null,
+    "performance_gate": null,
+    "ladder_certification": null,
+    "checkpoint_diagnosis": {
+      "episodes": 30,
+      "seed_start": 5200
+    },
+    "final_info_eval": false
+  },
+  "initialization": {
+    "mode": "policy_and_observation_stats",
+    "source_run_dir": "/scrubbed/courtside-dynamics/training_runs/PaddleTennis/sac/20260816_235141",
+    "source_artifacts": {
+      "best_model.zip": {
+        "path": "/scrubbed/courtside-dynamics/training_runs/PaddleTennis/sac/20260816_235141/model/best_model.zip",
+        "sha256": "838997fbffc509a69b9d03219a6908f117ac303eb661628d6b8111bea5a15d4a"
+      },
+      "best_vec_normalize.pkl": {
+        "path": "/scrubbed/courtside-dynamics/training_runs/PaddleTennis/sac/20260816_235141/model/best_vec_normalize.pkl",
+        "sha256": "d0502c14f027a670e2caf4c3ddbd6565457ef58fb556791f9210d2f21ef67b07"
+      },
+      "config.json": {
+        "path": "/scrubbed/courtside-dynamics/training_runs/PaddleTennis/sac/20260816_235141/config.json",
+        "sha256": "63e3ae52c1494de2c3c0e528d108fca129a13dbcab22486d75792f5921892591"
+      }
+    },
+    "source": {
+      "algo": "SAC",
+      "environment_class": "PaddleTennisEnv",
+      "curriculum": null,
+      "model_num_timesteps": 2400000,
+      "policy_class": "SACPolicy"
+    },
+    "target": {
+      "algo": "SAC",
+      "environment_class": "PaddleTennisEnv",
+      "curriculum": null,
+      "policy_class": "SACPolicy"
+    },
+    "transferred": [
+      "policy.state_dict",
+      "vec_normalize.obs_rms"
+    ],
+    "reset": [
+      "policy.optimizer_state",
+      "learning_rate_and_progress_schedule",
+      "num_timesteps",
+      "replay_buffer",
+      "vec_normalize.ret_rms",
+      "vec_normalize.returns",
+      "logger_and_callback_state",
+      "log_ent_coef"
+    ],
+    "transfer_log_ent_coef": false,
+    "normalize_obs_excluded_indices": [
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47
+    ],
+    "reset_observation_indices": [],
+    "reset_observation_values": [],
+    "observation_rms_count": 2400004.0001,
+    "reward_statistics_reset": true,
+    "optimizer_state_transferred": false
+  },
+  "resolved_model": {
+    "algo_class": "SAC",
+    "device": "cpu",
+    "policy_class": "SACPolicy",
+    "net_arch": [
+      256,
+      256
+    ],
+    "activation_fn": "ReLU",
+    "policy_num_params": 397319,
+    "hyperparameters": {
+      "learning_rate": 0.0003,
+      "gamma": 0.99,
+      "batch_size": 256,
+      "seed": 0,
+      "tau": 0.005,
+      "buffer_size": 1000000,
+      "learning_starts": 25000,
+      "train_freq": "TrainFreq(frequency=64, unit=<TrainFrequencyUnit.STEP: 'step'>)",
+      "gradient_steps": -1,
+      "ent_coef": "auto_0.02",
+      "target_entropy": -1.5,
+      "target_update_interval": 1,
+      "n_steps": 1
+    }
+  }
+}

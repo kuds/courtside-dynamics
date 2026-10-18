@@ -257,10 +257,28 @@ def _report_run_config_drift(
 def disconnect_runtime(delay_seconds: int = 5) -> None:
     """Free the Colab GPU by tearing down the runtime. No-op locally.
 
-    The optional delay gives any in-flight cell output a moment to
-    render before the runtime disconnects.
+    Drive is flushed and unmounted first (``drive.flush_and_unmount()``,
+    which only reports when nothing is mounted): the mount caches
+    writes, and tearing the VM down under it could lose the last ones
+    -- the campaign record and report, the final leg's artifacts
+    (``repo_review_20261016`` critic-4). When the flush raises, the
+    runtime is left up and the cell says so: an idle GPU costs less
+    than a lost run, and the writes can still be retried. The optional
+    delay gives any in-flight cell output a moment to render before the
+    runtime disconnects.
     """
     if not _in_colab():
+        return
+    try:
+        from google.colab import drive
+
+        drive.flush_and_unmount()
+    except Exception as error:
+        print(
+            f"[notebook_utils] Drive flush_and_unmount() failed ({error!r}); "
+            "NOT disconnecting, so the last Drive writes are not lost with "
+            "the VM. Retry drive.flush_and_unmount(), then disconnect by hand."
+        )
         return
     print(f"Disconnecting Colab runtime in {delay_seconds}s...")
     time.sleep(delay_seconds)
@@ -289,19 +307,31 @@ def _read_monitor_logs(monitor_dir: str) -> tuple[np.ndarray, np.ndarray]:
 def _best_checkpoint_marker(log_dir: str, eval_data) -> tuple[int | None, str]:
     """Timestep and legend label of the checkpoint ``best_model.zip`` holds.
 
-    Under headline selection ``InfoDictEvalCallback`` saves
-    ``best_model.zip`` by the task metric and records the save's
-    timestep in ``best_model_meta.json``; the argmax of the mean eval
-    reward is then a different checkpoint, and marking it would point
-    at a model nobody saved. Only runs without the meta file
-    (reward-selected recipes, where SB3's ``EvalCallback`` saved the
-    reward argmax) fall back to that argmax. A meta file without a
-    usable timestep gets no marker rather than the wrong one.
+    Both selection paths record the save's timestep in
+    ``best_model_meta.json``. Under headline selection the argmax of the
+    mean eval reward is a different checkpoint, and marking it would
+    point at a model nobody saved; under reward selection it is a step
+    no file holds after an interrupt inside the new-best save (SB3
+    appends the evaluation before the save runs). Only runs without the
+    meta file (reward-selected runs from before the reward path wrote
+    one) fall back to that argmax. A meta file without a usable
+    timestep, or one that does not bind the files beside it (a save
+    split between its renames), gets no marker rather than the wrong
+    one.
     """
+    from courtside_dynamics.experiments.records import best_model_meta_unbound
     from courtside_dynamics.training.artifacts import _read_best_model_meta
 
-    if locate_artifact(log_dir, "best_model_meta") is not None:
+    meta_path = locate_artifact(log_dir, "best_model_meta")
+    if meta_path is not None:
         meta = _read_best_model_meta(log_dir) or {}
+        unbound = best_model_meta_unbound(meta, os.path.dirname(meta_path))
+        if unbound is not None:
+            print(
+                f"[notebook_utils] {unbound}; the eval panels omit the "
+                f"best-checkpoint marker"
+            )
+            return None, ""
         timestep = meta.get("timestep")
         if (
             isinstance(timestep, bool)
@@ -340,9 +370,10 @@ def plot_learning_curve(
     (mean +/- std) from ``metrics/evaluations.npz`` (written by SB3's
     ``EvalCallback``). Both are resolved through ``locate_artifact`` so
     legacy flat-layout runs plot identically. The eval panels mark the
-    checkpoint ``best_model.zip`` actually holds: the timestep
-    ``best_model_meta.json`` records under headline selection, else the
-    reward argmax (see :func:`_best_checkpoint_marker`).
+    checkpoint ``best_model.zip`` actually holds: the timestep its bound
+    ``best_model_meta.json`` records (either selection path), else, for
+    a reward-selected run from before that meta, the reward argmax (see
+    :func:`_best_checkpoint_marker`).
     """
     import matplotlib.pyplot as plt
 
@@ -382,9 +413,10 @@ def plot_learning_curve(
     eval_npz = locate_artifact(log_dir, "evaluations")
     eval_data = np.load(eval_npz) if eval_npz is not None else None
 
-    # Best-checkpoint step (the save best_model.zip holds: the headline
-    # selection's timestep from best_model_meta.json, else EvalCallback's
-    # reward argmax). Marked on the eval panels so a post-best collapse
+    # Best-checkpoint step (the save best_model.zip holds: the timestep
+    # its bound best_model_meta.json records, else, for a pre-meta
+    # reward-selected run, EvalCallback's reward argmax). Marked on the
+    # eval panels so a post-best collapse
     # -- curve falling away right of the marker -- is visible at a glance.
     best_step, best_label = _best_checkpoint_marker(log_dir, eval_data)
 
@@ -457,14 +489,16 @@ _ARTIFACT_HINTS: dict[str, str] = {
     RUN_LAYOUT["progress_csv"]: "written by the CSV logger train() wires up; appears after SB3's first metric dump",
     RUN_LAYOUT["evaluations"]: "written by the reward eval stream; check eval_freq <= total_timesteps",
     RUN_LAYOUT["eval_info_csv"]: "written by InfoDictEvalCallback each eval; requires info_dict_eval=True",
-    RUN_LAYOUT["best_model"]: "saved on the first completed evaluation -- by InfoDictEvalCallback (with best_model_meta.json) when the recipe selects by a headline metric, else by the reward EvalCallback",
+    RUN_LAYOUT["best_model"]: "saved on the first completed evaluation, with best_model_meta.json -- by InfoDictEvalCallback when the recipe selects by a headline metric, else by the reward EvalCallback's new-best save",
     RUN_LAYOUT["best_vec_normalize"]: "needs VecNormalize enabled plus at least one new-best eval",
-    RUN_LAYOUT["best_model_meta"]: "written only under headline (task-metric) selection, beside best_model.zip; absent is expected for reward-selected recipes",
+    RUN_LAYOUT["best_model_meta"]: "written beside best_model.zip with every best save (reward-selected runs' carry \"selected_by\": \"reward\"); absent is expected only for reward-selected runs from before the reward path wrote one",
     RUN_LAYOUT["checkpoints_dir"]: "requires checkpoint_freq > 0 and a run long enough to reach the first checkpoint",
     RUN_LAYOUT["videos_dir"]: "requires record_video=True, video_freq > 0, and moviepy installed",
     RUN_LAYOUT["final_model"]: "written when learn() finishes, is interrupted, or raises (salvaged before the error re-raises); absent means the process died hard",
     RUN_LAYOUT["vec_normalize"]: "only written when VecNormalize is enabled (normalize_obs / normalize_reward)",
     RUN_LAYOUT["stage_summary"]: "written by train()'s epilogue or crash salvage (Status: completed/interrupted/crashed); absent means the process died hard",
+    RUN_LAYOUT["run_record"]: "written when train() starts and rewritten on every terminal path; absent means train() never ran on this dir, or the run predates run records",
+    RUN_LAYOUT["sync_manifest"]: "written last, once the run ended; absent means the run never finished (killed, a disconnected runtime, still training) or predates run records -- python -m courtside_dynamics.experiments.verify <run_dir>",
     RUN_LAYOUT["learning_curve"]: "saved by the plot_learning_curve cell -- did it run with save_path set?",
     RUN_LAYOUT["eval_headline"]: "saved by the plot_eval_info cell -- did it run with save_path set?",
     RUN_LAYOUT["eval_terminations"]: "saved by the plot_eval_info cell -- did it run with save_path set?",
@@ -495,8 +529,9 @@ def check_run_artifacts(
     """Audit ``log_dir`` against every artifact a run should have produced.
 
     Prints one line per artifact -- present ones with their size (file
-    count for directories), missing ones with the most common cause --
-    and returns the missing relative paths (as recorded in
+    count for directories; an empty directory counts as missing), missing
+    ones with the most common cause -- and returns the missing relative
+    paths (as recorded in
     ``RUN_LAYOUT``). Run it at the end of a notebook session, after the
     plotting and replay cells: it catches silently-skipped outputs (no
     video because moviepy failed, no best_model because eval never
@@ -525,7 +560,17 @@ def check_run_artifacts(
                 total += sum(
                     os.path.getsize(os.path.join(root, f)) for f in files
                 )
-            status = f"ok       {n_files} file(s), {_human_size(total)}"
+            if n_files:
+                status = f"ok       {n_files} file(s), {_human_size(total)}"
+            else:
+                # The directory is created before anything is written
+                # into it: empty means the artifact is missing (the 1M
+                # LT1 run lost all four videos behind an empty folder).
+                missing.append(rel)
+                hint = _ARTIFACT_HINTS.get(rel)
+                status = "MISSING  (empty directory)" + (
+                    f"  -- {hint}" if hint else ""
+                )
         elif os.path.isfile(full):
             status = f"ok       {_human_size(os.path.getsize(full))}"
         else:
@@ -818,15 +863,20 @@ def plot_training_health(
     return fig
 
 
-def _load_best_model(log_dir: str, algo: str):
-    from courtside_dynamics.training.algos import resolve_algo
+def _load_best_model(log_dir: str, algo: str | None = None):
+    """``best_model.zip`` through the algorithm the run recorded.
 
-    cls = resolve_algo(algo)
+    ``algo`` (optional) must agree with ``config.json``'s record, and
+    is required only for a run that has no ``config.json``
+    (``algos.load_run_model``).
+    """
+    from courtside_dynamics.training.algos import load_run_model
+
     candidate = locate_artifact(log_dir, "best_model")
     if candidate is None:
         # Ancient runs saved SB3's extension-less "best_model" stem.
         candidate = os.path.join(log_dir, "best_model")
-    return cls.load(candidate)
+    return load_run_model(candidate, algo)
 
 
 def _run_recorded_obs_normalization(log_dir: str) -> bool:
@@ -1471,8 +1521,8 @@ def _verify_pair_against_meta(
     where the verification reads ``"verified_by_best_model_meta_sha256"``
     (both digests match), ``"same_run_directory_legacy_metadata"`` (a
     meta written before the digests were bound), or
-    ``"unverified_no_best_model_meta"`` (``best_meta`` is ``None``:
-    reward-selected runs write no meta).
+    ``"unverified_no_best_model_meta"`` (``best_meta`` is ``None``: a
+    reward-selected run from before the reward path wrote a meta).
     """
     model_sha256 = _sha256(model_path)
     normalizer_sha256 = _sha256(normalizer_path)
@@ -1513,7 +1563,11 @@ def verify_best_checkpoint_pair(run_dir: str | Path) -> dict[str, Any]:
     ``ValueError``). :func:`score_paddle_stage` calls it before scoring
     a campaign leg, and the campaign notebook before warm-starting a leg
     from a source run: ``train()``'s own warm-start resolution checks
-    source digests only against pins the plan names.
+    source digests only against pins the plan names. A run whose
+    ``run_record.json`` marks its selection ``unbound`` raises
+    ``ValueError`` too: ``train()`` found the best-model files are not
+    one save, which no meta can show for a first save split before its
+    meta's rename.
 
     Returns ``{"model_path", "normalizer_path", "model_sha256",
     "normalizer_sha256", "pair_verification", "best_model_meta"}``.
@@ -1523,6 +1577,23 @@ def verify_best_checkpoint_pair(run_dir: str | Path) -> dict[str, Any]:
         name: locate_artifact(run_dir, name)
         for name in ("best_model", "best_vec_normalize", "best_model_meta")
     }
+    record_path = locate_artifact(run_dir, "run_record")
+    if record_path is not None:
+        from courtside_dynamics.experiments.records import (
+            BINDINGS_UNBOUND,
+            read_json_object,
+        )
+
+        selection = read_json_object(record_path).get("selection")
+        if (
+            isinstance(selection, Mapping)
+            and selection.get("bindings") == BINDINGS_UNBOUND
+        ):
+            raise ValueError(
+                f"{record_path} marks the best model unbound "
+                f"({selection.get('unbound_reason')}): best_model.zip and "
+                f"best_vec_normalize.pkl are not one save"
+            )
     model_path = located["best_model"]
     normalizer_path = located["best_vec_normalize"]
     if model_path is None or normalizer_path is None:
@@ -1772,9 +1843,11 @@ def evaluate_best_wall_ball(
     from stable_baselines3.common.utils import check_for_correct_spaces
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-    from courtside_dynamics.training.algos import resolve_algo
+    from courtside_dynamics.training.algos import load_run_model
 
-    model = resolve_algo(recorded_algo).load(model_path, device=device)
+    # The family's root class (SAC.load for a DemoSAC run, its designed
+    # inference path), read from the same config.json checked above.
+    model = load_run_model(model_path, recorded_algo, device=device)
     model_timestep = getattr(model, "num_timesteps", None)
     if model_timestep != selected_timestep:
         raise ValueError(
@@ -2002,7 +2075,7 @@ def record_best_model_video(
     log_dir: str | Path,
     env_fn: Callable,
     *,
-    algo: str = "SAC",
+    algo: str | None = None,
     video_length: int = 750,
     deterministic: bool = True,
     fps: int = 60,
@@ -2015,6 +2088,11 @@ def record_best_model_video(
     ``vec_normalize.pkl`` is present in ``log_dir`` the saved
     obs-normalizer is applied to each observation before
     ``model.predict``, matching the training-time wrapper.
+
+    The model loads through the algorithm ``config.json`` records;
+    ``algo`` (default ``None``) only cross-checks that record, and a
+    disagreeing one raises. The default used to be ``"SAC"``, which
+    could not load a PPO run's model.
     """
     import imageio.v2 as imageio
 
@@ -2472,12 +2550,13 @@ def score_campaign_bars(
 
 def _paddle_stage_scoring_inputs(
     run_dir: str,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], Mapping[str, Any]]:
     """:func:`score_paddle_stage`'s preconditions, checked before any load.
 
-    Returns ``(env_kwargs, pair)``: the evaluation constructor kwargs
-    ``config.json`` records, and the best checkpoint pair as
-    :func:`verify_best_checkpoint_pair` verified it. Raises
+    Returns ``(env_kwargs, pair, config)``: the evaluation constructor
+    kwargs ``config.json`` records, the best checkpoint pair as
+    :func:`verify_best_checkpoint_pair` verified it, and the parsed
+    ``config.json`` itself. Raises
     ``FileNotFoundError`` when ``config.json``, either half of the best
     pair, or ``best_model_meta.json`` is missing, and ``ValueError``
     when the config is not a PaddleTennisEnv run with constructor
@@ -2526,7 +2605,7 @@ def _paddle_stage_scoring_inputs(
             "instrument cannot rebuild the leg's environment"
         )
     pair = verify_best_checkpoint_pair(run_dir)
-    return dict(constructor_kwargs), pair
+    return dict(constructor_kwargs), pair, config
 
 
 def score_paddle_stage(
@@ -2561,10 +2640,17 @@ def score_paddle_stage(
     checkpoint is one of them), so a PASS is sound while a FAIL may
     under-credit a run whose peak on that metric came elsewhere.
 
+    The checkpoint loads through the algorithm the leg's
+    ``config.json`` records (``algos.load_run_model``: ``SAC.load`` for
+    SAC and DemoSAC, ``PPO.load`` for PPO), and the report names that
+    algorithm and the run's comparability key, so a PPO leg's reading
+    is never mistaken for an SAC one's.
+
     The payload is written atomically to ``reports/<report_name>``
     under ``run_dir`` and returned.
     """
     from courtside_dynamics.envs.paddle_tennis import PaddleTennisEnv
+    from courtside_dynamics.training.algos import recorded_run_algo
     from courtside_dynamics.training.paddle_diagnosis import (
         native_checkpoint_policy,
         run_player,
@@ -2578,7 +2664,7 @@ def score_paddle_stage(
     ):
         raise ValueError("episodes must be a positive integer")
 
-    env_kwargs, pair = _paddle_stage_scoring_inputs(run_dir)
+    env_kwargs, pair, config = _paddle_stage_scoring_inputs(run_dir)
     model_path = pair["model_path"]
     normalizer_path = pair["normalizer_path"]
     policy = native_checkpoint_policy(model_path, normalizer_path)
@@ -2597,6 +2683,7 @@ def score_paddle_stage(
         "run_dir": run_dir,
         "policy": {
             "artifact": os.path.basename(model_path),
+            "algo": recorded_run_algo(model_path),
             "sha256": pair["model_sha256"],
             "pair_verification": pair["pair_verification"],
             # The selection event's timestep only: the meta's metric
@@ -2608,6 +2695,10 @@ def score_paddle_stage(
             "artifact": os.path.basename(normalizer_path),
             "sha256": pair["normalizer_sha256"],
         },
+        # What this reading may be compared with (task, evaluation
+        # protocol, algorithm family); None for a run recorded before
+        # config.json carried the key.
+        "comparability_key": config.get("comparability_key"),
         "environment": {
             "class": "PaddleTennisEnv",
             "constructor_kwargs": _canonicalize_constructor_value(env_kwargs),

@@ -12,6 +12,7 @@ import math
 import numbers
 
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 
 
 def _finite_number(name: str, value: float) -> float:
@@ -49,6 +50,13 @@ class LinearEnvAttrScheduleCallback(BaseCallback):
     ``attr_name``.  The applied value is also recorded to the SB3 logger as
     ``schedule/<attr_name>`` so the realized curriculum is auditable from
     TensorBoard / ``progress.csv``.
+
+    Off-policy models get a new value at every step. An on-policy model
+    (PPO plan Step 6) gets one only at each rollout start, from the
+    timestep the rollout starts at: its update estimates advantages
+    over the whole rollout (GAE), so a setting that changed mid-rollout
+    would mix two tasks into one estimate. Detected from the model at
+    training start (:attr:`applies_at_rollout_starts`).
     """
 
     def __init__(
@@ -76,6 +84,14 @@ class LinearEnvAttrScheduleCallback(BaseCallback):
             raise ValueError("end_timesteps must be greater than hold_until_timesteps")
 
         self._last_value: float | None = None
+        # Set at training start from the model's type (see the class
+        # docstring).
+        self._rollout_starts_only = False
+
+    @property
+    def applies_at_rollout_starts(self) -> bool:
+        """Whether values move only at rollout starts (on-policy model)."""
+        return self._rollout_starts_only
 
     @property
     def schedule_metadata(self) -> dict[str, str | float | int]:
@@ -133,12 +149,18 @@ class LinearEnvAttrScheduleCallback(BaseCallback):
             logger.record(f"schedule/{self.attr_name}", value)
 
     def _on_training_start(self) -> None:
+        self._rollout_starts_only = isinstance(self.model, OnPolicyAlgorithm)
         # A fresh SB3 run starts at timestep zero, so this installs the
         # configured start value before the first action.  Using the current
         # global timestep also makes resumed ``learn(reset_num_timesteps=False)``
         # calls continue the schedule instead of jumping backwards.
         self._apply_current_value()
 
+    def _on_rollout_start(self) -> None:
+        if self._rollout_starts_only:
+            self._apply_current_value()
+
     def _on_step(self) -> bool:
-        self._apply_current_value()
+        if not self._rollout_starts_only:
+            self._apply_current_value()
         return True

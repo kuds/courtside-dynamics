@@ -1,0 +1,6 @@
+# L2 n-point pilot (docs/design_paddle_tennis_npoint.md §4a):
+# continuous play filling the 1500-step cap, with escrowed
+# contact shaping. Bars frozen 2026-08-10.
+[env]
+points_per_episode = "none"
+contact_shaping = 0.25

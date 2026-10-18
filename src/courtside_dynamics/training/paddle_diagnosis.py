@@ -53,21 +53,26 @@ FOLLOW_THROUGH_STEPS = 30
 
 
 def native_checkpoint_policy(
-    model_path: str, vec_normalize_path: str
+    model_path: str, vec_normalize_path: str, *, algo: str | None = None
 ) -> Callable[[np.ndarray], np.ndarray]:
-    """A saved PaddleTennis SB3 SAC checkpoint behind its normalizer.
+    """A saved PaddleTennis SB3 checkpoint behind its normalizer.
 
     Unlike the P5 tool's champion loader there is no shim: the
     checkpoint was trained on this env's own 48-value observation.
     The saved ``SelectiveVecNormalize`` carries the recipe's excluded
     tail (indices 24-47), so ``normalize_obs`` reproduces training
     normalization exactly.
+
+    The model loads through the algorithm its run recorded
+    (``algos.load_run_model``): SAC and DemoSAC through ``SAC.load``,
+    PPO through ``PPO.load``. ``algo`` must agree with that record, and
+    is required for a checkpoint outside any run directory.
     """
     import pickle
 
-    from stable_baselines3 import SAC
+    from courtside_dynamics.training.algos import load_run_model
 
-    model = SAC.load(model_path, device="cpu")
+    model = load_run_model(model_path, algo, device="cpu")
     with open(vec_normalize_path, "rb") as handle:
         normalizer = pickle.load(handle)
     normalizer.training = False

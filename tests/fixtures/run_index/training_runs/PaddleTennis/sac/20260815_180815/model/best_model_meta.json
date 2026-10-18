@@ -1,0 +1,21 @@
+{
+  "timestep": 25000,
+  "selection_keys": [
+    "crossings_ep_mean",
+    "success_rate",
+    "episode_reward_mean"
+  ],
+  "selection_values": {
+    "crossings_ep_mean": 6.366666666666666,
+    "success_rate": 0.3,
+    "episode_reward_mean": 1.8166666666666667
+  },
+  "artifacts": {
+    "best_model.zip": {
+      "sha256": "ce0fb08eff70a536309198ef17aed9603cda2b29b64e63e85e28ca9e828fd54b"
+    },
+    "best_vec_normalize.pkl": {
+      "sha256": "95c9d468c9b245f75682ecea0bd3597cb416ed73d6b27b88563c7ac9629e14b6"
+    }
+  }
+}

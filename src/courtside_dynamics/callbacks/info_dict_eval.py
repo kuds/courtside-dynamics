@@ -40,6 +40,7 @@ import os
 import shutil
 from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -47,6 +48,8 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecEnv
 
 from courtside_dynamics.callbacks._info import _scalar_info_keys
+from courtside_dynamics.experiments.records import BestSaveLedger, ReplaceTogether
+from courtside_dynamics.experiments.select import improves
 
 #: Offset between a paired evaluation's standard batch and its
 #: ``confirm_best`` batch: standard episode ``i`` resets with seed
@@ -54,6 +57,9 @@ from courtside_dynamics.callbacks._info import _scalar_info_keys
 #: ``eval_seed + CONFIRMATION_SEED_OFFSET + i``. Far past any
 #: ``n_eval_episodes`` so the two batches never share a feed.
 CONFIRMATION_SEED_OFFSET = 100_000
+
+#: The ``csv_path`` row ``record_n_updates`` adds to every evaluation.
+N_UPDATES_METRIC = "n_updates"
 
 
 def _sha256_file(path: str) -> str:
@@ -143,6 +149,341 @@ def _resolve_min_deltas(
         return per_key, tuple(per_key.get(key, 0.0) for key in keys)
     scalar = _delta(value, "best_metric_min_delta")
     return scalar, tuple(scalar for _ in keys)
+
+
+@dataclass(frozen=True)
+class EvaluationBatch:
+    """One evaluation batch: its aggregate metrics and per-episode samples.
+
+    ``metrics`` is the row :class:`InfoDictEvalCallback` logs (before it
+    merges its context metrics); ``episode_rewards`` and
+    ``episode_lengths`` are what it appends to ``evaluations.npz``.
+    """
+
+    metrics: dict[str, float]
+    episode_rewards: list[float]
+    episode_lengths: list[int]
+    total_steps: int
+    total_episodes: int
+
+
+def is_episode_sum_key(key: str, episode_sum_keys: Sequence[str] | None) -> bool:
+    """Whether a collected step key is summed per episode.
+
+    ``episode_sum_keys=None`` (the default) applies the repo-wide
+    naming convention -- ``rew_*`` info keys are per-step reward
+    increments -- so recipes opt components in simply by listing
+    them in ``info_keys``; an explicit tuple pins the set instead.
+    """
+    if episode_sum_keys is None:
+        return key.startswith("rew_")
+    return key in episode_sum_keys
+
+
+def reset_eval_episode(
+    eval_env: VecEnv,
+    seed_base: int | None,
+    episode: int,
+    reset_options: Sequence[Mapping[str, Any]] | None,
+) -> Any:
+    """Reset the eval env for batch episode ``episode``.
+
+    Paired mode (``seed_base`` set) stages the episode's seed (and
+    options, cycled) on the VecEnv, which applies them at this reset
+    only; both calls pass through wrappers such as the
+    ``VecNormalize(training=False)`` that ``train()`` puts around the
+    eval env. Unpaired (``seed_base=None``), a plain reset continues
+    the env's own RNG.
+    """
+    if seed_base is None:
+        return eval_env.reset()
+    eval_env.seed(seed_base + episode)
+    if reset_options is not None:
+        eval_env.set_options(
+            dict(reset_options[episode % len(reset_options)])
+        )
+    return eval_env.reset()
+
+
+def collect_episode_metrics(
+    model: Any,
+    eval_env: VecEnv,
+    *,
+    n_eval_episodes: int,
+    deterministic: bool = True,
+    seed_base: int | None = None,
+    reset_options: Sequence[Mapping[str, Any]] | None = None,
+    info_keys: Sequence[str] | None = None,
+    terminal_info_keys: Sequence[str] = (),
+    episode_distribution_keys: Sequence[str] = (),
+    episode_survival_thresholds: Mapping[str, Sequence[int]] | None = None,
+    episode_sum_keys: Sequence[str] | None = None,
+    success_key: str | None = None,
+    success_threshold: float = 1.0,
+    phase_key: str | None = None,
+    phase_labels: Mapping[int, str] | None = None,
+) -> EvaluationBatch:
+    """Roll ``n_eval_episodes`` on worker 0 of ``eval_env`` and aggregate.
+
+    The measurement core of :class:`InfoDictEvalCallback` (its
+    ``_collect_metrics`` calls this with its own settings) and of the
+    offline harness (``experiments.harness``), so an offline score is
+    the in-loop row by construction. ``model`` is anything with SB3's
+    ``predict(obs, deterministic=...)``. ``seed_base`` set makes the
+    batch paired: episode ``i`` resets with seed ``seed_base + i`` and
+    ``reset_options[i % len]`` (:func:`reset_eval_episode`); ``None``
+    opens the batch with one plain reset and lets the VecEnv's
+    auto-resets continue its RNG. The keyword settings are the
+    callback's parameters of the same names (see its docstring), passed
+    already de-duplicated. Pure measurement: no logging, no files.
+    """
+    survival_thresholds = dict(episode_survival_thresholds or {})
+    labels = dict(phase_labels or {})
+    # Per-key accumulators across all eval episodes.
+    sums: dict[str, float] = defaultdict(float)
+    counts: dict[str, int] = defaultdict(int)
+    finals: dict[str, float] = {}
+    maxes: dict[str, float] = {}
+    phase_counts: dict[int, int] = defaultdict(int)
+    # One terminal snapshot per finished episode, so we can aggregate
+    # at episode granularity (e.g. mean terminal rally count, success
+    # rate) rather than the step-weighted means above.
+    episode_finals: list[dict[str, float]] = []
+    # One dict of per-episode totals per finished episode, for the
+    # keys designated per-step increments (see ``episode_sum_keys``):
+    # the envs' rew_* components are emitted fresh every step, so the
+    # episode total must be summed here -- ``_mean`` is step-weighted
+    # and ``_ep_mean`` reads only the terminal step's increment.
+    episode_sums: list[dict[str, float]] = []
+    current_ep_sums: dict[str, float] = defaultdict(float)
+    # Per-episode reward totals (the eval env runs with
+    # norm_reward=False, so these are the env's true returns). Kept
+    # so reward can serve as the final tie-break in
+    # ``best_metric_keys`` without a second rollout.
+    episode_rewards: list[float] = []
+    # Per-episode step counts, kept alongside the rewards so this
+    # callback can emit the same ``evaluations.npz`` schema SB3's
+    # EvalCallback does (see ``evaluations_npz_path``).
+    episode_lengths: list[int] = []
+    current_ep_reward = 0.0
+    current_ep_length = 0
+    total_steps = 0
+    total_episodes = 0
+
+    # Paired mode pins every episode's reset (see eval_seed); None
+    # keeps the legacy stream, where one reset opens the batch and
+    # the VecEnv's own auto-resets continue its RNG.
+    obs = reset_eval_episode(eval_env, seed_base, 0, reset_options)
+    assert not isinstance(obs, tuple)
+    last_info: dict | None = None
+
+    while total_episodes < n_eval_episodes:
+        action, _ = model.predict(obs, deterministic=deterministic)
+        obs, rewards, dones, infos = eval_env.step(action)
+        assert not isinstance(obs, tuple)
+        total_steps += 1
+        current_ep_length += 1
+        current_ep_reward += float(rewards[0])
+        info = infos[0]
+        last_info = info
+
+        # Scalar keys are stable within a step; compute once and reuse
+        # for both the running stats and the terminal snapshot below.
+        scalar_keys = _scalar_info_keys(info)
+        if info_keys is None:
+            step_keys = scalar_keys
+        else:
+            scalar_key_set = set(scalar_keys)
+            step_keys = [
+                key for key in info_keys if key in scalar_key_set
+            ]
+        for key in step_keys:
+            value = float(info[key])
+            sums[key] += value
+            counts[key] += 1
+            if is_episode_sum_key(key, episode_sum_keys):
+                current_ep_sums[key] += value
+            prev_max = maxes.get(key)
+            if prev_max is None or value > prev_max:
+                maxes[key] = value
+
+        if phase_key is not None and phase_key in info:
+            try:
+                phase_counts[int(info[phase_key])] += 1
+            except (TypeError, ValueError):
+                pass
+
+        if bool(dones[0]):
+            # Capture terminal scalars so monotone counters (rally,
+            # hit counts) get their final value logged. On done,
+            # VecEnvs reset automatically and the next ``obs`` is
+            # already post-reset, so ``info`` holds the last step of
+            # the just-finished episode.
+            scalar_key_set = set(scalar_keys)
+            terminal_requested = (
+                *terminal_info_keys,
+                *episode_distribution_keys,
+                *survival_thresholds,
+            )
+            if success_key is not None:
+                terminal_requested = (*terminal_requested, success_key)
+            terminal_keys = tuple(
+                dict.fromkeys(
+                    (
+                        *step_keys,
+                        *(
+                            key
+                            for key in terminal_requested
+                            if key in scalar_key_set
+                        ),
+                    )
+                )
+            )
+            ep_terminal = {
+                key: float(info[key]) for key in terminal_keys
+            }
+            finals.update({key: ep_terminal[key] for key in step_keys})
+            episode_finals.append(ep_terminal)
+            episode_sums.append(dict(current_ep_sums))
+            current_ep_sums.clear()
+            episode_rewards.append(current_ep_reward)
+            episode_lengths.append(current_ep_length)
+            current_ep_reward = 0.0
+            current_ep_length = 0
+            total_episodes += 1
+            if (
+                seed_base is not None
+                and total_episodes < n_eval_episodes
+            ):
+                # The terminal info above is already captured (the
+                # VecEnv hands out a copy), so the auto-reset's
+                # unseeded episode can be replaced by this
+                # episode's pinned one.
+                obs = reset_eval_episode(
+                    eval_env, seed_base, total_episodes, reset_options
+                )
+                assert not isinstance(obs, tuple)
+
+    # Fall back to the last seen step if a rollout hit video_length
+    # without termination and ``finals`` is empty.
+    if not finals and last_info is not None:
+        scalar_keys = _scalar_info_keys(last_info)
+        if info_keys is not None:
+            scalar_key_set = set(scalar_keys)
+            scalar_keys = [
+                key for key in info_keys if key in scalar_key_set
+            ]
+        for key in scalar_keys:
+            finals[key] = float(last_info[key])
+
+    metrics: dict[str, float] = {
+        "episode_length": total_steps / max(1, total_episodes),
+    }
+    if episode_rewards:
+        metrics["episode_reward_mean"] = sum(episode_rewards) / len(
+            episode_rewards
+        )
+    for key, total in sums.items():
+        if counts[key] > 0:
+            metrics[f"{key}_mean"] = total / counts[key]
+        metrics[f"{key}_max"] = maxes[key]
+    for key, value in finals.items():
+        metrics[f"{key}_final"] = value
+
+    # Per-episode terminal means: average each key's terminal value
+    # across episodes. For monotone counters this is the mean
+    # end-of-episode total (e.g. avg rallies completed per episode);
+    # for the env's ``term_*`` flags it is the fraction of episodes
+    # that ended that way (OOB / stall / timeout breakdown).
+    if episode_finals:
+        ep_keys: set[str] = set()
+        for snap in episode_finals:
+            ep_keys.update(snap)
+        for key in ep_keys:
+            vals = [s[key] for s in episode_finals if key in s]
+            if vals:
+                metrics[f"{key}_ep_mean"] = sum(vals) / len(vals)
+        if success_key is not None:
+            # Only score episodes whose terminal info actually carried
+            # the key. If it never appears (misconfigured success_key),
+            # omit success_rate entirely -- a visible gap -- rather than
+            # reporting a confident 0.0 indistinguishable from real 0%.
+            present = [
+                s[success_key]
+                for s in episode_finals
+                if success_key in s
+            ]
+            if present:
+                successes = [
+                    1.0 if v >= success_threshold else 0.0
+                    for v in present
+                ]
+                metrics["success_rate"] = sum(successes) / len(successes)
+
+        for key in episode_distribution_keys:
+            values = [
+                snapshot[key]
+                for snapshot in episode_finals
+                if key in snapshot
+            ]
+            if values:
+                metrics[f"{key}_ep_min"] = min(values)
+                metrics[f"{key}_ep_p50"] = float(
+                    np.quantile(values, 0.5)
+                )
+                metrics[f"{key}_ep_p90"] = float(
+                    np.quantile(values, 0.9)
+                )
+                metrics[f"{key}_ep_max"] = max(values)
+
+        for key, thresholds in survival_thresholds.items():
+            values = [
+                snapshot[key]
+                for snapshot in episode_finals
+                if key in snapshot
+            ]
+            if values:
+                for threshold in thresholds:
+                    metrics[f"{key}_ep_ge_{threshold}_rate"] = sum(
+                        value >= threshold for value in values
+                    ) / len(values)
+
+    # Mean per-episode total for the designated per-step increments:
+    # e.g. ``rew_hold_ep_sum_mean`` is the hold escrow's delivered
+    # dose per eval episode (review finding §1.6: the reward
+    # decomposition was absent from the metrics artifacts). Averaged
+    # over the episodes that carried the key, mirroring the
+    # ``_ep_mean`` convention above.
+    if episode_sums:
+        summed_keys: set[str] = set()
+        for totals in episode_sums:
+            summed_keys.update(totals)
+        for key in summed_keys:
+            totals_present = [
+                totals[key] for totals in episode_sums if key in totals
+            ]
+            if totals_present:
+                metrics[f"{key}_ep_sum_mean"] = sum(
+                    totals_present
+                ) / len(totals_present)
+
+    if phase_key is not None and phase_counts and total_steps > 0:
+        for phase_int, count in phase_counts.items():
+            label = labels.get(phase_int, str(phase_int))
+            metrics[f"phase_frac_{label}"] = count / total_steps
+        # Also surface any declared labels that never appeared so
+        # plots don't have surprise gaps.
+        for phase_int, label in labels.items():
+            if phase_int not in phase_counts:
+                metrics.setdefault(f"phase_frac_{label}", 0.0)
+
+    return EvaluationBatch(
+        metrics=metrics,
+        episode_rewards=episode_rewards,
+        episode_lengths=episode_lengths,
+        total_steps=total_steps,
+        total_episodes=total_episodes,
+    )
 
 
 class InfoDictEvalCallback(BaseCallback):
@@ -340,6 +681,23 @@ class InfoDictEvalCallback(BaseCallback):
         across evaluations. Options without a seed are refused -- they
         are only applied by the paired resets, so they would be a
         silent no-op.
+    record_n_updates:
+        When ``True`` (``train()`` sets it for on-policy runs, PPO plan
+        Step 6), every evaluation's ``csv_path`` rows include
+        ``n_updates``: the model's SB3 ``_n_updates`` when the
+        evaluation ran, the count ``progress.csv`` logs as
+        ``train/n_updates`` (optimization epochs: ``n_epochs`` per
+        rollout, fewer when ``target_kl`` ends a rollout's epochs
+        early). An evaluation at ``0`` scored the initial policy. The
+        row is written to the CSV only: it is not an evaluation
+        metric, so selection, the gate and TensorBoard never see it.
+        ``best_model_meta.json`` records the selecting evaluation's
+        count as a top-level ``n_updates`` (outside its ``metrics``).
+    best_ledger:
+        ``train()``'s ``experiments.records.BestSaveLedger``: every best
+        save's digests, so the run record can tell a save split between
+        its renames even when no meta was renamed (a first save). Only
+        read with ``best_model_save_path``.
     """
 
     def __init__(
@@ -373,6 +731,8 @@ class InfoDictEvalCallback(BaseCallback):
         degenerate_flat_keys: Sequence[str] | None = None,
         eval_seed: int | None = None,
         eval_reset_options: Sequence[Mapping[str, Any]] | None = None,
+        record_n_updates: bool = False,
+        best_ledger: BestSaveLedger | None = None,
     ) -> None:
         super().__init__(verbose)
         # The rollout loop reads infos[0]/rewards[0] and counts episodes
@@ -443,6 +803,9 @@ class InfoDictEvalCallback(BaseCallback):
                         f"info_keys, so they would never be collected"
                     )
         self.csv_path = csv_path
+        if not isinstance(record_n_updates, bool):
+            raise TypeError("record_n_updates must be a bool")
+        self.record_n_updates = record_n_updates
         self.evaluations_npz_path = evaluations_npz_path
         # Rows for ``evaluations.npz``: SB3's EvalCallback schema, so
         # notebook_utils' learning plots and stage_summary's reward block
@@ -458,6 +821,7 @@ class InfoDictEvalCallback(BaseCallback):
         ) = None
         self.best_metric_keys = tuple(dict.fromkeys(best_metric_keys))
         self.best_model_save_path = best_model_save_path
+        self.best_ledger = best_ledger
         self.early_stop_patience = early_stop_patience
         self.early_stop_min_evals = int(early_stop_min_evals)
         # The configured form (scalar or per-key dict) stays inspectable;
@@ -636,11 +1000,37 @@ class InfoDictEvalCallback(BaseCallback):
                 logger.record("eval/mean_ep_length", metrics["episode_length"])
 
         if self.csv_path is not None:
-            self._append_csv(metrics, self.num_timesteps)
+            self._append_csv(self._csv_rows(metrics), self.num_timesteps)
         if self.evaluations_npz_path is not None:
             self._append_evaluations_npz(self.num_timesteps)
 
         return self._update_best_and_maybe_stop(metrics)
+
+    def _csv_rows(self, metrics: Mapping[str, float]) -> Mapping[str, float]:
+        """``metrics``, plus the ``n_updates`` row under ``record_n_updates``.
+
+        A collected metric of the same name would make the row
+        ambiguous, so it fails loudly at the first evaluation, like a
+        context-metric collision.
+        """
+        if not self.record_n_updates:
+            return metrics
+        if N_UPDATES_METRIC in metrics:
+            raise ValueError(
+                f"record_n_updates: an evaluation metric is already named "
+                f"'{N_UPDATES_METRIC}'"
+            )
+        return {**metrics, N_UPDATES_METRIC: float(self._model_n_updates())}
+
+    def _model_n_updates(self) -> int:
+        """The model's SB3 ``_n_updates`` (``record_n_updates`` only)."""
+        n_updates = getattr(self.model, "_n_updates", None)
+        if isinstance(n_updates, bool) or not isinstance(n_updates, int):
+            raise TypeError(
+                f"record_n_updates: the model's _n_updates is "
+                f"{n_updates!r}, not an SB3 update count"
+            )
+        return n_updates
 
     def _append_evaluations_npz(self, timestep: int) -> None:
         """Append this evaluation to ``evaluations.npz`` and rewrite it.
@@ -675,11 +1065,11 @@ class InfoDictEvalCallback(BaseCallback):
         self._npz_timesteps.append(int(timestep))
         self._npz_results.append(list(rewards))
         self._npz_ep_lengths.append(list(lengths))
+        temporary = f"{destination}.tmp.npz"
         try:
             parent = os.path.dirname(destination)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            temporary = f"{destination}.tmp.npz"
             np.savez(
                 temporary,
                 timesteps=np.asarray(self._npz_timesteps, dtype=np.int64),
@@ -687,7 +1077,17 @@ class InfoDictEvalCallback(BaseCallback):
                 ep_lengths=np.asarray(self._npz_ep_lengths, dtype=np.int64),
             )
             os.replace(temporary, destination)
-        except OSError as error:  # pragma: no cover - disk-level failure
+        except BaseException as error:
+            # Any failure, a KeyboardInterrupt (a stopped Colab cell)
+            # included, removes the temporary: a leftover fails the run
+            # directory's verification (experiments.records). Only a
+            # disk-level failure is logged and survived.
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            if not isinstance(error, OSError):
+                raise
             print(
                 f"[InfoDictEvalCallback] could not write "
                 f"{destination}: {error}"
@@ -698,247 +1098,37 @@ class InfoDictEvalCallback(BaseCallback):
 
         Pure measurement -- no TensorBoard/CSV logging and no selection
         side effects -- so ``confirm_best`` can rerun it for an
-        independent second sample.
+        independent second sample. The rollout and aggregation are
+        :func:`collect_episode_metrics`, which the offline harness
+        shares.
         """
-        # Per-key accumulators across all eval episodes.
-        sums: dict[str, float] = defaultdict(float)
-        counts: dict[str, int] = defaultdict(int)
-        finals: dict[str, float] = {}
-        maxes: dict[str, float] = {}
-        phase_counts: dict[int, int] = defaultdict(int)
-        # One terminal snapshot per finished episode, so we can aggregate
-        # at episode granularity (e.g. mean terminal rally count, success
-        # rate) rather than the step-weighted means above.
-        episode_finals: list[dict[str, float]] = []
-        # One dict of per-episode totals per finished episode, for the
-        # keys designated per-step increments (see ``episode_sum_keys``):
-        # the envs' rew_* components are emitted fresh every step, so the
-        # episode total must be summed here -- ``_mean`` is step-weighted
-        # and ``_ep_mean`` reads only the terminal step's increment.
-        episode_sums: list[dict[str, float]] = []
-        current_ep_sums: dict[str, float] = defaultdict(float)
-        # Per-episode reward totals (the eval env runs with
-        # norm_reward=False, so these are the env's true returns). Kept
-        # so reward can serve as the final tie-break in
-        # ``best_metric_keys`` without a second rollout.
-        episode_rewards: list[float] = []
-        # Per-episode step counts, kept alongside the rewards so this
-        # callback can emit the same ``evaluations.npz`` schema SB3's
-        # EvalCallback does (see ``evaluations_npz_path``).
-        episode_lengths: list[int] = []
-        current_ep_reward = 0.0
-        current_ep_length = 0
-        total_steps = 0
-        total_episodes = 0
-
-        # Paired mode pins every episode's reset (see eval_seed); None
-        # keeps the legacy stream, where one reset opens the batch and
-        # the VecEnv's own auto-resets continue its RNG.
-        seed_base = self._rollout_seed_base()
-        obs = self._reset_for_episode(seed_base, 0)
-        assert not isinstance(obs, tuple)
-        last_info: dict | None = None
-
-        while total_episodes < self.n_eval_episodes:
-            action, _ = self.model.predict(
-                obs, deterministic=self.deterministic
-            )
-            obs, rewards, dones, infos = self.eval_env.step(action)
-            assert not isinstance(obs, tuple)
-            total_steps += 1
-            current_ep_length += 1
-            current_ep_reward += float(rewards[0])
-            info = infos[0]
-            last_info = info
-
-            # Scalar keys are stable within a step; compute once and reuse
-            # for both the running stats and the terminal snapshot below.
-            scalar_keys = _scalar_info_keys(info)
-            if self.info_keys is None:
-                step_keys = scalar_keys
-            else:
-                scalar_key_set = set(scalar_keys)
-                step_keys = [
-                    key for key in self.info_keys if key in scalar_key_set
-                ]
-            for key in step_keys:
-                value = float(info[key])
-                sums[key] += value
-                counts[key] += 1
-                if self._is_episode_sum_key(key):
-                    current_ep_sums[key] += value
-                prev_max = maxes.get(key)
-                if prev_max is None or value > prev_max:
-                    maxes[key] = value
-
-            if self.phase_key is not None and self.phase_key in info:
-                try:
-                    phase_counts[int(info[self.phase_key])] += 1
-                except (TypeError, ValueError):
-                    pass
-
-            if bool(dones[0]):
-                # Capture terminal scalars so monotone counters (rally,
-                # hit counts) get their final value logged. On done,
-                # VecEnvs reset automatically and the next ``obs`` is
-                # already post-reset, so ``info`` holds the last step of
-                # the just-finished episode.
-                scalar_key_set = set(scalar_keys)
-                terminal_requested = (
-                    *self.terminal_info_keys,
-                    *self.episode_distribution_keys,
-                    *self.episode_survival_thresholds,
-                )
-                if self.success_key is not None:
-                    terminal_requested = (*terminal_requested, self.success_key)
-                terminal_keys = tuple(
-                    dict.fromkeys(
-                        (
-                            *step_keys,
-                            *(
-                                key
-                                for key in terminal_requested
-                                if key in scalar_key_set
-                            ),
-                        )
-                    )
-                )
-                ep_terminal = {
-                    key: float(info[key]) for key in terminal_keys
-                }
-                finals.update({key: ep_terminal[key] for key in step_keys})
-                episode_finals.append(ep_terminal)
-                episode_sums.append(dict(current_ep_sums))
-                current_ep_sums.clear()
-                episode_rewards.append(current_ep_reward)
-                episode_lengths.append(current_ep_length)
-                current_ep_reward = 0.0
-                current_ep_length = 0
-                total_episodes += 1
-                if (
-                    seed_base is not None
-                    and total_episodes < self.n_eval_episodes
-                ):
-                    # The terminal info above is already captured (the
-                    # VecEnv hands out a copy), so the auto-reset's
-                    # unseeded episode can be replaced by this
-                    # episode's pinned one.
-                    obs = self._reset_for_episode(seed_base, total_episodes)
-                    assert not isinstance(obs, tuple)
-
-        # Fall back to the last seen step if a rollout hit video_length
-        # without termination and ``finals`` is empty.
-        if not finals and last_info is not None:
-            scalar_keys = _scalar_info_keys(last_info)
-            if self.info_keys is not None:
-                scalar_key_set = set(scalar_keys)
-                scalar_keys = [
-                    key for key in self.info_keys if key in scalar_key_set
-                ]
-            for key in scalar_keys:
-                finals[key] = float(last_info[key])
-
-        self._last_episode_samples = (episode_rewards, episode_lengths)
-        metrics: dict[str, float] = {
-            "episode_length": total_steps / max(1, total_episodes),
-        }
-        if episode_rewards:
-            metrics["episode_reward_mean"] = sum(episode_rewards) / len(
-                episode_rewards
-            )
-        for key, total in sums.items():
-            if counts[key] > 0:
-                metrics[f"{key}_mean"] = total / counts[key]
-            metrics[f"{key}_max"] = maxes[key]
-        for key, value in finals.items():
-            metrics[f"{key}_final"] = value
-
-        # Per-episode terminal means: average each key's terminal value
-        # across episodes. For monotone counters this is the mean
-        # end-of-episode total (e.g. avg rallies completed per episode);
-        # for the env's ``term_*`` flags it is the fraction of episodes
-        # that ended that way (OOB / stall / timeout breakdown).
-        if episode_finals:
-            ep_keys: set[str] = set()
-            for snap in episode_finals:
-                ep_keys.update(snap)
-            for key in ep_keys:
-                vals = [s[key] for s in episode_finals if key in s]
-                if vals:
-                    metrics[f"{key}_ep_mean"] = sum(vals) / len(vals)
-            if self.success_key is not None:
-                # Only score episodes whose terminal info actually carried
-                # the key. If it never appears (misconfigured success_key),
-                # omit success_rate entirely -- a visible gap -- rather than
-                # reporting a confident 0.0 indistinguishable from real 0%.
-                present = [
-                    s[self.success_key]
-                    for s in episode_finals
-                    if self.success_key in s
-                ]
-                if present:
-                    successes = [
-                        1.0 if v >= self.success_threshold else 0.0
-                        for v in present
-                    ]
-                    metrics["success_rate"] = sum(successes) / len(successes)
-
-            for key in self.episode_distribution_keys:
-                values = [
-                    snapshot[key]
-                    for snapshot in episode_finals
-                    if key in snapshot
-                ]
-                if values:
-                    metrics[f"{key}_ep_min"] = min(values)
-                    metrics[f"{key}_ep_p50"] = float(
-                        np.quantile(values, 0.5)
-                    )
-                    metrics[f"{key}_ep_p90"] = float(
-                        np.quantile(values, 0.9)
-                    )
-                    metrics[f"{key}_ep_max"] = max(values)
-
-            for key, thresholds in self.episode_survival_thresholds.items():
-                values = [
-                    snapshot[key]
-                    for snapshot in episode_finals
-                    if key in snapshot
-                ]
-                if values:
-                    for threshold in thresholds:
-                        metrics[f"{key}_ep_ge_{threshold}_rate"] = sum(
-                            value >= threshold for value in values
-                        ) / len(values)
-
-        # Mean per-episode total for the designated per-step increments:
-        # e.g. ``rew_hold_ep_sum_mean`` is the hold escrow's delivered
-        # dose per eval episode (review finding §1.6: the reward
-        # decomposition was absent from the metrics artifacts). Averaged
-        # over the episodes that carried the key, mirroring the
-        # ``_ep_mean`` convention above.
-        if episode_sums:
-            summed_keys: set[str] = set()
-            for totals in episode_sums:
-                summed_keys.update(totals)
-            for key in summed_keys:
-                totals_present = [
-                    totals[key] for totals in episode_sums if key in totals
-                ]
-                if totals_present:
-                    metrics[f"{key}_ep_sum_mean"] = sum(
-                        totals_present
-                    ) / len(totals_present)
-
-        if self.phase_key is not None and phase_counts and total_steps > 0:
-            for phase_int, count in phase_counts.items():
-                label = self.phase_labels.get(phase_int, str(phase_int))
-                metrics[f"phase_frac_{label}"] = count / total_steps
-            # Also surface any declared labels that never appeared so
-            # plots don't have surprise gaps.
-            for phase_int, label in self.phase_labels.items():
-                if phase_int not in phase_counts:
-                    metrics.setdefault(f"phase_frac_{label}", 0.0)
+        batch = collect_episode_metrics(
+            self.model,
+            self.eval_env,
+            n_eval_episodes=self.n_eval_episodes,
+            deterministic=self.deterministic,
+            # Paired mode pins every episode's reset (see eval_seed);
+            # None keeps the legacy stream, where one reset opens the
+            # batch and the VecEnv's own auto-resets continue its RNG.
+            seed_base=self._rollout_seed_base(),
+            reset_options=self.eval_reset_options,
+            info_keys=self.info_keys,
+            terminal_info_keys=self.terminal_info_keys,
+            episode_distribution_keys=self.episode_distribution_keys,
+            episode_survival_thresholds=self.episode_survival_thresholds,
+            episode_sum_keys=self.episode_sum_keys,
+            success_key=self.success_key,
+            success_threshold=self.success_threshold,
+            phase_key=self.phase_key,
+            phase_labels=self.phase_labels,
+        )
+        self._last_episode_samples = (
+            batch.episode_rewards,
+            batch.episode_lengths,
+        )
+        metrics = batch.metrics
+        total_episodes = batch.total_episodes
+        total_steps = batch.total_steps
 
         if self.verbose:
             # One readable line per evaluation, at eval_freq cadence --
@@ -985,25 +1175,11 @@ class InfoDictEvalCallback(BaseCallback):
         return self.eval_seed
 
     def _reset_for_episode(self, seed_base: int | None, episode: int) -> Any:
-        """Reset the eval env for batch episode ``episode``.
-
-        Paired mode stages the episode's seed (and options) on the
-        VecEnv, which applies them at this reset only; both calls pass
-        through wrappers such as the ``VecNormalize(training=False)``
-        that ``train()`` puts around the eval env.
-        """
-        if seed_base is None:
-            return self.eval_env.reset()
-        self.eval_env.seed(seed_base + episode)
-        if self.eval_reset_options is not None:
-            self.eval_env.set_options(
-                dict(
-                    self.eval_reset_options[
-                        episode % len(self.eval_reset_options)
-                    ]
-                )
-            )
-        return self.eval_env.reset()
+        """Reset the eval env for batch episode ``episode``
+        (:func:`reset_eval_episode` with this callback's options)."""
+        return reset_eval_episode(
+            self.eval_env, seed_base, episode, self.eval_reset_options
+        )
 
     def _collect_confirmation_metrics(self) -> dict[str, float]:
         """Roll the ``confirm_best`` batch (its own paired seed block)."""
@@ -1014,16 +1190,9 @@ class InfoDictEvalCallback(BaseCallback):
             self._confirmation_pass = False
 
     def _is_episode_sum_key(self, key: str) -> bool:
-        """Whether a collected step key is summed per episode.
-
-        ``episode_sum_keys=None`` (the default) applies the repo-wide
-        naming convention -- ``rew_*`` info keys are per-step reward
-        increments -- so recipes opt components in simply by listing
-        them in ``info_keys``; an explicit tuple pins the set instead.
-        """
-        if self.episode_sum_keys is None:
-            return key.startswith("rew_")
-        return key in self.episode_sum_keys
+        """Whether a collected step key is summed per episode
+        (:func:`is_episode_sum_key` with this callback's keys)."""
+        return is_episode_sum_key(key, self.episode_sum_keys)
 
     def producible_metric_names(
         self, info_scalar_keys: Iterable[str]
@@ -1217,16 +1386,11 @@ class InfoDictEvalCallback(BaseCallback):
         by more than its ``best_metric_min_delta``; within the threshold
         the comparison falls through to the next key, and a full tie is
         not an improvement. With the default delta of 0.0 this is
-        exactly the historical strict-``>`` tuple comparison.
+        exactly the historical strict-``>`` tuple comparison. The
+        comparison is ``experiments.select.improves``, the one the
+        offline ``select()`` applies.
         """
-        if best is None:
-            return True
-        for new, old, delta in zip(score, best, self._min_deltas, strict=True):
-            if new > old + delta:
-                return True
-            if new < old - delta:
-                return False
-        return False
+        return improves(score, best, self._min_deltas)
 
     def _update_best_and_maybe_stop(
         self, metrics: Mapping[str, float]
@@ -1387,24 +1551,50 @@ class InfoDictEvalCallback(BaseCallback):
         metrics: Mapping[str, float],
         confirmation: Mapping[str, float] | None = None,
     ) -> None:
-        """Write best_model.zip + paired normalizer stats + meta json."""
+        """Write best_model.zip + paired normalizer stats + meta json.
+
+        Each file is written under a temporary name beside its target
+        and the three are renamed into place together, the meta last
+        (``experiments.records.ReplaceTogether``): an interrupt inside a
+        write (a stopped Colab cell) leaves the previous best whole and
+        no temporary behind. One between two renames leaves a meta whose
+        sha256s no longer bind the files, which the run record reports
+        instead of the meta's selection (as it reports, through
+        ``best_ledger``, a first save split before its meta's rename).
+        """
         if self.best_model_save_path is None:
             return
         os.makedirs(self.best_model_save_path, exist_ok=True)
+        with ReplaceTogether(self.best_ledger) as staged:
+            self._stage_best(staged, metrics, confirmation)
+            staged.commit()
+
+    def _stage_best(
+        self,
+        staged: ReplaceTogether,
+        metrics: Mapping[str, float],
+        confirmation: Mapping[str, float] | None,
+    ) -> None:
+        """Write the best triple's temporaries (``_save_best`` renames them)."""
+        assert self.best_model_save_path is not None
         model_path = os.path.join(self.best_model_save_path, "best_model.zip")
-        self.model.save(os.path.splitext(model_path)[0])
-        artifact_paths = {"best_model.zip": model_path}
+        # SB3 appends ".zip" only to a path without a suffix; the
+        # temporary's ".tmp-<pid>" keeps it as given.
+        artifact_paths = {"best_model.zip": staged.stage(model_path)}
+        self.model.save(artifact_paths["best_model.zip"])
         get_vec_norm = getattr(self.model, "get_vec_normalize_env", None)
         vec_norm = get_vec_norm() if get_vec_norm is not None else None
         if vec_norm is not None:
             # Paired stats snapshot: replaying best_model against
             # end-of-training stats is a silent obs-distribution
-            # mismatch (see _SaveVecNormalizeOnNewBest in train.py).
+            # mismatch (see _SaveBestOnNewBest in train.py).
             normalizer_path = os.path.join(
                 self.best_model_save_path, "best_vec_normalize.pkl"
             )
-            vec_norm.save(normalizer_path)
-            artifact_paths["best_vec_normalize.pkl"] = normalizer_path
+            artifact_paths["best_vec_normalize.pkl"] = staged.stage(
+                normalizer_path
+            )
+            vec_norm.save(artifact_paths["best_vec_normalize.pkl"])
         meta = {
             "timestep": int(self.num_timesteps),
             "selection_keys": list(self.best_metric_keys),
@@ -1425,6 +1615,15 @@ class InfoDictEvalCallback(BaseCallback):
             **(
                 {"eval_seed": self.eval_seed}
                 if self.eval_seed is not None
+                else {}
+            ),
+            # On-policy runs: the SB3 update count behind the saved
+            # policy. An evaluation runs before its rollout's update, so
+            # a best selected at 0 is the untrained initial policy, and
+            # the run summary says so.
+            **(
+                {N_UPDATES_METRIC: self._model_n_updates()}
+                if self.record_n_updates
                 else {}
             ),
             # Present only when confirm_best re-sampled the candidate:
@@ -1451,6 +1650,7 @@ class InfoDictEvalCallback(BaseCallback):
             # Bind the checkpoint and its observation statistics to this
             # selection event. A same-shape normalizer from another run would
             # otherwise load successfully while silently changing every input.
+            # Hashed from the temporaries: the bytes the renames publish.
             "artifacts": {
                 name: {"sha256": _sha256_file(path)}
                 for name, path in artifact_paths.items()
@@ -1459,7 +1659,7 @@ class InfoDictEvalCallback(BaseCallback):
         meta_path = os.path.join(
             self.best_model_save_path, "best_model_meta.json"
         )
-        with open(meta_path, "w") as f:
+        with open(staged.stage(meta_path), "w") as f:
             json.dump(meta, f, indent=2)
             f.write("\n")
 

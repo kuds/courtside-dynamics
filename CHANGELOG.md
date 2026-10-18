@@ -18,6 +18,924 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **Env streams no longer depend on the CPU's BLAS kernels
+  (2026-10-18).** numpy's OpenBLAS picks kernels from the CPU at run
+  time, and they round small products differently. The env code's
+  `np.linalg.norm`, `np.dot` and `@` on 3-vectors therefore gave other
+  last bits on AVX-512 hosts, where the goldens were recorded, than on
+  GitHub's AVX2 runners, and PR 81's `pytest (3.12)` job failed five
+  WallBall and BallBounce cases. A new `courtside_dynamics.envs._linalg`
+  (`dot`, `norm`, `matvec`) sums left to right on Python floats. All 19
+  call sites in the envs and the digest harness use it.
+  Effects on the streams:
+  - **PaddleTennis and BallBalance** streams are unchanged.
+  - **WallBall and HumanoidTennis** now give on every CPU what they
+    already gave on non-AVX-512 ones.
+  - **BallBounce** moves by last bits on AVX2 and AVX-512 hosts.
+  Not an era break (same arithmetic, portable rounding): saved
+  policies and `VecNormalize` statistics stay comparable. The new
+  goldens were proved equal to the old code run under the pre-AVX2
+  OpenBLAS kernel, 22/22 in both sets, under three forced kernels.
+  The re-record covers WallBall and BallBounce (CI and full) and the
+  full-set humanoid entry. A static test keeps BLAS calls out of the
+  stream code, and a CI test replays four cases under every OpenBLAS
+  kernel the runner can execute. See `docs/DECISIONS.md`, "Golden
+  digests and the freeze harness gate every refactor" (BLAS kernels).
+- **The best model says which save it holds on both selection paths,
+  final saves are atomic, and a protocol pins its device (phase-4
+  verifier findings, round 2, 2026-10-17).** No env stream or training
+  change: golden digests 22/22, recipe snapshot unchanged (96), and the
+  trainer digest against `17befbf` matches 83 of 92 components (every
+  policy, normalizer, monitor, RNG, `resolved_model`, evaluation,
+  `eval_info.csv`, best-model weight and normalizer, checkpoint-name
+  and diagnosis component of the four jobs). The nine that differ are
+  the declared layout addition below, three per reward-selected
+  BallBalance job (SAC, DemoSAC off, PPO): `best_model_meta` (absent
+  before), `best_model_meta_bindings` (now "verified: best_model.zip,
+  best_vec_normalize.pkl") and `run_layout_artifacts` (gains
+  `best_model_meta`). The headline-selected PaddleTennis job matches
+  whole.
+  - **A run on CUDA no longer claims a CPU protocol.** The in-loop
+    protocol a run records left the device out, so every Colab GPU SAC
+    run (SB3's `"auto"`) recorded the CPU-pinned `paddle-npoint@v3`.
+    `comparability_key.eval_protocol` now records the `device` the
+    in-loop evaluation runs the policy on (`train.inloop_eval_device`,
+    checked against the built model), fingerprinted with it; a run whose
+    protocol matches no registered one records `id: null` with
+    `nearest` (the recipe's closest registered protocol) and `differs`
+    (the fields that differ: `["device"]` for a stock GPU run, so a CPU
+    re-score under `nearest` is its comparable number). `inloop`
+    rebuilds a run on its recorded device (`resolved_model.device` for
+    older runs), and `rescore` refuses an in-loop protocol of another
+    device before scoring anything.
+  - **The reward path writes `best_model_meta.json` (a layout
+    addition).** SB3 appends an evaluation to `evaluations.npz` before
+    its new-best save runs, so after an interrupt inside that save the
+    summary named the series' argmax ("Best Checkpoint Evaluation (step
+    1,000)", "deploy best_model.zip") for a `best_model.zip` holding step
+    500. Every reward-selected run now writes the meta beside its pair
+    (`"selected_by": "reward"`, the step, `mean_reward`, the pair's
+    sha256s; the meta renamed last), its record carries a `verified`
+    selection with keys `["mean_reward"]` (it was `null`), and the
+    summary, the notebooks' best-checkpoint marker and the harness read
+    the step from the bound meta; the summary notes a series peak whose
+    save did not complete, and suggests no deploy when no save did.
+  - **`verify` fails a complete directory that is not clean.** A
+    directory whose record marks the best model unbound, or lists
+    unindexed snapshot files, printed a `WARNING` and exited 0, so a
+    script checking the exit code passed it. It now prints `NOT CLEAN`
+    with the damage listed and exits 2 (1 stays "incomplete");
+    `--allow-warnings` accepts it (exit 0, for checking a faithful copy
+    of a damaged run), and `--strict` counts it as incomplete. The
+    Python API keeps `complete` and adds `RunDirVerification.clean`
+    (`--json` and the index's `verification` block carry it).
+  - **`final_model.zip`, `vec_normalize.pkl` and periodic checkpoints
+    are written atomically.** Each was written in place on the completed
+    path and both salvage paths (checkpoints by SB3's
+    `CheckpointCallback`), so an interrupt inside the write sealed a
+    torn file that the record listed and `verify` passed. Each now goes
+    to a temporary beside its target and is renamed into place
+    (`records.write_atomically`; `_AtomicCheckpointCallback`, the same
+    names and contents, a checkpoint's normalizer renamed before its
+    model).
+  - **Smaller.** The rescore CLI and the rescore notebook name a
+    snapshot the run failed to save (a gap in the series beside the
+    `select()` pick; `harness.snapshot_gaps`). An unreadable model zip
+    (a torn or truncated checkpoint) is refused by name before anything
+    is scored, every one of them, instead of raising SB3's "wasn't a
+    zip-file" an hour into a run. The notebook's resume and QUICK reads
+    sit inside its per-run refusal, so an unreadable snapshot index or
+    `config.json` refuses that run, not the cell. Score rows name the
+    algorithm as the run records it (`DemoSAC`, not `DEMOSAC`). The
+    summary's Artifacts section flags an unbound best's files. The
+    README's run layout tells `checkpoints/` from `snapshots/`, and the
+    PaddleTennis run file's header says evaluation runs without the
+    escrows.
+- **Spike S1: a Colab notebook that decides whether the humanoid track
+  can train on Colab GPUs (design section 5).** No package, env stream
+  or training change. `notebooks/spikes/s1_gpu_throughput.ipynb`
+  measures, on an L4: MuJoCo Playground's G1 joystick env inside Brax's
+  training wrappers, on both MJX implementations (`warp` and classic
+  `jax`) at batch 1024, 4096 and 8192; mjlab's G1 velocity task when it
+  installs (in its own venv, since mjlab pins mujoco 3.11); and four
+  packaged G1s plus the packaged tennis ball, composed with MjSpec, on
+  MJX at 1 kHz physics. It states the design's bars up front (single G1
+  ≥ 2×10⁴ env steps/s; 4×G1 + ball ≥ 5×10³ 50 Hz control steps/s) and
+  ends with PASS or FAIL per bar and the design's next step. The results
+  JSON (GPU, CUDA, versions, timesteps, substeps, wall times, every
+  row) goes to the Drive root's `diagnostics/`, never `training_runs/`.
+  A row counts only when measured cleanly: no error, no MuJoCo Warp
+  buffer overflow, finite state. If MJX rejects the model, the scene
+  reports the rejection verbatim and falls back to a simplified
+  collision set; MJX 3.15 accepts the full set. `SMOKE = True` runs
+  every code path on CPU and never yields a verdict.
+  `tests/test_spike_notebooks.py` checks that every spike notebook is
+  clean, compiles and installs a pinned ref, and runs S1's verdict
+  rules, scene builder and results folder from the notebook's own
+  cells. See `docs/DECISIONS.md`.
+- **Offline evaluation fails loud where it cannot be faithful (phase-4
+  verifier findings, 2026-10-17).** No env stream or training change:
+  golden digests 22/22, recipe snapshot unchanged (96), and the trainer
+  digest against `9f54ae5` differs only in the three components the
+  @v3 step declared.
+  - **Performance-gated runs have no in-loop protocol.** The gate
+    rescales its evaluator's env per stage (stage 0 from training
+    start), stamps the stage into every row and resets the selection at
+    each advance, so the protocol rebuilt from the recipe's eval env
+    scored an evaluation the run never ran (a tiny gated run's rows
+    disagreed with `eval_info.csv` silently). `from_train_config`,
+    `from_run_config`, `protocol_for_run` and `rescore(..., "inloop")`
+    now refuse a gated run (`GatedEvaluationError`); the five gated
+    WallBall recipes no longer register `<recipe>-inloop@v1` (registered
+    since `0be8d77`, unreleased), and a gated run's
+    `eval_protocol` is `{"id": null, "fingerprint": null, "reason":
+    "performance_gate"}`.
+  - **Every best pair is bound.** `train()` now keeps the sha256s of
+    every best-model save it commits (`records.BestSaveLedger`) and
+    checks the files on disk against them when it seals the record. A
+    reward-path pair split between its two renames (a new model beside
+    the previous normalizer) and a first headline save interrupted
+    before its meta's rename (a model with no meta) were sealed as
+    healthy, listed in the record and scored by the harness; now the
+    record's selection is `unbound` (a reward-selected run gets the
+    block too), the files leave `artifacts`, the summary suggests no
+    deploy, and the loaders and the harness refuse the pair.
+  - **`verify` reports what the record says is wrong.** A complete
+    directory whose record marks the best model unbound, or lists
+    snapshot files its index does not bind, prints a `WARNING` line
+    (`warnings` in `--json`); `--strict` fails it. The index flags both.
+  - **Unindexed snapshot files are named.** A snapshot interrupted
+    between its renames left files the index did not list (or, at the
+    first snapshot, no index); the record's `snapshots` block now lists
+    them in `unindexed` (additive), and the harness refuses to score
+    them instead of ignoring them or failing the run as unreadable.
+  - **Harness and CLI refusals.** A model outside a run is refused
+    without a normalizer unless `raw_observations=True`
+    (`probe --raw-observations`); a run whose `config.json` records the
+    wrong algorithm is refused before scoring (it raised a `TypeError`
+    inside SB3 that the CLI and the notebook did not catch);
+    `in_loop_select()` refuses an unpaired confirming protocol, whose
+    in-loop rule it does not replay; `rescore --protocol inloop` notes
+    when only an unpaired run's first evaluation can match
+    `eval_info.csv`.
+  - **`notebooks/rescore_runs.ipynb`** keeps each series' scores apart
+    (`<run id>/<series>/scores/`), re-scores a run whose normalizer
+    changed, plots `curves_<series>.png` and merges `verdicts.json` (keyed
+    by run and series) across sessions instead of rewriting it from one
+    session's picks.
+  - **Fixed:** `test_l2_toml_spelling_reaches_both_envs` asserted the
+    pre-@v3 contract (an `[env]` contact escrow reaching evaluation);
+    it now pins @v3's, and an `[eval_env]` table restoring both escrows
+    reaches the evaluation env and records `paddle-npoint@v2`.
+  - **Open:** periodic checkpoints are hashed and recorded, never bound
+    (SB3's `CheckpointCallback` writes them in place, so a torn one
+    fails only when loaded); the docs now say so instead of claiming
+    every scored pair is checked against a binding. *(Closed since:
+    checkpoints are written atomically, and an unreadable zip is
+    refused before scoring; the round-2 bullet above.)*
+- **PaddleTennis selection moves to `paddle-npoint@v3`, the
+  evaluation env without training aids (design L3, 2026-10-17): a
+  selection-protocol era.** The recipe's `eval_env_overrides` set
+  `contact_shaping`, `reach_shaping` and `hold_shaping` to 0, so the
+  reward tie-break in selection and every PaddleTennis evaluation
+  reward (`eval_info.csv`, `evaluations.npz`, the closing evaluation,
+  the summary's eval lines) are task reward only. Training keeps the
+  escrows: golden digests 22/22; the trainer digest against `9f54ae5`
+  matches every training, `evaluations.npz`, best-model weight and
+  diagnosis component of the four jobs, and differs only in the
+  PaddleTennis job's `eval_info.csv` and `best_model_meta.json`
+  metrics (at 768 steps @v2's `episode_reward_mean` was a 3.7e-9 float32
+  residue of a reach escrow paid and clawed back; @v3 reads 0.0, the same
+  model selected) and its `run_layout_artifacts` (`snapshots_dir`, from
+  the previous step). The recipe snapshot was re-recorded: the 12
+  PaddleTennis resolutions' evaluation kwargs read 0.0 for the contact
+  and reach scales (were 0.25) and gain `hold_shaping` 0.0. The
+  overrides sit above a run file's `[env]` table, so an `[env]`
+  contact, reach or hold shaping no longer reaches evaluation; an
+  `[eval_env]` table restores it (and the run records the protocol it
+  then evaluates under).
+  - **Comparability.** The observations hold no escrow state (tested),
+    so a policy acts identically under @v2 and @v3: the k≥2 headline,
+    `success_rate`, k=1 and every other non-reward metric are identical
+    (tested on the oracle and a trained run), and `episode_reward_mean`
+    differs by the shaping collected. Evaluation rewards and reward
+    tie-break picks compare across 2026-10-17 only after re-scoring the
+    older runs under @v3.
+  - **`paddle-npoint@v3`** is registered beside `paddle-npoint@v2`
+    (still scorable); `RECIPE_PROTOCOLS["PaddleTennis"]` names @v3.
+  - **Runs record their protocol.** `config.json`'s
+    `comparability_key.eval_protocol` and the run record's
+    `task.eval_protocol` (both `null` since L1) are now
+    `{"id", "fingerprint"}`: the in-loop selection protocol's
+    fingerprint and the registered id it equals (`paddle-npoint@v3` for
+    a stock PaddleTennis run, `ball-balance-inloop@v1` for BallBalance,
+    `null` for a quick test or a run file that changes the evaluation).
+    `null` for a run without an info-dict evaluator.
+  - **`notebooks/rescore_runs.ipynb`** (new): re-scores a Drive runs
+    folder (default: the 2026-08 PaddleTennis runs, the registered run
+    `20260816_235141` among them) under @v3 on CPU, best model and every
+    checkpoint, into `courtside-dynamics/rescores/` beside
+    `training_runs/`, never inside a run; prints and plots the
+    per-checkpoint k≥2 and k=1 curves and a `select()` verdict per run;
+    resumes, and `QUICK` scores the best model and 3 checkpoints. Its
+    `REPO_REF` is a placeholder until the week-1 wrap-up bumps it.
+  - **Harness:** `rescore(steps=...)` and the CLI's `--steps` score only
+    the snapshots and checkpoints at those steps (a missing step is
+    refused); `harness.series_steps()` lists them without hashing.
+- **Offline evaluation: snapshots, protocols, the re-scoring harness,
+  `select()` and a probe CLI (design M3 + L2, 2026-10-17).** No env
+  stream or training change: golden digests 22/22; the recipe snapshot
+  differs only by the new `snapshot_evals` field (re-recorded: `false`
+  in 80 resolutions, `true` in the 12 PaddleTennis ones); the trainer
+  digest against `9f54ae5` matches every policy, normalizer, monitor,
+  RNG, `resolved_model`, evaluation, `eval_info.csv` and best-model
+  component, and the PaddleTennis job's `run_layout_artifacts` gains
+  `snapshots_dir` as declared.
+  - **Snapshots.** `TrainConfig.snapshot_evals` (default off; on in the
+    PaddleTennis recipe) saves the policy and its normalizer at every
+    evaluation, before any evaluator runs at that step:
+    `snapshots/snapshot_<N>_steps.zip` and
+    `snapshot_vecnormalize_<N>_steps.pkl`, the best model's format,
+    bound by sha256 in `snapshots/index.json`, written atomically,
+    listed in the run record's new `snapshots` block and in the
+    manifest. A disk error is listed and training continues. About 3.5
+    MB per PaddleTennis SAC snapshot (critics and optimizer states
+    included), so about 140 MB per 1M steps.
+  - **Protocols** (`experiments.protocols`): frozen `EvalProtocol`s with
+    a content fingerprint. `paddle-npoint@v2` was the PaddleTennis
+    in-loop selection evaluation until @v3 (above), declared literally;
+    every other recipe got `<recipe>-inloop@v1`, derived and pinned
+    (the gated ones since withdrawn, above). Scores use the run's own
+    seed block and record it.
+  - **Harness** (`experiments.harness`): `evaluate()` and `rescore()`
+    run the in-loop evaluator's own collection core, which moved out of
+    `InfoDictEvalCallback._collect_metrics` into
+    `collect_episode_metrics` (verbatim; the in-loop path is
+    bit-identical). A snapshot's offline row equals its `eval_info.csv`
+    row bit for bit on CPU (SAC and PPO, paired; an unpaired run's first
+    evaluation only). `python -m
+    courtside_dynamics.experiments.rescore --protocol <id> <run_dir>...`
+    scores best models, snapshots and checkpoints (the August
+    `checkpoints/paddle_tennis_sac_<N>_steps.zip` layout included) into
+    `scores/<protocol>.jsonl`, now a post-training location for
+    `verify`.
+  - **`select()`** (`experiments.select`): the lexicographic per-key
+    delta rule as a pure function over score rows, with confirmation
+    compared within block (`repo_review_20261016` section 2.2's
+    semantics). The in-loop `confirm_best` rule is unchanged pending
+    the maintainer's decision; `in_loop_select()` replays it for
+    comparison. The callback's comparison is now `select.improves`.
+  - **Probe CLI** (`python -m courtside_dynamics.experiments.probe`):
+    the zero, random, oracle and camper witnesses (the golden digests'
+    definitions, now `digests.scripted_policy`) or a model under a
+    protocol, with `--env`/`--episodes` deriving a fingerprinted probe
+    protocol. It reproduces the RS1 reach-shaping witness table.
+  - Not yet: the lever audit mode (L6). (`eval_protocol` in the
+    comparability key and run record was `null` until L3, above.)
+- **The best model is written atomically and the record checks what it
+  seals (L1 verifier round 2, 2026-10-17).** No env stream or training
+  change: golden digests 22/22, recipe snapshot unchanged (96), and the
+  trainer digest against `9f54ae5` matches every component of all four
+  jobs, the best-model ones included.
+  - **Best-model writes are atomic on both selection paths.**
+    `best_model.zip`, `best_vec_normalize.pkl` and
+    `best_model_meta.json` go to `.<name>.tmp-<pid>` files beside their
+    targets and are renamed into place together, the meta last
+    (`experiments.records.ReplaceTogether`). A `KeyboardInterrupt` inside
+    a write (a stopped Colab cell, the commonest interrupted run) left a
+    torn `best_model.zip` that the record listed and `verify --strict`
+    certified; now the previous best stands whole and nothing is left
+    behind. Under reward selection the save moved from SB3's
+    `EvalCallback` (an in-place write) into its new-best callback
+    (`_SaveBestOnNewBest`, which replaces `_SaveVecNormalizeOnNewBest`):
+    same model at the same moment, so the same content (the trainer
+    digest's best-model components match).
+  - **The record's selection is checked against the meta's sha256
+    bindings.** An interrupt between two renames leaves a meta that no
+    longer binds the files beside it; the record copied its selection,
+    describing the previous best beside the new model. `selection` now
+    carries `bindings` (`verified`, `unbound`, or `not_checked` for
+    backfilled index rows) and `unbound_reason`; an unbound selection has
+    `null` timestep, values and updates, and the best triple is left out
+    of `artifacts`. `stage_summary.txt` reports the best model as
+    unbound, `train()` prints a warning, and the index flags the row.
+  - **A temporary leftover fails verification whether or not the
+    manifest lists it.** The rule applied only to unlisted files, so a
+    leftover present when the run sealed itself verified complete. The
+    merged-stream `evaluations.npz` writer (which left
+    `evaluations.npz.tmp.npz` on any non-`OSError`, an interrupt
+    included), the gate's `curriculum_stages.json` and the ladder
+    certification report now remove their temporaries when a write fails
+    or is interrupted.
+  - **Index robustness.** A `config.json` or `best_model_meta.json` field
+    of the wrong type (a string `warm_start`, a list `env`, an integer
+    `selection_keys` ...) is read as missing and named in the row's
+    problems (`records.shape_problems`) instead of failing the whole
+    build with a bare `AttributeError`; so is a record whose status is
+    missing or not a string. A run-named directory holding
+    `run_config.toml` or `metrics/` but no `config.json` (a launch that
+    died in the 0.1-0.2 s between the two files) is an aborted stub row,
+    not a skip; TennisWall's `run_config.json` layout is still skipped.
+  - **Messages.** A directory whose record is terminal but which has no
+    manifest is "never sealed" (an unfinished mirror pass, re-run
+    `sync_run_dir`), not "never reached a terminal path". An interrupted
+    final mirror prints the `sync_run_dir` re-run before re-raising. An
+    on-policy guard that held at the final evaluation reads `full_budget:
+    collected all N steps ... the last rollout's update was skipped (SB3
+    n_updates K)`: SB3 stops before that rollout's update.
+  - The campaign design's S2 row credits the 3M override to LT1's
+    unregistered companion (`20260828_113136`), not the registered LT1
+    run, which trained its frozen 1M.
+- **Run-record, mirror and index fixes from the L1 verifiers, plus the
+  PPO round-2 leftovers (2026-10-17).** No env stream or training
+  change: golden digests 22/22, recipe snapshot unchanged, and the
+  trainer digest against `09f202a` matches every training component of
+  the SAC, DemoSAC, PaddleTennis-SAC and PPO jobs, `run_layout_artifacts`
+  differing only by `run_record` and `sync_manifest` as declared. The
+  PPO changes are summary and message text.
+  - **A run that raises while closing never reads `completed`.** An
+    exception after the run reported its outcome (an env close or the
+    SB3 logger's TensorBoard flush failing after a completed run) left
+    the record `completed` with no stop reason while `train()` raised.
+    The record now says `crashed` (`interrupted` for a
+    `KeyboardInterrupt`) with `crashed after the run ended as completed:
+    <error>`. The exception is the final mirror: the local directory is
+    sealed first, so a mirror that keeps failing (or is interrupted)
+    raises with the local record `completed`, which the record cannot
+    describe; the error names the `sync_run_dir` re-run.
+  - **`reuse_log_dir=True` rotates every run-layout artifact but
+    `config.json`** (the model files, `metrics/`, `reports/`, `media/`,
+    `checkpoints/`, summary, record and manifest), not just the logs:
+    an attempt that crashed before its first evaluation recorded the
+    previous attempt's selection and models as its own.
+  - **Mirrors.** `train()` mirrors to and records the `sync_dir` it
+    validated (`~` expanded, resolved once); a `~/Drive/run` used to land
+    in a literal `./~/Drive/run`. `RunDirMirror` and `sync_run_dir`
+    expand and resolve both paths, refuse one inside the other, and
+    never delete or overwrite a file they cannot prove is this run's
+    (copied by the mirror, listed by its manifest for this run id, or
+    byte-identical to the source): a destination holding anything else,
+    or another run's mirror, raises `SyncError` before anything is
+    written, instead of silently deleting every unrelated file under a
+    mistyped path. The final pass must reproduce the local manifest's
+    files, or it is redone without the change cache.
+  - **`verify_run_dir` / `experiments.verify` fail stray files by
+    default.** An unlisted file is tolerated only at the post-training
+    locations (`reports/`, `media/best_model.mp4`) and only without
+    `--strict`; any other unlisted file, and a writer's temporary
+    leftover (`.x.tmp-<pid>`, `.x.sync-tmp`, `*.tmp`) anywhere, makes
+    the directory incomplete. Problem messages name files relative to
+    the run directory; `read_json_object` takes a `label`, reads a
+    UTF-8 byte-order mark, and no longer puts a file's bytes into its
+    error.
+  - **Run index.** A run record that still says `running` is flagged in
+    `index.problems` with or without verification (training or dead
+    without a manifest; a mid-run mirror snapshot with one), is a stub
+    without a final model, and is counted on the CLI line. A summary
+    that exists but cannot be decoded leaves the status `null` with a
+    short problem instead of `aborted`. A stray `config.json` in a
+    non-run folder no longer hides the runs beneath it; a run-named
+    directory with a zero-byte or foreign `config.json` is an aborted
+    row carrying the problem; a BOM and an integral float budget are
+    read as written; `files.best_model_video` reports the replay video,
+    at the root of a pre-0.14 run; an on-policy summary's `Best eval`
+    step (`(at N steps, SB3 n_updates K)`) is parsed instead of read as
+    missing. The full 60-directory archive
+    indexes to 59 rows, 9 aborted, 7 stubs, 47 of 47 map entries joined,
+    no warnings.
+  - **`stage_summary.txt` is written as UTF-8** whatever the locale.
+  - **PPO round 2.** A reward-selected on-policy run with
+    `info_dict_eval=False` gets its best's 0 updates from
+    `resolved_training.rollout_env_steps` (the zero-update warning used
+    to be skipped); a warm-started run's zero-update notes name the
+    warm-start source's policy instead of an untrained one, and a
+    `log_std` carried from the source is reported as differing from
+    `log_std_init`, not as drift; the on-policy cadence refusal states
+    its real reason; the README no longer promises a nightly probe.
+  - `legacy_levers.toml`: LH1b's note records its undeclared 2M /
+    patience-60 override (now counted in the campaign design's S2), and
+    the L2 replication's its patience change.
+- **The regenerated run index and the legacy backfill (design L1,
+  second half; 2026-10-17).** No env stream, training or run-directory
+  change: golden digests 22/22, recipe snapshot unchanged, and the
+  trainer digest against `09f202a` differs only where the first half
+  declared (`run_layout_artifacts` gains `run_record` and
+  `sync_manifest`).
+  - **`python -m courtside_dynamics.experiments.index --root <runs
+    root> [--out <file>] [--legacy-levers <toml>] [--skip-verify]`**
+    (`experiments.index.build_index`, no SB3 or torch) writes
+    `<root>/index/runs.jsonl`: one row per run directory, sorted by path,
+    keys sorted, byte-identical when regenerated over unchanged
+    directories. A row is the run record's keys plus `index` (path,
+    source, `version_inferred`, the inferred fields, stub, manifest
+    verdict, model/checkpoint/video presence, run config basename and
+    sha256, the parsed summary head, problems) and `campaign`.
+  - **Run-record directories** are taken as written, with
+    `verify_run_dir`'s verdict (`--skip-verify` leaves it unchecked).
+  - **Older directories are backfilled** into the record's shape from
+    `config.json` (through `build_run_record`), `stage_summary.txt`
+    and `best_model_meta.json`, marked `version_inferred`. The
+    summary's `X of Y budget (stopped early)` line makes an early stop
+    `early_stop`; a stop reason on a full-budget run (train-3) becomes
+    `completed` with the `full_budget: ...` reason `train()` now
+    writes. No summary: `aborted`, and a stub without a final model; an
+    empty run-named directory is an aborted stub. A directory without a
+    run marker, or with a `config.json` that is not a courtside run
+    config, is skipped and listed, never parsed. No machine path
+    reaches a backfilled row.
+  - **`experiments/legacy_levers.toml`** (new package data): each of
+    the 20 PaddleTennis run directories mapped to one lever (or
+    `baseline`/`infra`), and the 27 WallBall directories of the five
+    era folders to their recipe era, each with its verdict and doc.
+    The index joins it by run id. `tools/smoke_wheel.py` checks that an
+    installed wheel carries it and that it parses.
+  - Validated against a text-only mirror of the Drive archive (25
+    directories: all 20 PaddleTennis and 5 WallBall): 8 aborted, 7 of
+    them stubs; all 20 PaddleTennis runs joined to one lever; git sha,
+    algorithm, budget against steps trained, best step and stop reason
+    agree with the source files for all 17 runs with a summary. New
+    [`docs/experiments.md`](docs/experiments.md) documents records,
+    manifests, `verify` and the index, Colab use included.
+- **Run records, sync manifests and run-directory trust (design L1,
+  first half; 2026-10-17).** No env stream or training change: golden
+  digests 22/22; the trainer digest against `09f202a` matches every
+  policy, normalizer, monitor, evaluation, best-model, checkpoint,
+  diagnosis, `resolved_model` and RNG component of the SAC, DemoSAC,
+  PaddleTennis-SAC and PPO jobs, and `run_layout_artifacts` differs
+  only by the two new files, `run_record` and `sync_manifest`. Recipe
+  snapshot re-recorded: each of the 92 entries gains
+  `sync_dir: null`; nothing else changes.
+  - **`run_record.json`** (`courtside-run-record/1`, new package
+    `courtside_dynamics.experiments`, which imports neither SB3 nor
+    torch). Written atomically right after `config.json` with status
+    `running`, rewritten on every terminal path: `completed`,
+    `early_stop` (patience on either selection path, the degenerate
+    guard or a gate stage budget; `stop_reason` says which),
+    `interrupted`, `crashed` (the crash salvage, or a failure before or
+    after `learn()` once `config.json` exists). It records the run id
+    (the `log_dir` leaf), UTC start and finish, the budget (total,
+    trained, SB3 `n_updates`), the algorithm, recipe, task (env
+    classes, the sha256 of their constructor kwargs, the observation
+    fingerprint, `eval_protocol: null`), the comparability key, seeds,
+    git sha and dirty state, library versions, the warm start's source
+    directory name and artifact digests, the selection from
+    `best_model_meta.json`, the wall clock with the periodic and
+    closing evaluations' share, the pre-flight warnings, the artifacts
+    present, and `experiment` placeholders for the spec system.
+    `stage_summary.txt` keeps `Status: completed` for an early stop
+    (the campaign resumes a leg only from it); the record says which.
+  - **`sync_manifest.json`** (`courtside-sync-manifest/1`): the path,
+    size and sha256 of every other file, written atomically and last on
+    every terminal path, once every env and the SB3 logger are closed.
+    `experiments.records.verify_run_dir` and `python -m
+    courtside_dynamics.experiments.verify <run_dir>` (exit 0 only when
+    complete) call a directory complete when its manifest verifies and
+    the run record it lists is terminal; files written after the
+    manifest are listed as unlisted and fail only `--strict`.
+  - **Local-then-sync.** New `TrainConfig.sync_dir` (default `None`,
+    recorded in `config.json`, refused in run-config files): train under
+    `log_dir` on local disk and mirror it to `sync_dir` at every
+    checkpoint and at the end. Each copied file is re-hashed and the
+    mirror's manifest is written only after every one matches; a failed
+    pass leaves the previous manifest, so a partial mirror never
+    verifies. A failed checkpoint pass is printed and training goes on;
+    the final mirror retries twice, then raises once the local run
+    directory is sealed (`experiments.sync.sync_run_dir` re-runs it).
+    `sync_dir` must be absent or empty, outside `log_dir`, with an
+    existing parent, checked before any output. Notebook knobs, default
+    off: `sb3_training` `LOCAL_THEN_SYNC` (section 9d mirrors the
+    post-training plots and video before the disconnect) and
+    `paddle_tennis_campaign` `LOCAL_THEN_SYNC` (each leg trains locally
+    and mirrors into its Drive attempt dir; operational, not
+    fingerprinted).
+  - **Run-directory trust fixes** (`repo_review_20261016`):
+    `disconnect_runtime` flushes and unmounts Drive before tearing the
+    VM down and leaves it up when the flush fails (critic-4);
+    `check_run_artifacts` and the summary's Artifacts section count an
+    empty directory artifact, such as `media/videos/`, as missing and
+    say so (training-data-5); a guard that fires once the run has
+    trained its whole budget (`num_timesteps >= total_timesteps`, e.g.
+    at the final evaluation of a budget that is a multiple of
+    `eval_freq`) now reads `completed` with a `full_budget: ...` stop
+    reason that quotes it (one at the final scheduled evaluation of any
+    other budget left steps untrained and reads `early_stop`), and
+    `train()` warns
+    before any output (and `config.json`'s
+    `resolved_training.early_stop_reachability` and the run record keep
+    it) when patience or the degenerate guard cannot fire inside the
+    budget: BallBalance's recipe patience is evaluation 41 of 40
+    (train-3, training-data-3); the reward-path early stop records its
+    `stop_reason`, found through `EvalCallback`'s nested
+    `callback_after_eval`, and stops exactly when it did (train-1);
+    `reuse_log_dir=True` also rotates the run record, the sync
+    manifest and the monitor and TensorBoard directories
+    (`metrics/monitor.attempt_<UTC time>`), and a `log_dir` holding a
+    previous attempt's run record is refused like one holding its
+    evaluation rows (train-5); the `KeyboardInterrupt` salvage saves
+    `final_model` and the normalizer first and runs the gate's
+    `finalize`, the closing evaluation and the summary each
+    log-and-continue, like the crash salvage (train-2); and
+    `SubstepTennisEventSampler.reset()` discards a control step an
+    exception left open instead of raising, so an interrupted env can
+    be reset (`begin_control_step` still refuses, naming the cure),
+    and a recovered PaddleTennis env replays a fresh env's stream byte
+    for byte (rules-events-1). Interrupted summaries now carry a
+    `Stop reason: interrupted: ...` line.
+- **Verifier fixes on the PPO commits (2026-10-17).** No env stream or
+  SAC-family training change: the trainer digest against `f920d8f`
+  matches every component of the SAC, DemoSAC and PaddleTennis-SAC
+  jobs, and the PPO job is unchanged from the previous commit. Every
+  change below is on-policy only unless it says otherwise.
+  - **The deployable best states its updates.** An evaluation runs
+    before its rollout's update, so a best selected at the first
+    evaluation of a one-rollout cadence was the untrained initial
+    policy, and the BallBalance quick test kept it (438 at 4,096
+    steps, 0 updates) while its summary advised deploying it.
+    `best_model_meta.json` gains a top-level `n_updates` (SB3's count
+    behind the selecting evaluation); the summary's "Best eval" and
+    "Best model" lines give the count, a `best_model.zip` selected at 0
+    is flagged on its line and printed, and "Final vs best" no longer
+    advises deploying such a best.
+  - **Quick test: two rollouts per evaluation.** A PPO quick test
+    sizes `n_steps` by `eval_freq // (2 · n_envs)` (was
+    `// n_envs`) and rounds its preset evaluation cadence to at least
+    two rollouts, so evaluation 1 follows an update: 256 at 8 workers
+    (was 512), 128 at 16 (was 256), 2,048 on one worker (unchanged).
+    BallBalance's quick test now trains 13 rollouts (SB3 n_updates
+    130) and selects its best after one update. Snapshot: the 10 PPO
+    quick-test entries at 8 workers are re-recorded (`n_steps` 512 →
+    256); nothing else changes.
+  - **The last update is logged.** SB3 dumps an update's `train/*`
+    metrics with the next rollout's row, so the final update's never
+    reached `progress.csv` (the BallBalance quick test read
+    `train/n_updates` 60 against SB3's 70). `train()` now dumps the
+    logger once after `learn()` returns when they are pending, so
+    TensorBoard, Training Health and the flags include it.
+  - **Epochs per update.** Training Health gains an "Epochs per
+    update" line (the steps of `train/n_updates`) and a flag when the
+    last-quarter mean is below half of `n_epochs`: the gSDE profiles'
+    `target_kl` ended every update in its first epoch while their mean
+    approx_kl looked healthy (the PaddleTennis quick test now reads
+    1.77 of 10, flagged). New `artifacts.epochs_per_update`;
+    `on_policy_health_flags` takes `n_epochs` (optional).
+  - **Resolved reward normalization in the summary.** Hyperparameters
+    list `reward_norm` (the resolved switch, the configured value, and
+    the normalizer's gamma and its source) from `config.json`'s
+    `resolved_training`.
+  - **Refused, not silent.** `degenerate_min_evals` must be `None` or
+    a nonnegative integer, checked before any output for every
+    family (an SAC run with −1 used to fail after `config.json` with a
+    `TypeError` from the update-floor print, and a PPO run accepted
+    it). The performance gate's `finalize` raises a pending advance
+    that fails on a normal training end, after writing the stage
+    history, and only reports it under the interrupt and crash
+    salvage (`finalize(salvage=True)`). The on-policy pre-flight
+    refuses a gate `stage_eval_budget` stop at or below the update
+    floor (it has no warm-up to raise), and an actor-critic `net_arch`
+    dict with keys other than `pi` and `vf` (SAC's `qf` built a PPO
+    value network with no hidden layer). Without a run record,
+    `load_run_model` refuses an `algo` whose family the zip's own
+    policy class contradicts (`SAC.load` of a PPO checkpoint failed
+    inside SB3).
+  - **Docs.** `TrainConfig.vec_env` and the run-config spec say a
+    plain script using `"subproc"` needs an `if __name__ ==
+    "__main__":` guard. README's CI learning bar reads about 11 s, as
+    elsewhere. The plan's Open list adds the gSDE profiles' learning
+    rate against `target_kl`, the humanoid profile's move to 8
+    subprocess workers × 512, and the humanoid notebook's `REPO_REF`
+    bump, a merge prerequisite: until it lands, the notebook's default
+    `AUTO_ADVANCE` refuses the pinned package before any stage trains.
+- **PPO is first-class: loaders, provenance, health flags, learning
+  bars, notebooks and docs (PPO plan Steps 10–12 and 14,
+  2026-10-17).** No env stream or SAC-family training change: the
+  trainer digest against `f920d8f` matches every component of the SAC,
+  DemoSAC and PaddleTennis-SAC jobs. The PPO job's `resolved_model`
+  gains the keys below (and its `eval_info.csv` keeps Step 6's
+  `n_updates` rows); the recipe snapshot is unchanged.
+  - **Loaders (Step 10).** New `algos.load_run_model(path, algo=None)`
+    (with `algos.locate_run_config` and `algos.recorded_run_algo`)
+    loads a model through the algorithm its run's `config.json` records:
+    `SAC.load` for SAC and DemoSAC, `PPO.load` for PPO. An explicit
+    `algo` that disagrees with the record raises, and so does a record
+    without `train_config.algo`; a checkpoint outside any run needs
+    `algo=`. It replaces the hard-coded `SAC.load` in
+    `paddle_diagnosis.native_checkpoint_policy` (new `algo=` keyword),
+    the P5 transfer champion loader and `score_paddle_stage`, and backs
+    `_load_best_model`, `record_best_model_video` (default `algo` is now
+    `None`, was `"SAC"`) and `evaluate_best_wall_ball` (a DemoSAC run
+    now loads through `SAC.load`). The diagnosis, post-swing, k=2
+    harvest, k=2 step-0 and P5 transfer tools take `--algo`.
+    `score_paddle_stage`'s report names the scored algorithm and the
+    run's comparability key.
+  - **Provenance (Step 11).** `config.json` gains top-level `algorithm`
+    (`name`, `family`, `implementation` = `sb3==<version>`) and
+    `comparability_key` (`task`, `eval_protocol` = `null` for now,
+    `algo_family`) blocks, for every run. On-policy `resolved_model`
+    adds `target_kl`, `sde_sample_freq`, `log_std_init` and `ortho_init`,
+    and is re-recorded when training ends with SB3's `n_updates` and
+    `timesteps` (trained vs budget); SAC's block is byte-identical. An
+    on-policy summary reads its timesteps against the budget, saying by
+    how much the last rollout ran past it.
+  - **Training Health flags (Step 11).** A PPO run's
+    `stage_summary.txt` flags, over the last quarter of its updates,
+    mean approx_kl above max(2 × target_kl, 0.05), mean clip_fraction
+    above 0.3, mean explained_variance below 0, and a final log std
+    more than 1 nat from `log_std_init` (also printed). New
+    `artifacts.on_policy_health_flags`.
+  - **Tests (Step 12).** A parametrized SAC/PPO end-to-end `train()`
+    test, PPO determinism, `score_paddle_stage` on a real PPO
+    checkpoint, and a CI learning bar: PPO learns a 1-D reach through
+    `train()` in about 11 s (best paired return −3.2 to −3.4 over three
+    seeds against a −6 bar; the zero action scores −26.7).
+  - **`tools/ppo_learning_probe.py` (Step 12).** BallBalance on its
+    recipe's PPO profile for at most 330 s, then the best model on 20
+    held-out seeds; PASS at a mean of 700 of 750. Run once here: 750.0
+    on all 20 seeds after 491,520 steps.
+  - **Notebooks.** `paddle_tennis_campaign` admits `ALGO = "PPO"`: the
+    legs use the recipe's PPO profile on new `PPO_N_ENVS` /
+    `PPO_EVAL_FREQ` / `PPO_CHECKPOINT_FREQ` (8 workers, 24,576,
+    98,304), no SAC key reaches them, the settings cell refuses
+    `REQUIRE_DEVICE = "cuda"`, a temperature skip, a geometry the
+    on-policy pre-flight refuses and a package without first-class PPO
+    (the pinned `REPO_REF` included), a PPO campaign refuses a non-PPO
+    warm-start lineage before its manifest exists, and it lives under
+    `PaddleTennisCampaign/ppo/`. The SAC-family plan is unchanged.
+    `sb3_training` keeps a recipe's PPO profile worker count when
+    switching to PPO (it forced 16), and its worker table and
+    training-health notes describe the PPO profiles and flags.
+  - **Docs (Step 14).** README "Algorithms", the `TrainConfig.algo`
+    and `build_train_config` docstrings, the run-config spec's
+    per-family settings tables, a DECISIONS entry, and the plan's
+    status line.
+- **PPO runtime: stops counted in updates, matched normalizer gamma,
+  CPU default, warm-start exploration, subprocess workers (PPO plan
+  Steps 6–9 and 13, 2026-10-17).** No env stream changes, and every SAC
+  and DemoSAC training path is unchanged: the trainer digest against
+  `f920d8f` matches on the SAC, DemoSAC and PaddleTennis-SAC jobs.
+  The PPO job differs only in `eval_info.csv`, which gains its
+  `n_updates` rows.
+  - **Stops in policy updates (Step 6).** New
+    `TrainConfig.min_policy_updates_before_stop` (K, default 20). An
+    on-policy run floors the early-stop warm-ups (the headline
+    evaluator's patience warm-up, SB3's `StopTrainingOnNoModelImprovement`
+    `min_evals`, and `degenerate_min_evals`) at
+    ceil(K · n_steps · n_envs / eval_freq) evaluations, so no early stop
+    fires before K updates; a raised warm-up is printed, and 0 disables
+    the floor. Off-policy runs must leave the default (any other value
+    is refused). On the shipped PPO profiles only the degenerate stop
+    moves: on PaddleTennis, WallBallBootstrap, GoalRally and
+    TrueBaseline it first fires at evaluation 11 (43 updates) instead
+    of 6 (23) at 8 workers, and at 16 (31) instead of 6 (11) at 16;
+    WallBallBaseline's moves only at 16 workers (27 to 31 updates).
+  - **Rollout boundaries (Step 6).** Under an on-policy model,
+    `PerformanceGatedEnvStagesCallback` applies an earned advance at the
+    end of the rollout its evaluation landed in (`finalize` applies one
+    a stop left pending, so the stage history matches an off-policy
+    run's), and `LinearEnvAttrScheduleCallback` moves its value only at
+    rollout starts. Both detect the model at training start; off-policy
+    runs are unchanged.
+  - **`eval_info.csv` `n_updates` (Step 6).** On-policy runs write one
+    `n_updates` row per evaluation: SB3's `_n_updates` (the
+    `train/n_updates` count) behind the evaluated policy. CSV only, so
+    selection, the gate and TensorBoard never see it.
+  - **Normalizer gamma (Step 7).** An on-policy run that normalizes
+    rewards passes the model's gamma to all four `SelectiveVecNormalize`
+    constructions and sets it on a warm-start normalizer; the
+    pre-flight refuses a non-numeric gamma, and train() checks the
+    normalizer's against the built model. Every other run keeps
+    VecNormalize's 0.99 (SB3 updates `ret_rms` even with reward
+    normalization off, so an SAC run's pickled stats would move).
+  - **CPU by default (Step 8).** An on-policy run with SB3's MLP
+    actor-critic policy, no `model_kwargs["device"]` and
+    `require_device=None` is built with `device="cpu"`. CNN and
+    multi-input policies, explicit devices and the SAC family keep
+    their device.
+  - **Warm-start exploration (Step 9).** New
+    `WarmStartConfig.reset_log_std` (default False): an on-policy
+    target refills the transferred `policy.log_std` from its own
+    `log_std_init`. On-policy `transfer_log_ent_coef=False` (a no-op
+    before) is refused with a pointer to `reset_log_std`; the SAC
+    family refuses `reset_log_std`. On-policy provenance lists
+    `policy.log_std` as transferred or reset and records
+    `reset_log_std` (and `log_std_reset_value`). The humanoid notebook's
+    AUTO_ADVANCE passes `reset_log_std=True` and refuses, before any
+    stage trains, a package without it, which includes the pinned
+    `REPO_REF` until its bump.
+  - **Subprocess workers (Step 13).** New `TrainConfig.vec_env`
+    (`"dummy"` default, or `"subproc"`) for the training workers only.
+    `"subproc"` uses `train.DummyDtypeSubprocVecEnv`, which returns
+    DummyVecEnv's float32 rewards and observation-space dtypes (stock
+    `SubprocVecEnv` returns float64 rewards, which VecNormalize's return
+    statistics would see), and runs `check_env` on a throwaway instance
+    in the parent. A PPO run trains bit-identically either way.
+  - **`config.json`.** `train_config` records the two new fields and
+    `warm_start.reset_log_std`. A new top-level `resolved_training`
+    block records the resolved reward normalization, the normalizer's
+    gamma and its source, the device asked of SB3 and why, and an
+    on-policy run's rollout and evaluation floor. `resolved_model` is
+    unchanged.
+  - Snapshot: each of the 92 resolved entries gains the two new fields
+    at their defaults (`min_policy_updates_before_stop: 20`,
+    `vec_env: "dummy"`); nothing else changes, and the 4 refusals are
+    untouched.
+- **PPO starting profiles, on-policy pre-flight and quick test (PPO
+  plan Steps 3–5, 2026-10-17).** No env stream or SAC-family change:
+  every SAC and DemoSAC snapshot entry is byte-identical, and the
+  trainer digest against `f920d8f` matches on every job. The PPO job
+  matches too, since its explicit settings override the new profile.
+  - **Profiles (Step 3).** Every recipe's `algo_cfg["PPO"]` carries the
+    design's starting profile (section 3), with clip_range 0.2,
+    gae_lambda 0.95 and the recipe's own gamma:
+    - BallBalance and BallBounce: 8 × 512 rollouts, minibatch 256,
+      lr 3e-4, target_kl 0.03, log_std_init −1, ent_coef 0, reward
+      normalization on.
+    - WallBall family: 8 × 1,024 rollouts, otherwise the same.
+    - PaddleTennis: 8 × 1,024, minibatch 256, 10 epochs, lr 3e-4,
+      target_kl 0.02, gSDE resampled every 64 steps, log_std_init −2
+      without orthogonal init, ent_coef 0, no reward normalization,
+      CPU.
+    - Humanoid Stages 0–2: 1 × 2,048, minibatch 256, 5 epochs, lr
+      1e-4, target_kl 0.02, gSDE resampled every episode (150/300
+      steps), log_std_init −2 without orthogonal init, ent_coef 0.001
+      (was 0.01).
+    - Humanoid smoke: the stage settings on 128-step rollouts.
+
+    Cadences are whole rollouts at the profile's worker count and at 16
+    (sb3_training's PPO count): `eval_freq` 24,576 (ball and humanoid)
+    or 32,768 (WallBall, PaddleTennis), `checkpoint_freq` 245,760
+    (98,304 on the humanoid stages, 4,096 on the smoke). No early stop
+    can fire before about 20 updates. The degenerate-signal stop needs
+    6 flat evaluations under PPO, not 5.
+  - **Pre-flight (Step 4).** `train._validate_on_policy_config` runs
+    in `train()` before any output and in `build_train_config`, and
+    returns at once for the SAC family. It refuses the gate's SAC-only
+    levers (update pause, replay wipe, entropy reset). It refuses
+    non-integer `n_steps`/`batch_size`, `batch_size <= 1` with advantage
+    normalization, `n_steps * n_envs <= 1`, and a minibatch that does
+    not divide the rollout. It refuses `eval_freq // n_envs < n_steps`,
+    a budget shorter than one rollout, evaluation or checkpoint
+    cadences that are not whole rollouts, and `policy_kwargs` the
+    policy class does not accept (new `algos.validate_policy_kwargs`).
+    WallBallDepthCurriculum and its Aligned variant are refused under
+    PPO for their gate levers. So is a hand-built
+    `TrainConfig(algo="PPO")` left at the dataclass cadences
+    (`eval_freq` 25,000 at 4 × 2,048): the message names the nearest
+    whole-rollout value.
+  - **Quick test (Step 5).** Unless the explicit `model_kwargs` set
+    `n_steps`, a PPO quick test shrinks it to the largest power of two
+    within min(current, budget // (4 · n_envs), eval_freq // n_envs).
+    SB3's 2,048 becomes 512 at 8 workers and 256 at 16. The preset
+    evaluation and checkpoint cadences then round down to whole
+    rollouts. A PPO run's `stage_summary.txt` gains an "SB3 n_updates"
+    line (SB3's count of optimization epochs), flagged and printed
+    when it is 0. SAC summaries are unchanged.
+  - **Starters.** Flat `eval_freq`/`checkpoint_freq` move into
+    `[train.algo.sac]`, with `[train.algo.ppo]` counterparts (ball
+    balance, paddle tennis, the humanoid stages and smoke). A run file
+    copied from an older starter with a flat cadence is refused under
+    PPO when the cadence is not a whole rollout; move it into
+    `[train.algo.sac]`.
+  - Snapshot: the 32 PPO entries are re-recorded; nothing else changes.
+- **Per-algorithm config blocks (PPO plan Step 2, 2026-10-17).** No env
+  stream changes. SAC and DemoSAC training paths are unchanged except
+  an explicit SAC run of the humanoid stages (below); the trainer
+  digest against `f920d8f` matches on every job.
+  - `Recipe.algo_cfg[family]` holds `TrainConfig` fields for one
+    algorithm family (`"SAC"` covers DemoSAC). Merge order:
+    `extra_cfg`, then the run family's block (`model_kwargs` merged
+    one level deep), then the run file, `quick_test`, and explicit
+    arguments.
+  - The PaddleTennis and WallBallBootstrap SAC exploration bundles move
+    into `algo_cfg["SAC"]` (Bootstrap's family-neutral `gamma=0.995`
+    stays shared). Every recipe now builds under `algo="PPO"`; both
+    used to refuse it ("'target_entropy' is not accepted by PPO").
+  - The humanoid stages' `{use_sde: True, ent_coef: 0.01}` bundle
+    moves into `algo_cfg["PPO"]`. **Intended change:** an explicit
+    `algo="SAC"` or `"DemoSAC"` run of Stages 0–2 now gets SB3's SAC
+    defaults (auto entropy, no gSDE) instead of a fixed `ent_coef` of
+    0.01 with gSDE. The stages default to PPO, whose resolution is
+    unchanged, so no campaign path moves.
+  - Run files gain `[train.algo.sac]` and `[train.algo.ppo]` tables,
+    validated like `[train]` and merged after it only for runs of that
+    family (DemoSAC reads `sac`). An unknown family table is refused;
+    `RunFileConfig.train_algo` carries the tables. The WallBallBootstrap
+    starter's `ent_coef` moves to `[train.algo.sac.model_kwargs]`.
+  - `algos.DIVERGENT_SHARED_KWARGS` (`n_steps`, `batch_size`,
+    `ent_coef`, `use_sde`, `sde_sample_freq`), which SAC and PPO both
+    accept but read differently: a flat recipe or file `model_kwargs`
+    key from the set is refused when the run's family is not the
+    recipe default's. The hint names the family tables and says that
+    an explicit `model_kwargs=` (exempt) replaces the whole bundle.
+  - The recipe snapshot also records every recipe's PPO resolution
+    (96 entries, was 70). Re-recorded: the 12 humanoid Stage 0–2 ×
+    {SAC, DEMOSAC} entries, plus 26 new PPO entries. Every other entry
+    is byte-identical.
+  - The campaign notebook and the trainer digest's PaddleTennis job
+    read the recipe's SAC bundle through `build_train_config` instead
+    of `extra_cfg["model_kwargs"]`, so both work against the pinned
+    package and this one.
+- **Algorithm families (PPO plan Step 1, 2026-10-17).** No env stream
+  or training path changes: the recipe snapshot is unchanged and the
+  trainer digest against `f920d8f` matches on every job.
+  - `algos.OFF_POLICY_ALGOS` and the new `ON_POLICY_ALGOS` are derived
+    from the registered classes (`issubclass` on SB3's off- and
+    on-policy bases) and equal the old hand-kept set. A registered
+    algorithm that is neither refuses at import.
+  - `algos.algo_family()` names each algorithm's config family after
+    its most general registered ancestor: `"SAC"` for SAC and DemoSAC,
+    `"PPO"` for PPO. The reward-normalization default, its twin for
+    recorded configs and the warm-start family check now test families
+    instead of the strings `"PPO"`/`"SAC"`.
+  - One intended notebook fix: `sb3_training` re-applies the worker
+    count only when `ALGO` switches family, and picks it by family. So
+    `ALGO="DemoSAC"` keeps the SAC count (the recipe's own, 8 on every
+    recipe but the 1-env humanoid smoke; 8 on the PPO-default humanoid
+    stages) where it used to get PPO's 16. The notebooks use the
+    derived `OFF_POLICY_ALGOS`, which the pinned `REPO_REF` exports
+    too.
+- **Refactor-gate leftovers (2026-10-17).** No env stream or training
+  path changes: every existing golden entry reproduces unchanged, and
+  the trainer digest against `f920d8f` matches on every job.
+  - CI's typecheck passes again. Three errors (`Env.data`, an
+    `np.full` shape that may be `None`, `BaseAlgorithm.log_ent_coef`)
+    are narrowed with typed checks, and CI runs `python -m mypy`. A
+    mypy without numpy, Gymnasium and SB3 beside it passes silently;
+    README "Refactor gates" says how to run it as CI does.
+  - Golden cases gain a reset mode. `"seed_once"` seeds the first
+    reset only, as SB3's VecEnvs do in training, so the env RNG and
+    PaddleTennis' serve alternation carry across episodes. New CI
+    cases: the PaddleTennis recipe under random and oracle play over
+    three episodes, and the WallBall TrueBaseline oracle. CI now runs
+    22 cases in about 45 s.
+  - The trainer digest also compares the best-model artifacts: the
+    policy weights and `log_ent_coef` inside `best_model.zip`,
+    `best_vec_normalize.pkl`'s stats, the meta's selection fields and
+    bound artifact names (each side checks the bound sha256s against
+    its files), which run-layout artifacts exist, and the checkpoint
+    file names.
+  - `digests.version_info()` records numpy's SIMD dispatch. The CI
+    goldens match with AVX-512, or all SIMD dispatch, disabled (the
+    env code calls no dispatch-sensitive numpy loop), and a test
+    replays one case per env family with every dispatch target off.
+  - `tests/test_packaging.py` checks that the installed dependencies,
+    and the imported MuJoCo, satisfy the declared ranges ("mujoco
+    3.16.0 violates the declared range ..."), and reads the CI
+    workflow's install lines through quoting and flag variants.
+- **Refactor-gate hardening (2026-10-16).** No env stream or training
+  path changes: every recorded `stream_sha256` reproduces unchanged.
+  Fixes from the gates' review (see DECISIONS):
+  - The golden file moves to format `courtside-env-digests/2`. The info
+    digest hashes every item, tuples and arrays included (they used to
+    be skipped), and raises on a type it cannot hash. A new
+    `interface_sha256` covers the spaces and the concrete obs, reward
+    and flag types. Every PaddleTennis reward must equal the
+    left-to-right sum of its nine `rew_*` terms, bit for bit.
+  - Tests pin the summation order of both PaddleTennis reward sums on
+    forced adversarial terms, and a third NaN witness keeps an
+    order-sensitive reward in the CI streams.
+  - New cases: `volley_rule="legal"` with the lead-charge oracle, and
+    the k=2 drill in both launch arms from a library harvested
+    in-process.
+  - The digest and snapshot tools and the test suite refuse to run
+    when `courtside_dynamics` imports from another checkout (a git
+    worktree's editable install).
+  - The recipe snapshot compares canonical JSON text, so `8` versus
+    `8.0` is a diff. The trainer digest runs the two sides under
+    different hash seeds.
+- **Golden digests and the SAC freeze harness (2026-10-16).** No env
+  stream or training path changes. Three refactor gates (see DECISIONS):
+  - `courtside_dynamics.digests` plus `tools/golden_digest.py`
+    (`--check`, `--write`, `--full`) check per-step env-stream and info
+    digests against `tests/golden/env_digests.json`. CI runs the fast
+    set (22 cases in about 45 s, with the cases added below) through
+    `tests/test_golden_digests.py`, including the
+    NaN-with-pending-escrow witnesses. The humanoid case has a declared
+    MuJoCo 3.16 drift slot.
+  - `tools/recipe_snapshot.py` freezes every recipe's resolved
+    `TrainConfig` in `tests/golden/recipe_snapshot.json`.
+  - `tools/trainer_digest.py --base <ref>` compares tiny seeded `train()`
+    jobs (SAC, DemoSAC with demos off, the PaddleTennis SAC quick path,
+    PPO) against a temporary worktree of `<ref>`.
+
+  `courtside_dynamics.recipes` now imports SB3 and torch inside
+  `build_train_config` instead of at module import, so the recipe
+  registry and env factories load without the training stack. Every
+  resolution is unchanged: the snapshot rebuilt from `4e2e019`'s source
+  (before the import move) is identical.
+- **Dependency hygiene (2026-10-16).** No code or env stream changes
+  on the supported range, which is now exactly the range that
+  reproduces the golden digests: `mujoco>=3.12,<3.16`. 3.16.0's
+  `mj_setConst` refreshes body bounding volumes, which knocks the
+  humanoid Stage-1 oracle off its calibration (138 steps, target
+  missed), while the PaddleTennis, WallBall and BallBounce streams are
+  identical from 3.12 through 3.16. Below 3.12 the streams move: 3.11
+  changes the humanoid stream, and 3.10 every golden case but the
+  WallBall TrueBaseline random stream (see DECISIONS).
+  The `gymnasium` floor rises to 1.1.1, since 1.1.0 cannot construct
+  any courtside env. The license is now the SPDX string `MIT` with no License
+  classifier, built with `setuptools>=77`. CI's typecheck and test
+  jobs install CPU torch instead of the CUDA build.
+  `tests/test_packaging.py` pins the bounds and the CPU-torch order.
 - **PaddleTennis instrument and bug-fix batch (2026-10-05).** Fixes
   the review findings in `docs/repo_review_20261005.md` §5b/§7.2 plus
   their adversarial follow-ups.
