@@ -18,6 +18,29 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **Env streams no longer depend on the CPU's BLAS kernels
+  (2026-10-18).** numpy's OpenBLAS picks kernels from the CPU at run
+  time, and they round small products differently. The env code's
+  `np.linalg.norm`, `np.dot` and `@` on 3-vectors therefore gave other
+  last bits on AVX-512 hosts, where the goldens were recorded, than on
+  GitHub's AVX2 runners, and PR 81's `pytest (3.12)` job failed five
+  WallBall and BallBounce cases. A new `courtside_dynamics.envs._linalg`
+  (`dot`, `norm`, `matvec`) sums left to right on Python floats. All 19
+  call sites in the envs and the digest harness use it.
+  Effects on the streams:
+  - **PaddleTennis and BallBalance** streams are unchanged.
+  - **WallBall and HumanoidTennis** now give on every CPU what they
+    already gave on non-AVX-512 ones.
+  - **BallBounce** moves by last bits on AVX2 and AVX-512 hosts.
+  Not an era break (same arithmetic, portable rounding): saved
+  policies and `VecNormalize` statistics stay comparable. The new
+  goldens were proved equal to the old code run under the pre-AVX2
+  OpenBLAS kernel, 22/22 in both sets, under three forced kernels.
+  The re-record covers WallBall and BallBounce (CI and full) and the
+  full-set humanoid entry. A static test keeps BLAS calls out of the
+  stream code, and a CI test replays four cases under every OpenBLAS
+  kernel the runner can execute. See `docs/DECISIONS.md`, "Golden
+  digests and the freeze harness gate every refactor" (BLAS kernels).
 - **The best model says which save it holds on both selection paths,
   final saves are atomic, and a protocol pins its device (phase-4
   verifier findings, round 2, 2026-10-17).** No env stream or training

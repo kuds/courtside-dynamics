@@ -18,6 +18,7 @@ from typing import Final
 import mujoco
 import numpy as np
 
+from courtside_dynamics.envs import _linalg
 from courtside_dynamics.envs._tennis_physics import (
     COLLISION_BALL,
     COLLISION_COURT,
@@ -601,7 +602,7 @@ class SubstepTennisEventSampler:
         ):
             return RallyEventKind.NONFINITE_STATE
         limits = self.config.safety
-        ball_speed = float(np.linalg.norm(self._ball_velocity(data)))
+        ball_speed = _linalg.norm(self._ball_velocity(data))
         if (
             ball_speed > limits.max_ball_linear_speed
             or float(np.max(np.abs(data.qvel), initial=0.0)) > limits.max_abs_qvel

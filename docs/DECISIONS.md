@@ -1974,11 +1974,12 @@ moves unless the change is declared, and three gates make that checkable:
   `power`, `arcsin`, `arccos`, `arctan2`, `cbrt`, and rarely `log`,
   `tan` and `arctan`. `tanh` differs without AVX2 (20%). Float64
   `sin`, `cos`, `sqrt` and `hypot` do not move. The env code calls
-  only those four (and `np.linalg.norm`) from numpy's math; its few
-  other transcendentals are Python `math` calls (libm, no dispatch),
-  and the physics is MuJoCo's compiled code. So the goldens,
-  recorded on an AVX-512 machine, still match on GitHub's runners,
-  which may lack AVX-512 (often an AMD EPYC 7763). Measured: all 22 CI cases match
+  only those four from numpy's math; its few other transcendentals
+  are Python `math` calls (libm, no dispatch), and the physics is
+  MuJoCo's compiled code. So the goldens, recorded on an AVX-512
+  machine, do not depend on numpy's dispatch on GitHub's runners,
+  which may lack AVX-512 (often an AMD EPYC 7763), though BLAS did
+  (next bullet). Measured: all 22 CI cases match
   with AVX-512 disabled (`NPY_DISABLE_CPU_FEATURES="X86_V4 AVX512_ICL
   AVX512_SPR"`, numpy 2.x names; numpy 1.26 calls them `AVX512F
   AVX512CD AVX512_SKX AVX512_CLX`), with AVX2 disabled as well, and the
@@ -1988,6 +1989,55 @@ moves unless the change is declared, and three gates make that checkable:
   dispatch target disabled, so a refactor that brings, say, an
   `np.exp` into a stream is caught on any CPU before a runner with
   other SIMD finds it.
+- **BLAS kernels (2026-10-18).** The SIMD bullet missed one path:
+  numpy hands float64 `np.linalg.norm(v)`, `np.dot(u, v)`, `u @ v` and
+  `A @ v` to its bundled OpenBLAS, which picks kernels from the CPU at
+  run time (`DYNAMIC_ARCH`), and they round 3-vectors differently. On
+  numpy 2.5's OpenBLAS 0.3.34, the AVX-512 (SkylakeX) `ddot` (norm,
+  1-D dot) and `A.T @ v` give other last bits than the Haswell (which
+  this build also runs for Zen) and pre-AVX2 kernels, which all sum
+  left to right; the Haswell and
+  SkylakeX `A @ v` agree with each other but not with the pre-AVX2
+  kernels. The goldens were recorded on an AVX-512 machine, and PR 81's
+  `pytest (3.12)` job landed on an AVX2 runner (`numpy_simd`
+  `baseline X86_V2; dispatch X86_V3`): five WallBall and BallBounce
+  cases failed, even with numpy's dispatch disabled. Forcing
+  `OPENBLAS_CORETYPE=Haswell`, `Zen` or `Sandybridge` reproduced the
+  failure locally; `SkylakeX` matched. The 300-step humanoid case
+  passed only because the first divergence (a ball-speed norm) falls
+  at step 409 of the full set's second episode.
+  The fix takes BLAS out of the streams rather than recording a golden
+  per kernel. A golden per kernel would leave training itself
+  CPU-dependent, and Colab's hosts vary. `courtside_dynamics.envs._linalg`
+  computes `dot`, `norm` and `matvec` on Python floats, left to right
+  from 0.0, which is the pre-AVX2 kernels' arithmetic. All 19 call
+  sites in the envs and the digest harness use it.
+  Proof: the old code run under `OPENBLAS_CORETYPE=Nehalem` was
+  recorded to a scratch golden file. The new code then matched it
+  bit for bit, 22/22 in both the CI and full sets, under each of
+  Nehalem, Haswell and SkylakeX. So the re-recorded goldens are
+  exactly the streams the old code produced on a pre-AVX2 kernel:
+  - **PaddleTennis and BallBalance** (all 14 + 2 cases in each set)
+    did not move.
+  - **WallBall and humanoid** (norm only) now give on every CPU the
+    stream the old code gave on any non-AVX-512 CPU.
+  - **BallBounce** (dot, `A.T @ v` and `A @ v`) moved by last bits on
+    AVX2 and AVX-512 hosts alike.
+  This is rounding of the same arithmetic, not a task change, so saved
+  policies and `VecNormalize` statistics stay comparable and no task
+  version moves. The re-record covers the five WallBall and BallBounce
+  entries in each set and the full set's humanoid entry. Two guards
+  keep it true:
+  - `tests/test_env_linalg.py` parses every env module, the scripted
+    policies and the digest harness, and fails on any `@`, `dot`,
+    `matmul`, `inner`, `vdot`, `tensordot`, `einsum` or `linalg` call.
+    It flags all 19 sites in the pre-fix code.
+  - `test_streams_do_not_depend_on_the_openblas_kernel` replays four
+    CI cases under each kernel the CPU can run (Nehalem always;
+    Haswell with AVX2 and FMA; SkylakeX with AVX-512). It asserts
+    OpenBLAS reports the forced core and that every case matches.
+  Still open: non-x86 BLAS (Apple Accelerate, ARM OpenBLAS) is not
+  exercised, though the env code no longer calls BLAS.
 - **NaN witnesses.** These sit on pending escrows, and a test re-proves
   them from the stream's own info. A NaN action at step 250 of the
   seed-0 recipe oracle stream claws back the contact escrow (−0.25). At

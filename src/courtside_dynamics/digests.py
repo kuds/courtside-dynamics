@@ -82,6 +82,7 @@ from courtside_dynamics.envs import (
     CourtSide,
     PaddleTennisEnv,
     WallBallEnv,
+    _linalg,
 )
 from courtside_dynamics.envs._paddle_court import (
     scripted_ground_opponent,
@@ -451,7 +452,7 @@ def _drill_entry_is_clear(env: PaddleTennisEnv, entry: Mapping[str, Any]) -> boo
     """The launch-clearance test ``PaddleTennisEnv._launch_point`` applies."""
     ball = entry["qpos"][env._ball_qposadr : env._ball_qposadr + 3]
     return all(
-        float(np.linalg.norm(entry[key] - ball)) >= env._SERVE_CLEARANCE
+        _linalg.norm(entry[key] - ball) >= env._SERVE_CLEARANCE
         for key in ("head_a", "head_b")
     )
 

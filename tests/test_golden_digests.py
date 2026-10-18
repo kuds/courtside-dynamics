@@ -448,9 +448,9 @@ def test_version_info_records_the_numpy_simd_path():
 
 #: CI cases replayed with numpy's SIMD dispatch switched off, one per
 #: env family. The numpy float64 math the env code calls (np.sin,
-#: np.cos, np.hypot, np.sqrt, np.linalg.norm) does not move with the
-#: dispatch; the loops that do (exp, log1p, arctan2, ...) appear
-#: nowhere in it. This keeps that true as the code changes.
+#: np.cos, np.hypot, np.sqrt) does not move with the dispatch; the
+#: loops that do (exp, log1p, arctan2, ...) appear nowhere in it. This
+#: keeps that true as the code changes.
 _DISPATCH_CASES = (
     "paddle_tennis/recipe/oracle_nan_contact_escrow",
     "wall_ball_true_baseline/oracle",
@@ -489,6 +489,69 @@ def test_streams_do_not_depend_on_numpy_simd_dispatch():
     assert "; dispatch none" in result.stdout, result.stdout + result.stderr
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"{len(_DISPATCH_CASES)}/{len(_DISPATCH_CASES)} cases match" in result.stdout
+
+
+#: CI cases replayed under each OpenBLAS kernel: the ones whose env code
+#: once reached BLAS (norm, dot, matrix-vector) on every step.
+_BLAS_CASES = (
+    "paddle_tennis/recipe/oracle_nan_contact_escrow",
+    "wall_ball_true_baseline/oracle",
+    "ball_bounce/oracle",
+    "humanoid_tennis_coop/random",
+)
+
+#: OpenBLAS kernels to force, with the numpy CPU features each needs.
+_BLAS_KERNELS = {
+    "Nehalem": (),
+    "Haswell": ("AVX2", "FMA3"),
+    "SkylakeX": ("AVX512_SKX",),
+}
+
+
+def _openblas_picks_kernels_at_run_time() -> bool:
+    config = np.show_config(mode="dicts") or {}
+    blas = config.get("Build Dependencies", {}).get("blas", {})
+    return "openblas" in str(blas.get("name", "")) and "DYNAMIC_ARCH" in str(
+        blas.get("openblas configuration", "")
+    )
+
+
+@pytest.mark.parametrize("kernel", sorted(_BLAS_KERNELS))
+def test_streams_do_not_depend_on_the_openblas_kernel(kernel):
+    """The goldens must match whichever BLAS kernels the CPU picks.
+
+    numpy's OpenBLAS picks its kernels from the CPU at run time, and on
+    3-vectors they round differently: the AVX-512 ``ddot`` and
+    ``A.T @ v`` against the AVX2 ones, the AVX2 ``A @ v`` against the
+    pre-AVX2 one. Goldens recorded on an AVX-512 machine through
+    ``np.linalg.norm`` failed on an AVX2 runner. The env code does that
+    math in ``envs._linalg`` (``tests/test_env_linalg.py`` keeps BLAS
+    calls out of it); this forces each kernel the CPU can run, and the
+    streams must not move.
+    """
+    if not _openblas_picks_kernels_at_run_time():
+        pytest.skip("numpy's BLAS is not an OpenBLAS that picks kernels at run time")
+    features = _numpy_umath().__cpu_features__
+    missing = [name for name in _BLAS_KERNELS[kernel] if not features.get(name)]
+    if missing:
+        pytest.skip(f"this CPU cannot run the {kernel} kernels (no {' '.join(missing)})")
+    env = {
+        **os.environ,
+        "OPENBLAS_CORETYPE": kernel,
+        "OPENBLAS_VERBOSE": "2",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    }
+    argv = [sys.executable, str(REPO_ROOT / "tools" / "golden_digest.py")]
+    for name in _BLAS_CASES:
+        argv += ["--case", name]
+    result = subprocess.run(
+        argv, capture_output=True, text=True, env=env, cwd=REPO_ROOT, timeout=300
+    )
+    output = result.stdout + result.stderr
+    assert f"Core: {kernel}" in output, output
+    assert result.returncode == 0, output
+    assert f"{len(_BLAS_CASES)}/{len(_BLAS_CASES)} cases match" in result.stdout
 
 
 def test_stream_digest_is_sensitive_to_the_nan_injection():

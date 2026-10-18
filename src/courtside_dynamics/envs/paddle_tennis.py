@@ -72,6 +72,7 @@ from gymnasium import utils
 from gymnasium.spaces import Box
 
 from courtside_dynamics.assets import asset_path
+from courtside_dynamics.envs import _linalg
 from courtside_dynamics.envs._base import (
     CourtsideMujocoEnv,
     finite_nonnegative,
@@ -1369,7 +1370,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         """True when both paddle heads clear the drawn serve origin."""
         for side in (CourtSide.A, CourtSide.B):
             head = self._paddle_position(side)
-            if float(np.linalg.norm(head - position)) < self._SERVE_CLEARANCE:
+            if _linalg.norm(head - position) < self._SERVE_CLEARANCE:
                 return False
         return True
 
@@ -1392,7 +1393,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             ),
         ):
             head = self._paddle_position(side)
-            if float(np.linalg.norm(head - position)) >= self._SERVE_CLEARANCE:
+            if _linalg.norm(head - position) >= self._SERVE_CLEARANCE:
                 continue
             self._nudge_slides_clear(head, position, names)
 
@@ -1415,7 +1416,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
         the envelope's diameter, so one always exists).
         """
         offset = head - position
-        distance = float(np.linalg.norm(offset))
+        distance = _linalg.norm(offset)
         joints = [self.model.joint(name) for name in names]
         addresses = [int(joint.qposadr[0]) for joint in joints]
         current = [float(self.data.qpos[address]) for address in addresses]
@@ -1437,18 +1438,18 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
             moved = head.copy()
             for target, value, axis in zip(targets, current, axes, strict=True):
                 moved += (target - value) * axis
-            return float(np.linalg.norm(moved - position)) >= self._SERVE_CLEARANCE
+            return _linalg.norm(moved - position) >= self._SERVE_CLEARANCE
 
         direction = (
             offset / distance if distance > 1e-9 else np.array([0.0, 0.0, 1.0])
         )
         world_delta = direction * (self._SERVE_CLEARANCE - distance + 1e-3)
-        targets = _clamped([float(world_delta @ axis) for axis in axes])
+        targets = _clamped([_linalg.dot(world_delta, axis) for axis in axes])
         if not _clears(targets):
             radius = self._SERVE_CLEARANCE + 1e-3
             exits: list[tuple[float, list[float]]] = []
             for index, axis in enumerate(axes):
-                along = float(offset @ axis)
+                along = _linalg.dot(offset, axis)
                 reach = float(np.sqrt(max(0.0, radius**2 - (distance**2 - along**2))))
                 for sign in (1.0, -1.0):
                     deltas = [0.0, 0.0, 0.0]
@@ -1553,8 +1554,7 @@ class PaddleTennisEnv(CourtsideMujocoEnv, utils.EzPickle):
                 entry = self._drill_entries[index]
                 ball = entry["qpos"][self._ball_qposadr : self._ball_qposadr + 3]
                 clear = all(
-                    float(np.linalg.norm(entry[key] - ball))
-                    >= self._SERVE_CLEARANCE
+                    _linalg.norm(entry[key] - ball) >= self._SERVE_CLEARANCE
                     for key in ("head_a", "head_b")
                 )
                 if clear:

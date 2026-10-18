@@ -143,6 +143,7 @@ from gymnasium import utils
 from gymnasium.spaces import Box
 
 from courtside_dynamics.assets import asset_path
+from courtside_dynamics.envs import _linalg
 from courtside_dynamics.envs._base import (
     CourtsideMujocoEnv,
     piecewise_targets,
@@ -1666,7 +1667,7 @@ class WallBallEnv(CourtsideMujocoEnv, utils.EzPickle):
             and not double_bounce_latched
             and self.track_shaping_scale > 0.0
         ):
-            dist = float(np.linalg.norm(ball_pos - paddle_head_pos))
+            dist = _linalg.norm(ball_pos - paddle_head_pos)
             if np.isfinite(dist):
                 if self._prev_paddle_to_ball is not None:
                     delta = self.track_shaping_scale * (

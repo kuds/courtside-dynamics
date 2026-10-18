@@ -26,6 +26,7 @@ import numpy as np
 from gymnasium import utils
 
 from courtside_dynamics.assets import asset_path
+from courtside_dynamics.envs import _linalg
 from courtside_dynamics.envs._base import (
     CourtsideMujocoEnv,
     finite_nonnegative,
@@ -181,13 +182,13 @@ class BallBounceEnv(CourtsideMujocoEnv, utils.EzPickle):
         ball_velocity: np.ndarray,
         paddle_point_velocity: np.ndarray,
     ) -> float:
-        return float(np.dot(ball_velocity - paddle_point_velocity, normal))
+        return _linalg.dot(ball_velocity - paddle_point_velocity, normal)
 
     def _ball_paddle_height(self) -> float:
         """Signed ball-centre height above the paddle centre plane."""
         normal, _, paddle_position, _, _ = self._paddle_kinematics()
         ball_position = np.asarray(self.data.geom("ball_geom").xpos)
-        return float(np.dot(ball_position - paddle_position, normal))
+        return _linalg.dot(ball_position - paddle_position, normal)
 
     def _geom_clearance(self) -> float:
         """Smallest signed surface distance, including lateral separation."""
@@ -227,12 +228,14 @@ class BallBounceEnv(CourtsideMujocoEnv, utils.EzPickle):
             mujoco.mj_contactForce(self.model, self.data, index, force6)
             normal_force = float(force6[0])
 
-            local_contact = rotation.T @ (np.asarray(contact.pos) - paddle_position)
+            local_contact = _linalg.matvec(
+                rotation.T, np.asarray(contact.pos) - paddle_position
+            )
             if normal_force >= peak_force:
                 peak_force = normal_force
                 strongest_local_contact = local_contact.copy()
             contact_normal = np.asarray(contact.frame[:3])
-            face_alignment = abs(float(np.dot(contact_normal, paddle_normal)))
+            face_alignment = abs(_linalg.dot(contact_normal, paddle_normal))
             if local_contact[2] > 0.0 and face_alignment >= 0.75:
                 on_top_face = True
                 if normal_force >= top_peak_force:
@@ -306,7 +309,7 @@ class BallBounceEnv(CourtsideMujocoEnv, utils.EzPickle):
                 self._contact_release_progress = 0
                 if not self._contact_latched:
                     pre_contact_point = (
-                        pre_origin + pre_rotation @ local_position
+                        pre_origin + _linalg.matvec(pre_rotation, local_position)
                     )
                     pre_paddle_point_velocity = self._point_velocity(
                         origin=pre_origin,
@@ -319,8 +322,8 @@ class BallBounceEnv(CourtsideMujocoEnv, utils.EzPickle):
                         pre_ball_velocity,
                         pre_paddle_point_velocity,
                     )
-                    pre_paddle_speed = float(
-                        np.dot(pre_paddle_point_velocity, pre_normal)
+                    pre_paddle_speed = _linalg.dot(
+                        pre_paddle_point_velocity, pre_normal
                     )
                     self._begin_contact_episode(
                         on_top_face=on_top_face,
@@ -342,7 +345,7 @@ class BallBounceEnv(CourtsideMujocoEnv, utils.EzPickle):
                         linear_velocity,
                     ) = self._paddle_kinematics()
                     contact_point = (
-                        origin + rotation @ self._contact_local_position
+                        origin + _linalg.matvec(rotation, self._contact_local_position)
                     )
                     paddle_point_velocity = self._point_velocity(
                         origin=origin,
@@ -512,7 +515,7 @@ class BallBounceEnv(CourtsideMujocoEnv, utils.EzPickle):
                     qpos[address], float(joint.range[0]), float(joint.range[1])
                 )
         quaternion = qpos[self._ball_qposadr + 3 : self._ball_qposadr + 7]
-        quaternion_norm = float(np.linalg.norm(quaternion))
+        quaternion_norm = _linalg.norm(quaternion)
         if quaternion_norm <= 0.0 or not math.isfinite(quaternion_norm):
             quaternion[:] = (1.0, 0.0, 0.0, 0.0)
         else:
