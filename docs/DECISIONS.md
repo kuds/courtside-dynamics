@@ -746,21 +746,39 @@ host, and the protocols pinned only `device="cpu"`. The fix:
   `versions.mkl_cbwr` and `versions.libc`.
 - **Refused when unpinned.** The harness refuses to score under a CPU
   protocol when MKL is not on `COMPATIBLE`, with the fix in the error.
-  This happens when an operator set another `MKL_CBWR` (theirs wins),
-  or torch multiplied before the package was imported. A CPU run
-  trained unpinned records `eval_protocol` `id: null` with
-  `"differs": ["cpu_numerics"]`, so it is no registered protocol's.
-  A torch without MKL (Apple silicon, aarch64) has nothing to pin and
-  is not refused.
+  This happens when an operator set another non-empty `MKL_CBWR`
+  (theirs wins; an empty one counts as unset), or torch multiplied
+  before the package was imported. A CPU run trained unpinned records
+  `eval_protocol` `id: null` with `"differs": ["cpu_numerics"]`, so it
+  is no registered protocol's. A torch without MKL (Apple silicon,
+  aarch64) has nothing to pin and is not refused. A build with MKL
+  whose branch cannot be read is refused with its own reason, because
+  the pin cannot be shown there. The branch is looked up in torch's
+  `lib` and, on Linux, in any loaded MKL library (a conda build). A
+  Windows build that exports no `mkl_cbwr_get` is untested.
+- **The re-score notebook reuses only rows scored under this session's
+  numerics.** It compares each row's recorded `cpu_numerics` (BLAS and
+  branch) with this session's. Rows from a session before the pin are
+  re-scored when their run is picked. Until then they stay out of the
+  curves and verdicts, with their earlier verdict dropped and their
+  runs listed.
 - **Costs.** Every CPU float32 GEMM changes, so CPU-trained runs (the
   PPO reference) after the pin are a new numeric era: their streams are
   not bit-comparable with earlier CPU runs. GPU training (cuBLAS) is
   unaffected. A pinned re-score of a run evaluated in-loop on CPU
   before the pin does not reproduce its in-loop numbers bit for bit;
-  re-score both sides of a comparison under the pin. `COMPATIBLE`
-  GEMMs are slower: the test suite took about 22% longer, mostly in its
-  SAC tests. The cost to a re-score's batch-1 policy calls was not
-  measured separately.
+  re-score both sides of a comparison under the pin. Runs recorded
+  before the pin carry no `versions.mkl_cbwr`. Speed was measured on
+  this AVX-512 host, single-threaded:
+  - unchanged: batch-1 inference (a re-score's policy calls, about
+    21 µs either way), and a PaddleTennis PPO iteration (8 × 1,024
+    steps and 10 epochs of 256-batches on SB3's 64×64 nets; 4.5-4.9 s
+    either way);
+  - 2.7x slower: a 256-wide MLP's batch-30 forward pass;
+  - 2-2.6x slower: that MLP's 64- to 256-batch training steps.
+
+  The test suite takes about 22% longer, mostly in its 256-wide SAC
+  tests.
 
 ### A campaign leg whose final Drive mirror fails is booked, not retrained — *implemented (unreleased, 2026-11-27)*
 Under `LOCAL_THEN_SYNC`, `train()` seals the leg's local copy and then
@@ -780,6 +798,20 @@ was replaced by a fresh 1M-3M-step `attempt_02`. The fix:
   as usual. If it never verifies, `run_leg` raises with the way out.
   A Ctrl-C inside the final mirror books the leg `unsynced` the same
   way, when its local copy verifies complete, and re-raises.
+- **The booking survives a Drive that refuses the manifest too.** A
+  full or dead mount usually refuses both. So a leg booked from its
+  local copy is first written to `local_leg_bookings.json` in the
+  campaign's local root, and the Drive manifest's failure is printed,
+  not raised. The loop cell adopts such bookings before it resumes any
+  leg (`adopt_local_leg_bookings`), unless the Drive manifest holds a
+  later word on that leg (the same attempt, a later attempt, or
+  `complete`). Booking a leg from Drive drops its local booking.
+- **A leg is booked by what its sealed run reached.** A finished,
+  validated leg is booked `unsynced`. A config mismatch is booked
+  `config_mismatch`, and an interrupted run `interrupted`. A run sealed
+  `crashed`, or without a stage summary, is booked by its run record's
+  status. Only an `unsynced` leg is promised a score; the others
+  retrain, and the error says which applies.
 - **On resume, an `unsynced` leg is finished, then scored.**
   `campaign_leg_resume_point` uses the Drive copy if it now verifies
   (the operator re-synced it). Otherwise it mirrors the local copy if

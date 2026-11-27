@@ -73,6 +73,14 @@ def test_importing_the_package_pins_mkl():
     assert numerics["pinned"] is True
 
 
+def test_an_empty_mkl_cbwr_counts_as_unset():
+    """An exported but empty MKL_CBWR is no operator choice (MKL ignores
+    it); the pin still applies."""
+    numerics = _outputs(MKL_CBWR="")["numerics"]
+    assert numerics["mkl_cbwr"] == "COMPATIBLE"
+    assert numerics["pinned"] is True
+
+
 def test_an_operators_own_branch_wins_and_is_reported_unpinned():
     numerics = _outputs(MKL_CBWR="AUTO")["numerics"]
     assert numerics["mkl_cbwr"] == "AUTO"
@@ -130,6 +138,16 @@ def test_cpu_numerics_problem_names_the_fix(monkeypatch):
     problem = numerics.cpu_numerics_problem()
     assert "AVX2 CNR branch, not COMPATIBLE" in problem
     assert "MKL_CBWR=COMPATIBLE" in problem
+    # A build whose branch cannot be read (no exported mkl_cbwr_get) is
+    # refused with its own reason, not as a branch named None.
+    monkeypatch.setattr(
+        numerics,
+        "cpu_numerics",
+        lambda: {"blas": "mkl", "mkl_cbwr": None, "mkl_cbwr_env": "COMPATIBLE", "pinned": False},
+    )
+    problem = numerics.cpu_numerics_problem()
+    assert "its CNR branch cannot be read" in problem
+    assert "None" not in problem
     for blas in ("other", "no-torch"):
         monkeypatch.setattr(
             numerics,

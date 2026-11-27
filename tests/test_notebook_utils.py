@@ -2072,6 +2072,55 @@ def test_an_unsynced_leg_is_mirrored_and_scored_never_retrained(
     assert "no 'ok' config validation verdict" in capsys.readouterr().out
 
 
+def test_local_leg_bookings_rejoin_the_manifest_only_when_newer(tmp_path, capsys):
+    """Review 2026-11-27, N3 follow-up: a Drive that refuses the mirror
+    usually refuses the manifest too, so a leg booked from its local
+    copy is also booked on local disk; the next Run-All adopts it unless
+    the Drive manifest already holds a later word on that leg."""
+    from courtside_dynamics.notebook_utils import (
+        adopt_local_leg_bookings,
+        forget_local_leg_booking,
+        save_local_leg_booking,
+    )
+
+    root = tmp_path / "local" / "campaign"
+    drive = tmp_path / "drive" / "campaign"
+
+    def booking(stage, attempt, status="unsynced"):
+        return {
+            "status": status,
+            "run_dir": str(drive / stage / f"attempt_{attempt:02d}"),
+            "local_dir": str(root / stage / f"attempt_{attempt:02d}"),
+        }
+
+    assert adopt_local_leg_bookings({"stages": {}}, root) == []  # none yet
+    for stage, attempt in (("new", 1), ("same", 1), ("newer", 2), ("older", 1), ("done", 2)):
+        save_local_leg_booking(root, stage, booking(stage, attempt))
+    manifest = {
+        "stages": {
+            "same": booking("same", 1, status="trained"),
+            "newer": booking("newer", 1, status="interrupted"),
+            "older": booking("older", 2, status="trained"),
+            "done": booking("done", 1, status="complete"),
+        }
+    }
+    assert sorted(adopt_local_leg_bookings(manifest, root)) == ["new", "newer"]
+    assert manifest["stages"]["new"] == booking("new", 1)
+    assert manifest["stages"]["newer"] == booking("newer", 2)
+    assert manifest["stages"]["same"]["status"] == "trained"
+    assert manifest["stages"]["older"]["run_dir"].endswith("attempt_02")
+    assert manifest["stages"]["done"]["status"] == "complete"
+    assert "adopting the local booking 'unsynced'" in capsys.readouterr().out
+    forget_local_leg_booking(root, "new")
+    forget_local_leg_booking(root, "never-booked")
+    assert sorted(adopt_local_leg_bookings({"stages": {}}, root)) == [
+        "done", "newer", "older", "same"
+    ]
+    (root / "local_leg_bookings.json").write_text("[]")
+    with pytest.raises(ValueError, match="JSON object of leg bookings"):
+        adopt_local_leg_bookings({"stages": {}}, root)
+
+
 def test_next_stage_attempt_dir_numbers_attempts(tmp_path):
     first = next_stage_attempt_dir(tmp_path, "leg1_scratch_gate")
     assert first == str(tmp_path / "leg1_scratch_gate" / "attempt_01")

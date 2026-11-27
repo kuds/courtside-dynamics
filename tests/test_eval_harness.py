@@ -755,14 +755,18 @@ def test_a_cpu_run_without_pinned_numerics_claims_no_cpu_protocol(
 
 
 def test_score_rows_record_the_c_library_and_cpu_numerics():
-    versions = harness._versions()
-    assert versions["libc"]
-    assert versions["cpu_numerics"]["pinned"] is True
     from courtside_dynamics.training.artifacts import _versions as run_versions
 
+    versions = harness._versions()
     recorded = run_versions()
+    assert versions["libc"]
     assert recorded["libc"] == versions["libc"]
-    assert recorded["mkl_cbwr"] == "COMPATIBLE"
+    if torch.backends.mkl.is_available():
+        assert versions["cpu_numerics"]["pinned"] is True
+        assert recorded["mkl_cbwr"] == "COMPATIBLE"
+    else:  # nothing to pin (Apple silicon, aarch64)
+        assert versions["cpu_numerics"]["blas"] == "other"
+        assert recorded["mkl_cbwr"] == "other"
 
 
 def test_a_run_evaluating_on_cuda_claims_no_cpu_protocol(tmp_path, monkeypatch):

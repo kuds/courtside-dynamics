@@ -33,8 +33,12 @@ supersedes it (see the ground-rules bullet).
     `eval_protocol` `id: null` with `"differs": ["cpu_numerics"]`.
   - **Score rows record `versions.cpu_numerics` and `versions.libc`;**
     run artifacts record `versions.mkl_cbwr` and `versions.libc`.
-  - `COMPATIBLE` GEMMs are slower: the test suite takes about 22%
-    longer.
+  - **`rescore_runs` reuses only rows scored under this session's CPU
+    numerics.** It re-scores the others when their run is picked, and
+    leaves them out of the curves and verdicts until then.
+  - **Speed.** Batch-1 inference and a PaddleTennis PPO iteration (64×64
+    nets) cost the same. 256-wide training steps run 2-2.6x slower, and
+    the test suite takes about 22% longer.
   - See `docs/DECISIONS.md`, "CPU scores pin MKL's numerics".
 - **A campaign leg whose final Drive mirror fails is booked, not
   retrained (2026-11-27).** No env, training or recipe change.
@@ -43,11 +47,17 @@ supersedes it (see the ground-rules bullet).
   - **The campaign's `run_leg` books the leg `unsynced`** from its
     local copy, retries the mirror in-session, and books it `trained`
     once the Drive copy verifies. A Ctrl-C inside the final mirror is
-    booked the same way.
+    booked the same way. A crashed run is booked `crashed`.
+  - **The booking also goes to local disk** (`local_leg_bookings.json`)
+    before the Drive manifest, and the loop cell adopts it on the next
+    Run-All. A Drive that refuses the manifest too therefore cannot lose
+    the leg.
   - **`campaign_leg_resume_point` finishes an `unsynced` leg's mirror,
     then scores it.** It retrains only when the local copy is gone and
     the Drive copy does not verify.
-  - New helper: `notebook_utils.finish_leg_mirror`.
+  - New helpers in `notebook_utils`: `finish_leg_mirror`,
+    `save_local_leg_booking`, `forget_local_leg_booking` and
+    `adopt_local_leg_bookings`.
   - See `docs/DECISIONS.md`, "A campaign leg whose final Drive mirror
     fails is booked, not retrained".
 - **A PPO notebook runs on a Colab CPU runtime (2026-11-27).** No env,

@@ -2217,6 +2217,101 @@ def write_campaign_manifest(
     return path
 
 
+#: A LOCAL_THEN_SYNC campaign's bookings of legs whose Drive mirror does
+#: not verify yet, kept on local disk in the campaign's local root. A
+#: booking lands here before the Drive manifest is written, so a Drive
+#: that refuses the manifest as well as the mirror cannot lose a
+#: finished leg to a retrain (review 2026-11-27, N3).
+LOCAL_LEG_BOOKINGS_NAME = "local_leg_bookings.json"
+
+
+def _local_leg_bookings(local_campaign_root: str | Path) -> dict[str, Any]:
+    path = Path(local_campaign_root) / LOCAL_LEG_BOOKINGS_NAME
+    if not path.is_file():
+        return {}
+    with open(path) as handle:
+        bookings = json.load(handle)
+    if not isinstance(bookings, dict):
+        raise ValueError(f"{path} must hold a JSON object of leg bookings")
+    return bookings
+
+
+def save_local_leg_booking(
+    local_campaign_root: str | Path,
+    stage_name: str,
+    record: Mapping[str, Any],
+) -> str:
+    """Book a leg on local disk; returns the bookings file's path.
+
+    The campaign notebook calls this before it writes the Drive
+    manifest whenever it books a leg from its local copy, so the booking
+    survives a Drive that refuses the manifest too. See
+    :func:`adopt_local_leg_bookings`.
+    """
+    bookings = _local_leg_bookings(local_campaign_root)
+    bookings[stage_name] = dict(record)
+    Path(local_campaign_root).mkdir(parents=True, exist_ok=True)
+    path = os.path.join(str(local_campaign_root), LOCAL_LEG_BOOKINGS_NAME)
+    _atomic_write_json(path, bookings)
+    return path
+
+
+def forget_local_leg_booking(local_campaign_root: str | Path, stage_name: str) -> None:
+    """Drop a leg's local booking once the Drive manifest books it from Drive."""
+    bookings = _local_leg_bookings(local_campaign_root)
+    if bookings.pop(stage_name, None) is not None:
+        path = os.path.join(str(local_campaign_root), LOCAL_LEG_BOOKINGS_NAME)
+        _atomic_write_json(path, bookings)
+
+
+def _attempt_number(run_dir: Any) -> int | None:
+    name = Path(str(run_dir)).name
+    prefix, _, number = name.partition("_")
+    if prefix != "attempt" or not number.isdigit():
+        return None
+    return int(number)
+
+
+def adopt_local_leg_bookings(
+    manifest: dict[str, Any], local_campaign_root: str | Path
+) -> list[str]:
+    """Merge legs booked only on local disk into ``manifest``; returns them.
+
+    A local booking is adopted when the manifest holds no record for its
+    leg, or holds one for an earlier attempt that is not ``complete``
+    (the booked attempt was trained after that record sent the leg back
+    to training). A record for the same attempt dir is the Drive
+    manifest's later word and is kept. The caller writes the manifest.
+    """
+    adopted = []
+    stages = manifest.setdefault("stages", {})
+    for stage_name, local in _local_leg_bookings(local_campaign_root).items():
+        if not isinstance(local, Mapping) or not local.get("run_dir"):
+            continue
+        current = stages.get(stage_name)
+        if isinstance(current, Mapping):
+            if current.get("run_dir") == local["run_dir"]:
+                continue
+            if current.get("status") == "complete":
+                continue
+            local_attempt = _attempt_number(local["run_dir"])
+            current_attempt = _attempt_number(current.get("run_dir"))
+            if (
+                local_attempt is None
+                or current_attempt is None
+                or local_attempt <= current_attempt
+            ):
+                continue
+        stages[stage_name] = dict(local)
+        adopted.append(stage_name)
+        print(
+            f"[campaign] {stage_name}: adopting the local booking "
+            f"{local.get('status')!r} of {local['run_dir']} (the Drive "
+            "manifest refused it)"
+        )
+    return adopted
+
+
 def _json_normalized(value: Any) -> Any:
     """Round-trip ``value`` through JSON so tuples compare as lists."""
     return json.loads(json.dumps(value, sort_keys=True, allow_nan=False))

@@ -713,9 +713,9 @@ def test_campaign_notebook_validates_config_and_plumbs_env_kwargs() -> None:
         < book_leg.index("write_campaign_manifest(CAMPAIGN_ROOT, manifest)")
     )
     assert run_leg.index("model = train(cfg)") < run_leg.index(
-        "validation, run_status = book_leg("
+        "validation, run_status, _ = book_leg("
     )
-    assert source.index("validation, run_status = book_leg(") < source.index(
+    assert source.index("validation, run_status, _ = book_leg(") < source.index(
         "gate_report = score_paddle_stage("
     )
     assert 'if validation["verdict"] != "ok":' in source
@@ -1490,7 +1490,8 @@ def test_campaign_local_then_sync_is_operational_not_fingerprinted(
         if "def run_leg(" in _source(cell)
     )
     run_leg = helpers[helpers.index("def run_leg(") :]
-    assert 'log_dir = os.path.join("/content/runs", drive_relative)' in run_leg
+    assert "log_dir = local_twin(stage_dir)" in run_leg
+    assert 'return os.path.join("/content/runs", drive_relative)' in helpers
     assert "sync_dir = stage_dir" in run_leg
     assert "sync_dir=sync_dir," in run_leg
     # Everything after train() reads the Drive attempt dir; only a leg
@@ -1522,6 +1523,8 @@ def test_campaign_books_a_leg_whose_final_mirror_failed(tmp_path) -> None:
     )
     from courtside_dynamics.experiments.sync import FinalMirrorError
     from courtside_dynamics.notebook_utils import (
+        LOCAL_LEG_BOOKINGS_NAME,
+        RunConfigPlanMismatch,
         finish_leg_mirror,
         load_campaign_manifest,
         write_campaign_manifest,
@@ -1546,24 +1549,30 @@ def test_campaign_books_a_leg_whose_final_mirror_failed(tmp_path) -> None:
     campaign_root = drive_mount / "campaigns" / "c1"
     campaign_root.mkdir(parents=True)
     validated = []
+    drifted = set()
+
+    def validate(path, expected):
+        validated.append(str(path))
+        if any(f"/{stage}/" in str(path) for stage in drifted):
+            raise RunConfigPlanMismatch("seed: expected 0, recorded 1")
+
     namespace.update(
         CAMPAIGN_ROOT=str(campaign_root),
         manifest={"campaign_id": "c1", "status": "running", "stages": {}},
         write_campaign_manifest=write_campaign_manifest,
-        validate_run_config_against_plan=lambda path, expected: validated.append(
-            str(path)
-        ),
+        validate_run_config_against_plan=validate,
         print_stage_summary=lambda run_dir: None,
     )
+    local_bookings = local_root / "campaigns" / "c1" / LOCAL_LEG_BOOKINGS_NAME
 
-    def seal(log_dir):
+    def seal(log_dir, status="completed"):
         log_dir = Path(log_dir)
         log_dir.mkdir(parents=True)
         (log_dir / "config.json").write_text("{}\n")
-        (log_dir / "stage_summary.txt").write_text("Status:         completed\n")
+        (log_dir / "stage_summary.txt").write_text(f"Status:         {status}\n")
         write_run_record(
             log_dir,
-            build_run_record({}, run_id="r", created_at="t", status="completed"),
+            build_run_record({}, run_id="r", created_at="t", status=status),
         )
         write_sync_manifest(log_dir)
 
@@ -1629,6 +1638,47 @@ def test_campaign_books_a_leg_whose_final_mirror_failed(tmp_path) -> None:
     with pytest.raises(KeyboardInterrupt):
         leg("leg_d")
     assert "leg_d" not in namespace["manifest"]["stages"]
+
+    # A crashed run stopped inside its final mirror is booked as what it
+    # is, so a resume retrains it instead of blocking on its mirror.
+    def crashed_then_interrupted(cfg):
+        seal(cfg.log_dir, status="crashed")
+        raise KeyboardInterrupt
+
+    namespace["train"] = crashed_then_interrupted
+    with pytest.raises(KeyboardInterrupt):
+        leg("leg_e")
+    assert booked("leg_e")["status"] == "crashed"
+
+    # A drifted leg whose mirror fails is booked config_mismatch, and the
+    # error says it is retried rather than scored.
+    namespace["train"] = mirror_fails
+    namespace["finish_leg_mirror"] = lambda local_dir, drive_dir: False
+    drifted.add("leg_f")
+    with pytest.raises(RuntimeError, match="booked 'config_mismatch'"):
+        leg("leg_f")
+    assert booked("leg_f")["status"] == "config_mismatch"
+
+    # Drive refuses the manifest as well as the mirror (a full Drive):
+    # the booking survives on local disk, the guidance error is not
+    # masked by the manifest's OSError, and the next Run-All adopts it.
+    def full_drive(campaign_root, manifest):
+        raise OSError(28, "No space left on device")
+
+    namespace["write_campaign_manifest"] = full_drive
+    with pytest.raises(RuntimeError, match="instead of retraining it"):
+        leg("leg_g")
+    on_drive = load_campaign_manifest(campaign_root)
+    assert "leg_g" not in on_drive["stages"]
+    assert json.loads(local_bookings.read_text())["leg_g"]["status"] == "unsynced"
+    namespace["write_campaign_manifest"] = write_campaign_manifest
+    namespace["manifest"] = on_drive  # pc-root reloads it on the re-run
+    namespace["adopt_local_bookings"]()
+    adopted = load_campaign_manifest(campaign_root)["stages"]["leg_g"]
+    assert adopted["status"] == "unsynced"
+    assert adopted["run_dir"] == str(campaign_root / "leg_g" / "attempt_01")
+    # Booking a leg from Drive drops its local booking.
+    assert "leg_b" not in json.loads(local_bookings.read_text())
 
 
 # -- Rescore notebook (design L3) ---------------------------------------------
@@ -1797,6 +1847,12 @@ def _exec_rescore_notebook(
     return namespace
 
 
+def torch_has_mkl() -> bool:
+    import torch
+
+    return torch.backends.mkl.is_available()
+
+
 def test_rescore_notebook_scores_august_layout_runs_outside_their_folders(
     tmp_path, monkeypatch, capsys
 ) -> None:
@@ -1918,6 +1974,45 @@ def test_rescore_notebook_scores_august_layout_runs_outside_their_folders(
         checkpoints / "paddle_tennis_sac_vecnormalize_256_steps.pkl", normalizer
     )
     assert _tree_digest(runs) == before
+
+    # Review 2026-11-27, N2: rows an earlier session scored before MKL was
+    # pinned hold one host's kernels. They are re-scored, not reused ...
+    def unpinned(rows):
+        return "".join(
+            json.dumps(
+                {
+                    **row,
+                    "versions": {
+                        key: value
+                        for key, value in row["versions"].items()
+                        if key != "cpu_numerics"
+                    },
+                }
+            )
+            + "\n"
+            for row in rows
+        )
+
+    scores.write_text(unpinned(read_scores(scores)))
+    _exec_rescore_notebook(ns, cells=("rs-rescore",))
+    assert f"{registered}: already scored" not in capsys.readouterr().out
+    assert all(
+        row["versions"]["cpu_numerics"]["pinned"] is True or not torch_has_mkl()
+        for row in read_scores(scores)
+    )
+    # ... and a run left with such rows stays out of the curves and the
+    # verdicts, its earlier verdict dropped, until it is picked again.
+    elsewhere = out_root / "20260701_000000" / "checkpoints" / "scores"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / scores.name).write_text(unpinned(read_scores(scores)))
+    _exec_rescore_notebook(ns, cells=("rs-read", "rs-verdict"))
+    assert ns["OTHER_NUMERICS"] == {"20260701_000000"}
+    assert "20260701_000000" not in ns["ALL_SCORES"]
+    assert "Left out, scored under other CPU numerics" in capsys.readouterr().out
+    assert "20260701_000000" not in json.loads(
+        (out_root / "verdicts.json").read_text()
+    )["runs"]
+    shutil.rmtree(out_root / "20260701_000000")
 
     # QUICK: the best model and 3 checkpoints, first to last, elsewhere.
     quick = _exec_rescore_notebook(

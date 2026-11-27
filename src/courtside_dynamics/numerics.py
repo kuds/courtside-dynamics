@@ -9,18 +9,21 @@ episodes: the same snapshot, seeds and protocol fingerprint scored 53 of
 
 MKL's conditional numerical reproducibility (CNR) fixes the code path.
 ``MKL_CBWR=COMPATIBLE`` is the branch Intel documents as reproducible
-across processors, Intel and non-Intel alike, and it costs nothing at
-batch-1 inference (every evaluation and re-score). Training GEMMs run
-about 2-3x slower under it, which is about 10% of a CPU PPO run's wall
-clock; GPU training is untouched (cuBLAS, not MKL).
+across processors, Intel and non-Intel alike. Measured on an AVX-512
+host, single-threaded: batch-1 inference (a re-score's policy calls)
+costs the same; a 256-wide MLP's batch-30 forward pass and its 64- to
+256-batch training steps run 2-2.7x slower; a PaddleTennis PPO
+iteration (SB3's 64x64 nets) took the same 4.5-4.9 s either way. GPU
+training is untouched (cuBLAS, not MKL).
 
 MKL reads the variable once, at its first call, and a read of the branch
 fixes it too. So :func:`pin_cpu_numerics` runs when the package is
 imported, before anything here touches torch, and an operator's own
-``MKL_CBWR`` wins (``setdefault``). Whether the pin took effect is read
-from MKL itself (:func:`cpu_numerics`): a process that ran an MKL call
-before importing this package keeps MKL's default branch, and the
-offline evaluation harness refuses to score a CPU protocol there.
+non-empty ``MKL_CBWR`` wins. Whether the pin took effect is read from
+MKL itself (:func:`cpu_numerics`): a process that ran an MKL call before
+importing this package keeps MKL's default branch, and the offline
+evaluation harness refuses to score a CPU protocol there. So does a
+build whose branch cannot be read: the pin cannot be shown there.
 
 Nothing here imports torch at module import time.
 """
@@ -65,18 +68,41 @@ def pin_cpu_numerics() -> None:
     """Pin MKL's CNR branch for this process unless the operator chose one.
 
     Runs at package import. Effective only if no MKL call has happened
-    yet in this process; :func:`cpu_numerics` reports whether it did.
+    yet in this process; :func:`cpu_numerics` reports whether it did. An
+    empty ``MKL_CBWR`` counts as unset (MKL ignores it).
     """
-    os.environ.setdefault("MKL_CBWR", PINNED_MKL_CBWR)
+    if not os.environ.get("MKL_CBWR", "").strip():
+        os.environ["MKL_CBWR"] = PINNED_MKL_CBWR
 
 
-def _torch_cpu_library(torch_module: Any) -> Path | None:
+#: Loaded libraries that may export ``mkl_cbwr_get``: torch's own (the
+#: PyPI wheels link MKL into it) and MKL's (conda builds load it shared).
+_MKL_LIBRARY_MARKERS = ("libtorch_cpu", "libmkl_rt", "libmkl_core")
+
+
+def _mkl_libraries(torch_module: Any) -> list[Path]:
+    """Libraries to ask for MKL's branch: torch's ``lib`` dir, then the
+    MKL-bearing libraries this process has loaded (Linux)."""
     lib_dir = Path(torch_module.__file__).parent / "lib"
-    for name in ("libtorch_cpu.so", "libtorch_cpu.dylib", "torch_cpu.dll"):
-        candidate = lib_dir / name
-        if candidate.exists():
-            return candidate
-    return None
+    candidates = [
+        lib_dir / name
+        for name in ("libtorch_cpu.so", "libtorch_cpu.dylib", "torch_cpu.dll")
+    ]
+    try:
+        with open("/proc/self/maps") as maps:
+            for line in maps:
+                fields = line.split(maxsplit=5)
+                if len(fields) == 6 and fields[5].startswith("/"):
+                    path = Path(fields[5].strip())
+                    if path.name.startswith(_MKL_LIBRARY_MARKERS):
+                        candidates.append(path)
+    except OSError:
+        pass  # no procfs: macOS, Windows
+    found: list[Path] = []
+    for candidate in candidates:
+        if candidate.exists() and candidate.resolve() not in found:
+            found.append(candidate.resolve())
+    return found
 
 
 def _mkl_cbwr_branch(torch_module: Any) -> int | None:
@@ -85,20 +111,18 @@ def _mkl_cbwr_branch(torch_module: Any) -> int | None:
     Reading it fixes the branch for the rest of the process, like any
     first MKL call: call this only after :func:`pin_cpu_numerics`.
     """
-    library = _torch_cpu_library(torch_module)
-    if library is None:
-        return None
-    try:
-        handle = ctypes.CDLL(str(library))
-    except OSError:
-        return None
-    for symbol in _CBWR_GET_SYMBOLS:
-        function = getattr(handle, symbol, None)
-        if function is None:
+    for library in _mkl_libraries(torch_module):
+        try:
+            handle = ctypes.CDLL(str(library))
+        except OSError:
             continue
-        function.restype = ctypes.c_int
-        function.argtypes = [ctypes.c_int]
-        return int(function(_MKL_CBWR_BRANCH))
+        for symbol in _CBWR_GET_SYMBOLS:
+            function = getattr(handle, symbol, None)
+            if function is None:
+                continue
+            function.restype = ctypes.c_int
+            function.argtypes = [ctypes.c_int]
+            return int(function(_MKL_CBWR_BRANCH))
     return None
 
 
@@ -149,7 +173,16 @@ def cpu_numerics_problem() -> str | None:
     info = cpu_numerics()
     if info["pinned"] or info["blas"] != "mkl":
         return None
-    active = info["mkl_cbwr"] or "an unreadable"
+    if info["mkl_cbwr"] is None:
+        return (
+            f"torch is built with MKL, but its CNR branch cannot be read "
+            f"here (no {' or '.join(_CBWR_GET_SYMBOLS)} in torch's "
+            f"libraries or a loaded MKL library), so the {PINNED_MKL_CBWR} "
+            f"pin cannot be shown and a CPU score here might not be the "
+            f"protocol's. Score with the PyPI torch wheel on Linux (Colab, "
+            f"CI) (see docs/DECISIONS.md, 'CPU scores pin MKL's numerics')"
+        )
+    active = info["mkl_cbwr"]
     return (
         f"torch's MKL runs its {active} CNR branch, not {PINNED_MKL_CBWR} "
         f"(MKL_CBWR={info['mkl_cbwr_env']!r}), so its CPU float32 matmuls "
