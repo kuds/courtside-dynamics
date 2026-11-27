@@ -718,6 +718,43 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### A PPO notebook runs on a Colab CPU runtime; only the SAC family demands a GPU — *implemented (unreleased, 2026-11-27)*
+PPO trains on CPU by design: its profiles pin `device="cpu"`, and SB3's
+MLP actor-critic is slower on a GPU. The PPO reference is planned as a
+CPU run. Yet both training notebooks called `setup_colab()`, whose
+default `require_gpu=True` raised "Cannot communicate with GPU" on a
+CPU runtime:
+- **The campaign notebook** ran it in `pc-gpu`, before `pc-settings`
+  reads `ALGO`, so no knob could avoid it.
+- **`sb3_training`** ran it after `ALGO` was set, but unconditionally.
+
+The error steered the operator onto a paid GPU runtime that a PPO run
+leaves idle. The fix:
+- **`setup_colab` returns** what `nvidia-smi` found (`True` or `False`
+  on Colab, `None` outside).
+- **On a CPU runtime with `require_gpu=False`, it leaves `MUJOCO_GL`
+  alone.** The NVIDIA EGL setup cannot work there, and forcing
+  `MUJOCO_GL=egl` without an EGL library breaks `import mujoco` itself.
+  This was seen in the review container: PyOpenGL's EGL binding is
+  `None`, "'NoneType' object has no attribute 'eglQueryString'". Colab
+  has no display, so the recorders skip video without opening a context
+  ("A failed render is never retried"). Training and evaluation never
+  render.
+- **The campaign's `pc-gpu`** calls `setup_colab(require_gpu=False)` and
+  keeps the answer as `COLAB_GPU`. The settings cell refuses the SAC
+  plan's `REQUIRE_DEVICE = "cuda"` when `COLAB_GPU is False`, before
+  any leg setup. `train()`'s `require_device` remains the binding check
+  that torch sees the GPU; the 2026-08-28 false starts passed
+  `nvidia-smi`.
+- **`sb3_training`** calls `setup_colab(require_gpu=algo_family(ALGO)
+  != "PPO")`.
+- **`_in_colab()`** returns `False` instead of raising
+  `ModuleNotFoundError` when no `google` package is installed (finding
+  `notebook-utils-5` of 2026-10-16).
+
+The humanoid notebook still demands a GPU: the ladder design forbids
+humanoid training on CPU.
+
 ### A failed render is never retried: MuJoCo aborts the process on a second render context — *implemented (unreleased, 2026-11-27)*
 On a host without a working OpenGL backend the first render context
 fails, and the next attempt kills the interpreter:

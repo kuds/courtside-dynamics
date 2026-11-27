@@ -18,6 +18,21 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **A PPO notebook runs on a Colab CPU runtime (2026-11-27).** No env,
+  training or recipe change.
+  - **`setup_colab(require_gpu=False)` on a CPU runtime** leaves
+    `MUJOCO_GL` alone instead of forcing EGL (which breaks
+    `import mujoco` without an EGL library), and prints that video is
+    skipped. It returns whether `nvidia-smi` found a GPU (`None` off
+    Colab).
+  - **The campaign notebook** no longer refuses a CPU runtime before
+    `ALGO` is read. Its settings cell refuses the SAC plan's
+    `REQUIRE_DEVICE = "cuda"` on a runtime without a GPU.
+  - **`sb3_training`** demands a GPU for the SAC family only.
+  - **`_in_colab()`** returns `False` when no `google` package is
+    installed.
+  - See `docs/DECISIONS.md`, "A PPO notebook runs on a Colab CPU
+    runtime".
 - **CI pins its runner OS, and a failed render is never retried
   (2026-11-27).** No env stream or training change: golden digests
   22/22 (CI and full sets), recipe snapshot unchanged (96).
