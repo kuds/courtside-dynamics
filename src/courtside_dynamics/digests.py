@@ -1051,19 +1051,21 @@ def format_mismatch(
 ) -> str:
     """The loud failure text shared by the tool and the test."""
     against = f" (declared-drift slot {drift!r})" if drift else ""
-    recorded_libc = recorded_versions.get("libc", "unknown (not recorded)")
+    recorded_libc = recorded_versions.get("libc")
     live_libc = live_versions.get("libc", "unknown")
-    libc_hint = (
-        (
+    libc_hint: tuple[str, ...] = ()
+    if recorded_libc is None:
+        # Recorded before the field existed: nothing to compare, so no
+        # advice either way.
+        libc_hint = (f"  (recorded before libc was tracked; running: {live_libc})",)
+    elif "unknown" not in (recorded_libc, live_libc) and recorded_libc != live_libc:
+        libc_hint = (
             f"  libc differs (recorded: {recorded_libc}, running: "
             f"{live_libc}): the env streams reach the OS math library, "
             "whose last bits move between glibc releases -- suspect it "
             "alongside MuJoCo and numpy. See docs/DECISIONS.md, "
             "'CI pins its runner OS'.",
         )
-        if recorded_libc != live_libc
-        else ()
-    )
     return "\n".join(
         (
             f"GOLDEN DIGEST MISMATCH: {set_name}/{name}{against}",

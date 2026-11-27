@@ -58,7 +58,9 @@ PR #81, "week-1 foundations", 2026-10-18) and conducted 2026-11-27.
    changed.**
    - Seven PaddleTennis golden digests fail on every Python leg since
      GitHub's runner moved to Ubuntu 26.04. Every gate passes locally.
-   - The likely cause is the OS math library (not proven).
+   - A same-day A/B confirmed the runner image as the cause, most
+     likely through the OS math library. CI is now pinned to
+     `ubuntu-24.04` on this review's branch.
    - It means bit-identity is platform-dependent, and Colab's digests
      have never been recorded (§5).
 4. **One training setup is current: SAC on PaddleTennis.**
@@ -74,7 +76,8 @@ PR #81, "week-1 foundations", 2026-10-18) and conducted 2026-11-27.
    - The PPO reference, the in-loop and `@v3` re-scores and `select()`
      all ran end to end here, including on a real August run.
    - **First fix:** on a host without OpenGL, any run that records
-     video (the default) aborts at its second video attempt (N1).
+     video (the default) aborted at its second video attempt (N1).
+     Fixed on this review's branch.
    - **Second fix:** the notebooks refuse a Colab CPU runtime (N4).
    - **Throughput** is better than the design assumed: PPO collects
      1.2-2.7k steps/s, so 3 seeds × 10M take about 3 h on 4 vCPUs
@@ -413,21 +416,38 @@ These facts were checked against the GitHub Actions API:
   bit-identical across X86_V3, AVX512_ICL and AVX512_SPR runners,
   across numpy 2.4.6 and 2.5.5, and across the three Pythons.
 
-**Cause: not proven.** The health reviewer found the following:
+**Cause: the runner image** (confirmed after this review was first
+drafted; see the update below). The health reviewer found the
+following:
 - Between #228 and #229, GitHub's `ubuntu-latest` image moved from
   Ubuntu 24.04 to 26.04 (glibc 2.39 → 2.43).
-- The numeric packages in the install logs are unchanged.
+- The py3.11 leg is the control. Its numeric packages were the same in
+  both runs (numpy 2.4.6, MuJoCo 3.15.0), and it failed identically.
+  The py3.12 and py3.13 legs also moved numpy from 2.5.4 to 2.5.5,
+  which matches 22/22 on glibc 2.39.
 - A local replica of the failing py3.11 package set passes on glibc
   2.39.
 
-The likely cause is therefore last-bit changes in the OS math library.
+The most likely mechanism is last-bit changes in the OS math library.
 The PaddleTennis code calls `np.sin` and `np.cos` in the serve draw
 and `np.hypot` in the reach and hold escrows; the scripted policies
 and MuJoCo add more libm calls. A last-bit difference
 shows up only when a rollout reaches an input whose rounding changed,
 which would explain why some seeded cases move and others do not.
-This is unconfirmed: running Python under a glibc 2.43 loader was not
-possible in this session.
+The exact libm call that moves has not been isolated.
+
+**Update (same day).** The fix landed on this review's branch
+(`619ea91`, with follow-ups). A `workflow_dispatch` A/B confirmed the
+cause:
+- **Run #231**, at the same stream code, passed every pytest leg on
+  `ubuntu-24.04`, and the render smoke test ran and passed.
+- **The new canary job on `ubuntu-latest`** (glibc 2.43) failed exactly
+  the same 7 cases with the same digests, from a base-only install with
+  no SB3 or torch.
+
+So the runner image is the cause; numpy, SB3 and torch are not. Items
+1-3 below are done. The canary now passes while exactly those 7 cases
+move, so a change to that set is visible.
 
 **Why it matters beyond CI:**
 - **CI no longer guards the env streams.** Every future change to
@@ -778,8 +798,8 @@ in flight. Items 1-6 need no design work. Most of them run on CPU.
 
 | # | Step | Cost | Why now |
 |---|---|---|---|
-| 1 | **Restore green CI.** A/B one job on `ubuntu-24.04` against `ubuntu-26.04`, then pin `runs-on: ubuntu-24.04` as a stopgap declared in DECISIONS (do not re-record). Add the libc version to `digests.version_info()`. Add `if: ${{ !cancelled() }}` to the render step | hours | Every later merge needs a working stream gate (§5.2) |
-| 2 | **Fix the video-retry abort.** Disable recording after the first failure, with a regression test. Until then pass `record_video=False` on CPU hosts | 1 h | Otherwise a CPU run dies at its second video cadence (§8) |
+| 1 | **Done on this branch** (`619ea91` and follow-up). **Restore green CI.** A/B one job on `ubuntu-24.04` against `ubuntu-26.04`, then pin `runs-on: ubuntu-24.04` as a stopgap declared in DECISIONS (do not re-record). Add the libc version to `digests.version_info()`. Add `if: ${{ !cancelled() }}` to the render step | hours | Every later merge needs a working stream gate (§5.2) |
+| 2 | **Done on this branch** (`619ea91` and follow-up). **Fix the video-retry abort.** Disable recording after the first failure, with a regression test. Until then pass `record_video=False` on CPU hosts | 1 h | Otherwise a CPU run dies at its second video cadence (§8) |
 | 3 | **Launch the day-0 PPO reference** exactly as pre-registered: the §7 call plus `early_stop_degenerate_evals=0` and `record_video=False`, 3 seeds as parallel single-process CPU runs with a Drive `sync_dir`. On a Colab CPU runtime, call `setup_colab(require_gpu=False)` first (N4). Record `os.cpu_count()` and the CPU's ISA. Read at 3M against the frozen table | about 1 h to the 3M readout; 2.6-3.5 h for 3 × 10M on 4 vCPUs | The cheapest result that can change a decision: task-side or SAC-side, the default algorithm, and LD1′'s form |
 | 3a | **Book the choice first.** Add a DECISIONS line saying the reference is the design-literal call, not the recipe's unprobed profile, and commit the config as a TOML or spec in git rather than on Drive. Report best models under both `select()` and the in-loop rule (§6.3) | minutes | Two configs disagree on 8-9 settings (§4.4) |
 | 3b | **Add a γ control** so the reading table can separate algorithm from discount: 1-2 PPO seeds at γ=0.99 (about 1 h per 3M on CPU), or the SAC γ=0.995 arm (2 × 3M, about 11-14 h per seed on CPU or about 20 h on an L4) | as stated | Row 2 of the table otherwise confounds the two (§4.4) |

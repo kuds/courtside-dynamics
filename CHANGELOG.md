@@ -21,27 +21,34 @@ supersedes it (see the ground-rules bullet).
 - **CI pins its runner OS, and a failed render is never retried
   (2026-11-27).** No env stream or training change: golden digests
   22/22 (CI and full sets), recipe snapshot unchanged (96).
-  - **CI runs on `ubuntu-24.04`.** Since GitHub moved `ubuntu-latest`
-    to Ubuntu 26.04 (glibc 2.43), the scheduled runs of 2026-11-16 and
-    11-23 failed 7 PaddleTennis goldens on every Python leg, with no
-    code or Python-package change. The likely cause is last-bit changes
-    in the OS math library the streams reach. The pin is declared, not
-    a re-record.
-  - **A new non-blocking `golden-canary` job** runs the CI set on
-    `ubuntu-latest`, so OS-level drift stays visible.
+  - **The gating CI jobs run on `ubuntu-24.04`.** Since GitHub moved
+    `ubuntu-latest` to Ubuntu 26.04 (glibc 2.43), the scheduled runs of
+    2026-11-16 and 11-23 failed 7 PaddleTennis goldens on every Python
+    leg with no code change; the py3.11 leg's numeric packages were
+    unchanged too. `workflow_dispatch` run #231 confirmed the runner
+    image: green on 24.04, the same 7 cases failing on `ubuntu-latest`.
+    The pin is declared, not a re-record.
+  - **A non-gating `golden-canary` job** checks the CI set on
+    `ubuntu-latest` against that image's known drift. It fails only
+    when the set of moving cases changes.
   - **The render smoke test runs even when the coverage step fails.**
-  - **`digests.version_info()` records `libc`,** and a golden mismatch
-    names a libc difference. Entries recorded earlier lack the field;
-    the golden file is unchanged.
-  - **A failed video recording turns recording off for the rest of the
-    run.** A `mujoco.FatalError`, which is what a missing OpenGL backend
-    raises, turns rendering off for the rest of the process. On such a
-    host the second render-context attempt used to abort the interpreter
-    (SIGABRT, exit 134), losing the run's final model, closing
-    evaluation and manifest. A PaddleTennis quick test died that way at
-    step 20,000.
-  - **`record_best_model_video` refuses** with a `RuntimeError` after
-    such a failure, instead of killing the notebook kernel.
+  - **`digests.version_info()` records `libc`.** A golden mismatch
+    names a libc difference when both sides record one, and says the
+    recording predates the field otherwise. The golden file is
+    unchanged.
+  - **The video recorder does not try to render where it cannot.** On
+    Linux with `MUJOCO_GL` unset or `glfw` and no display, it skips
+    without opening a render context.
+  - **It never retries after a failure.** A failed recording turns
+    recording off for the rest of the run. A `mujoco.FatalError` before
+    any frame has rendered turns rendering off for the process and sets
+    `MUJOCO_GL=disable`.
+  - **Why.** On a host without OpenGL, the second render-context
+    attempt used to abort the interpreter (SIGABRT), losing the run's
+    final model, closing evaluation and manifest. A PaddleTennis quick
+    test died that way at step 20,000.
+  - **`record_best_model_video` refuses** with a `RuntimeError` where
+    rendering is unavailable, instead of killing the notebook kernel.
   - See `docs/DECISIONS.md`, "CI pins its runner OS" and "A failed
     render is never retried".
 - **Env streams no longer depend on the CPU's BLAS kernels

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import os
+import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
@@ -30,19 +31,68 @@ from stable_baselines3.common.vec_env import VecVideoRecorder
 # code (and tests) import it from this module.
 from courtside_dynamics.callbacks._info import _scalar_info_keys
 
-#: The first ``mujoco.FatalError`` raised while rendering in this process,
-#: or ``None``. MuJoCo cannot retry a failed render context: on a host
-#: without a working OpenGL backend the first ``mujoco.Renderer`` raises
-#: ``FatalError``, and the next one aborts the interpreter (SIGABRT,
-#: "libc++abi: __cxa_guard_acquire detected recursive initialization"),
-#: which no ``except`` can catch. Every recorder in the process -- later
-#: legs in one notebook kernel included -- checks this before rendering.
+# -- the process-wide render guard -------------------------------------------
+#
+# MuJoCo cannot retry a failed render context. On a host without a working
+# OpenGL backend the first ``mujoco.Renderer`` (or gymnasium's offscreen
+# viewer) raises ``mujoco.FatalError``, and the next attempt in the same
+# process aborts the interpreter (SIGABRT, "libc++abi: __cxa_guard_acquire
+# detected recursive initialization"), which no ``except`` can catch. So the
+# package's recorders never try where rendering cannot work, and never try
+# twice where it failed. See docs/DECISIONS.md, "A failed render is never
+# retried".
+
+#: A frameless copy of the first MuJoCo fatal error that poisoned rendering
+#: in this process, or ``None``. A copy, so the global never pins the
+#: failed run's frames (its model, replay buffer and envs).
 _rendering_failure: BaseException | None = None
+#: True once any frame has rendered in this process: a render context
+#: exists, so a later ``FatalError`` (a physics overflow mid-recording)
+#: is not a context failure and must not poison rendering.
+_rendered_in_process = False
 
 
 def rendering_failure() -> BaseException | None:
     """The MuJoCo error that poisoned rendering in this process, if any."""
     return _rendering_failure
+
+
+def _no_display_reason() -> str | None:
+    """Why GLFW cannot render here, decided without trying, or ``None``.
+
+    Gymnasium's MuJoCo renderer, with ``MUJOCO_GL`` unset, settles on GLFW
+    whenever its module imports, even with no display (``glfw.init`` fails
+    without raising), and only ``mjr_makeContext`` then fails. On Linux
+    that is exactly "MUJOCO_GL unset or glfw, and no DISPLAY or
+    WAYLAND_DISPLAY".
+    """
+    backend = os.environ.get("MUJOCO_GL", "").strip().lower()
+    if not sys.platform.startswith("linux") or backend not in ("", "glfw"):
+        return None
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return None
+    return (
+        "no display: MUJOCO_GL is unset or 'glfw' and neither DISPLAY nor "
+        "WAYLAND_DISPLAY is set, so GLFW cannot create a render context "
+        "(set MUJOCO_GL=egl or osmesa to render headless)"
+    )
+
+
+def rendering_unavailable_reason() -> str | None:
+    """Why the package will not render in this process, or ``None``."""
+    if _rendering_failure is not None:
+        return (
+            f"rendering already failed in this process "
+            f"({_rendering_failure!r}), and MuJoCo aborts the interpreter on "
+            f"a second render-context attempt"
+        )
+    return _no_display_reason()
+
+
+def note_rendered() -> None:
+    """Record that a frame rendered: a render context works here."""
+    global _rendered_in_process
+    _rendered_in_process = True
 
 
 def _mujoco_fatal_in(error: BaseException) -> BaseException | None:
@@ -57,18 +107,32 @@ def _mujoco_fatal_in(error: BaseException) -> BaseException | None:
     return None
 
 
-def note_rendering_failure(error: BaseException) -> bool:
-    """Remember ``error`` if a MuJoCo fatal error caused it.
+def _frameless(error: BaseException) -> BaseException:
+    """A copy of ``error`` without its traceback (and so its frames)."""
+    try:
+        return type(error)(*error.args)
+    except Exception:
+        return RuntimeError(repr(error))
 
-    Returns ``True`` when rendering is now off for the rest of the
-    process. Only the first failure is kept: it names the root cause.
+
+def note_rendering_failure(error: BaseException) -> bool:
+    """Poison rendering for the process if ``error`` is a context failure.
+
+    A context failure is a ``mujoco.FatalError`` in the error's chain
+    before any frame has rendered in this process. Returns ``True`` when
+    rendering is now off for the rest of the process. Only the first
+    failure is kept, since it names the root cause. Poisoning also sets
+    ``MUJOCO_GL=disable``, so that a later gymnasium ``env.render()``
+    anywhere in the process, a notebook cell included, raises a
+    ``RuntimeError`` instead of aborting.
     """
     global _rendering_failure
     fatal = _mujoco_fatal_in(error)
-    if fatal is None:
+    if fatal is None or _rendered_in_process:
         return False
     if _rendering_failure is None:
-        _rendering_failure = fatal
+        _rendering_failure = _frameless(fatal)
+        os.environ["MUJOCO_GL"] = "disable"
     return True
 
 InfoRowFn = Callable[[dict, float, float, bool], Sequence[object]]
@@ -224,17 +288,16 @@ class VideoRecordCallback(BaseCallback):
             return True
         if self.save_freq <= 0 or self.n_calls % self.save_freq != 0:
             return True
-        earlier = rendering_failure()
-        if earlier is not None:
-            # Another recorder in this process already hit a MuJoCo
-            # render failure; trying again would abort the interpreter.
-            self._disabled_reason = repr(earlier)
+        unavailable = rendering_unavailable_reason()
+        if unavailable is not None:
+            # No display, or another recorder in this process already hit
+            # a MuJoCo render failure: trying would fail, or abort the
+            # interpreter.
+            self._disabled_reason = unavailable
             print(
                 f"[VideoRecordCallback] recording at step "
                 f"{self.num_timesteps} skipped, and off for the rest of "
-                f"this run: rendering already failed in this process "
-                f"({earlier!r}), and MuJoCo aborts the interpreter on a "
-                f"second render-context attempt."
+                f"this run: {unavailable}."
             )
             return True
         # Recording is an optional diagnostic: a missing GL backend or
@@ -334,6 +397,9 @@ class VideoRecordCallback(BaseCallback):
             )
 
             obs = rec_env.reset()
+            # VecVideoRecorder.reset captured the first frame: a render
+            # context works in this process.
+            note_rendered()
             # SB3 VecEnv.reset() is typed as ndarray | dict | tuple, but
             # ``VecVideoRecorder`` over a Box obs space always yields ndarray.
             assert not isinstance(obs, tuple)

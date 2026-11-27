@@ -2097,20 +2097,19 @@ def record_best_model_video(
     import imageio.v2 as imageio
 
     from courtside_dynamics.callbacks.video_record import (
+        note_rendered,
         note_rendering_failure,
-        rendering_failure,
+        rendering_unavailable_reason,
     )
 
-    earlier = rendering_failure()
-    if earlier is not None:
-        # A second render-context attempt after a MuJoCo render failure
-        # aborts the interpreter (and with it the notebook kernel), so
-        # refuse with a Python error instead.
+    unavailable = rendering_unavailable_reason()
+    if unavailable is not None:
+        # With no display the render fails; after a MuJoCo render failure
+        # a second render-context attempt aborts the interpreter (and with
+        # it the notebook kernel). Refuse with a Python error instead.
         raise RuntimeError(
-            "Rendering already failed in this process "
-            f"({earlier!r}); MuJoCo aborts the interpreter on a second "
-            "render-context attempt, so no video is recorded. Restart the "
-            "runtime on a host with a working OpenGL backend (MUJOCO_GL)."
+            f"No video recorded: {unavailable}. Use a runtime with a "
+            "working OpenGL backend (MUJOCO_GL=egl on a GPU runtime)."
         )
 
     model = _load_best_model(str(log_dir), algo)
@@ -2141,6 +2140,8 @@ def record_best_model_video(
                 note_rendering_failure(error)
                 raise
             if frame is not None:
+                if not frames:
+                    note_rendered()
                 frames.append(np.asarray(frame))
             if terminated or truncated:
                 break

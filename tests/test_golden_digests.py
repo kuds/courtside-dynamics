@@ -832,12 +832,20 @@ def test_version_info_records_the_c_library():
 
 
 def test_mismatch_names_a_libc_difference():
-    """A mismatch whose recorded and live C libraries differ (or whose
-    recording predates the libc field) says so, so the reader suspects
-    the OS math library and not only MuJoCo or numpy."""
+    """A mismatch whose recorded and live C libraries are both known and
+    differ says so, so the reader suspects the OS math library and not
+    only MuJoCo or numpy. A recording that predates the libc field gets a
+    neutral note instead: every golden entry recorded before the field
+    lacks it, and blaming libc there would mislead on every mismatch."""
     live = {**version_info(), "libc": "glibc 2.43"}
-    recorded = {k: v for k, v in live.items() if k != "libc"}
-    text = format_mismatch("ci", "case", ["x: expected 1, got 2"], recorded, live, None)
-    assert "libc differs (recorded: unknown (not recorded), running: glibc 2.43)" in text
-    same = format_mismatch("ci", "case", ["x"], live, live, None)
-    assert "libc differs" not in same
+    lines = ["x: expected 1, got 2"]
+    recorded = {**live, "libc": "glibc 2.39"}
+    text = format_mismatch("ci", "case", lines, recorded, live, None)
+    assert "libc differs (recorded: glibc 2.39, running: glibc 2.43)" in text
+    predates = {k: v for k, v in live.items() if k != "libc"}
+    text = format_mismatch("ci", "case", lines, predates, live, None)
+    assert "libc differs" not in text
+    assert "(recorded before libc was tracked; running: glibc 2.43)" in text
+    for same in (live, {**live, "libc": "unknown"}):
+        text = format_mismatch("ci", "case", lines, same, live, None)
+        assert "libc differs" not in text

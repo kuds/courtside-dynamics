@@ -719,37 +719,75 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 ## Training harness & instrumentation
 
 ### A failed render is never retried: MuJoCo aborts the process on a second render context — *implemented (unreleased, 2026-11-27)*
-On a host without a working OpenGL backend (no display and no usable
-`MUJOCO_GL`: a CPU container, a CI runner, possibly a Colab CPU
-runtime) the first `mujoco.Renderer` raises `mujoco.FatalError`, and
-`VideoRecordCallback` logged it and skipped the recording, as Cardinal
-Rule 7 asks. It then retried at the next cadence, and the second
-render-context attempt aborts the interpreter: "libc++abi:
-__cxa_guard_acquire detected recursive initialization", SIGABRT, exit
-134, which no `except` catches. The review of 2026-11-27 hit it in a
-PaddleTennis SAC quick test at step 20,000. The run was left with a
-`running` record, no manifest, no closing evaluation and no final
-model. `record_video` defaults to on, and PPO now trains on CPU, so the
-PPO reference would have died at its second video, step 500,000.
+On a host without a working OpenGL backend the first render context
+fails, and the next attempt kills the interpreter:
+- **Where.** A CPU container, a CI runner, possibly a Colab CPU
+  runtime.
+- **What happens.** The first `mujoco.Renderer`, or gymnasium's
+  offscreen viewer, raises `mujoco.FatalError`. `VideoRecordCallback`
+  logged it and skipped the recording, as Cardinal Rule 7 asks, then
+  retried at the next cadence. The second render-context attempt
+  aborts the interpreter: "libc++abi: __cxa_guard_acquire detected
+  recursive initialization", SIGABRT (`subprocess` returncode -6, 134
+  from a shell). No `except` can catch that.
+- **The cost.** The 2026-11-27 review hit it in a PaddleTennis SAC
+  quick test at step 20,000. The run was left with a `running` record,
+  no manifest, no closing evaluation and no final model.
+- **Why it matters now.** `record_video` defaults to on, and PPO now
+  trains on CPU, so the PPO reference would have died at its second
+  video, step 500,000.
+
+The package now never opens a render context where it cannot work,
+and never opens one twice where one failed
+(`video_record.rendering_unavailable_reason()`):
+- **No display: skip without trying.** On Linux with `MUJOCO_GL` unset
+  or `glfw` and neither `DISPLAY` nor `WAYLAND_DISPLAY` set, gymnasium
+  still settles on GLFW: `glfw.init` fails without raising, and only
+  `mjr_makeContext` then fails. That predicate is exact, so the
+  recorder and `record_best_model_video` skip and say why, without
+  touching GL. `MUJOCO_GL=egl` or `osmesa` renders headless.
 - **The first failed recording turns recording off for the rest of the
   run** (any exception: a codec failure only repeats).
-- **A `mujoco.FatalError` anywhere in the error's cause chain turns
-  rendering off for the rest of the process**
-  (`video_record.rendering_failure()`). A later recorder in the same
-  interpreter, for example the next campaign leg in one notebook
-  kernel, prints why and does not try, and `record_best_model_video`
-  refuses with a `RuntimeError` instead of aborting the kernel. Only the
-  first failure is kept, since it names the root cause.
-- **Regression test.**
-  `test_two_recordings_on_a_host_without_gl_do_not_abort` runs two real
-  cadences in a subprocess with no display. It exits 134 on the old
-  callback and 0 on the new one; on a host with GL both cadences simply
-  record.
+- **A context failure turns rendering off for the rest of the
+  process.** A context failure is a `mujoco.FatalError` in the error's
+  cause chain before any frame has rendered in this process. Once a
+  frame has rendered, a context exists, so a later `FatalError` (a
+  physics stack overflow mid-recording) stays local to its run.
+  Poisoning the process does three things:
+  - later recorders skip and say why, for example the next campaign
+    leg in one notebook kernel;
+  - `record_best_model_video` refuses with a `RuntimeError`;
+  - `MUJOCO_GL=disable` is set, so a later gymnasium `env.render()`
+    anywhere in the process, a notebook cell included, raises
+    `RuntimeError` instead of aborting.
+- **The stored failure is a frameless copy.** The live exception's
+  traceback would pin the failed run's model and replay buffer for the
+  life of the kernel.
 
-Not changed: whether a run records video, the recording itself, and
-every artifact of a run whose recording works. See also "Isolate the
-video callback" (Humanoid tennis environment) for the isolation this
-completes.
+**Limits.** A raw `mujoco.Renderer` or `mujoco.GLContext` in user code
+reads `MUJOCO_GL` at import, so after a failure outside the package's
+recorders a second such attempt still aborts. Only code that goes
+through this guard is protected.
+
+**Tests** (in `tests/test_callbacks.py`):
+- Two subprocess tests run real recorders, the second recorder in the
+  same process standing in for the next campaign leg:
+  - with no display, no recorder opens a context;
+  - with a `DISPLAY` that names no X server, the first context really
+    fails, the run's second cadence and the later recorder do not try,
+    and a plain `env.render()` raises.
+
+  Both exit with SIGABRT on the old callback and 0 on the new one.
+- Unit tests cover:
+  - per-run and per-process scope;
+  - the cause chain;
+  - the rendered-frame exemption;
+  - the no-display predicate;
+  - the frameless copy.
+
+Not changed: the recording itself, and every artifact of a run whose
+recording works. See also "Isolate the video callback" (Humanoid
+tennis environment), the isolation this completes.
 
 ### CI pins its runner OS: the goldens are glibc-2.39 streams — *implemented (unreleased, 2026-11-27)*
 The scheduled CI runs of 2026-11-16 (#229) and 2026-11-23 (#230) at
@@ -761,12 +799,20 @@ PaddleTennis golden digests. The same SHA had passed weekly from
   `drill_full/random` and `recipe/oracle_seed_once` (info only);
 - the other 7 PaddleTennis cases and every other env still matched;
 - the wrong digests were bit-identical across X86_V3, AVX512_ICL and
-  AVX512_SPR runners, numpy 2.4.6 and 2.5.5, and all three Pythons.
+  AVX512_SPR runners and all three Pythons.
 
 Between #228 and #229, `ubuntu-latest` moved from Ubuntu 24.04 to
-26.04, so glibc went from 2.39 to 2.43 while every Python package in
-the install logs stayed the same. A local replica of the failing py3.11
-package set on glibc 2.39 matches.
+26.04, so glibc went from 2.39 to 2.43. Two facts rule out the Python
+packages:
+- **The py3.11 leg is the control.** Its numeric packages were the
+  same in both runs (numpy 2.4.6, MuJoCo 3.15.0), and it failed
+  identically. The py3.12 and py3.13 legs also moved numpy from 2.5.4
+  to 2.5.5, but numpy 2.5.5 on glibc 2.39 matches 22/22.
+- **The A/B confirms the runner image.** `workflow_dispatch` run #231
+  of the pinned workflow (`619ea91`) at the same stream code passed
+  every pytest leg on `ubuntu-24.04`. Its canary on `ubuntu-latest`
+  (glibc 2.43, a base-only install with no SB3 or torch) failed exactly
+  the same 7 cases with the same digests.
 
 The streams reach the OS libm in three ways:
 - numpy's float64 `sin`, `cos` and `hypot` (the serve draw and the
@@ -774,29 +820,34 @@ The streams reach the OS libm in three ways:
 - `libmujoco`, which links `libm.so.6` dynamically;
 - the scripted policies.
 
-The BLAS fix of 2026-10-18 removed the CPU-kernel dependence, but not
-this OS dependence. The cause is the most likely one and is not
-proven: running Python under a glibc 2.43 loader was not possible in
-the review session. A `workflow_dispatch` run of the pinned workflow
-confirms it if `pytest` is green on 24.04 while the canary fails on
-26.04.
+The BLAS fix of 2026-10-18 removed the CPU-kernel dependence, not this
+OS dependence. The exact libm call that moves has not been isolated.
 
-**Decision.** Pin every job to `ubuntu-24.04` and do not re-record.
-Re-recording would bless 26.04's bits and break 24.04 and every
-earlier host. A `golden-canary` job runs the CI set on the floating
-`ubuntu-latest` with `continue-on-error`, so the next OS-level move
-shows as a red job, not a red `main`. Also:
-- `digests.version_info()` records `libc`, and a mismatch names a libc
-  difference. Older entries lack the field, as they lack `numpy_simd`.
+**Decision.** Pin every gating job to `ubuntu-24.04` and do not
+re-record. Re-recording would bless 26.04's bits and break 24.04 and
+every earlier host. A non-gating `golden-canary` job (with
+`continue-on-error`) runs the CI set on the floating `ubuntu-latest`
+against that image's known drift. It passes while exactly the 7 cases
+above move, and fails when the set changes: a further OS move, or a
+recovery. Update its list here and in `ci.yml` when that happens. Also:
+- `digests.version_info()` records `libc`. A mismatch names a libc
+  difference only when both sides know their libc. Older entries lack
+  the field, as they lack `numpy_simd`, and get a neutral note instead.
 - The render smoke step runs whenever the job was not cancelled. It was
   skipped behind the golden failures.
 
-**Still open.** Colab's digests have never been recorded (M1's "Colab
-vs local" clause), and every August run trained on Colab, so record
-them before leaning on "bit-identical since August". Then decide
-between a libm-independent stream path, as was done for BLAS, and one
-lock per platform, the ladder design's fallback. The cap here is the
-runner image: lifting the pin needs one of the two.
+**Still open:**
+- **Colab's digests have never been recorded** (M1's "Colab vs local"
+  clause). Colab's image ships its own glibc, and every August run
+  trained there, so record them before leaning on "bit-identical since
+  August".
+- **Run records and re-score rows do not record the libc.**
+  `harness._versions()` and `artifacts._versions()` keep python, numpy,
+  MuJoCo, torch and SB3 only, so a Colab-versus-local libm split is not
+  visible where cross-host comparisons happen.
+- **Lifting the pin** needs one of two things: a libm-independent
+  stream path, as was done for BLAS, or one lock per platform, the
+  ladder design's fallback.
 
 ### The best model says which save it holds on both paths, final saves are atomic, and a protocol pins its device — *implemented (unreleased, 2026-10-17); phase-4 verifier findings, round 2*
 The round-2 verifiers of `17befbf`: four majors and six minors. No env

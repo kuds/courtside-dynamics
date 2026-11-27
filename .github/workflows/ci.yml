@@ -24,14 +24,15 @@ concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Every job pins its runner OS. The golden env digests are recorded on
-# Ubuntu 24.04 (glibc 2.39), and the env streams still reach the OS
+# Every gating job pins its runner OS. The golden env digests reproduce
+# on Ubuntu 24.04 (glibc 2.39), and the env streams still reach the OS
 # math library: when GitHub moved ubuntu-latest to Ubuntu 26.04
 # (glibc 2.43) between the 2026-11-09 and 2026-11-16 scheduled runs, 7
-# PaddleTennis goldens failed on every Python leg with no code or
-# Python-package change. The pin is a declared stopgap, not a
-# re-record; the golden-canary job below keeps measuring ubuntu-latest.
-# See docs/DECISIONS.md, "CI pins its runner OS".
+# PaddleTennis goldens failed on every Python leg with no code change,
+# the py3.11 leg's numeric packages unchanged too. The pin is a declared
+# stopgap, not a re-record; the non-gating golden-canary job below
+# keeps measuring ubuntu-latest. See docs/DECISIONS.md, "CI pins its
+# runner OS".
 jobs:
   lint:
     name: ruff
@@ -147,11 +148,14 @@ jobs:
           MKL_NUM_THREADS: 1
         run: xvfb-run -a pytest -q tests/test_humanoid_tennis_env.py::test_rgb_array_render_smoke
 
-  # Not a gate: the CI golden set on the floating ubuntu-latest image, so
-  # the next OS-level change to the env streams shows up as a red job
-  # here instead of a red main. While ubuntu-latest is Ubuntu 26.04 this
-  # job is expected to fail on the 7 PaddleTennis cases that move under
-  # glibc 2.43; continue-on-error keeps the workflow green.
+  # Not a gate: the CI golden set on the floating ubuntu-latest image,
+  # checked against that image's known drift. The baseline is the set
+  # of cases that move there: on Ubuntu 26.04 (glibc 2.43), measured in
+  # run #231 (2026-11-27), the 7 PaddleTennis cases below and nothing
+  # else. The job fails only when that set changes -- a further OS move,
+  # or a recovery -- so a red canary is news. continue-on-error keeps a
+  # new runner image from blocking merges; update the list and
+  # docs/DECISIONS.md when it changes.
   golden-canary:
     name: golden digests (ubuntu-latest canary)
     runs-on: ubuntu-latest
@@ -166,8 +170,31 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -e .
       - run: ldd --version | head -1
-      - name: Golden digests (CI set)
+      - name: Golden digests (CI set) against the known ubuntu-latest drift
         env:
           OMP_NUM_THREADS: 1
           MKL_NUM_THREADS: 1
-        run: python tools/golden_digest.py
+          EXPECTED_MISMATCHES: >-
+            paddle_tennis/drill_feed/random
+            paddle_tennis/drill_full/random
+            paddle_tennis/hold/oracle
+            paddle_tennis/one_point/oracle
+            paddle_tennis/recipe/camper
+            paddle_tennis/recipe/oracle_seed_once
+            paddle_tennis/recipe/random
+        run: |
+          status=0
+          python tools/golden_digest.py > canary.log 2>&1 || status=$?
+          cat canary.log
+          if ! grep -qE '^ci: [0-9]+/[0-9]+ cases match' canary.log; then
+            echo "golden_digest.py did not finish (exit $status)"
+            exit 1
+          fi
+          { grep -E '^(MISMATCH|MISSING) ' canary.log || true; } \
+            | awk '{print $2}' | sort > got.txt
+          printf '%s\n' $EXPECTED_MISMATCHES | sort > want.txt
+          if ! diff -u want.txt got.txt; then
+            echo "The ubuntu-latest golden drift changed (diff above)."
+            exit 1
+          fi
+          echo "ubuntu-latest drift unchanged: exactly the $(wc -l < want.txt) known cases move."
