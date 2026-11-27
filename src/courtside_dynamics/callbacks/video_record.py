@@ -18,6 +18,7 @@ import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
+import mujoco
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
@@ -28,6 +29,47 @@ from stable_baselines3.common.vec_env import VecVideoRecorder
 # a private name from the other. Re-exported here for back-compat: existing
 # code (and tests) import it from this module.
 from courtside_dynamics.callbacks._info import _scalar_info_keys
+
+#: The first ``mujoco.FatalError`` raised while rendering in this process,
+#: or ``None``. MuJoCo cannot retry a failed render context: on a host
+#: without a working OpenGL backend the first ``mujoco.Renderer`` raises
+#: ``FatalError``, and the next one aborts the interpreter (SIGABRT,
+#: "libc++abi: __cxa_guard_acquire detected recursive initialization"),
+#: which no ``except`` can catch. Every recorder in the process -- later
+#: legs in one notebook kernel included -- checks this before rendering.
+_rendering_failure: BaseException | None = None
+
+
+def rendering_failure() -> BaseException | None:
+    """The MuJoCo error that poisoned rendering in this process, if any."""
+    return _rendering_failure
+
+
+def _mujoco_fatal_in(error: BaseException) -> BaseException | None:
+    """The ``mujoco.FatalError`` in ``error``'s cause/context chain."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, mujoco.FatalError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def note_rendering_failure(error: BaseException) -> bool:
+    """Remember ``error`` if a MuJoCo fatal error caused it.
+
+    Returns ``True`` when rendering is now off for the rest of the
+    process. Only the first failure is kept: it names the root cause.
+    """
+    global _rendering_failure
+    fatal = _mujoco_fatal_in(error)
+    if fatal is None:
+        return False
+    if _rendering_failure is None:
+        _rendering_failure = fatal
+    return True
 
 InfoRowFn = Callable[[dict, float, float, bool], Sequence[object]]
 """Signature: ``(info, reward, total_reward, done) -> row values``."""
@@ -137,6 +179,9 @@ class VideoRecordCallback(BaseCallback):
         self.tb_log_prefix = tb_log_prefix
         self.seed = seed
         self.deterministic = deterministic
+        # Set by the first failed recording; recording stays off for the
+        # rest of the run after that (see ``_on_step``).
+        self._disabled_reason: str | None = None
 
         self._user_info_row_fn = info_row_fn
         self._user_csv_header = list(csv_header) if csv_header else None
@@ -175,19 +220,46 @@ class VideoRecordCallback(BaseCallback):
         # ``save_freq <= 0`` disables recording (same contract as
         # InfoDictEvalCallback's eval_freq) instead of raising
         # ZeroDivisionError on the modulo below.
+        if self._disabled_reason is not None:
+            return True
         if self.save_freq <= 0 or self.n_calls % self.save_freq != 0:
+            return True
+        earlier = rendering_failure()
+        if earlier is not None:
+            # Another recorder in this process already hit a MuJoCo
+            # render failure; trying again would abort the interpreter.
+            self._disabled_reason = repr(earlier)
+            print(
+                f"[VideoRecordCallback] recording at step "
+                f"{self.num_timesteps} skipped, and off for the rest of "
+                f"this run: rendering already failed in this process "
+                f"({earlier!r}), and MuJoCo aborts the interpreter on a "
+                f"second render-context attempt."
+            )
             return True
         # Recording is an optional diagnostic: a missing GL backend or
         # video codec surfacing here must not propagate out of
         # model.learn() and cost the run its final artifacts
         # (KeyboardInterrupt still propagates -- the salvage path owns
-        # it).
+        # it). It must not be retried either: after a failed GL context
+        # the next mujoco.Renderer aborts the whole process (SIGABRT,
+        # uncatchable), and a codec failure only repeats. So the first
+        # failure turns recording off for the rest of the run, and a
+        # MuJoCo fatal error turns it off for the rest of the process.
         try:
             self._record_rollout()
         except Exception as error:
+            self._disabled_reason = repr(error)
+            scope = (
+                "every later recorder in this process (MuJoCo cannot "
+                "retry a failed render context)"
+                if note_rendering_failure(error)
+                else "the rest of this run"
+            )
             print(
                 f"[VideoRecordCallback] recording at step "
-                f"{self.num_timesteps} failed and was skipped: {error!r}"
+                f"{self.num_timesteps} failed and was skipped: {error!r}. "
+                f"Recording is off for {scope}."
             )
         return True
 

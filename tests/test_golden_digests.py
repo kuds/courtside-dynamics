@@ -101,8 +101,9 @@ def test_golden_records_exactly_the_defined_cases(golden, set_name):
     """No stale entry, no unrecorded case: either drifts silently."""
     cases = {"ci": CI_CASES, "full": FULL_CASES}[set_name]
     assert sorted(golden["sets"][set_name]) == sorted(case.name for case in cases)
-    # Entries recorded before version_info() gained numpy_simd lack it.
-    required = version_info().keys() - {"numpy_simd"}
+    # Entries recorded before version_info() gained numpy_simd or libc
+    # lack them.
+    required = version_info().keys() - {"numpy_simd", "libc"}
     for name, entry in golden["sets"][set_name].items():
         assert "stream_sha256" in entry, f"{name} has no primary digest"
         assert required <= entry["versions"].keys() <= version_info().keys(), name
@@ -815,3 +816,28 @@ def test_digests_never_import_sb3_or_torch():
         timeout=300,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_version_info_records_the_c_library():
+    """The env streams reach the OS libm, so the C library belongs in the
+    recorded provenance (glibc 2.39 -> 2.43 moved 7 PaddleTennis goldens
+    with every Python package unchanged)."""
+    import platform
+
+    from courtside_dynamics.digests import libc_version
+
+    name, version = platform.libc_ver()
+    assert version_info()["libc"] == libc_version()
+    assert libc_version() == (f"{name} {version}" if name else "unknown")
+
+
+def test_mismatch_names_a_libc_difference():
+    """A mismatch whose recorded and live C libraries differ (or whose
+    recording predates the libc field) says so, so the reader suspects
+    the OS math library and not only MuJoCo or numpy."""
+    live = {**version_info(), "libc": "glibc 2.43"}
+    recorded = {k: v for k, v in live.items() if k != "libc"}
+    text = format_mismatch("ci", "case", ["x: expected 1, got 2"], recorded, live, None)
+    assert "libc differs (recorded: unknown (not recorded), running: glibc 2.43)" in text
+    same = format_mismatch("ci", "case", ["x"], live, live, None)
+    assert "libc differs" not in same

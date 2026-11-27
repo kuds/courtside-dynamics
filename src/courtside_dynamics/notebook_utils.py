@@ -2096,6 +2096,23 @@ def record_best_model_video(
     """
     import imageio.v2 as imageio
 
+    from courtside_dynamics.callbacks.video_record import (
+        note_rendering_failure,
+        rendering_failure,
+    )
+
+    earlier = rendering_failure()
+    if earlier is not None:
+        # A second render-context attempt after a MuJoCo render failure
+        # aborts the interpreter (and with it the notebook kernel), so
+        # refuse with a Python error instead.
+        raise RuntimeError(
+            "Rendering already failed in this process "
+            f"({earlier!r}); MuJoCo aborts the interpreter on a second "
+            "render-context attempt, so no video is recorded. Restart the "
+            "runtime on a host with a working OpenGL backend (MUJOCO_GL)."
+        )
+
     model = _load_best_model(str(log_dir), algo)
     normalize_obs = _load_obs_normalizer(str(log_dir), env_fn)
     env = env_fn()
@@ -2111,16 +2128,24 @@ def record_best_model_video(
     frames: list[ArrayLike] = []
     total_reward = 0.0
     obs, _ = env.reset()
-    for _ in range(video_length):
-        action, _ = model.predict(normalize_obs(obs), deterministic=deterministic)
-        obs, reward, terminated, truncated, _ = env.step(action)
-        total_reward += float(reward)
-        frame = env.render()
-        if frame is not None:
-            frames.append(np.asarray(frame))
-        if terminated or truncated:
-            break
-    env.close()
+    try:
+        for _ in range(video_length):
+            action, _ = model.predict(
+                normalize_obs(obs), deterministic=deterministic
+            )
+            obs, reward, terminated, truncated, _ = env.step(action)
+            total_reward += float(reward)
+            try:
+                frame = env.render()
+            except Exception as error:
+                note_rendering_failure(error)
+                raise
+            if frame is not None:
+                frames.append(np.asarray(frame))
+            if terminated or truncated:
+                break
+    finally:
+        env.close()
 
     if not frames:
         raise RuntimeError("No frames captured; check render_mode='rgb_array'.")

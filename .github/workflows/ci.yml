@@ -24,10 +24,18 @@ concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Every job pins its runner OS. The golden env digests are recorded on
+# Ubuntu 24.04 (glibc 2.39), and the env streams still reach the OS
+# math library: when GitHub moved ubuntu-latest to Ubuntu 26.04
+# (glibc 2.43) between the 2026-11-09 and 2026-11-16 scheduled runs, 7
+# PaddleTennis goldens failed on every Python leg with no code or
+# Python-package change. The pin is a declared stopgap, not a
+# re-record; the golden-canary job below keeps measuring ubuntu-latest.
+# See docs/DECISIONS.md, "CI pins its runner OS".
 jobs:
   lint:
     name: ruff
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +49,7 @@ jobs:
 
   typecheck:
     name: mypy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -62,7 +70,7 @@ jobs:
 
   build:
     name: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -91,7 +99,7 @@ jobs:
 
   test:
     name: pytest (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -129,9 +137,37 @@ jobs:
         run: >
           pytest -n 2 --cov=courtside_dynamics
           --cov-report=term-missing:skip-covered
+      # !cancelled(): run even when the coverage step failed, so GL
+      # rendering keeps its only CI coverage (runs #229 and #230 skipped
+      # it behind the golden-digest failures).
       - name: MuJoCo rendering smoke test
-        if: matrix.python-version == '3.13'
+        if: ${{ !cancelled() && matrix.python-version == '3.13' }}
         env:
           OMP_NUM_THREADS: 1
           MKL_NUM_THREADS: 1
         run: xvfb-run -a pytest -q tests/test_humanoid_tennis_env.py::test_rgb_array_render_smoke
+
+  # Not a gate: the CI golden set on the floating ubuntu-latest image, so
+  # the next OS-level change to the env streams shows up as a red job
+  # here instead of a red main. While ubuntu-latest is Ubuntu 26.04 this
+  # job is expected to fail on the 7 PaddleTennis cases that move under
+  # glibc 2.43; continue-on-error keeps the workflow green.
+  golden-canary:
+    name: golden digests (ubuntu-latest canary)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e .
+      - run: ldd --version | head -1
+      - name: Golden digests (CI set)
+        env:
+          OMP_NUM_THREADS: 1
+          MKL_NUM_THREADS: 1
+        run: python tools/golden_digest.py

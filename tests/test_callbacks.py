@@ -266,6 +266,167 @@ def test_video_recording_failure_does_not_stop_training(
     assert "no GL backend" in out
 
 
+def _broken_recorder(monkeypatch, fail):
+    """Make every recording attempt call ``fail`` (which raises); count
+    the attempts."""
+    from courtside_dynamics.callbacks import video_record
+
+    attempts = []
+
+    def broken_make_vec_env(*args, **kwargs):
+        attempts.append(1)
+        fail()
+
+    monkeypatch.setattr(video_record, "make_vec_env", broken_make_vec_env)
+    # Isolate the process-wide flag: monkeypatch restores it afterwards.
+    monkeypatch.setattr(video_record, "_rendering_failure", None)
+    return attempts
+
+
+def _video_callback(tmp_path, save_freq=1):
+    from courtside_dynamics.callbacks.video_record import VideoRecordCallback
+
+    cb = VideoRecordCallback(
+        env_fn=lambda: None,
+        save_path=str(tmp_path),
+        video_length=5,
+        save_freq=save_freq,
+    )
+    cb.model = _FakeModel(action_dim=3)
+    return cb
+
+
+def test_video_recording_failure_turns_recording_off_for_the_run(
+    tmp_path, monkeypatch, capsys
+):
+    """A failed recording is never retried within the run: after a failed
+    GL context MuJoCo aborts the interpreter on the next attempt, and a
+    codec failure only repeats. A non-MuJoCo error stays local to this
+    callback, so another run in the process may still record."""
+    from courtside_dynamics.callbacks import video_record
+
+    def no_codec():
+        raise RuntimeError("no codec")
+
+    attempts = _broken_recorder(monkeypatch, no_codec)
+    cb = _video_callback(tmp_path)
+    for step in (1, 2, 3):
+        cb.n_calls = cb.num_timesteps = step
+        assert cb._on_step() is True
+    assert len(attempts) == 1
+    out = capsys.readouterr().out
+    assert out.count("failed and was skipped") == 1
+    assert "off for the rest of this run" in out
+    assert video_record.rendering_failure() is None
+
+    fresh = _video_callback(tmp_path)
+    fresh.n_calls = fresh.num_timesteps = 1
+    fresh._on_step()
+    assert len(attempts) == 2
+
+
+def test_mujoco_render_failure_turns_recording_off_for_the_process(
+    tmp_path, monkeypatch, capsys
+):
+    """A ``mujoco.FatalError`` (what a missing GL backend raises) poisons
+    rendering for the whole process: the next ``mujoco.Renderer`` would
+    abort the interpreter with SIGABRT, so a later recorder -- another
+    campaign leg in the same notebook kernel -- must not try at all."""
+    import mujoco
+
+    from courtside_dynamics.callbacks import video_record
+
+    fatal = mujoco.FatalError("an OpenGL platform library has not been loaded")
+
+    def gl_context_fails():
+        # Wrapped, as a renderer layer may re-raise it: the chain counts.
+        raise RuntimeError("render failed") from fatal
+
+    attempts = _broken_recorder(monkeypatch, gl_context_fails)
+    cb = _video_callback(tmp_path)
+    cb.n_calls = cb.num_timesteps = 1
+    cb._on_step()
+    assert video_record.rendering_failure() is fatal
+    assert "every later recorder in this process" in capsys.readouterr().out
+
+    later = _video_callback(tmp_path)
+    for step in (1, 2):
+        later.n_calls = later.num_timesteps = step
+        assert later._on_step() is True
+    assert len(attempts) == 1, "a later recorder retried a poisoned renderer"
+    out = capsys.readouterr().out
+    assert out.count("rendering already failed in this process") == 1
+
+
+def test_note_rendering_failure_keeps_only_mujoco_fatal_errors(monkeypatch):
+    import mujoco
+
+    from courtside_dynamics.callbacks import video_record
+
+    monkeypatch.setattr(video_record, "_rendering_failure", None)
+    assert video_record.note_rendering_failure(ValueError("codec")) is False
+    assert video_record.rendering_failure() is None
+    first = mujoco.FatalError("first")
+    try:
+        try:
+            raise first
+        except mujoco.FatalError:
+            raise RuntimeError("context")  # noqa: B904 -- __context__ chain
+    except RuntimeError as wrapped:
+        assert video_record.note_rendering_failure(wrapped) is True
+    assert video_record.note_rendering_failure(mujoco.FatalError("later"))
+    assert video_record.rendering_failure() is first, "root cause kept"
+
+
+def test_two_recordings_on_a_host_without_gl_do_not_abort(tmp_path):
+    """End to end, in a subprocess: with no display and no MUJOCO_GL, the
+    first real recording fails (MuJoCo cannot load a GL platform) and the
+    second cadence must not try again -- it used to abort the interpreter
+    (exit 134, SIGABRT) and lose the whole run. On a host where GL does
+    work, both cadences simply record."""
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(
+        f"""
+        from stable_baselines3 import PPO
+        from courtside_dynamics.callbacks.video_record import VideoRecordCallback
+        from courtside_dynamics.envs import BallBalanceEnv
+
+        model = PPO("MlpPolicy", BallBalanceEnv(), n_steps=64, batch_size=64,
+                    device="cpu")
+        cb = VideoRecordCallback(
+            env_fn=lambda: BallBalanceEnv(render_mode="rgb_array"),
+            save_path={str(tmp_path)!r}, video_length=5, save_freq=1,
+            max_episodes=1,
+        )
+        cb.init_callback(model)
+        for step in (1, 2):
+            cb.n_calls = cb.num_timesteps = step
+            cb._on_step()
+        print("SURVIVED")
+        """
+    )
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"DISPLAY", "WAYLAND_DISPLAY", "MUJOCO_GL", "PYOPENGL_PLATFORM"}
+    }
+    env.update(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1")
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=300,
+    )
+    assert result.returncode == 0, (result.returncode, result.stderr[-2000:])
+    assert "SURVIVED" in result.stdout
+    if "failed and was skipped" in result.stdout:
+        assert result.stdout.count("failed and was skipped") == 1
+
+
 def test_auto_sum_survives_a_key_turning_non_numeric(
     tmp_path, _stub_video_recorder
 ):

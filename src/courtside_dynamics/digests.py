@@ -945,13 +945,26 @@ def numpy_simd_dispatch() -> str:
     )
 
 
-def version_info() -> dict[str, str]:
-    """The library versions (and numpy SIMD path) a golden digest was
-    recorded under.
+def libc_version() -> str:
+    """The C library the OS math functions come from, e.g. ``glibc 2.39``.
 
-    ``numpy_simd`` is newer than the first entries: a golden entry's
-    ``versions`` may lack it, and then the recording's dispatch is
-    unknown (``tests/test_golden_digests.py`` allows exactly that).
+    The env streams reach the OS libm (numpy's and MuJoCo's ``sin``,
+    ``cos``, ``hypot`` and friends), and glibc releases change last bits:
+    the PaddleTennis goldens recorded on glibc 2.39 do not all reproduce
+    on glibc 2.43. ``"unknown"`` where Python cannot tell (non-glibc).
+    """
+    name, version = platform.libc_ver()
+    return f"{name} {version}" if name else "unknown"
+
+
+def version_info() -> dict[str, str]:
+    """The library versions (numpy SIMD path and C library included) a
+    golden digest was recorded under.
+
+    ``numpy_simd`` and ``libc`` are newer than the first entries: a golden
+    entry's ``versions`` may lack them, and then the recording's dispatch
+    or C library is unknown (``tests/test_golden_digests.py`` allows
+    exactly that).
     """
     return {
         "python": platform.python_version(),
@@ -960,6 +973,7 @@ def version_info() -> dict[str, str]:
         "numpy_simd": numpy_simd_dispatch(),
         "gymnasium": gymnasium.__version__,
         "machine": platform.machine(),
+        "libc": libc_version(),
     }
 
 
@@ -1037,12 +1051,26 @@ def format_mismatch(
 ) -> str:
     """The loud failure text shared by the tool and the test."""
     against = f" (declared-drift slot {drift!r})" if drift else ""
+    recorded_libc = recorded_versions.get("libc", "unknown (not recorded)")
+    live_libc = live_versions.get("libc", "unknown")
+    libc_hint = (
+        (
+            f"  libc differs (recorded: {recorded_libc}, running: "
+            f"{live_libc}): the env streams reach the OS math library, "
+            "whose last bits move between glibc releases -- suspect it "
+            "alongside MuJoCo and numpy. See docs/DECISIONS.md, "
+            "'CI pins its runner OS'.",
+        )
+        if recorded_libc != live_libc
+        else ()
+    )
     return "\n".join(
         (
             f"GOLDEN DIGEST MISMATCH: {set_name}/{name}{against}",
             *(f"  {line}" for line in lines),
             f"  recorded under: {dict(recorded_versions)}",
             f"  running under:  {dict(live_versions)}",
+            *libc_hint,
             f"  {MISMATCH_EXPLANATION}",
         )
     )
@@ -1283,6 +1311,7 @@ __all__ = [
     "info_value_bytes",
     "iter_stream",
     "left_to_right_sum",
+    "libc_version",
     "numpy_simd_dispatch",
     "order_sensitive_swaps",
     "stream_digest",
