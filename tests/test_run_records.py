@@ -40,6 +40,7 @@ from courtside_dynamics.experiments.records import (
     write_sync_manifest,
 )
 from courtside_dynamics.experiments.sync import (
+    FinalMirrorError,
     RunDirMirror,
     SyncError,
     sync_run_dir,
@@ -2005,7 +2006,9 @@ def test_a_final_mirror_that_keeps_failing_raises_after_sealing_locally(
     log_dir = tmp_path / "local" / "run"
     sync_dir = tmp_path / "drive" / "run"
     (tmp_path / "drive").mkdir()
-    with pytest.raises(RuntimeError, match=r"failed 2 times .*sync_run_dir\("):
+    with pytest.raises(
+        FinalMirrorError, match=r"failed 2 times .*sync_run_dir\("
+    ) as caught:
         train(
             _cfg(
                 log_dir,
@@ -2014,6 +2017,12 @@ def test_a_final_mirror_that_keeps_failing_raises_after_sealing_locally(
                 sync_dir=str(sync_dir),
             )
         )
+    # A RuntimeError still (callers that caught that keep working), and
+    # it names both copies so the campaign can finish the mirror and
+    # book the leg instead of retraining it (review 2026-11-27, N3).
+    assert isinstance(caught.value, RuntimeError)
+    assert caught.value.local_dir.resolve() == log_dir.resolve()
+    assert caught.value.sync_dir.resolve() == sync_dir.resolve()
     _assert_sealed(log_dir, "completed")
     remote = verify_run_dir(sync_dir)
     assert not remote.complete

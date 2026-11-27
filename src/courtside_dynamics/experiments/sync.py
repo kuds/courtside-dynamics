@@ -67,6 +67,28 @@ class SyncError(RuntimeError):
     """A mirror pass failed; the mirror keeps its previous manifest."""
 
 
+class FinalMirrorError(SyncError):
+    """``train()`` sealed its local run directory, but the final mirror failed.
+
+    The local copy (``local_dir``) is the complete run; the mirror
+    (``sync_dir``) holds the last checkpoint pass and does not verify
+    until ``sync_run_dir(local_dir, sync_dir)`` succeeds. A caller that
+    books runs (the campaign notebook) catches this to finish the mirror
+    and book the run instead of losing it to a retrain.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        local_dir: str | os.PathLike[str],
+        sync_dir: str | os.PathLike[str],
+    ) -> None:
+        super().__init__(message)
+        self.local_dir = Path(local_dir)
+        self.sync_dir = Path(sync_dir)
+
+
 def validate_sync_target(
     log_dir: str | os.PathLike[str], sync_dir: Any
 ) -> Path | None:

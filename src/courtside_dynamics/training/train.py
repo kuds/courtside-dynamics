@@ -83,6 +83,7 @@ from courtside_dynamics.experiments.snapshots import (
     snapshot_summary,
 )
 from courtside_dynamics.experiments.sync import (
+    FinalMirrorError,
     RunDirMirror,
     SyncError,
     validate_sync_target,
@@ -741,7 +742,7 @@ class _RunLifecycle:
         )
 
     def _final_sync(self, error: BaseException | None) -> None:
-        assert self.mirror is not None
+        assert self.mirror is not None and self.sync_dir is not None
         last: Exception | None = None
         delays = (0.0, *_FINAL_SYNC_RETRY_SECONDS)
         for attempt, delay in enumerate(delays, start=1):
@@ -770,7 +771,9 @@ class _RunLifecycle:
         if error is not None:
             print(f"[train] {message}")
             return
-        raise RuntimeError(message) from last
+        raise FinalMirrorError(
+            message, local_dir=self.log_dir, sync_dir=self.sync_dir
+        ) from last
 
 
 class _MirrorRunDirCallback(BaseCallback):

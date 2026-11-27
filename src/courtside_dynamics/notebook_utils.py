@@ -2328,6 +2328,98 @@ def stage_summary_status(run_dir: str | Path) -> str | None:
     return None
 
 
+#: Pauses between attempts to finish a leg's Drive mirror in-session: a
+#: full Drive or a remounting FUSE mount often recovers within minutes.
+LEG_MIRROR_RETRY_SECONDS = (30.0, 120.0, 300.0)
+
+
+def finish_leg_mirror(
+    local_dir: str | os.PathLike[str],
+    drive_dir: str | os.PathLike[str],
+    *,
+    retry_seconds: Sequence[float] = LEG_MIRROR_RETRY_SECONDS,
+    sleep: Callable[[float], Any] = time.sleep,
+) -> bool:
+    """Mirror a sealed local run to its Drive attempt dir until it verifies.
+
+    For a ``LOCAL_THEN_SYNC`` campaign leg whose ``train()`` ended with
+    :class:`~courtside_dynamics.experiments.sync.FinalMirrorError`, or
+    with an interrupt inside the final mirror. The local run directory is
+    complete; only its Drive copy is not. Retries ``sync_run_dir`` after
+    each pause in ``retry_seconds`` (one attempt when empty) and returns
+    ``True`` once the Drive copy verifies complete, ``False`` when every
+    attempt failed, each failure printed. A local directory that does
+    not itself verify complete is not mirrored (``False``): a mirror of
+    it would seal damage as a complete run.
+    """
+    from courtside_dynamics.experiments.records import verify_run_dir
+    from courtside_dynamics.experiments.sync import sync_run_dir
+
+    local = verify_run_dir(local_dir)
+    if not local.complete:
+        print(
+            f"[campaign] {local_dir} does not verify complete "
+            f"({'; '.join(local.problems) or local.manifest}); not mirroring it"
+        )
+        return False
+    delays = (0.0, *retry_seconds)
+    for attempt, delay in enumerate(delays, start=1):
+        if delay > 0:
+            print(f"[campaign] retrying the Drive mirror in {delay:.0f} s")
+            sleep(delay)
+        try:
+            sync_run_dir(local_dir, drive_dir)
+        except Exception as error:  # SyncError, a full or dead mount
+            print(
+                f"[campaign] mirroring {local_dir} to {drive_dir} failed "
+                f"(attempt {attempt} of {len(delays)}): {error!r}"
+            )
+            continue
+        if verify_run_dir(drive_dir).complete:
+            print(f"[campaign] {drive_dir} verifies: the leg's Drive copy is complete")
+            return True
+        print(
+            f"[campaign] mirrored {local_dir} to {drive_dir}, but the copy does "
+            f"not verify (attempt {attempt} of {len(delays)})"
+        )
+    return False
+
+
+def _finish_unsynced_leg(record: Mapping[str, Any]) -> bool:
+    """Make an ``unsynced`` leg's Drive copy verify; ``False`` to retrain it.
+
+    The leg trained and its local copy was sealed, but the Drive mirror
+    did not verify when it was booked. If the Drive copy verifies now
+    (the operator re-ran ``sync_run_dir``), it is used. If the local copy
+    is still here (the same runtime), it is mirrored; a mirror that
+    still fails raises, since a fresh attempt would hit the same Drive.
+    With the local copy gone (a new runtime) and the Drive copy
+    incomplete, nothing can be scored: ``False``, said so.
+    """
+    from courtside_dynamics.experiments.records import verify_run_dir
+
+    run_dir = str(record["run_dir"])
+    local_dir = record.get("local_dir")
+    if Path(run_dir).is_dir() and verify_run_dir(run_dir).complete:
+        print(f"[campaign] {run_dir}'s Drive copy verifies now; scoring it")
+        return True
+    if local_dir and Path(local_dir).is_dir():
+        print(f"[campaign] finishing the Drive mirror of {local_dir}")
+        if finish_leg_mirror(local_dir, run_dir, retry_seconds=()):
+            return True
+        raise RuntimeError(
+            f"{run_dir} finished training, but mirroring {local_dir} to it "
+            "still fails. Free Drive space or remount Drive, then re-run all "
+            "cells: the campaign scores this attempt, it does not retrain it."
+        )
+    print(
+        f"[campaign] {run_dir} finished training, but its Drive copy does not "
+        f"verify and its local copy ({local_dir}) is gone (a new runtime): "
+        "training a fresh attempt"
+    )
+    return False
+
+
 def campaign_leg_resume_point(
     record: Mapping[str, Any] | None,
 ) -> tuple[str, str | None]:
@@ -2356,6 +2448,13 @@ def campaign_leg_resume_point(
       every resume and wedge the campaign). The reason is printed; the
       retry trains a fresh attempt dir and leaves the old one in place
       as evidence.
+
+    An ``unsynced`` leg trained under ``LOCAL_THEN_SYNC`` and was sealed
+    locally, but its Drive mirror did not verify when it was booked. Its
+    Drive copy is finished first (see :func:`_finish_unsynced_leg`, which
+    raises while Drive still refuses the mirror), and it then takes the
+    ``trained`` checks: a finished leg is scored, never retrained, unless
+    its only complete copy is gone.
     """
     if record is None:
         return "train", None
@@ -2363,6 +2462,10 @@ def campaign_leg_resume_point(
     run_dir = record.get("run_dir")
     if status == "complete" and run_dir:
         return "done", str(run_dir)
+    if status == "unsynced" and run_dir:
+        if not _finish_unsynced_leg(record):
+            return "train", None
+        status = "trained"
     if status != "trained" or not run_dir:
         print(
             f"[campaign] leg recorded as {status!r}; training a fresh attempt"

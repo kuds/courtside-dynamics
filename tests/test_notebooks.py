@@ -1483,9 +1483,142 @@ def test_campaign_local_then_sync_is_operational_not_fingerprinted(
     assert 'log_dir = os.path.join("/content/runs", drive_relative)' in run_leg
     assert "sync_dir = stage_dir" in run_leg
     assert "sync_dir=sync_dir," in run_leg
-    # Everything after train() keeps reading the Drive attempt dir.
-    assert 'locate_artifact(stage_dir, "config")' in run_leg
-    assert "stage_summary_status(stage_dir)" in run_leg
+    # Everything after train() reads the Drive attempt dir; only a leg
+    # whose final mirror failed is booked from its sealed local copy
+    # (test_campaign_books_a_leg_whose_final_mirror_failed).
+    assert (
+        "book_leg(\n        stage_name, stage_dir=stage_dir, expected=expected\n    )"
+        in run_leg
+    )
+    assert "read_dir = stage_dir if local_dir is None else local_dir" in helpers
+    assert 'locate_artifact(read_dir, "config")' in helpers
+    assert "stage_summary_status(read_dir)" in helpers
+
+
+def test_campaign_books_a_leg_whose_final_mirror_failed(tmp_path) -> None:
+    """Review 2026-11-27, N3: under LOCAL_THEN_SYNC a leg whose final
+    Drive mirror failed (or was interrupted) raised out of train() before
+    run_leg booked it, so a resume retrained the finished leg as
+    attempt_02. run_leg now books it 'unsynced' from its sealed local
+    copy, keeps retrying the mirror in-session, and books it 'trained'
+    from Drive once the mirror verifies."""
+    import pytest
+
+    from courtside_dynamics.experiments.records import (
+        build_run_record,
+        verify_run_dir,
+        write_run_record,
+        write_sync_manifest,
+    )
+    from courtside_dynamics.experiments.sync import FinalMirrorError
+    from courtside_dynamics.notebook_utils import (
+        finish_leg_mirror,
+        load_campaign_manifest,
+        write_campaign_manifest,
+    )
+
+    drive_mount, local_root = tmp_path / "MyDrive", tmp_path / "runs"
+    namespace = _exec_campaign_plan(
+        (("LOCAL_THEN_SYNC = False", "LOCAL_THEN_SYNC = True"),)
+    )
+    helpers = next(
+        _source(cell)
+        for cell in _load_campaign_notebook()["cells"]
+        if "def make_leg_config(" in _source(cell)
+    )
+    for old, new in (
+        ('"/content/drive/MyDrive"', repr(str(drive_mount))),
+        ('"/content/runs"', repr(str(local_root))),
+    ):
+        assert helpers.count(old) == 1, old
+        helpers = helpers.replace(old, new)
+    exec(compile(helpers, f"{CAMPAIGN_NOTEBOOK}:helpers", "exec"), namespace)
+    campaign_root = drive_mount / "campaigns" / "c1"
+    campaign_root.mkdir(parents=True)
+    validated = []
+    namespace.update(
+        CAMPAIGN_ROOT=str(campaign_root),
+        manifest={"campaign_id": "c1", "status": "running", "stages": {}},
+        write_campaign_manifest=write_campaign_manifest,
+        validate_run_config_against_plan=lambda path, expected: validated.append(
+            str(path)
+        ),
+        print_stage_summary=lambda run_dir: None,
+    )
+
+    def seal(log_dir):
+        log_dir = Path(log_dir)
+        log_dir.mkdir(parents=True)
+        (log_dir / "config.json").write_text("{}\n")
+        (log_dir / "stage_summary.txt").write_text("Status:         completed\n")
+        write_run_record(
+            log_dir,
+            build_run_record({}, run_id="r", created_at="t", status="completed"),
+        )
+        write_sync_manifest(log_dir)
+
+    def mirror_fails(cfg):
+        seal(cfg.log_dir)
+        raise FinalMirrorError(
+            "mirror failed", local_dir=cfg.log_dir, sync_dir=cfg.sync_dir
+        )
+
+    def leg(stage_name):
+        return namespace["run_leg"](stage_name, seed=0, total_timesteps=1_000_000)
+
+    def booked(stage_name):
+        on_disk = load_campaign_manifest(campaign_root)["stages"][stage_name]
+        assert on_disk == namespace["manifest"]["stages"][stage_name]
+        return on_disk
+
+    # Drive keeps refusing: booked unsynced from the local copy, and the
+    # error says the resume scores the leg rather than retraining it.
+    namespace["train"] = mirror_fails
+    namespace["finish_leg_mirror"] = lambda local_dir, drive_dir: False
+    with pytest.raises(RuntimeError, match="instead of retraining it"):
+        leg("leg_a")
+    record = booked("leg_a")
+    drive_a = campaign_root / "leg_a" / "attempt_01"
+    local_a = local_root / drive_a.relative_to(drive_mount)
+    assert record == {
+        "status": "unsynced",
+        "run_dir": str(drive_a),
+        "config_validation": {"verdict": "ok"},
+        "local_dir": str(local_a),
+    }
+    assert validated[-1] == str(local_a / "config.json")
+
+    # Drive recovers within the session: the leg is booked trained from
+    # its now-verified Drive copy, exactly as an unfailed leg is.
+    namespace["finish_leg_mirror"] = finish_leg_mirror
+    drive_b = campaign_root / "leg_b" / "attempt_01"
+    assert leg("leg_b") == str(drive_b)
+    assert booked("leg_b") == {
+        "status": "trained",
+        "run_dir": str(drive_b),
+        "config_validation": {"verdict": "ok"},
+    }
+    assert validated[-1] == str(drive_b / "config.json")
+    assert verify_run_dir(drive_b, strict=True).complete
+
+    # Stopped inside the final mirror: booked unsynced, interrupt re-raised.
+    def interrupted_in_the_mirror(cfg):
+        seal(cfg.log_dir)
+        raise KeyboardInterrupt
+
+    namespace["train"] = interrupted_in_the_mirror
+    with pytest.raises(KeyboardInterrupt):
+        leg("leg_c")
+    assert booked("leg_c")["status"] == "unsynced"
+
+    # Stopped before the run was sealed: nothing complete to book.
+    def interrupted_early(cfg):
+        raise KeyboardInterrupt
+
+    namespace["train"] = interrupted_early
+    with pytest.raises(KeyboardInterrupt):
+        leg("leg_d")
+    assert "leg_d" not in namespace["manifest"]["stages"]
 
 
 # -- Rescore notebook (design L3) ---------------------------------------------

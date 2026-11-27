@@ -285,8 +285,14 @@ run that evaluates on CUDA (a Colab GPU SAC run) is no registered
 protocol's, since each pins CPU: it records `id: null` with its CUDA
 fingerprint, `"nearest": "paddle-npoint@v3"` and `"differs":
 ["device"]`, and its comparable number is a CPU re-score under
-`nearest`. A quick test, or a run file that changes the evaluation
-episodes or env, records `id: null` too, naming the nearest registered
+`nearest`. A CPU protocol also pins the CPU numerics: the package
+sets `MKL_CBWR=COMPATIBLE` at import, so torch's MKL gives the same
+bits on AVX2 and AVX-512 hosts. A CPU run trained with MKL unpinned
+records `id: null` with `"differs": ["cpu_numerics"]`, and the harness
+refuses to score under a CPU protocol while MKL is unpinned (see
+`docs/DECISIONS.md`, "CPU scores pin MKL's numerics"). A quick test,
+or a run file that changes the evaluation episodes or env, records
+`id: null` too, naming the nearest registered
 protocol and the fields that differ (`["env_kwargs", "n_episodes"]`),
 so two runs compare only when both id and fingerprint match. A run
 recorded before the device was rebuilds its in-loop protocol on its

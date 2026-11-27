@@ -89,7 +89,8 @@ PR #81, "week-1 foundations", 2026-10-18) and conducted 2026-11-27.
      downgraded to low.
    - **The new risk:** CPU re-scores depend on the host's MKL kernels,
      so the same snapshot under the same protocol scores differently on
-     AVX2 and AVX-512 Colab hosts (N2). Pinning `MKL_CBWR` fixes it.
+     AVX2 and AVX-512 Colab hosts (N2). Pinning `MKL_CBWR` fixes it
+     (fixed on this branch, §11).
    - **Older findings:** of the 98 from 2026-10-16, 82 remain open (81
      after this branch, §11),
      including 7 of the 10 medium ones. The open ones that matter are
@@ -614,8 +615,8 @@ a finding.
 | # | Finding | Severity | Where |
 |---|---|---|---|
 | N1 | **Fixed on this branch (§11).** **A second video attempt on a host without OpenGL aborts the training process** (SIGABRT, uncatchable). The run is left `running`, with no manifest and no final model. The bug predates week 1, but PPO's move to CPU makes it bite now (§8) | **high** for CPU launches | `callbacks/video_record.py:173-190` |
-| N2 | **CPU re-scores depend on the host.** torch's CPU `Linear` calls MKL SGEMM, and MKL's AVX2 and AVX-512 kernels round differently. PaddleTennis is chaotic, so one ulp in an action changes whole episodes. The same snapshot, seeds and protocol fingerprint gave 53 of 132 differing metrics on the two kernels. The protocol pins only `device="cpu"`, and score rows record no CPU model, MKL mode or package SHA | **medium** | `experiments/protocols.py:264`; `harness.py:649` |
-| N3 | **A campaign leg whose final Drive mirror fails is never booked.** It goes unbooked even after the operator runs the printed `sync_run_dir(...)` fix. `run_leg` does not catch `train()`'s final-sync error, so on the next Run-All `campaign_leg_resume_point` returns "train" and the complete `attempt_01` is replaced by a fresh `attempt_02`. A Ctrl-C during the final mirror takes the same path | **medium** | `paddle_tennis_campaign.ipynb` (`run_leg`); `train.py:743-773`; `notebook_utils.py:2334` |
+| N2 | **Fixed on this branch (§11).** **CPU re-scores depend on the host.** torch's CPU `Linear` calls MKL SGEMM, and MKL's AVX2 and AVX-512 kernels round differently. PaddleTennis is chaotic, so one ulp in an action changes whole episodes. The same snapshot, seeds and protocol fingerprint gave 53 of 132 differing metrics on the two kernels. The protocol pins only `device="cpu"`, and score rows record no CPU model, MKL mode or package SHA | **medium** | `experiments/protocols.py:264`; `harness.py:649` |
+| N3 | **Fixed on this branch (§11).** **A campaign leg whose final Drive mirror fails is never booked.** It goes unbooked even after the operator runs the printed `sync_run_dir(...)` fix. `run_leg` does not catch `train()`'s final-sync error, so on the next Run-All `campaign_leg_resume_point` returns "train" and the complete `attempt_01` is replaced by a fresh `attempt_02`. A Ctrl-C during the final mirror takes the same path | **medium** | `paddle_tennis_campaign.ipynb` (`run_leg`); `train.py:743-773`; `notebook_utils.py:2334` |
 | N4 | **Fixed on this branch.** **The campaign and `sb3_training` notebooks refused a Colab CPU runtime.** `setup_colab()` defaults to `require_gpu=True` and runs before `ALGO` is read, although the PPO reference is a CPU run by design | low (but it blocks the planned launch path) | `colab_setup.py:51`; campaign cell `pc-gpu` |
 
 **Fixes:**

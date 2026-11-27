@@ -18,6 +18,38 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **CPU scores and CPU training pin MKL's numerics (2026-11-27).** No
+  env or recipe change. **An era boundary for CPU-trained runs.**
+  - **`import courtside_dynamics` sets `MKL_CBWR=COMPATIBLE`** unless
+    the operator set it. torch's CPU float32 GEMMs then give the same
+    bits on AVX2 and AVX-512 hosts, so a CPU re-score no longer
+    depends on which Colab host it ran on.
+  - **Every CPU torch computation changes.** CPU-trained runs (the PPO
+    reference) are not bit-comparable with CPU runs before the pin.
+    GPU training is unaffected. Re-score both sides of a comparison
+    under the pin.
+  - **The harness refuses a CPU protocol** when MKL is not on
+    `COMPATIBLE`, and a CPU run trained unpinned records
+    `eval_protocol` `id: null` with `"differs": ["cpu_numerics"]`.
+  - **Score rows record `versions.cpu_numerics` and `versions.libc`;**
+    run artifacts record `versions.mkl_cbwr` and `versions.libc`.
+  - `COMPATIBLE` GEMMs are slower: the test suite takes about 22%
+    longer.
+  - See `docs/DECISIONS.md`, "CPU scores pin MKL's numerics".
+- **A campaign leg whose final Drive mirror fails is booked, not
+  retrained (2026-11-27).** No env, training or recipe change.
+  - **`train()` raises `FinalMirrorError`** (a `RuntimeError`, as
+    before) naming the sealed local copy and the mirror.
+  - **The campaign's `run_leg` books the leg `unsynced`** from its
+    local copy, retries the mirror in-session, and books it `trained`
+    once the Drive copy verifies. A Ctrl-C inside the final mirror is
+    booked the same way.
+  - **`campaign_leg_resume_point` finishes an `unsynced` leg's mirror,
+    then scores it.** It retrains only when the local copy is gone and
+    the Drive copy does not verify.
+  - New helper: `notebook_utils.finish_leg_mirror`.
+  - See `docs/DECISIONS.md`, "A campaign leg whose final Drive mirror
+    fails is booked, not retrained".
 - **A PPO notebook runs on a Colab CPU runtime (2026-11-27).** No env,
   training or recipe change.
   - **`setup_colab(require_gpu=False)` on a CPU runtime** leaves

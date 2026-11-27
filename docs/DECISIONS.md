@@ -718,6 +718,78 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### CPU scores pin MKL's numerics — *implemented (unreleased, 2026-11-27)*
+CPU re-scores depended on the host (review 2026-11-27, N2). torch's CPU
+`Linear` calls MKL's SGEMM, and MKL picks its kernels by the host's
+instruction set. The AVX2 and AVX-512 kernels round differently, and
+PaddleTennis is chaotic: one ulp in an action changes whole episodes.
+The same snapshot, seeds and protocol fingerprint gave 53 of 132
+differing metrics on the two kernels. Colab hands out both kinds of
+host, and the protocols pinned only `device="cpu"`. The fix:
+- **`import courtside_dynamics` sets `MKL_CBWR=COMPATIBLE`**
+  (`numerics.pin_cpu_numerics`, a `setdefault`) before anything in
+  torch runs. MKL fixes its branch at its first call, so the pin has
+  to come first; the package import is the earliest point the repo
+  controls, and every CLI, notebook and `train()` import it before
+  torch does any work. `COMPATIBLE` is the one branch every x86-64
+  host runs; a named branch such as `AVX2` reproduces only across
+  hosts that have that instruction set.
+- **Measured** (`tests/test_numerics.py`, on an AVX-512 host). A
+  policy-shaped MLP's float32 outputs hash `91b3…` with the host's
+  kernels and `d194…` with `MKL_ENABLE_INSTRUCTIONS=AVX2` (an AVX2
+  host's kernels) when unpinned. Pinned, both give `8943…`.
+- **Recorded.** `numerics.cpu_numerics()` reads the branch from MKL
+  itself (`mkl_serv_cbwr_get` in `libtorch_cpu`). Reading it also
+  fixes it, so it is never read before the pin. Score rows carry
+  `versions.cpu_numerics` (BLAS, branch, `MKL_CBWR`, torch's CPU
+  capability, pinned) and `versions.libc`; run artifacts carry
+  `versions.mkl_cbwr` and `versions.libc`.
+- **Refused when unpinned.** The harness refuses to score under a CPU
+  protocol when MKL is not on `COMPATIBLE`, with the fix in the error.
+  This happens when an operator set another `MKL_CBWR` (theirs wins),
+  or torch multiplied before the package was imported. A CPU run
+  trained unpinned records `eval_protocol` `id: null` with
+  `"differs": ["cpu_numerics"]`, so it is no registered protocol's.
+  A torch without MKL (Apple silicon, aarch64) has nothing to pin and
+  is not refused.
+- **Costs.** Every CPU float32 GEMM changes, so CPU-trained runs (the
+  PPO reference) after the pin are a new numeric era: their streams are
+  not bit-comparable with earlier CPU runs. GPU training (cuBLAS) is
+  unaffected. A pinned re-score of a run evaluated in-loop on CPU
+  before the pin does not reproduce its in-loop numbers bit for bit;
+  re-score both sides of a comparison under the pin. `COMPATIBLE`
+  GEMMs are slower: the test suite took about 22% longer, mostly in its
+  SAC tests. The cost to a re-score's batch-1 policy calls was not
+  measured separately.
+
+### A campaign leg whose final Drive mirror fails is booked, not retrained — *implemented (unreleased, 2026-11-27)*
+Under `LOCAL_THEN_SYNC`, `train()` seals the leg's local copy and then
+mirrors it to the Drive attempt dir. A final mirror that kept failing
+raised out of `train()` before `run_leg` booked the leg, and so did a
+Ctrl-C during the mirror (review 2026-11-27, N3). Running the printed
+`sync_run_dir(...)` fix did not help: the next Run-All found no record,
+`campaign_leg_resume_point` said "train", and the finished `attempt_01`
+was replaced by a fresh 1M-3M-step `attempt_02`. The fix:
+- **`train()` raises `FinalMirrorError`** (a `SyncError`, so still a
+  `RuntimeError`), carrying `local_dir` and `sync_dir`.
+- **`run_leg` books the leg `unsynced` first,** validating the local
+  `config.json` against the frozen plan, with `local_dir` in the
+  record. It then retries the mirror in-session
+  (`notebook_utils.finish_leg_mirror`, pauses of 30, 120 and 300 s).
+  Once the Drive copy verifies, the leg is booked `trained` from Drive
+  as usual. If it never verifies, `run_leg` raises with the way out.
+  A Ctrl-C inside the final mirror books the leg `unsynced` the same
+  way, when its local copy verifies complete, and re-raises.
+- **On resume, an `unsynced` leg is finished, then scored.**
+  `campaign_leg_resume_point` uses the Drive copy if it now verifies
+  (the operator re-synced it). Otherwise it mirrors the local copy if
+  the runtime still has it, and raises while Drive refuses: a fresh
+  attempt would hit the same Drive. It then takes the `trained` checks.
+  Only when the local copy is gone (a new runtime) and the Drive copy
+  does not verify does the leg retrain, with the reason printed.
+- **A local copy that does not verify is never mirrored.** A mirror of
+  it would seal damage as a complete run.
+
 ### A PPO notebook runs on a Colab CPU runtime; only the SAC family demands a GPU — *implemented (unreleased, 2026-11-27)*
 PPO trains on CPU by design: its profiles pin `device="cpu"`, and SB3's
 MLP actor-critic is slower on a GPU. The PPO reference is planned as a

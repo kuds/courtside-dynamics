@@ -1920,6 +1920,158 @@ def test_campaign_leg_resume_point_propagates_other_io_errors(
         notebook_utils.campaign_leg_resume_point(record)
 
 
+def _sealed_leg(run_dir, **kwargs):
+    """A finished leg sealed as train() seals it: a terminal run record
+    and the sync manifest that lists every file."""
+    from courtside_dynamics.experiments.records import (
+        build_run_record,
+        write_run_record,
+        write_sync_manifest,
+    )
+
+    _finished_leg(run_dir, **kwargs)
+    write_run_record(
+        run_dir,
+        build_run_record(
+            {}, run_id=run_dir.name, created_at="t", status="completed"
+        ),
+    )
+    write_sync_manifest(run_dir)
+    return str(run_dir)
+
+
+def test_finish_leg_mirror_retries_until_the_drive_copy_verifies(
+    tmp_path, monkeypatch, capsys
+):
+    """Review 2026-11-27, N3: a full or remounting Drive often recovers
+    within minutes, so the campaign keeps mirroring a sealed leg before
+    it gives up on this session."""
+    from courtside_dynamics.experiments import sync
+    from courtside_dynamics.experiments.records import verify_run_dir
+    from courtside_dynamics.notebook_utils import finish_leg_mirror
+
+    local = _sealed_leg(tmp_path / "local" / "attempt_01")
+    (tmp_path / "drive").mkdir()
+    drive = tmp_path / "drive" / "attempt_01"
+    real_sync = sync.sync_run_dir
+    calls = []
+
+    def full_then_freed(source, destination, **kwargs):
+        calls.append(str(destination))
+        if len(calls) < 3:
+            raise OSError(28, "No space left on device")
+        return real_sync(source, destination, **kwargs)
+
+    monkeypatch.setattr(sync, "sync_run_dir", full_then_freed)
+    pauses = []
+    assert finish_leg_mirror(
+        local, drive, retry_seconds=(1.0, 2.0, 3.0), sleep=pauses.append
+    )
+    assert pauses == [1.0, 2.0]  # the third attempt verified; no fourth
+    assert calls == [str(drive)] * 3
+    assert verify_run_dir(drive, strict=True).complete
+    out = capsys.readouterr().out
+    assert "(attempt 1 of 4): OSError(28, 'No space left on device')" in out
+    assert "the leg's Drive copy is complete" in out
+
+    # Every attempt failing: False, after every pause.
+    def always_full(source, destination, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(sync, "sync_run_dir", always_full)
+    pauses.clear()
+    assert not finish_leg_mirror(
+        local, tmp_path / "drive" / "attempt_02", retry_seconds=(5.0,),
+        sleep=pauses.append,
+    )
+    assert pauses == [5.0]
+    assert "(attempt 2 of 2)" in capsys.readouterr().out
+
+    # A pass that "succeeds" but leaves a copy that does not verify is
+    # not a finished mirror.
+    monkeypatch.setattr(sync, "sync_run_dir", lambda source, destination: None)
+    assert not finish_leg_mirror(
+        local, tmp_path / "drive" / "attempt_03", retry_seconds=()
+    )
+    assert "does not verify (attempt 1 of 1)" in capsys.readouterr().out
+
+
+def test_finish_leg_mirror_never_mirrors_an_unsealed_local_dir(
+    tmp_path, monkeypatch, capsys
+):
+    from courtside_dynamics.experiments import sync
+    from courtside_dynamics.notebook_utils import finish_leg_mirror
+
+    def must_not_sync(source, destination, **kwargs):
+        raise AssertionError("mirrored an unsealed run")
+
+    monkeypatch.setattr(sync, "sync_run_dir", must_not_sync)
+    unsealed = _finished_leg(tmp_path / "local" / "attempt_01")
+    (tmp_path / "drive").mkdir()
+    assert not finish_leg_mirror(
+        unsealed, tmp_path / "drive" / "attempt_01", sleep=pytest.fail
+    )
+    assert "does not verify complete" in capsys.readouterr().out
+    assert not (tmp_path / "drive" / "attempt_01").exists()
+
+
+def test_an_unsynced_leg_is_mirrored_and_scored_never_retrained(
+    tmp_path, monkeypatch, capsys
+):
+    """Review 2026-11-27, N3: a LOCAL_THEN_SYNC leg whose final mirror
+    failed was never booked, so a resume retrained it (1M-3M steps) as
+    attempt_02 although its sealed local copy was complete. The notebook
+    now books it 'unsynced' with its local dir; the resume point
+    finishes the mirror and re-enters at scoring. A Drive that still
+    refuses the mirror stops the resume instead of retraining into the
+    same Drive."""
+    import shutil
+
+    from courtside_dynamics.experiments import sync
+    from courtside_dynamics.experiments.records import verify_run_dir
+    from courtside_dynamics.notebook_utils import campaign_leg_resume_point
+
+    local = _sealed_leg(tmp_path / "local" / "leg1" / "attempt_01")
+    (tmp_path / "drive" / "leg1").mkdir(parents=True)
+    drive = tmp_path / "drive" / "leg1" / "attempt_01"
+    record = {
+        "status": "unsynced",
+        "run_dir": str(drive),
+        "local_dir": local,
+        "config_validation": {"verdict": "ok"},
+    }
+    real_sync = sync.sync_run_dir
+
+    def full(source, destination, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(sync, "sync_run_dir", full)
+    with pytest.raises(RuntimeError, match="it does not retrain it"):
+        campaign_leg_resume_point(record)
+    capsys.readouterr()
+
+    monkeypatch.setattr(sync, "sync_run_dir", real_sync)
+    assert campaign_leg_resume_point(record) == ("score", str(drive))
+    out = capsys.readouterr().out
+    assert f"finishing the Drive mirror of {local}" in out
+    assert "re-entering at scoring" in out
+    assert verify_run_dir(drive, strict=True).complete
+
+    # A new runtime: the local copy is gone, but the Drive copy verifies.
+    shutil.rmtree(local)
+    assert campaign_leg_resume_point(record) == ("score", str(drive))
+    assert "Drive copy verifies now" in capsys.readouterr().out
+
+    # Neither copy complete: nothing to score, so the leg retrains.
+    orphan = {**record, "run_dir": str(tmp_path / "drive" / "leg1" / "attempt_02")}
+    assert campaign_leg_resume_point(orphan) == ("train", None)
+    assert "its local copy" in capsys.readouterr().out
+    # An unsynced record still takes the 'trained' checks once mirrored.
+    unvalidated = {**record, "config_validation": {"verdict": "mismatch"}}
+    assert campaign_leg_resume_point(unvalidated) == ("train", None)
+    assert "no 'ok' config validation verdict" in capsys.readouterr().out
+
+
 def test_next_stage_attempt_dir_numbers_attempts(tmp_path):
     first = next_stage_attempt_dir(tmp_path, "leg1_scratch_gate")
     assert first == str(tmp_path / "leg1_scratch_gate" / "attempt_01")
