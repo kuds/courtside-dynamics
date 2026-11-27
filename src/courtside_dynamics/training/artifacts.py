@@ -154,6 +154,16 @@ def _versions() -> dict[str, str]:
         version = getattr(mod, "__version__", None)
         if version:
             versions[name] = str(version)
+    # The env streams reach the OS libm, and the policy's CPU float32
+    # kernels follow MKL's CNR branch: both decide whether another host
+    # reproduces this run's numbers (docs/DECISIONS.md, "CPU scores pin
+    # MKL's numerics" and "CI pins its runner OS").
+    from courtside_dynamics.digests import libc_version
+    from courtside_dynamics.numerics import cpu_numerics
+
+    versions["libc"] = libc_version()
+    numerics = cpu_numerics()
+    versions["mkl_cbwr"] = str(numerics["mkl_cbwr"] or numerics["blas"])
     return versions
 
 

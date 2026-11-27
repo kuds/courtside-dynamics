@@ -264,8 +264,17 @@ def score_model(
 
 
 def _device_problem(protocol: EvalProtocol, device: str) -> str | None:
-    """Why scoring on ``device`` would not be ``protocol``'s score, or ``None``."""
+    """Why scoring on ``device`` would not be ``protocol``'s score, or ``None``.
+
+    A CPU protocol also needs pinned CPU numerics: unpinned, MKL's
+    float32 kernels follow the host's instruction set, and the same
+    snapshot scores differently on AVX2 and AVX-512 hosts.
+    """
     if device_type(device) == protocol.device:
+        if protocol.device == "cpu":
+            from courtside_dynamics.numerics import cpu_numerics_problem
+
+            return cpu_numerics_problem()
         return None
     problem = (
         f"protocol {protocol.id} scores on {protocol.device!r}; a score on "
@@ -646,11 +655,20 @@ def run_artifacts(
 # -- rescoring ---------------------------------------------------------------------
 
 
-def _versions() -> dict[str, str]:
+def _versions() -> dict[str, Any]:
+    """The libraries, C library and CPU numerics a score row was made with.
+
+    ``libc`` and ``cpu_numerics`` say what the env streams' libm and the
+    policy's float32 kernels were (docs/DECISIONS.md, "CPU scores pin
+    MKL's numerics"), so rows from different hosts can be told apart.
+    """
     import mujoco
     import numpy
     import stable_baselines3
     import torch
+
+    from courtside_dynamics.digests import libc_version
+    from courtside_dynamics.numerics import cpu_numerics
 
     return {
         "python": platform.python_version(),
@@ -658,6 +676,8 @@ def _versions() -> dict[str, str]:
         "mujoco": mujoco.__version__,
         "torch": torch.__version__,
         "stable_baselines3": stable_baselines3.__version__,
+        "libc": libc_version(),
+        "cpu_numerics": cpu_numerics(),
     }
 
 

@@ -285,8 +285,14 @@ run that evaluates on CUDA (a Colab GPU SAC run) is no registered
 protocol's, since each pins CPU: it records `id: null` with its CUDA
 fingerprint, `"nearest": "paddle-npoint@v3"` and `"differs":
 ["device"]`, and its comparable number is a CPU re-score under
-`nearest`. A quick test, or a run file that changes the evaluation
-episodes or env, records `id: null` too, naming the nearest registered
+`nearest`. A CPU protocol also pins the CPU numerics: the package
+sets `MKL_CBWR=COMPATIBLE` at import, so torch's MKL gives the same
+bits on AVX2 and AVX-512 hosts. A CPU run trained with MKL unpinned
+records `id: null` with `"differs": ["cpu_numerics"]`, and the harness
+refuses to score under a CPU protocol while MKL is unpinned (see
+`docs/DECISIONS.md`, "CPU scores pin MKL's numerics"). A quick test,
+or a run file that changes the evaluation episodes or env, records
+`id: null` too, naming the nearest registered
 protocol and the fields that differ (`["env_kwargs", "n_episodes"]`),
 so two runs compare only when both id and fingerprint match. A run
 recorded before the device was rebuilds its in-loop protocol on its
@@ -359,15 +365,21 @@ meets a score file. Each run is scored whole or refused with its
 reasons (a placeholder, torn or unbound file, a missing normalizer, an
 unreadable snapshot index or `config.json`) while the others go on; its file is written when the run is done, and re-running
 skips a run already scored for the same files (every model's and
-normalizer's sha256). It then prints the per-checkpoint k≥2 headline
+normalizer's sha256) under the same CPU numerics (rows from before the
+MKL pin record none, so they are re-scored; a session whose MKL is not
+pinned stops before it scores or records anything). It then prints the per-checkpoint k≥2 headline
 and k=1 (each point's first confirmed return:
 `episode_valid_return_count_a` minus the headline) on both blocks,
 plots them (`curves_<series>.png`), and writes a `select()` verdict per
 run and series (`verdicts.json`): the checkpoint the protocol's rule
 picks, next to the run's own `best_model` scored under the same
 protocol. The plot and the verdicts cover every run scored into the
-folder, and a session merges its verdicts and refusals into
-`verdicts.json` rather than replacing what earlier sessions wrote. `QUICK =
+folder under this session's CPU numerics; a run scored under others is
+named and left out until it is picked again. A session merges its
+verdicts and refusals into `verdicts.json` rather than replacing what
+earlier sessions wrote, except that it drops every verdict picked under
+other numerics (each verdict records its `cpu_numerics`; those from
+before the pin record none). `QUICK =
 True` scores the best model and three checkpoints per run (first,
 middle, last) into a `-quick` folder; `SERIES = "snapshots"` scores a
 newer run's evaluation snapshots instead of its checkpoints. The August

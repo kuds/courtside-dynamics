@@ -7,7 +7,14 @@ juggling up to full wall-rally and (eventually) humanoid tennis.
 """
 from __future__ import annotations
 
-from gymnasium.envs.registration import register
+# First, before anything here can reach torch: pin MKL's CPU numerics so a
+# CPU score is the same on every host (docs/DECISIONS.md, "CPU scores pin
+# MKL's numerics"). MKL reads the setting once, at its first call.
+from courtside_dynamics.numerics import pin_cpu_numerics as _pin_cpu_numerics
+
+_pin_cpu_numerics()
+
+from gymnasium.envs.registration import register  # noqa: E402
 
 # 0.2.0: WallBall contact physics made realistic (ball contact priority
 # + solref tuned to regulation-like restitution; racket reaches a

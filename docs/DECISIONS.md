@@ -718,6 +718,146 @@ exactly one return. It is not one bug — it is the confluence of rules 2, 3, an
 
 ## Training harness & instrumentation
 
+### CPU scores pin MKL's numerics — *implemented (unreleased, 2026-11-27)*
+CPU re-scores depended on the host (review 2026-11-27, N2). torch's CPU
+`Linear` calls MKL's SGEMM, and MKL picks its kernels by the host's
+instruction set. The AVX2 and AVX-512 kernels round differently, and
+PaddleTennis is chaotic: one ulp in an action changes whole episodes.
+The same snapshot, seeds and protocol fingerprint gave 53 of 132
+differing metrics on the two kernels. Colab hands out both kinds of
+host, and the protocols pinned only `device="cpu"`. The fix:
+- **`import courtside_dynamics` sets `MKL_CBWR=COMPATIBLE`**
+  (`numerics.pin_cpu_numerics`, a `setdefault`) before anything in
+  torch runs. MKL fixes its branch at its first call, so the pin has
+  to come first; the package import is the earliest point the repo
+  controls, and every CLI, notebook and `train()` import it before
+  torch does any work. `COMPATIBLE` is the one branch every x86-64
+  host runs; a named branch such as `AVX2` reproduces only across
+  hosts that have that instruction set.
+- **Measured** (`tests/test_numerics.py`, on an AVX-512 host). A
+  policy-shaped MLP's float32 outputs hash `91b3…` with the host's
+  kernels and `d194…` with `MKL_ENABLE_INSTRUCTIONS=AVX2` (an AVX2
+  host's kernels) when unpinned. Pinned, both give `8943…`.
+- **Recorded.** `numerics.cpu_numerics()` reads the branch from MKL
+  itself (`mkl_serv_cbwr_get` in `libtorch_cpu`). Reading it also
+  fixes it, so it is never read before the pin. Score rows carry
+  `versions.cpu_numerics` (BLAS, branch, `MKL_CBWR`, torch's CPU
+  capability, pinned) and `versions.libc`; run artifacts carry
+  `versions.mkl_cbwr` and `versions.libc`.
+- **Refused when unpinned.** The harness refuses to score under a CPU
+  protocol when MKL is not on `COMPATIBLE`, with the fix in the error.
+  This happens when an operator set another non-empty `MKL_CBWR`
+  (theirs wins; an empty one counts as unset), or torch multiplied
+  before the package was imported. A CPU run trained unpinned records
+  `eval_protocol` `id: null` with `"differs": ["cpu_numerics"]`, so it
+  is no registered protocol's. A torch without MKL (Apple silicon,
+  aarch64) has nothing to pin and is not refused. A build with MKL
+  whose branch cannot be read is refused with its own reason, because
+  the pin cannot be shown there. The branch is looked up in torch's
+  `lib` and, on Linux, in any loaded MKL library (a conda build). A
+  Windows build that exports no `mkl_cbwr_get` is untested.
+- **The re-score notebook reuses only rows scored under this session's
+  numerics.** A session whose MKL is not pinned stops in its re-score
+  cell, before it scores, refuses or drops anything; without that stop
+  it booked its own numerics as every run's refusal and every verdict's
+  staleness. A session that proceeds compares each row's recorded
+  `cpu_numerics` (BLAS and branch) with its own. Rows from a session
+  before the pin are re-scored when their run is picked. Until then
+  they stay out of the curves and verdicts, with their earlier verdict
+  dropped and their runs listed. Each verdict records its
+  `cpu_numerics`, and one of any series that records none (every
+  verdict from before the pin) or others is dropped from
+  `verdicts.json` until its series is re-scored. A session with no run
+  to plot removes the series' earlier `curves_<series>.png` rather than
+  leave it showing runs the verdicts no longer cover.
+- **Costs.** Every CPU float32 GEMM changes, so CPU-trained runs (the
+  PPO reference) after the pin are a new numeric era: their streams are
+  not bit-comparable with earlier CPU runs. GPU training (cuBLAS) is
+  unaffected. A pinned re-score of a run evaluated in-loop on CPU
+  before the pin does not reproduce its in-loop numbers bit for bit;
+  re-score both sides of a comparison under the pin. Runs recorded
+  before the pin carry no `versions.mkl_cbwr`. Speed was measured on
+  this AVX-512 host, single-threaded:
+  - unchanged: batch-1 inference (a re-score's policy calls, about
+    21 µs either way), and a PaddleTennis PPO iteration (8 × 1,024
+    steps and 10 epochs of 256-batches on SB3's 64×64 nets; 4.5-4.9 s
+    either way);
+  - 2.7x slower: a 256-wide MLP's batch-30 forward pass;
+  - 2-2.6x slower: that MLP's 64- to 256-batch training steps.
+
+  The test suite takes about 22% longer, mostly in its 256-wide SAC
+  tests.
+- **Pins.** The training and re-scoring notebooks get the pin from
+  `REPO_REF` `cffb2a3` on; a notebook pinned earlier scores unpinned.
+
+### A campaign leg whose final Drive mirror fails is booked, not retrained — *implemented (unreleased, 2026-11-27)*
+Under `LOCAL_THEN_SYNC`, `train()` seals the leg's local copy and then
+mirrors it to the Drive attempt dir. A final mirror that kept failing
+raised out of `train()` before `run_leg` booked the leg, and so did a
+Ctrl-C during the mirror (review 2026-11-27, N3). Running the printed
+`sync_run_dir(...)` fix did not help: the next Run-All found no record,
+`campaign_leg_resume_point` said "train", and the finished `attempt_01`
+was replaced by a fresh 1M-3M-step `attempt_02`. The fix:
+- **`train()` raises `FinalMirrorError`** (a `SyncError`, so still a
+  `RuntimeError`), carrying `local_dir` and `sync_dir`.
+- **`run_leg` books the leg `unsynced` first,** validating the local
+  `config.json` against the frozen plan, with `local_dir` in the
+  record. It then retries the mirror in-session
+  (`notebook_utils.finish_leg_mirror`, pauses of 30, 120 and 300 s).
+  Once the Drive copy verifies, the leg is booked `trained` from Drive
+  as usual. If it never verifies, `run_leg` raises with the way out.
+  A Ctrl-C inside the final mirror books the leg `unsynced` the same
+  way, when its local copy verifies complete, and re-raises.
+- **The booking survives a Drive that refuses the manifest too, for as
+  long as the runtime does.** A full or dead mount usually refuses
+  both. So a leg booked from its local copy is first written to
+  `local_leg_bookings.json` in the campaign's local root, and the Drive
+  manifest's failure is printed, not raised. The loop cell adopts such
+  bookings before it resumes any leg (`adopt_local_leg_bookings`),
+  unless the Drive manifest holds a later word on that leg (the same
+  attempt, a later attempt, or `complete`). Booking a leg from Drive
+  drops its local booking. A booking keeps its campaign's fingerprint
+  and is never adopted into another campaign: not under other settings,
+  and not once its Drive attempt dir is gone (the campaign folder was
+  deleted and re-created under the same ID). The bookings file lives on
+  the runtime's disk, beside the local copy, so a new runtime has
+  neither: a leg whose booking only that file held then retrains,
+  whatever its Drive copy holds by then.
+- **A leg is booked by what its sealed run reached.** A finished,
+  validated leg whose local copy verifies is booked `unsynced`; an early
+  stop is a finished leg (its stage summary says `completed`, its run
+  record `early_stop`), as on the Drive path, which books it `trained`.
+  A config mismatch is booked `config_mismatch`, and an interrupted run
+  `interrupted`. A crashed run stopped inside its final mirror is
+  booked `crashed` (an ordinary crash raises its own error, and
+  `run_leg` books nothing). A finished run that no stage summary marks
+  completed, or whose local copy changed after it was sealed, is
+  booked `incomplete`. Only an `unsynced` leg is promised a score; the
+  others retrain, and the error says which applies.
+- **On resume, an `unsynced` leg is finished, then scored.**
+  `campaign_leg_resume_point` uses the Drive copy if it now verifies
+  (the operator re-synced it). Otherwise it mirrors the local copy if
+  the runtime still has it and it still verifies, and raises while
+  Drive refuses: a fresh attempt would hit the same Drive. It then
+  takes the `trained` checks. Only when the local copy is gone (a new
+  runtime) or changed since its seal, and the Drive copy does not
+  verify, does the leg retrain, with the reason printed.
+- **A re-sync finishes the run's own half-written mirror.** A
+  checkpoint pass that failed before any manifest existed leaves copies
+  of files that changed later (`progress.csv` grows). A fresh mirror
+  (`sync_run_dir`, the printed re-sync, the campaign's recovery) did
+  not write them and could not prove them the run's, so it refused the
+  run's own attempt dir on every try, even with Drive healthy again.
+  The directory the source's run record names as its mirror
+  (`sync.dir`, checked empty when the run started) now counts the paths
+  its sealed manifest lists, and temporary leftovers, as the run's. Any
+  other destination, and any file the seal does not list (a report
+  written into the mirror after training), is still refused.
+- **A local copy that does not verify is never mirrored.** A mirror of
+  it would seal damage as a complete run.
+- **Pins.** The campaign notebook runs this from `REPO_REF` `cffb2a3`
+  on.
+
 ### A PPO notebook runs on a Colab CPU runtime; only the SAC family demands a GPU — *implemented (unreleased, 2026-11-27)*
 PPO trains on CPU by design: its profiles pin `device="cpu"`, and SB3's
 MLP actor-critic is slower on a GPU. The PPO reference is planned as a
@@ -767,9 +907,10 @@ ladder design's "no humanoid training on CPU" is about the training
 backend, which both notebooks share.
 
 **Pins.** The fix lives in the package, so the four training and
-re-scoring notebooks pin `REPO_REF` to `069d000`, the commit that ships
-it. That commit also carries the render guard and the BLAS-free
-streams. The S1 spike keeps its own pin. Merge with a merge commit, not
+re-scoring notebooks pinned `REPO_REF` to `069d000`, the commit that
+ships it. That commit also carries the render guard and the BLAS-free
+streams. They now pin `cffb2a3`, which adds the MKL pin and the
+campaign's booking of an unsynced leg. The S1 spike keeps its own pin. Merge with a merge commit, not
 a squash: a squash leaves pinned branch SHAs unreachable from `main`.
 
 ### A failed render is never retried: MuJoCo aborts the process on a second render context — *implemented (unreleased, 2026-11-27)*
@@ -887,6 +1028,11 @@ recovery. Update its list here and in `ci.yml` when that happens. Also:
 - `digests.version_info()` records `libc`. A mismatch names a libc
   difference only when both sides know their libc. Older entries lack
   the field, as they lack `numpy_simd`, and get a neutral note instead.
+- Run artifacts and re-score rows record it too, since the MKL pin
+  ("CPU scores pin MKL's numerics"): `harness._versions()` and
+  `artifacts._versions()` carry `libc`, so a Colab-versus-local libm
+  split is visible where cross-host comparisons happen. Runs and rows
+  recorded before it lack the field.
 - The render smoke step runs whenever the job was not cancelled. It was
   skipped behind the golden failures.
 
@@ -895,10 +1041,6 @@ recovery. Update its list here and in `ci.yml` when that happens. Also:
   clause). Colab's image ships its own glibc, and every August run
   trained there, so record them before leaning on "bit-identical since
   August".
-- **Run records and re-score rows do not record the libc.**
-  `harness._versions()` and `artifacts._versions()` keep python, numpy,
-  MuJoCo, torch and SB3 only, so a Colab-versus-local libm split is not
-  visible where cross-host comparisons happen.
 - **Lifting the pin** needs one of two things: a libm-independent
   stream path, as was done for BLAS, or one lock per platform, the
   ladder design's fallback.

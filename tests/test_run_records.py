@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -40,6 +41,7 @@ from courtside_dynamics.experiments.records import (
     write_sync_manifest,
 )
 from courtside_dynamics.experiments.sync import (
+    FinalMirrorError,
     RunDirMirror,
     SyncError,
     sync_run_dir,
@@ -967,6 +969,83 @@ def test_a_manual_resync_finishes_a_mirror_a_failed_pass_left_unsealed(
     monkeypatch.setattr(sync, "_copy_and_hash", copy_and_hash)
     sync_run_dir(source, mirror_dir)
     assert verify_run_dir(mirror_dir, strict=True).complete
+
+
+def test_a_resync_finishes_its_own_mirror_a_failed_first_pass_left_stale(
+    tmp_path, monkeypatch
+):
+    """Review wf r1 (N3): the first checkpoint pass died mid-copy (no
+    manifest yet), and files it had copied changed later (progress.csv
+    grows). A fresh mirror -- the manual re-sync, the campaign's
+    recovery -- did not write those copies and could not prove them
+    this run's, so it refused the run's own attempt dir on every try,
+    even with Drive healthy again. The directory the run's own record
+    names as its mirror, which train() checked empty at the start, now
+    claims the paths the sealed local manifest lists; any other
+    destination still refuses."""
+    source = tmp_path / "local" / "attempt_01"
+    mirror_dir = tmp_path / "drive" / "attempt_01"
+    source.mkdir(parents=True)
+    (source / "config.json").write_text("{}\n")
+    (source / "metrics").mkdir()
+    (source / "metrics" / "progress.csv").write_text("step\n1\n")
+
+    def record(status):
+        return build_run_record(
+            {},
+            run_id=source.name,
+            created_at="t",
+            status=status,
+            sync={"dir": str(mirror_dir.resolve()), "checkpoint_mirrors": 0},
+        )
+
+    write_run_record(source, record(records.RUNNING))
+    copy_and_hash = sync._copy_and_hash
+
+    def dies_on_the_record(src: Path, dst: Path):
+        if src.name == RUN_RECORD_NAME:
+            raise OSError("Transport endpoint is not connected")
+        return copy_and_hash(src, dst)
+
+    monkeypatch.setattr(sync, "_copy_and_hash", dies_on_the_record)
+    with pytest.raises(OSError, match="Transport endpoint"):
+        RunDirMirror(source, mirror_dir).sync()
+    monkeypatch.setattr(sync, "_copy_and_hash", copy_and_hash)
+    assert (mirror_dir / "metrics" / "progress.csv").is_file()
+    assert not (mirror_dir / SYNC_MANIFEST_NAME).exists()
+    # A leftover of the source's own atomic writer, copied mid-write.
+    (mirror_dir / ".run_record.json.tmp-123").write_text("{")
+    # The run went on: progress.csv grew, and the run was sealed.
+    (source / "metrics" / "progress.csv").write_text("step\n1\n2\n")
+    write_run_record(source, record(records.COMPLETED))
+    write_sync_manifest(source)
+
+    # Without a record naming the destination, the stale copy is not
+    # provably this run's: a copy of the run elsewhere still refuses.
+    elsewhere = tmp_path / "elsewhere"
+    shutil.copytree(mirror_dir, elsewhere)
+    with pytest.raises(SyncError, match="progress.csv"):
+        sync_run_dir(source, elsewhere)
+    assert (elsewhere / "metrics" / "progress.csv").read_text() == "step\n1\n"
+
+    sync_run_dir(source, mirror_dir)
+    assert verify_run_dir(mirror_dir, strict=True).complete
+    assert (mirror_dir / "metrics" / "progress.csv").read_text() == "step\n1\n2\n"
+    assert not (mirror_dir / ".run_record.json.tmp-123").exists()
+
+    # A file the seal does not list -- a report the campaign wrote into
+    # the mirror after training -- is still never overwritten or deleted.
+    (mirror_dir / "reports").mkdir()
+    (mirror_dir / "reports" / "campaign_gate.json").write_text('{"verdict": "PASS"}\n')
+    (source / "notes.txt").write_text("local only\n")
+    write_sync_manifest(source)
+    (source / "reports").mkdir()
+    (source / "reports" / "campaign_gate.json").write_text('{"verdict": "local"}\n')
+    with pytest.raises(SyncError, match="campaign_gate.json"):
+        sync_run_dir(source, mirror_dir)
+    assert (mirror_dir / "reports" / "campaign_gate.json").read_text() == (
+        '{"verdict": "PASS"}\n'
+    )
 
 
 def test_the_final_pass_redoes_a_mirror_its_change_cache_left_stale(tmp_path):
@@ -2005,7 +2084,9 @@ def test_a_final_mirror_that_keeps_failing_raises_after_sealing_locally(
     log_dir = tmp_path / "local" / "run"
     sync_dir = tmp_path / "drive" / "run"
     (tmp_path / "drive").mkdir()
-    with pytest.raises(RuntimeError, match=r"failed 2 times .*sync_run_dir\("):
+    with pytest.raises(
+        FinalMirrorError, match=r"failed 2 times .*sync_run_dir\("
+    ) as caught:
         train(
             _cfg(
                 log_dir,
@@ -2014,6 +2095,12 @@ def test_a_final_mirror_that_keeps_failing_raises_after_sealing_locally(
                 sync_dir=str(sync_dir),
             )
         )
+    # A RuntimeError still (callers that caught that keep working), and
+    # it names both copies so the campaign can finish the mirror and
+    # book the leg instead of retraining it (review 2026-11-27, N3).
+    assert isinstance(caught.value, RuntimeError)
+    assert caught.value.local_dir.resolve() == log_dir.resolve()
+    assert caught.value.sync_dir.resolve() == sync_dir.resolve()
     _assert_sealed(log_dir, "completed")
     remote = verify_run_dir(sync_dir)
     assert not remote.complete

@@ -703,11 +703,28 @@ def test_campaign_notebook_validates_config_and_plumbs_env_kwargs() -> None:
     assert "except RunConfigPlanMismatch as err:" in source
     assert "except ValueError" not in source
     assert 'validation = {"verdict": "mismatch", "error": str(err)}' in source
-    train_index = source.index("model = train(cfg)")
-    validate_index = source.index("validate_run_config_against_plan(")
-    record_index = source.index('"config_validation": validation,')
-    gate_score_index = source.index("gate_report = score_paddle_stage(")
-    assert train_index < validate_index < record_index < gate_score_index
+    # book_leg validates, then records, then writes the manifest; run_leg
+    # calls it after train() returns, and the gate scores after that.
+    book_leg = source[source.index("def book_leg(") : source.index("def run_leg(")]
+    run_leg = source[source.index("def run_leg(") : source.index("def record_stage(")]
+    assert (
+        book_leg.index("validate_run_config_against_plan(")
+        < book_leg.index('"config_validation": validation,')
+        < book_leg.index("write_campaign_manifest(CAMPAIGN_ROOT, manifest)")
+    )
+    assert run_leg.index("model = train(cfg)") < run_leg.index(
+        "validation, run_status, _ = book_leg("
+    )
+    assert source.index("validation, run_status, _ = book_leg(") < source.index(
+        "gate_report = score_paddle_stage("
+    )
+    # Legs booked on local disk only rejoin the manifest before the first
+    # leg's resume point reads it (review N3; wf r1: no test held this).
+    assert (
+        source.index("\nadopt_local_bookings()\n")
+        < source.index("gate_resume, gate_dir = campaign_leg_resume_point(")
+        < source.index("main_resume, main_dir = campaign_leg_resume_point(")
+    )
     assert 'if validation["verdict"] != "ok":' in source
     assert "does not match the" in source
     # record_stage merges over run_leg's record instead of dropping the
@@ -1480,12 +1497,253 @@ def test_campaign_local_then_sync_is_operational_not_fingerprinted(
         if "def run_leg(" in _source(cell)
     )
     run_leg = helpers[helpers.index("def run_leg(") :]
-    assert 'log_dir = os.path.join("/content/runs", drive_relative)' in run_leg
+    assert "log_dir = local_twin(stage_dir)" in run_leg
+    assert 'return os.path.join("/content/runs", drive_relative)' in helpers
     assert "sync_dir = stage_dir" in run_leg
     assert "sync_dir=sync_dir," in run_leg
-    # Everything after train() keeps reading the Drive attempt dir.
-    assert 'locate_artifact(stage_dir, "config")' in run_leg
-    assert "stage_summary_status(stage_dir)" in run_leg
+    # Everything after train() reads the Drive attempt dir; only a leg
+    # whose final mirror failed is booked from its sealed local copy
+    # (test_campaign_books_a_leg_whose_final_mirror_failed).
+    assert (
+        "book_leg(\n        stage_name, stage_dir=stage_dir, expected=expected\n    )"
+        in run_leg
+    )
+    assert "read_dir = stage_dir if local_dir is None else local_dir" in helpers
+    assert 'locate_artifact(read_dir, "config")' in helpers
+    assert "stage_summary_status(read_dir)" in helpers
+
+
+def test_campaign_books_a_leg_whose_final_mirror_failed(tmp_path) -> None:
+    """Review 2026-11-27, N3: under LOCAL_THEN_SYNC a leg whose final
+    Drive mirror failed (or was interrupted) raised out of train() before
+    run_leg booked it, so a resume retrained the finished leg as
+    attempt_02. run_leg now books it 'unsynced' from its sealed local
+    copy, keeps retrying the mirror in-session, and books it 'trained'
+    from Drive once the mirror verifies. Review wf r1: an early stop is a
+    finished leg too, a local copy changed after its seal is not, and a
+    local booking never joins another campaign."""
+    import pytest
+
+    from courtside_dynamics.experiments.records import (
+        build_run_record,
+        verify_run_dir,
+        write_run_record,
+        write_sync_manifest,
+    )
+    from courtside_dynamics.experiments.sync import FinalMirrorError
+    from courtside_dynamics.notebook_utils import (
+        LOCAL_LEG_BOOKINGS_NAME,
+        RunConfigPlanMismatch,
+        finish_leg_mirror,
+        load_campaign_manifest,
+        write_campaign_manifest,
+    )
+
+    drive_mount, local_root = tmp_path / "MyDrive", tmp_path / "runs"
+    namespace = _exec_campaign_plan(
+        (("LOCAL_THEN_SYNC = False", "LOCAL_THEN_SYNC = True"),)
+    )
+    helpers = next(
+        _source(cell)
+        for cell in _load_campaign_notebook()["cells"]
+        if "def make_leg_config(" in _source(cell)
+    )
+    for old, new in (
+        ('"/content/drive/MyDrive"', repr(str(drive_mount))),
+        ('"/content/runs"', repr(str(local_root))),
+    ):
+        assert helpers.count(old) == 1, old
+        helpers = helpers.replace(old, new)
+    exec(compile(helpers, f"{CAMPAIGN_NOTEBOOK}:helpers", "exec"), namespace)
+    campaign_root = drive_mount / "campaigns" / "c1"
+    campaign_root.mkdir(parents=True)
+    validated = []
+    drifted = set()
+
+    def validate(path, expected):
+        validated.append(str(path))
+        if any(f"/{stage}/" in str(path) for stage in drifted):
+            raise RunConfigPlanMismatch("seed: expected 0, recorded 1")
+
+    namespace.update(
+        CAMPAIGN_ROOT=str(campaign_root),
+        manifest={
+            "campaign_id": "c1",
+            "status": "running",
+            "fingerprint": {"campaign_id": "c1", "seed": 0},
+            "stages": {},
+        },
+        write_campaign_manifest=write_campaign_manifest,
+        validate_run_config_against_plan=validate,
+        print_stage_summary=lambda run_dir: None,
+    )
+    local_bookings = local_root / "campaigns" / "c1" / LOCAL_LEG_BOOKINGS_NAME
+
+    def seal(log_dir, status="completed", summary=None):
+        log_dir = Path(log_dir)
+        log_dir.mkdir(parents=True)
+        (log_dir / "config.json").write_text("{}\n")
+        (log_dir / "stage_summary.txt").write_text(
+            f"Status:         {summary or status}\n"
+        )
+        write_run_record(
+            log_dir,
+            build_run_record({}, run_id="r", created_at="t", status=status),
+        )
+        write_sync_manifest(log_dir)
+
+    def mirror_fails(cfg):
+        seal(cfg.log_dir)
+        raise FinalMirrorError(
+            "mirror failed", local_dir=cfg.log_dir, sync_dir=cfg.sync_dir
+        )
+
+    def leg(stage_name):
+        return namespace["run_leg"](stage_name, seed=0, total_timesteps=1_000_000)
+
+    def booked(stage_name):
+        on_disk = load_campaign_manifest(campaign_root)["stages"][stage_name]
+        assert on_disk == namespace["manifest"]["stages"][stage_name]
+        return on_disk
+
+    # Drive keeps refusing: booked unsynced from the local copy, and the
+    # error says the resume scores the leg rather than retraining it.
+    namespace["train"] = mirror_fails
+    namespace["finish_leg_mirror"] = lambda local_dir, drive_dir: False
+    with pytest.raises(RuntimeError, match="instead of retraining it"):
+        leg("leg_a")
+    record = booked("leg_a")
+    drive_a = campaign_root / "leg_a" / "attempt_01"
+    local_a = local_root / drive_a.relative_to(drive_mount)
+    assert record == {
+        "status": "unsynced",
+        "run_dir": str(drive_a),
+        "config_validation": {"verdict": "ok"},
+        "local_dir": str(local_a),
+    }
+    assert validated[-1] == str(local_a / "config.json")
+
+    # Drive recovers within the session: the leg is booked trained from
+    # its now-verified Drive copy, exactly as an unfailed leg is.
+    namespace["finish_leg_mirror"] = finish_leg_mirror
+    drive_b = campaign_root / "leg_b" / "attempt_01"
+    assert leg("leg_b") == str(drive_b)
+    assert booked("leg_b") == {
+        "status": "trained",
+        "run_dir": str(drive_b),
+        "config_validation": {"verdict": "ok"},
+    }
+    assert validated[-1] == str(drive_b / "config.json")
+    assert verify_run_dir(drive_b, strict=True).complete
+
+    # Stopped inside the final mirror: booked unsynced, interrupt re-raised.
+    def interrupted_in_the_mirror(cfg):
+        seal(cfg.log_dir)
+        raise KeyboardInterrupt
+
+    namespace["train"] = interrupted_in_the_mirror
+    with pytest.raises(KeyboardInterrupt):
+        leg("leg_c")
+    assert booked("leg_c")["status"] == "unsynced"
+
+    # Stopped before the run was sealed: nothing complete to book.
+    def interrupted_early(cfg):
+        raise KeyboardInterrupt
+
+    namespace["train"] = interrupted_early
+    with pytest.raises(KeyboardInterrupt):
+        leg("leg_d")
+    assert "leg_d" not in namespace["manifest"]["stages"]
+
+    # A crashed run stopped inside its final mirror is booked as what it
+    # is, so a resume retrains it instead of blocking on its mirror.
+    def crashed_then_interrupted(cfg):
+        seal(cfg.log_dir, status="crashed")
+        raise KeyboardInterrupt
+
+    namespace["train"] = crashed_then_interrupted
+    with pytest.raises(KeyboardInterrupt):
+        leg("leg_e")
+    assert booked("leg_e")["status"] == "crashed"
+
+    # A drifted leg whose mirror fails is booked config_mismatch, and the
+    # error says it is retried rather than scored.
+    namespace["train"] = mirror_fails
+    namespace["finish_leg_mirror"] = lambda local_dir, drive_dir: False
+    drifted.add("leg_f")
+    with pytest.raises(RuntimeError, match="booked 'config_mismatch'"):
+        leg("leg_f")
+    assert booked("leg_f")["status"] == "config_mismatch"
+
+    # An early stop is a finished leg (stage_summary "completed", the run
+    # record "early_stop"), booked unsynced exactly as the Drive path
+    # books it trained: scored on resume, not retrained.
+    def early_stop_mirror_fails(cfg):
+        seal(cfg.log_dir, status="early_stop", summary="completed")
+        raise FinalMirrorError(
+            "mirror failed", local_dir=cfg.log_dir, sync_dir=cfg.sync_dir
+        )
+
+    namespace["train"] = early_stop_mirror_fails
+    with pytest.raises(RuntimeError, match="instead of retraining it"):
+        leg("leg_h")
+    assert booked("leg_h")["status"] == "unsynced"
+
+    # A local copy changed after its seal can never be mirrored: booked
+    # incomplete (retrained), not promised a score it cannot get.
+    def changed_after_the_seal(cfg):
+        seal(cfg.log_dir)
+        (Path(cfg.log_dir) / "config.json").write_text('{"edited": true}\n')
+        raise FinalMirrorError(
+            "mirror failed", local_dir=cfg.log_dir, sync_dir=cfg.sync_dir
+        )
+
+    namespace["train"] = changed_after_the_seal
+    with pytest.raises(RuntimeError, match="booked 'incomplete'"):
+        leg("leg_i")
+    assert booked("leg_i")["status"] == "incomplete"
+    namespace["train"] = mirror_fails
+
+    # Drive refuses the manifest as well as the mirror (a full Drive):
+    # the booking survives on local disk, the guidance error is not
+    # masked by the manifest's OSError, and the next Run-All adopts it.
+    def full_drive(campaign_root, manifest):
+        raise OSError(28, "No space left on device")
+
+    namespace["write_campaign_manifest"] = full_drive
+    with pytest.raises(RuntimeError, match="instead of retraining it"):
+        leg("leg_g")
+    on_drive = load_campaign_manifest(campaign_root)
+    assert "leg_g" not in on_drive["stages"]
+    assert json.loads(local_bookings.read_text())["leg_g"]["status"] == "unsynced"
+    namespace["write_campaign_manifest"] = write_campaign_manifest
+    namespace["manifest"] = on_drive  # pc-root reloads it on the re-run
+    namespace["adopt_local_bookings"]()
+    adopted = load_campaign_manifest(campaign_root)["stages"]["leg_g"]
+    assert adopted["status"] == "unsynced"
+    assert adopted["run_dir"] == str(campaign_root / "leg_g" / "attempt_01")
+    # The booking keeps its campaign's fingerprint; the manifest does not.
+    assert "campaign_fingerprint" not in adopted
+    assert json.loads(local_bookings.read_text())["leg_g"]["campaign_fingerprint"] == {
+        "campaign_id": "c1",
+        "seed": 0,
+    }
+
+    # A booking never joins another campaign: not one booked under other
+    # settings, nor one whose Drive attempt dir is gone (the campaign
+    # folder deleted and re-created under the same ID).
+    bookings = json.loads(local_bookings.read_text())
+    bookings["leg_x"] = {**bookings["leg_g"], "campaign_fingerprint": {"seed": 1}}
+    bookings["leg_y"] = {
+        **bookings["leg_g"],
+        "run_dir": str(campaign_root / "leg_y" / "attempt_01"),
+    }
+    local_bookings.write_text(json.dumps(bookings))
+    namespace["adopt_local_bookings"]()
+    stages = load_campaign_manifest(campaign_root)["stages"]
+    assert "leg_x" not in stages and "leg_y" not in stages
+    # Booking a leg from Drive drops its local booking.
+    assert "leg_b" not in json.loads(local_bookings.read_text())
 
 
 # -- Rescore notebook (design L3) ---------------------------------------------
@@ -1654,6 +1912,12 @@ def _exec_rescore_notebook(
     return namespace
 
 
+def torch_has_mkl() -> bool:
+    import torch
+
+    return torch.backends.mkl.is_available()
+
+
 def test_rescore_notebook_scores_august_layout_runs_outside_their_folders(
     tmp_path, monkeypatch, capsys
 ) -> None:
@@ -1775,6 +2039,87 @@ def test_rescore_notebook_scores_august_layout_runs_outside_their_folders(
         checkpoints / "paddle_tennis_sac_vecnormalize_256_steps.pkl", normalizer
     )
     assert _tree_digest(runs) == before
+    # The rows scored for these files are back: reused again.
+    scores.write_bytes(written)
+    _exec_rescore_notebook(ns, cells=("rs-rescore",))
+    assert f"{registered}: already scored" in capsys.readouterr().out
+
+    # Review 2026-11-27, N2: rows an earlier session scored before MKL was
+    # pinned hold one host's kernels. They are re-scored, not reused,
+    # though they cover exactly the run's files ...
+    def unpinned(rows):
+        return "".join(
+            json.dumps(
+                {
+                    **row,
+                    "versions": {
+                        key: value
+                        for key, value in row["versions"].items()
+                        if key != "cpu_numerics"
+                    },
+                }
+            )
+            + "\n"
+            for row in rows
+        )
+
+    scores.write_text(unpinned(read_scores(scores)))
+    _exec_rescore_notebook(ns, cells=("rs-rescore",))
+    assert f"{registered}: already scored" not in capsys.readouterr().out
+    assert all(
+        row["versions"]["cpu_numerics"]["pinned"] is True or not torch_has_mkl()
+        for row in read_scores(scores)
+    )
+    # ... and a run left with such rows stays out of the curves and the
+    # verdicts, its earlier verdict dropped, until it is picked again.
+    # A verdict of another series that records no numerics (before the
+    # pin, every verdict) is dropped too, not kept beside this one.
+    elsewhere = out_root / "20260701_000000" / "checkpoints" / "scores"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / scores.name).write_text(unpinned(read_scores(scores)))
+    seeded = json.loads((out_root / "verdicts.json").read_text())
+    assert verdict["cpu_numerics"] == ns["NUMERICS"]
+    seeded["runs"]["20260701_000000"] = {"checkpoints": verdict}
+    pre_pin = {key: value for key, value in verdict.items() if key != "cpu_numerics"}
+    seeded["runs"][registered]["snapshots"] = {**pre_pin, "series": "snapshots"}
+    (out_root / "verdicts.json").write_text(json.dumps(seeded))
+    _exec_rescore_notebook(ns, cells=("rs-read", "rs-verdict"))
+    assert ns["OTHER_NUMERICS"] == {"20260701_000000"}
+    assert "20260701_000000" not in ns["ALL_SCORES"]
+    out = capsys.readouterr().out
+    assert "Left out, scored under other CPU numerics" in out
+    assert f"Dropped verdicts picked under other CPU numerics: {registered} (snapshots)" in out
+    after = json.loads((out_root / "verdicts.json").read_text())
+    assert "20260701_000000" not in after["runs"]
+    assert list(after["runs"][registered]) == ["checkpoints"]
+    shutil.rmtree(out_root / "20260701_000000")
+
+    # Review wf r1 (N2): a session whose MKL is not pinned stops before it
+    # scores, refuses or drops anything, instead of booking its own
+    # numerics as every run's refusal and every verdict's staleness.
+    from courtside_dynamics import numerics
+
+    kept = (scores.read_bytes(), (out_root / "verdicts.json").read_bytes())
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            numerics, "cpu_numerics_problem", lambda: "torch's MKL runs its AVX2 CNR branch"
+        )
+        with pytest.raises(
+            RuntimeError, match="nothing was scored and verdicts.json is untouched"
+        ):
+            _exec_rescore_notebook(ns, cells=("rs-rescore",))
+    assert (scores.read_bytes(), (out_root / "verdicts.json").read_bytes()) == kept
+
+    # With no run to plot, an earlier session's curves are removed, not
+    # left showing runs ALL_SCORES (and the verdicts) leave out.
+    curves = out_root / "curves_checkpoints.png"
+    png, all_scores = curves.read_bytes(), ns["ALL_SCORES"]
+    ns["ALL_SCORES"] = {}
+    _exec_rescore_notebook(ns, cells=("rs-plot",))
+    assert not curves.exists()
+    assert "removed the earlier" in capsys.readouterr().out
+    curves.write_bytes(png)
+    ns["ALL_SCORES"] = all_scores
 
     # QUICK: the best model and 3 checkpoints, first to last, elsewhere.
     quick = _exec_rescore_notebook(

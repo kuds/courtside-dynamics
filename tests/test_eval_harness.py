@@ -717,6 +717,58 @@ def test_eval_protocol_record_names_the_registered_protocol_or_none():
     assert protocols.eval_protocol_record(cfg) is None
 
 
+def test_a_cpu_run_without_pinned_numerics_claims_no_cpu_protocol(
+    tmp_path, monkeypatch
+):
+    """Review 2026-11-27 (N2): torch's CPU float32 matmuls follow MKL's
+    per-host kernels unless MKL's CNR branch is pinned, so the same
+    snapshot scored differently on AVX2 and AVX-512 hosts under one
+    fingerprint. A CPU run whose numerics are not pinned records no
+    protocol id (nearest @v3, ``cpu_numerics`` the difference), and the
+    harness refuses to score a CPU protocol in such a process."""
+    from courtside_dynamics import numerics
+
+    cfg = build_train_config("PaddleTennis", log_dir=str(tmp_path), seed=0)
+    assert numerics.cpu_numerics_problem() is None  # the package pinned it
+    assert protocols.eval_protocol_record(cfg, device="cpu")["id"] == "paddle-npoint@v3"
+
+    monkeypatch.setattr(numerics, "cpu_numerics_problem", lambda: "MKL runs AUTO")
+    assert protocols.eval_protocol_record(cfg, device="cpu") == {
+        "id": None,
+        "fingerprint": _V3_FINGERPRINT,
+        "device": "cpu",
+        "nearest": "paddle-npoint@v3",
+        "differs": ["cpu_numerics"],
+    }
+    cfg.n_eval_episodes = 4
+    assert protocols.eval_protocol_record(cfg, device="cpu")["differs"] == [
+        "n_episodes",
+        "cpu_numerics",
+    ]
+    v3 = get_protocol("paddle-npoint@v3")
+    assert harness._device_problem(v3, "cpu") == "MKL runs AUTO"
+    with pytest.raises(ValueError, match="rescore refused before scoring") as refused:
+        harness.rescore([tmp_path], "paddle-npoint@v3")
+    assert "MKL runs AUTO" in str(refused.value)
+    # A CUDA protocol does not ask for MKL's numerics.
+    assert harness._device_problem(v3.derive("cuda", device="cuda"), "cuda") is None
+
+
+def test_score_rows_record_the_c_library_and_cpu_numerics():
+    from courtside_dynamics.training.artifacts import _versions as run_versions
+
+    versions = harness._versions()
+    recorded = run_versions()
+    assert versions["libc"]
+    assert recorded["libc"] == versions["libc"]
+    if torch.backends.mkl.is_available():
+        assert versions["cpu_numerics"]["pinned"] is True
+        assert recorded["mkl_cbwr"] == "COMPATIBLE"
+    else:  # nothing to pin (Apple silicon, aarch64)
+        assert versions["cpu_numerics"]["blas"] == "other"
+        assert recorded["mkl_cbwr"] == "other"
+
+
 def test_a_run_evaluating_on_cuda_claims_no_cpu_protocol(tmp_path, monkeypatch):
     """Verifier r2 (phase 4, major): the in-loop protocol a run recorded
     left the device out, so an SB3 "auto" run on a Colab GPU recorded
