@@ -502,7 +502,76 @@ __NEWBUGS__
 
 ## 8. Run readiness: the next runs, executed here at small scale
 
-__READINESS__
+The planned next runs were executed here at reduced scale, at
+`8df9277`, on 4 shared CPUs with one torch thread each.
+
+| Step | What ran | Result |
+|---|---|---|
+| Day-0 PPO reference (ladder §7 item 1) | The design's call builds unchanged for seeds 0-2 at 4, 8 and 16 workers. A reduced run (4 envs × 256-step rollouts, 8,192 steps, 4 evaluations) went through `train()` | **Pass.** 64.5 s, 40 updates. Wrote `run_record.json` (completed), `sync_manifest.json`, 4 snapshot pairs and `best_model_meta.json`. `verify` and `verify --strict` pass |
+| In-loop identity | `rescore --protocol inloop` on that run | **Pass.** 132/132 keys equal `eval_info.csv` at all 4 snapshots |
+| `@v3` re-score and `select()` | `rescore --protocol paddle-npoint@v3`, then `select()` | **Pass.** About 100 s per artifact. Both pick the same step on `@v3` rows. On the in-loop rows, `select()` and the in-loop rule disagree (2048 against 4096): the confirmation bias of §6.3 |
+| Re-score of a real August run | Registered run `20260816_235141`: its best (2.4M) and the 2M checkpoint, fetched read-only from Drive (sha256 matched `best_model_meta`), scored under `@v3` and `@v2` | **Pass.** Every non-reward key is identical across the two protocols (117-119 per block), so L3's identity gate holds on real data. Under `@v3`: k≥2 = 0.000 for both, k=1 1.70 and 1.43, task reward 0.667 (1.445 under `@v2` with shaping) |
+| SAC quick test | `build_train_config('PaddleTennis', algo='SAC', quick_test=True)` | **Crash** (exit 134) at the second video attempt, step 20k. With `record_video=False` it completes in 405 s and verifies (38 files) |
+| PPO learning probe | `tools/ppo_learning_probe.py` | **Pass.** 750/750 on 20 held-out seeds after 688k steps. The CI 1-D reach test passes in 7.5 s |
+| SAC γ=0.995 arm | Through a TOML `[train.algo.sac.model_kwargs] gamma = 0.995` | **Builds.** The value deep-merges onto the exploration bundle |
+
+**The crash is the one real defect.**
+- **What happens.** On a host where MuJoCo cannot create an OpenGL
+  context, `VideoRecordCallback` catches the first failure and retries
+  at the next cadence. MuJoCo 3.15 cannot retry: the second
+  `mujoco.Renderer()` trips a C++ static-initialization guard and
+  aborts the interpreter, which no Python `except` can catch.
+- **Reproduced here** with two `Renderer()` calls (exit 134).
+- **What is left behind.** A run record that says `running`, no
+  manifest, no closing evaluation and no final model.
+- **Where it applies.** `record_video` defaults to True. Any CPU host
+  without working GL dies at its second video cadence: this container,
+  CI runners and possibly Colab CPU runtimes. `setup_colab` forces
+  `MUJOCO_GL=egl`, and whether that works without an NVIDIA driver was
+  not tested.
+- **For the PPO reference** at its 250k video cadence, that means death
+  at 500k steps.
+- **The fix.** After the first failure, disable recording for the rest
+  of the run (`save_freq = 0`). Until then, pass `record_video=False`
+  on CPU hosts.
+
+**Throughput, measured.**
+
+| Quantity | Measured | Design's figure |
+|---|---|---|
+| PPO collection, single process | 1,244-1,674 env steps/s | 632-832 |
+| PPO collection, `subproc` (8 workers, 4 vCPUs) | 1,889-2,673 env steps/s | — |
+| PPO update share | 7-14% | ≤ 4% |
+| Single-env evaluation | 738-1,082 steps/s; the 30-episode checkpoint diagnosis takes about 51 s | — |
+| SAC recipe, one torch thread | 80-88 env steps/s, 95% of it in gradient steps | — |
+
+What the numbers imply:
+- `subproc` gains only 1.4-1.6×, because policy inference and the
+  in-loop evaluation stay in the main process.
+- At the reference cadence, evaluation takes 20-48% of PPO wall clock.
+- **PPO reference, one core:** about 0.8-1.0 h per 3M steps per seed
+  and 2.6-3.5 h per 10M.
+- **Three seeds × 10M** as parallel single-process runs on 4 vCPUs
+  take about 2.6-3.5 h, against 6-8.6 h one after another.
+- **SAC on CPU:** about 7.5-9.6 h for the recipe's 2M budget and
+  11-14 h per 3M seed of the γ arm. That is comparable to the L4
+  estimate of about 20 h per seed.
+
+**The re-score is bigger than planned.** Drive holds about 237 legacy
+PaddleTennis SAC checkpoint zips (2026-08-03 to 08-29). At 1.7-1.9
+minutes each, scoring them all takes about 7-8 CPU-hours; the design
+assumed about 100 checkpoints and "a few CPU-hours". The notebook has
+no every-500k option, so use `QUICK`, `RUN_IDS`, or the CLI's
+`--steps` with parallel processes.
+
+**Smaller defects:**
+- `stage_summary.txt` reads the git SHA when it is written, not at
+  launch. A checkout that moves mid-run gets a summary that disagrees
+  with its run record. This happened here: this review's own
+  work-in-progress commit (`86ab95d`) landed during the SAC quick
+  test, so its summary says `86ab95d` and its record `8df9277`.
+- `rescore_runs.ipynb`'s pin comment is stale: 95fb930 does ship
+  `@v3`.
 
 ## 9. The humanoid and GPU track
 
@@ -563,7 +632,64 @@ a declared era on MuJoCo 4.
 
 ## 10. Next steps
 
-__NEXT__
+The ordering principle is the one the project already wrote down:
+run what can change a decision, with no new features, and keep a run
+in flight. Items 1-6 need no design work. Most of them run on CPU.
+
+### 10.1 This week: restore the baseline, then run
+
+| # | Step | Cost | Why now |
+|---|---|---|---|
+| 1 | **Restore green CI.** A/B one job on `ubuntu-24.04` against `ubuntu-26.04`, then pin `runs-on: ubuntu-24.04` as a stopgap declared in DECISIONS (do not re-record). Add the libc version to `digests.version_info()`. Add `if: ${{ !cancelled() }}` to the render step | hours | Every later merge needs a working stream gate (§5.2) |
+| 2 | **Fix the video-retry abort.** Disable recording after the first failure, with a regression test. Until then pass `record_video=False` on CPU hosts | 1 h | Otherwise a CPU run dies at its second video cadence (§8) |
+| 3 | **Launch the day-0 PPO reference** exactly as pre-registered: the §7 call plus `early_stop_degenerate_evals=0` and `record_video=False`, 3 seeds as parallel single-process CPU runs with a Drive `sync_dir`. Read at 3M against the frozen table | about 1 h to the 3M readout; 2.6-3.5 h for 3 × 10M on 4 vCPUs | The cheapest result that can change a decision: task-side or SAC-side, the default algorithm, and LD1′'s form |
+| 3a | **Book the choice first.** Add a DECISIONS line saying the reference is the design-literal call, not the recipe's unprobed profile, and commit the config as a TOML or spec in git rather than on Drive. Report best models under both `select()` and the in-loop rule (§6.3) | minutes | Two configs disagree on 8-9 settings (§4.4) |
+| 3b | **Add a γ control** so the reading table can separate algorithm from discount: 1-2 PPO seeds at γ=0.99 (about 1 h per 3M on CPU), or the SAC γ=0.995 arm (2 × 3M, about 11-14 h per seed on CPU or about 20 h on an L4) | as stated | Row 2 of the table otherwise confounds the two (§4.4) |
+| 4 | **Re-score the August runs under `@v3`** with `rescore_runs.ipynb` on a Colab CPU runtime (`RUNS_SUBDIR='PaddleTennis/sac'`, `SERIES='checkpoints'`). Run `QUICK` first; then best models plus 500k multiples as parallel CLI processes. Book the `select()` verdicts | 1.5-2 CPU-h (QUICK); 7-8 CPU-h (all about 237 checkpoints) | Gives the current-era incumbent on `episode_rally_returns_a`, which every later comparison needs, and closes L3 |
+| 5 | **Record the golden digests on Colab** (`tools/golden_digest.py --full` on a CPU runtime) | 5 min | Closes M1. Tests whether Colab reproduces the local streams, an assumption the re-score's comparability rests on (§5.2) |
+| 6 | **Run spike S1** after a half-day preflight: print the `nvidia-smi` driver first, swap Warp to its `+cu12` 1.18.0 wheel if the driver is below R580, and pin flax, optax, orbax and chex. Book PASS, FAIL or no result | 0.5 day + 1-2 L4-h | Decides the whole humanoid half and the GPU platform (§9) |
+
+### 10.2 Next two weeks: test the top hypothesis directly
+
+| # | Step | Notes |
+|---|---|---|
+| 7 | **Context-blind pilot, built minimally.** Make it a pure observation projection, i.e. physics only, dropping the rally-state, latch and clock dims. Give it its own observation fingerprint so old checkpoints refuse it. Train 3 PPO seeds on CPU against the step-3 reference; SAC seeds against the γ arm when an L4 is free | It is the only direct test of hypothesis 1 (§3.2), and it does not need M5-M7. Score it on the 10-05 bar (k=2 ≥ 5% on fresh seeds) or the campaign design's pilot rule |
+| 8 | **Decide LD1′.** Freeze it as a short pilot spec with a cap and a kill date, in whichever algorithm step 3 favours (`DemoSAC`, or PPO with BC or kickstarting via M13). Or retire it by tag-and-delete | Fix `artifacts-demo-1` and `train-4` first if it runs |
+| 9 | **Fix what would mislead the reading of steps 3-8:** the paired `confirm_best` first-best bias (decide the rule; roll a confirmation for the first best); `stage_summary`'s "deploy best_model.zip"; the `eval_headline.png` routing; the campaign's unsafe count; plus the verified items of §7 | Mostly bit-identical; the `confirm_best` rule is an era decision for selection |
+| 10 | **Widen the incoming-ball distribution** (the 10-05 "ball machine") if k=2 moves only partially | Hypothesis 2 |
+
+### 10.3 Later, at the rung that needs it
+
+- **M5-M7 with L4-L5** (`ObsLayout`, task registry, experiment
+  specs). Build them when step 7's result shows what P1 needs. Count
+  the total as about 88 working days, not 70.
+- **L6-L7** (extract the escrows, then tag and delete the dead levers),
+  before any new lever is added. `PaddleTennisEnv` still carries 19
+  kwargs.
+- **The MuJoCo version strategy and M8** (§9):
+  - tag first;
+  - fix `humanoid-1` and the Wilson clamp in the tagged commit, so the
+    archived notebook can promote;
+  - keep the G1 adapter for the GPU track;
+  - lift the cap to `<4`, since 3.17 moves only the humanoid golden.
+- **S2-S4 and H0** only after S1 passes. Budget about 30-90 L4-hours
+  for H0's 3 seeds.
+
+### 10.4 Process guardrails
+
+- **Keep one run in flight at all times.** Merge no M4+/L4+
+  infrastructure until steps 3-6 have launched.
+- **Make runless stretches visible.** Generate a one-line status from
+  the run index ("days since last run", "runs in flight") and put it at
+  the top of `docs/README.md`.
+- **Spend verifier rounds on code that has run.** Week 1's four
+  interrupt-hardening rounds covered windows no run had exercised.
+- **Refresh the stale docs:**
+  - the design status headers, which still say "week 1 in progress";
+  - the throughput figures (632-832 steps/s and ≤ 4% updates; §8);
+  - the README's "nightly job is planned";
+  - the S1 `REPO_REF` in DECISIONS;
+  - the incomplete `docs/README.md` index.
 
 ## Appendix A. Status of the 2026-10-16 findings at HEAD
 
