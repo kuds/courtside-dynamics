@@ -32,7 +32,76 @@ PR #81, "week-1 foundations", 2026-10-18) and conducted 2026-11-27.
 
 ## 1. Bottom line
 
-__BOTTOM_LINE__
+1. **Where the ladder stands.**
+   - Ball control and WallBall are done; WallBall's goal was met and
+     replicated on 2/3 seeds.
+   - PaddleTennis is the active rung, and it is stuck. Over about 25M
+     SAC steps in 16 runs, k=1 receiving reached 90-100%, but the
+     policy's own second return (k=2) never left the noise floor: 1.6%
+     on fresh seeds at best, against a 5% bar.
+   - Six levers were falsified on k=2 and two were retired before
+     launch.
+   - The top-ranked explanation, a context gate on rally bookkeeping,
+     has never been tested by an intervention.
+   - The humanoid track has scripted oracles only.
+2. **Nothing has trained for 90 days, and nothing has been committed
+   for 40.**
+   - The last run ended 2026-08-29, and the Drive archive has had no
+     write since 08-30.
+   - Week 1 (10-16 to 10-18) delivered its infrastructure plan, about
+     25k hand-written lines plus 21.6k of goldens, and ran none of the
+     runs it booked. The day-0 PPO reference, the August re-score and
+     spike S1 were all due that week.
+   - That is the "runless stretch" the 2026-10-16 campaign design was
+     written to prevent, and this review treats it as the main risk.
+3. **CI on `main` has been red since 2026-11-16, although no code
+   changed.**
+   - Seven PaddleTennis golden digests fail on every Python leg since
+     GitHub's runner moved to Ubuntu 26.04. Every gate passes locally.
+   - The likely cause is the OS math library (not proven).
+   - It means bit-identity is platform-dependent, and Colab's digests
+     have never been recorded (§5).
+4. **One training setup is current: SAC on PaddleTennis.**
+   - The PaddleTennis PPO profile is unprobed. It also differs from the
+     pre-registered day-0 PPO reference on 8-9 settings: γ, network,
+     batch, epochs, gSDE and cadences.
+   - The pre-registered call is not "no early stop" as written, and its
+     reading table confounds algorithm with discount.
+   - In-loop evaluation is the dominant cost: about 31-39% of L4 wall
+     clock for SAC, and 75% of CPU wall clock at the recipe's PPO
+     cadence (§4).
+5. **The next runs are executable today, with two fixes.**
+   - The PPO reference, the in-loop and `@v3` re-scores and `select()`
+     all ran end to end here, including on a real August run.
+   - **First fix:** on a host without OpenGL, any run that records
+     video (the default) aborts at its second video attempt (N1).
+   - **Second fix:** the notebooks refuse a Colab CPU runtime (N4).
+   - **Throughput** is better than the design assumed: PPO collects
+     1.2-2.7k steps/s, so 3 seeds × 10M take about 3 h on 4 vCPUs
+     (§8).
+6. **The week-1 code holds up, with one notable new risk.**
+   - All 18 bug-review findings survived verification, but most were
+     downgraded to low.
+   - **The new risk:** CPU re-scores depend on the host's MKL kernels,
+     so the same snapshot under the same protocol scores differently on
+     AVX2 and AVX-512 Colab hosts (N2). Pinning `MKL_CBWR` fixes it.
+   - **Older findings:** of the 98 from 2026-10-16, 82 remain open,
+     including 7 of the 10 medium ones. The open ones that matter are
+     the paired `confirm_best` bias and the misleading
+     reporting (§6.3).
+7. **The GPU plan has a version problem.** mjlab pins MuJoCo 3.11,
+   Playground 1.x needs ≥ 4.0, and the CPU court is capped at 3.15. S1
+   is ready but has never run (§9).
+8. **Next (§10):**
+   - restore CI;
+   - fix the video abort;
+   - launch the PPO reference as pre-registered, with a γ control;
+   - re-score the August runs under `@v3` with MKL pinned;
+   - record the Colab digests;
+   - run S1.
+
+   Then test the context gate directly, and hold further
+   infrastructure until runs are in flight.
 
 ## 2. Goal and where the ladder stands
 
@@ -332,11 +401,13 @@ These facts were checked against the GitHub Actions API:
 - **The same SHA passed weekly** from 2026-10-19 through 2026-11-09
   (#225-#228).
 - **The failures are all PaddleTennis:**
-  - `recipe/camper`, `one_point/oracle`, `hold/oracle`,
-    `drill_feed/random`, `drill_full/random` and
-    `recipe/oracle_seed_once` (info digest only), plus one more;
-  - the other 7 PaddleTennis cases pass on the same runners,
-    `recipe/random` and `recipe/zero` among them;
+  - the 7 failing cases are `recipe/random`, `recipe/camper`,
+    `one_point/oracle`, `hold/oracle`, `drill_feed/random`,
+    `drill_full/random` and `recipe/oracle_seed_once` (its info digest
+    only);
+  - the other 7 pass on the same runners: `recipe/zero`,
+    `recipe/oracle`, `recipe/random_seed_once`, `legal_volley/oracle`
+    and the three NaN witnesses;
   - every other env passes.
 - **The wrong digests do not depend on CPU, numpy or Python.** They are
   bit-identical across X86_V3, AVX512_ICL and AVX512_SPR runners,
@@ -349,11 +420,14 @@ These facts were checked against the GitHub Actions API:
 - A local replica of the failing py3.11 package set passes on glibc
   2.39.
 
-The likely cause is therefore last-bit changes in the OS math library
-on a code path that only some scripted cases reach. Since
-`recipe/random` passes, the serve draw that every case uses is
-unlikely. This is unconfirmed: running Python under a glibc 2.43
-loader was not possible in this session.
+The likely cause is therefore last-bit changes in the OS math library.
+The PaddleTennis code calls `np.sin` and `np.cos` in the serve draw
+and `np.hypot` in the reach and hold escrows; the scripted policies
+and MuJoCo add more libm calls. A last-bit difference
+shows up only when a rollout reaches an input whose rounding changed,
+which would explain why some seeded cases move and others do not.
+This is unconfirmed: running Python under a glibc 2.43 loader was not
+possible in this session.
 
 **Why it matters beyond CI:**
 - **CI no longer guards the env streams.** Every future change to
@@ -498,7 +572,71 @@ Notes on what was built:
 
 ## 7. New findings in the week-1 code (verified)
 
-__NEWBUGS__
+**Method.** Five finders covered the week-1 diff: run records and
+sync, offline evaluation, PPO and training, digests and linalg, and
+the Colab notebooks. Between them they reported 18 findings. Each
+scope's verifier re-read the code at HEAD, wrote its own independent
+reproduction, and defaulted to "refuted" when it could not reproduce
+a finding.
+- **Result.** None was refuted. Four were confirmed only in part.
+  Severity was re-rated for real use, and most findings dropped to low.
+- **Two additions** come from other parts of the review: the
+  video-retry abort, found by the readiness run (§8) and reproduced
+  here, and the red CI (§5.2).
+
+### 7.1 Findings that matter for the next runs
+
+| # | Finding | Severity | Where |
+|---|---|---|---|
+| N1 | **A second video attempt on a host without OpenGL aborts the training process** (SIGABRT, uncatchable). The run is left `running`, with no manifest and no final model. The bug predates week 1, but PPO's move to CPU makes it bite now (§8) | **high** for CPU launches | `callbacks/video_record.py:173-190` |
+| N2 | **CPU re-scores depend on the host.** torch's CPU `Linear` calls MKL SGEMM, and MKL's AVX2 and AVX-512 kernels round differently. PaddleTennis is chaotic, so one ulp in an action changes whole episodes. The same snapshot, seeds and protocol fingerprint gave 53 of 132 differing metrics on the two kernels. The protocol pins only `device="cpu"`, and score rows record no CPU model, MKL mode or package SHA | **medium** | `experiments/protocols.py:264`; `harness.py:649` |
+| N3 | **A campaign leg whose final Drive mirror fails is never booked.** It goes unbooked even after the operator runs the printed `sync_run_dir(...)` fix. `run_leg` does not catch `train()`'s final-sync error, so on the next Run-All `campaign_leg_resume_point` returns "train" and the complete `attempt_01` is replaced by a fresh `attempt_02`. A Ctrl-C during the final mirror takes the same path | **medium** | `paddle_tennis_campaign.ipynb` (`run_leg`); `train.py:743-773`; `notebook_utils.py:2334` |
+| N4 | **The campaign and `sb3_training` notebooks refuse a Colab CPU runtime.** `setup_colab()` defaults to `require_gpu=True` and runs before `ALGO` is read, although the PPO reference is a CPU run by design | low (but it blocks the planned launch path) | `colab_setup.py:51`; campaign cell `pc-gpu` |
+
+**Fixes:**
+- **N1:** after the first failure, set `save_freq = 0`.
+- **N2:** set `MKL_CBWR` before torch is imported; under either
+  `AVX2` or `COMPATIBLE`, both kernels give identical bits. Then
+  record the numeric mode in the protocol and in every score row.
+  - Pinning changes CPU training streams, so declare it as an era
+    boundary for CPU-trained runs.
+  - It does not corrupt within-run selection: each run is re-scored
+    whole in one call.
+  - It does break cross-session comparisons, the merged verdicts, and
+    the in-loop identity check for CPU-trained runs re-scored on a
+    host with the other ISA.
+- **N3:** catch the error and book the leg as `trained_unsynced`, then
+  re-sync on resume.
+- **N4:** call `setup_colab(require_gpu=False)` and leave the GPU
+  requirement to `REQUIRE_DEVICE`.
+
+### 7.2 Lower-severity confirmed findings
+
+| ID | Finding (all low after verification) |
+|---|---|
+| records-1 | `run_id` is the run directory's basename, so every campaign leg is `attempt_NN`. A manual `sync_run_dir` into the wrong leg's Drive directory therefore passes the "another run's mirror" guard: it overwrites that leg's files, deletes its checkpoints, and re-seals it as complete. Timestamp-named runs are protected. Fix: a unique run id at launch |
+| records-2 (partly) | The mirror copies `run_record.json` (terminal) before `snapshots/` and `stage_summary.txt`. A final pass cut short leaves a directory that an unverified index (`verify=False`) reports as complete. `verify` itself catches it |
+| records-3 | The index backfill turns every performance-gated run's `model/stage_bests/stage_NN/` (which holds a copy of `config.json`) into phantom "aborted" stub rows. This affects the WallBall gated era and future humanoid curricula |
+| records-4 (partly) | `sync_run_dir` re-seals whatever the source holds, without checking the source's manifest |
+| records-5 (partly) | Dead launches are recognized only in timestamp-named directories, so an early-dying campaign leg (`attempt_NN`, empty under `LOCAL_THEN_SYNC`) leaves no index row |
+| eval-2 | A `rescore --steps` or `--which` quick look rewrites `<run>/scores/<protocol>.jsonl` whole, deleting an earlier full re-score. The notebook driver writes elsewhere, so only CLI use is exposed |
+| eval-3 | `probe --block confirm` reports the standard block's first seed |
+| eval-4 | `from_run_config` fingerprints JSON-round-tripped kwargs, so an IntEnum kwarg becomes an int and `HumanoidTennisCoopSmoke`'s in-loop protocol never matches its recorded one |
+| ppo-1 | Ctrl-C on a `vec_env="subproc"` run raises `BrokenPipeError` during teardown, and the run is recorded as crashed instead of interrupted. The default `dummy` path is unaffected |
+| digests-1 (partly) | The static BLAS guard misses `from numpy.linalg import norm`, `np.vecdot`, `np.matvec` and `@=` |
+| digests-2 | glibc libm picks FMA or SSE2 variants of sin, cos, atan2 and pow per CPU, and no gate exercises that. This supports the libm explanation of §5.2 |
+| digests-3 (partly) | `c669f4d` breaks the documented bit-for-bit `--protocol inloop` re-score for legacy WallBall and BallBounce runs evaluated on AVX-512 hosts. PaddleTennis is unaffected |
+| colab-2 | In `sb3_training` with `LOCAL_THEN_SYNC`, a failing replay-video cell halts Run-All before the 9d mirror, so the audit and plots stay on the VM's disk |
+| colab-4 | The humanoid notebook writes its promotion evidence at the run-directory root after sealing, so every gated stage fails `verify` |
+| colab-5 (partly) | The `REPO_REF` pin predates `c669f4d`. Non-PaddleTennis streams on pinned notebooks still depend on the host's OpenBLAS kernel. Several "bump REPO_REF for PPO / LOCAL_THEN_SYNC" notes are stale, since the pin already ships both |
+
+**What held up under review:**
+- `_linalg` is equivalent to the pre-AVX2 numpy calls: 0 differences
+  in 290k cases.
+- The harness reproduces in-loop rows bit for bit on the same host.
+- The PPO rollout-geometry checks, the update-counted stops, the
+  normalizer gamma, `log_std` reset and `load_run_model` all hold.
+- `DemoSAC` still matches SB3 2.9.2.
 
 ## 8. Run readiness: the next runs, executed here at small scale
 
@@ -642,10 +780,10 @@ in flight. Items 1-6 need no design work. Most of them run on CPU.
 |---|---|---|---|
 | 1 | **Restore green CI.** A/B one job on `ubuntu-24.04` against `ubuntu-26.04`, then pin `runs-on: ubuntu-24.04` as a stopgap declared in DECISIONS (do not re-record). Add the libc version to `digests.version_info()`. Add `if: ${{ !cancelled() }}` to the render step | hours | Every later merge needs a working stream gate (§5.2) |
 | 2 | **Fix the video-retry abort.** Disable recording after the first failure, with a regression test. Until then pass `record_video=False` on CPU hosts | 1 h | Otherwise a CPU run dies at its second video cadence (§8) |
-| 3 | **Launch the day-0 PPO reference** exactly as pre-registered: the §7 call plus `early_stop_degenerate_evals=0` and `record_video=False`, 3 seeds as parallel single-process CPU runs with a Drive `sync_dir`. Read at 3M against the frozen table | about 1 h to the 3M readout; 2.6-3.5 h for 3 × 10M on 4 vCPUs | The cheapest result that can change a decision: task-side or SAC-side, the default algorithm, and LD1′'s form |
+| 3 | **Launch the day-0 PPO reference** exactly as pre-registered: the §7 call plus `early_stop_degenerate_evals=0` and `record_video=False`, 3 seeds as parallel single-process CPU runs with a Drive `sync_dir`. On a Colab CPU runtime, call `setup_colab(require_gpu=False)` first (N4). Record `os.cpu_count()` and the CPU's ISA. Read at 3M against the frozen table | about 1 h to the 3M readout; 2.6-3.5 h for 3 × 10M on 4 vCPUs | The cheapest result that can change a decision: task-side or SAC-side, the default algorithm, and LD1′'s form |
 | 3a | **Book the choice first.** Add a DECISIONS line saying the reference is the design-literal call, not the recipe's unprobed profile, and commit the config as a TOML or spec in git rather than on Drive. Report best models under both `select()` and the in-loop rule (§6.3) | minutes | Two configs disagree on 8-9 settings (§4.4) |
 | 3b | **Add a γ control** so the reading table can separate algorithm from discount: 1-2 PPO seeds at γ=0.99 (about 1 h per 3M on CPU), or the SAC γ=0.995 arm (2 × 3M, about 11-14 h per seed on CPU or about 20 h on an L4) | as stated | Row 2 of the table otherwise confounds the two (§4.4) |
-| 4 | **Re-score the August runs under `@v3`** with `rescore_runs.ipynb` on a Colab CPU runtime (`RUNS_SUBDIR='PaddleTennis/sac'`, `SERIES='checkpoints'`). Run `QUICK` first; then best models plus 500k multiples as parallel CLI processes. Book the `select()` verdicts | 1.5-2 CPU-h (QUICK); 7-8 CPU-h (all about 237 checkpoints) | Gives the current-era incumbent on `episode_rally_returns_a`, which every later comparison needs, and closes L3 |
+| 4 | **Re-score the August runs under `@v3`** with `rescore_runs.ipynb` on a Colab CPU runtime (`RUNS_SUBDIR='PaddleTennis/sac'`, `SERIES='checkpoints'`). Set `MKL_CBWR=COMPATIBLE` before torch is imported, or score every run on one host type and record its ISA, so that scores from different sessions are comparable (N2). Run `QUICK` first; then best models plus 500k multiples as parallel CLI processes. Book the `select()` verdicts | 1.5-2 CPU-h (QUICK); 7-8 CPU-h (all about 237 checkpoints) | Gives the current-era incumbent on `episode_rally_returns_a`, which every later comparison needs, and closes L3 |
 | 5 | **Record the golden digests on Colab** (`tools/golden_digest.py --full` on a CPU runtime) | 5 min | Closes M1. Tests whether Colab reproduces the local streams, an assumption the re-score's comparability rests on (§5.2) |
 | 6 | **Run spike S1** after a half-day preflight: print the `nvidia-smi` driver first, swap Warp to its `+cu12` 1.18.0 wheel if the driver is below R580, and pin flax, optax, orbax and chex. Book PASS, FAIL or no result | 0.5 day + 1-2 L4-h | Decides the whole humanoid half and the GPU platform (§9) |
 
@@ -655,7 +793,7 @@ in flight. Items 1-6 need no design work. Most of them run on CPU.
 |---|---|---|
 | 7 | **Context-blind pilot, built minimally.** Make it a pure observation projection, i.e. physics only, dropping the rally-state, latch and clock dims. Give it its own observation fingerprint so old checkpoints refuse it. Train 3 PPO seeds on CPU against the step-3 reference; SAC seeds against the γ arm when an L4 is free | It is the only direct test of hypothesis 1 (§3.2), and it does not need M5-M7. Score it on the 10-05 bar (k=2 ≥ 5% on fresh seeds) or the campaign design's pilot rule |
 | 8 | **Decide LD1′.** Freeze it as a short pilot spec with a cap and a kill date, in whichever algorithm step 3 favours (`DemoSAC`, or PPO with BC or kickstarting via M13). Or retire it by tag-and-delete | Fix `artifacts-demo-1` and `train-4` first if it runs |
-| 9 | **Fix what would mislead the reading of steps 3-8:** the paired `confirm_best` first-best bias (decide the rule; roll a confirmation for the first best); `stage_summary`'s "deploy best_model.zip"; the `eval_headline.png` routing; the campaign's unsafe count; plus the verified items of §7 | Mostly bit-identical; the `confirm_best` rule is an era decision for selection |
+| 9 | **Fix what would mislead the reading of steps 3-8:** the paired `confirm_best` first-best bias (decide the rule; roll a confirmation for the first best); `stage_summary`'s "deploy best_model.zip"; the `eval_headline.png` routing; the campaign's unsafe count; and N2-N4 plus records-1 from §7 (pin `MKL_CBWR` and record the numeric mode in protocols and score rows; book an unsynced campaign leg; give runs a unique id) | Mostly bit-identical. The `confirm_best` rule and the `MKL_CBWR` pin are declared era decisions (for selection, and for CPU-trained streams) |
 | 10 | **Widen the incoming-ball distribution** (the 10-05 "ball machine") if k=2 moves only partially | Hypothesis 2 |
 
 ### 10.3 Later, at the rung that needs it
