@@ -15,14 +15,42 @@ from __future__ import annotations
 import csv
 import json
 import os
+import sys
 
 import numpy as np
 import pytest
 from stable_baselines3.common.vec_env import VecEnvWrapper
 
 from courtside_dynamics.callbacks.video_record import (
+    _no_display_reason as _REAL_NO_DISPLAY_REASON,
+)
+from courtside_dynamics.callbacks.video_record import (
     _scalar_info_keys,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_render_guard(monkeypatch):
+    """Every test starts with a clean process-wide render guard.
+
+    The guard's state is module-global (it must outlive one callback), so
+    a test that trips it would otherwise leak into the rest of the worker:
+    the first failure, the "a frame has rendered" bit, and the
+    ``MUJOCO_GL=disable`` a trip writes. The no-display check is off too:
+    these tests stub the recorder and never open a render context, and
+    the tests of the check turn it back on.
+    """
+    from courtside_dynamics.callbacks import video_record
+
+    monkeypatch.setattr(video_record, "_rendering_failure", None)
+    monkeypatch.setattr(video_record, "_rendered_in_process", False)
+    monkeypatch.setattr(video_record, "_no_display_reason", lambda: None)
+    original = os.environ.get("MUJOCO_GL")
+    yield
+    if original is None:
+        os.environ.pop("MUJOCO_GL", None)
+    else:
+        os.environ["MUJOCO_GL"] = original
 
 
 class _PassthroughVideoRecorder(VecEnvWrapper):
@@ -264,6 +292,268 @@ def test_video_recording_failure_does_not_stop_training(
     out = capsys.readouterr().out
     assert "failed and was skipped" in out
     assert "no GL backend" in out
+
+
+def _broken_recorder(monkeypatch, fail):
+    """Make every recording attempt call ``fail`` (which raises); count
+    the attempts."""
+    from courtside_dynamics.callbacks import video_record
+
+    attempts = []
+
+    def broken_make_vec_env(*args, **kwargs):
+        attempts.append(1)
+        fail()
+
+    monkeypatch.setattr(video_record, "make_vec_env", broken_make_vec_env)
+    return attempts
+
+
+def _video_callback(tmp_path, save_freq=1):
+    from courtside_dynamics.callbacks.video_record import VideoRecordCallback
+
+    cb = VideoRecordCallback(
+        env_fn=lambda: None,
+        save_path=str(tmp_path),
+        video_length=5,
+        save_freq=save_freq,
+    )
+    cb.model = _FakeModel(action_dim=3)
+    return cb
+
+
+def test_video_recording_failure_turns_recording_off_for_the_run(
+    tmp_path, monkeypatch, capsys
+):
+    """A failed recording is never retried within the run: after a failed
+    GL context MuJoCo aborts the interpreter on the next attempt, and a
+    codec failure only repeats. A non-MuJoCo error stays local to this
+    callback, so another run in the process may still record."""
+    from courtside_dynamics.callbacks import video_record
+
+    def no_codec():
+        raise RuntimeError("no codec")
+
+    attempts = _broken_recorder(monkeypatch, no_codec)
+    cb = _video_callback(tmp_path)
+    for step in (1, 2, 3):
+        cb.n_calls = cb.num_timesteps = step
+        assert cb._on_step() is True
+    assert len(attempts) == 1
+    out = capsys.readouterr().out
+    assert out.count("failed and was skipped") == 1
+    assert "off for the rest of this run" in out
+    assert video_record.rendering_failure() is None
+
+    fresh = _video_callback(tmp_path)
+    fresh.n_calls = fresh.num_timesteps = 1
+    fresh._on_step()
+    assert len(attempts) == 2
+
+
+def test_mujoco_render_failure_turns_recording_off_for_the_process(
+    tmp_path, monkeypatch, capsys
+):
+    """A ``mujoco.FatalError`` (what a failed GL context raises) poisons
+    rendering for the whole process: the next render context would abort
+    the interpreter with SIGABRT, so a later recorder -- another campaign
+    leg in the same notebook kernel -- must not try at all, and later
+    gymnasium renders anywhere are fenced off through MUJOCO_GL."""
+    import mujoco
+
+    from courtside_dynamics.callbacks import video_record
+
+    fatal = mujoco.FatalError("an OpenGL platform library has not been loaded")
+
+    def gl_context_fails():
+        # Wrapped, as a renderer layer may re-raise it: the chain counts.
+        raise RuntimeError("render failed") from fatal
+
+    attempts = _broken_recorder(monkeypatch, gl_context_fails)
+    cb = _video_callback(tmp_path)
+    cb.n_calls = cb.num_timesteps = 1
+    cb._on_step()
+    failure = video_record.rendering_failure()
+    assert isinstance(failure, mujoco.FatalError)
+    assert failure.args == fatal.args
+    assert failure.__traceback__ is None, "the global must not pin frames"
+    assert os.environ["MUJOCO_GL"] == "disable"
+    assert "every later recorder in this process" in capsys.readouterr().out
+
+    later = _video_callback(tmp_path)
+    for step in (1, 2):
+        later.n_calls = later.num_timesteps = step
+        assert later._on_step() is True
+    assert len(attempts) == 1, "a later recorder retried a poisoned renderer"
+    out = capsys.readouterr().out
+    assert out.count("rendering already failed in this process") == 1
+
+
+def test_note_rendering_failure_keeps_only_context_failures():
+    """Only a MuJoCo fatal error before any frame has rendered is a
+    context failure; the first one is kept, as a frameless copy."""
+    import mujoco
+
+    from courtside_dynamics.callbacks import video_record
+
+    assert video_record.note_rendering_failure(ValueError("codec")) is False
+    assert video_record.rendering_failure() is None
+    first = mujoco.FatalError("first")
+    try:
+        try:
+            raise first
+        except mujoco.FatalError:
+            raise RuntimeError("context")  # noqa: B904 -- __context__ chain
+    except RuntimeError as wrapped:
+        assert video_record.note_rendering_failure(wrapped) is True
+    assert video_record.note_rendering_failure(mujoco.FatalError("later"))
+    assert video_record.rendering_failure().args == ("first",), "root cause kept"
+
+
+def test_a_fatal_error_after_a_rendered_frame_does_not_poison(
+    tmp_path, monkeypatch, capsys
+):
+    """Once a frame has rendered, a render context exists, so a later
+    ``FatalError`` (a physics stack overflow mid-recording) is not a
+    context failure: it turns recording off for that run only."""
+    import mujoco
+
+    from courtside_dynamics.callbacks import video_record
+
+    video_record.note_rendered()
+
+    def physics_overflow():
+        raise mujoco.FatalError("mj_stackAlloc: out of memory, stack overflow")
+
+    attempts = _broken_recorder(monkeypatch, physics_overflow)
+    cb = _video_callback(tmp_path)
+    cb.n_calls = cb.num_timesteps = 1
+    cb._on_step()
+    assert video_record.rendering_failure() is None
+    assert "off for the rest of this run" in capsys.readouterr().out
+    fresh = _video_callback(tmp_path)
+    fresh.n_calls = fresh.num_timesteps = 1
+    fresh._on_step()
+    assert len(attempts) == 2
+
+
+def test_no_display_skips_recording_without_trying(tmp_path, monkeypatch, capsys):
+    """On Linux with MUJOCO_GL unset (or glfw) and no DISPLAY or
+    WAYLAND_DISPLAY, gymnasium settles on GLFW and fails in
+    mjr_makeContext: the recorder must not open a render context at all."""
+    from courtside_dynamics.callbacks import video_record
+
+    monkeypatch.setattr(video_record, "_no_display_reason", _REAL_NO_DISPLAY_REASON)
+    monkeypatch.setattr(video_record.sys, "platform", "linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("MUJOCO_GL", "glfw")
+
+    def must_not_run():
+        raise AssertionError("tried to render with no display")
+
+    attempts = _broken_recorder(monkeypatch, must_not_run)
+    cb = _video_callback(tmp_path)
+    for step in (1, 2):
+        cb.n_calls = cb.num_timesteps = step
+        cb._on_step()
+    assert attempts == []
+    assert capsys.readouterr().out.count("no display") == 1
+
+    monkeypatch.delenv("MUJOCO_GL")
+    assert video_record.rendering_unavailable_reason() is not None
+    monkeypatch.setenv("DISPLAY", ":0")
+    assert video_record.rendering_unavailable_reason() is None
+    monkeypatch.delenv("DISPLAY")
+    monkeypatch.setenv("MUJOCO_GL", "egl")
+    assert video_record.rendering_unavailable_reason() is None
+
+
+_GUARD_SCRIPT = """
+import os, sys
+from stable_baselines3 import PPO
+from courtside_dynamics.callbacks.video_record import VideoRecordCallback
+from courtside_dynamics.envs import BallBalanceEnv
+
+model = PPO("MlpPolicy", BallBalanceEnv(), n_steps=64, batch_size=64, device="cpu")
+
+def recorder():
+    cb = VideoRecordCallback(
+        env_fn=lambda: BallBalanceEnv(render_mode="rgb_array"),
+        save_path=sys.argv[1], video_length=5, save_freq=1, max_episodes=1,
+    )
+    cb.init_callback(model)
+    return cb
+
+first = recorder()
+for step in (1, 2):
+    first.n_calls = first.num_timesteps = step
+    first._on_step()
+later = recorder()  # the next campaign leg in the same kernel
+later.n_calls = later.num_timesteps = 1
+later._on_step()
+env = BallBalanceEnv(render_mode="rgb_array")
+env.reset(seed=0)
+try:
+    env.render()
+    print("USER RENDER OK")
+except RuntimeError as error:
+    print("USER RENDER REFUSED", error)
+except Exception as error:
+    print("USER RENDER FAILED", type(error).__name__)
+print("SURVIVED")
+"""
+
+
+def _run_guard_script(tmp_path, **env_overrides):
+    import subprocess
+    import sys
+
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"DISPLAY", "WAYLAND_DISPLAY", "MUJOCO_GL", "PYOPENGL_PLATFORM"}
+    }
+    env.update(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", **env_overrides)
+    return subprocess.run(
+        [sys.executable, "-c", _GUARD_SCRIPT, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=300,
+    )
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="GLFW/X11 path")
+def test_no_display_host_records_nothing_and_never_opens_a_context(tmp_path):
+    """End to end, in a subprocess with no display and no MUJOCO_GL: no
+    recorder opens a render context. The callback used to retry after the
+    first FatalError and die of SIGABRT (returncode -6) with the run."""
+    result = _run_guard_script(tmp_path)
+    assert result.returncode == 0, (result.returncode, result.stderr[-2000:])
+    assert "SURVIVED" in result.stdout
+    assert result.stdout.count("no display") == 2  # both recorders
+    assert "failed and was skipped" not in result.stdout
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="GLFW/X11 path")
+def test_a_failed_render_context_poisons_rendering_for_the_process(tmp_path):
+    """End to end, in a subprocess whose DISPLAY names no X server: the
+    first render context really fails (mujoco.FatalError). The run's second
+    cadence and a later recorder must not try again (that attempt aborted
+    the interpreter: returncode -6), and a later plain env.render() must
+    raise instead of aborting."""
+    result = _run_guard_script(tmp_path, DISPLAY=":9876")
+    assert result.returncode == 0, (result.returncode, result.stderr[-2000:])
+    assert "SURVIVED" in result.stdout
+    out = result.stdout
+    if "failed and was skipped" in out:  # GLFW really failed to open :9876
+        assert out.count("failed and was skipped") == 1
+        assert "FatalError" in out
+        assert "rendering already failed in this process" in out
+        assert "USER RENDER REFUSED" in out
+    else:  # an X server answered on :9876 after all: rendering worked
+        assert "USER RENDER OK" in out
 
 
 def test_auto_sum_survives_a_key_turning_non_numeric(

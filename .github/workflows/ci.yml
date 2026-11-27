@@ -24,10 +24,19 @@ concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Every gating job pins its runner OS. The golden env digests reproduce
+# on Ubuntu 24.04 (glibc 2.39), and the env streams still reach the OS
+# math library: when GitHub moved ubuntu-latest to Ubuntu 26.04
+# (glibc 2.43) between the 2026-11-09 and 2026-11-16 scheduled runs, 7
+# PaddleTennis goldens failed on every Python leg with no code change,
+# the py3.11 leg's numeric packages unchanged too. The pin is a declared
+# stopgap, not a re-record; the non-gating golden-canary job below
+# keeps measuring ubuntu-latest. See docs/DECISIONS.md, "CI pins its
+# runner OS".
 jobs:
   lint:
     name: ruff
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +50,7 @@ jobs:
 
   typecheck:
     name: mypy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -62,7 +71,7 @@ jobs:
 
   build:
     name: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -91,7 +100,7 @@ jobs:
 
   test:
     name: pytest (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -129,9 +138,63 @@ jobs:
         run: >
           pytest -n 2 --cov=courtside_dynamics
           --cov-report=term-missing:skip-covered
+      # !cancelled(): run even when the coverage step failed, so GL
+      # rendering keeps its only CI coverage (runs #229 and #230 skipped
+      # it behind the golden-digest failures).
       - name: MuJoCo rendering smoke test
-        if: matrix.python-version == '3.13'
+        if: ${{ !cancelled() && matrix.python-version == '3.13' }}
         env:
           OMP_NUM_THREADS: 1
           MKL_NUM_THREADS: 1
         run: xvfb-run -a pytest -q tests/test_humanoid_tennis_env.py::test_rgb_array_render_smoke
+
+  # Not a gate: the CI golden set on the floating ubuntu-latest image,
+  # checked against that image's known drift. The baseline is the set
+  # of cases that move there: on Ubuntu 26.04 (glibc 2.43), measured in
+  # run #231 (2026-11-27), the 7 PaddleTennis cases below and nothing
+  # else. The job fails only when that set changes -- a further OS move,
+  # or a recovery -- so a red canary is news. continue-on-error keeps a
+  # new runner image from blocking merges; update the list and
+  # docs/DECISIONS.md when it changes.
+  golden-canary:
+    name: golden digests (ubuntu-latest canary)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e .
+      - run: ldd --version | head -1
+      - name: Golden digests (CI set) against the known ubuntu-latest drift
+        env:
+          OMP_NUM_THREADS: 1
+          MKL_NUM_THREADS: 1
+          EXPECTED_MISMATCHES: >-
+            paddle_tennis/drill_feed/random
+            paddle_tennis/drill_full/random
+            paddle_tennis/hold/oracle
+            paddle_tennis/one_point/oracle
+            paddle_tennis/recipe/camper
+            paddle_tennis/recipe/oracle_seed_once
+            paddle_tennis/recipe/random
+        run: |
+          status=0
+          python tools/golden_digest.py > canary.log 2>&1 || status=$?
+          cat canary.log
+          if ! grep -qE '^ci: [0-9]+/[0-9]+ cases match' canary.log; then
+            echo "golden_digest.py did not finish (exit $status)"
+            exit 1
+          fi
+          { grep -E '^(MISMATCH|MISSING) ' canary.log || true; } \
+            | awk '{print $2}' | sort > got.txt
+          printf '%s\n' $EXPECTED_MISMATCHES | sort > want.txt
+          if ! diff -u want.txt got.txt; then
+            echo "The ubuntu-latest golden drift changed (diff above)."
+            exit 1
+          fi
+          echo "ubuntu-latest drift unchanged: exactly the $(wc -l < want.txt) known cases move."

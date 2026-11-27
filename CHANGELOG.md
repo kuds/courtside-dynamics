@@ -18,6 +18,59 @@ Within the unreleased PaddleTennis itself there are two eras: the
 initial volley-rules freeze and the ground-rules amendment that
 supersedes it (see the ground-rules bullet).
 
+- **A PPO notebook runs on a Colab CPU runtime (2026-11-27).** No env,
+  training or recipe change.
+  - **`setup_colab(require_gpu=False)` on a CPU runtime** leaves
+    `MUJOCO_GL` alone instead of forcing EGL (which breaks
+    `import mujoco` without an EGL library), and prints that video is
+    skipped. It returns whether `nvidia-smi` found a GPU (`None` off
+    Colab).
+  - **The campaign notebook** no longer refuses a CPU runtime before
+    `ALGO` is read. Its settings cell refuses the SAC plan's
+    `REQUIRE_DEVICE = "cuda"` on a runtime without a GPU.
+  - **`sb3_training`** demands a GPU for the SAC family only. Its replay
+    cell skips, or prints a failed recording, instead of stopping
+    Run-All before the audit, the Drive mirror and the disconnect.
+  - **`_in_colab()`** returns `False` when no `google` package is
+    installed.
+  - **The four training and re-scoring notebooks pin `REPO_REF` to
+    `069d000`,** which carries these changes, the render guard and the
+    BLAS-free streams. The S1 spike keeps its own pin.
+  - See `docs/DECISIONS.md`, "A PPO notebook runs on a Colab CPU
+    runtime".
+- **CI pins its runner OS, and a failed render is never retried
+  (2026-11-27).** No env stream or training change: golden digests
+  22/22 (CI and full sets), recipe snapshot unchanged (96).
+  - **The gating CI jobs run on `ubuntu-24.04`.** Since GitHub moved
+    `ubuntu-latest` to Ubuntu 26.04 (glibc 2.43), the scheduled runs of
+    2026-11-16 and 11-23 failed 7 PaddleTennis goldens on every Python
+    leg with no code change; the py3.11 leg's numeric packages were
+    unchanged too. `workflow_dispatch` run #231 confirmed the runner
+    image: green on 24.04, the same 7 cases failing on `ubuntu-latest`.
+    The pin is declared, not a re-record.
+  - **A non-gating `golden-canary` job** checks the CI set on
+    `ubuntu-latest` against that image's known drift. It fails only
+    when the set of moving cases changes.
+  - **The render smoke test runs even when the coverage step fails.**
+  - **`digests.version_info()` records `libc`.** A golden mismatch
+    names a libc difference when both sides record one, and says the
+    recording predates the field otherwise. The golden file is
+    unchanged.
+  - **The video recorder does not try to render where it cannot.** On
+    Linux with `MUJOCO_GL` unset or `glfw` and no display, it skips
+    without opening a render context.
+  - **It never retries after a failure.** A failed recording turns
+    recording off for the rest of the run. A `mujoco.FatalError` before
+    any frame has rendered turns rendering off for the process and sets
+    `MUJOCO_GL=disable`.
+  - **Why.** On a host without OpenGL, the second render-context
+    attempt used to abort the interpreter (SIGABRT), losing the run's
+    final model, closing evaluation and manifest. A PaddleTennis quick
+    test died that way at step 20,000.
+  - **`record_best_model_video` refuses** with a `RuntimeError` where
+    rendering is unavailable, instead of killing the notebook kernel.
+  - See `docs/DECISIONS.md`, "CI pins its runner OS" and "A failed
+    render is never retried".
 - **Env streams no longer depend on the CPU's BLAS kernels
   (2026-10-18).** numpy's OpenBLAS picks kernels from the CPU at run
   time, and they round small products differently. The env code's

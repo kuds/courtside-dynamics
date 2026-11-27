@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 REPOSITORY_ROOT = Path(__file__).parents[1]
 SB3_NOTEBOOK = REPOSITORY_ROOT / "notebooks" / "sb3_training.ipynb"
 HUMANOID_NOTEBOOK = (
@@ -406,7 +408,7 @@ def test_campaign_notebook_bootstraps_mujoco_before_environment_imports() -> Non
     setup_index = next(
         index
         for index, source in enumerate(code_cells)
-        if "setup_colab()" in source
+        if "setup_colab(" in source
     )
     recipe_index = next(
         index
@@ -493,6 +495,96 @@ def test_campaign_notebook_requires_a_cuda_device() -> None:
     fingerprint = source[start : source.index("\n}\n", start)]
     assert "REQUIRE_DEVICE" not in fingerprint
     assert "deliberately NOT\n# fingerprinted" in source
+
+
+def test_campaign_notebook_admits_a_cpu_runtime_for_ppo_only() -> None:
+    """The pc-gpu cell runs before ALGO is read, so it must not demand a
+    GPU (a PPO campaign trains on CPU by design). It records what
+    nvidia-smi found as COLAB_GPU, and the settings cell refuses the SAC
+    plan's REQUIRE_DEVICE = "cuda" on a runtime without a GPU, before
+    any leg setup. train()'s require_device stays the binding check."""
+    cells = {
+        cell.get("id"): _source(cell)
+        for cell in _load_campaign_notebook()["cells"]
+    }
+    assert "COLAB_GPU = setup_colab(require_gpu=False)" in cells["pc-gpu"]
+    with pytest.raises(RuntimeError, match="without a GPU"):
+        _exec_campaign_plan(colab_gpu=False)
+    # Off Colab, on a GPU runtime, or re-entered after a restart without
+    # pc-gpu (train()'s require_device still checks the device then).
+    for colab_gpu in (None, True, _SKIP_PC_GPU):
+        assert _exec_campaign_plan(colab_gpu=colab_gpu)["REQUIRE_DEVICE"] == "cuda"
+    ppo = _exec_campaign_plan(
+        (
+            ('ALGO = None', 'ALGO = "PPO"'),
+            ('REQUIRE_DEVICE = "cuda"', "REQUIRE_DEVICE = None"),
+        ),
+        colab_gpu=False,
+    )
+    assert ppo["REQUIRE_DEVICE"] is None
+
+
+@pytest.mark.parametrize(
+    "algo, require_gpu", [("SAC", True), ("DemoSAC", True), ("PPO", False), ("ppo", False)]
+)
+def test_sb3_notebook_demands_a_gpu_for_the_sac_family_only(
+    monkeypatch, algo, require_gpu
+) -> None:
+    """The SAC family needs a GPU runtime; PPO trains on CPU by design, so
+    its Colab setup must not refuse a CPU runtime."""
+    from courtside_dynamics import colab_setup
+
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        colab_setup, "setup_colab", lambda require_gpu=True: calls.append(require_gpu)
+    )
+    (cell,) = [
+        _source(cell)
+        for cell in _load_sb3_notebook()["cells"]
+        if cell.get("id") == "_MADj-GJKjTN"
+    ]
+    exec(compile(cell, f"{SB3_NOTEBOOK}:colab", "exec"), {"ALGO": algo})
+    assert calls == [require_gpu]
+
+
+@pytest.mark.parametrize("case", ["rendering_unavailable", "recording_fails"])
+def test_sb3_replay_cell_never_stops_the_notebook(monkeypatch, capsys, case) -> None:
+    """9b is optional evidence. Where rendering is unavailable (a Colab CPU
+    runtime has no display) or the recording raises (a codec), it says why
+    and returns, so the artifact audit (9c), the Drive mirror (9d) and the
+    disconnect (10) still run under Run-All."""
+    from courtside_dynamics import notebook_utils
+    from courtside_dynamics.callbacks import video_record
+
+    calls: list[tuple] = []
+
+    def failing_record(*args, **kwargs):
+        calls.append(args)
+        raise RuntimeError("no libx264")
+
+    monkeypatch.setattr(notebook_utils, "record_best_model_video", failing_record)
+    reason = "no display: test" if case == "rendering_unavailable" else None
+    monkeypatch.setattr(video_record, "rendering_unavailable_reason", lambda: reason)
+    (cell,) = [
+        _source(cell)
+        for cell in _load_sb3_notebook()["cells"]
+        if cell.get("id") == "Xf-H9xWtKjTO"
+    ]
+
+    class _Cfg:
+        eval_env_fn = None
+        env_fn = staticmethod(lambda: None)
+
+    namespace = {"cfg": _Cfg(), "LOG_DIR": "/nowhere", "ALGO": "PPO"}
+    exec(compile(cell, f"{SB3_NOTEBOOK}:replay", "exec"), namespace)
+    out = capsys.readouterr().out
+    if case == "rendering_unavailable":
+        assert calls == []
+        assert "Replay video skipped: no display: test." in out
+    else:
+        assert len(calls) == 1
+        assert "Replay video failed and was skipped" in out
+        assert "no libx264" in out
 
 
 def test_campaign_notebook_resumes_and_branches_via_helpers() -> None:
@@ -725,10 +817,20 @@ _DEMO_LEG_KWARGS = {
 }
 
 
-def _exec_campaign_plan(substitutions: tuple[tuple[str, str], ...] = ()):
+_SKIP_PC_GPU = object()
+
+
+def _exec_campaign_plan(
+    substitutions: tuple[tuple[str, str], ...] = (),
+    colab_gpu: Any = None,
+):
     """Execute the campaign's settings cell (with whole-line setting
     substitutions), the fingerprint block of the root cell (no Drive
-    mount, no manifest), and the leg-helper cell; return the namespace."""
+    mount, no manifest), and the leg-helper cell; return the namespace.
+
+    ``colab_gpu`` stands in for the pc-gpu cell's ``COLAB_GPU`` (``None``:
+    not on Colab); ``_SKIP_PC_GPU`` leaves it undefined, as re-entering
+    at the settings cell after a session restart does."""
     code_cells = [
         _source(cell)
         for cell in _load_campaign_notebook()["cells"]
@@ -746,7 +848,9 @@ def _exec_campaign_plan(substitutions: tuple[tuple[str, str], ...] = ()):
     fingerprint = root[
         root.index("FINGERPRINT = {") : root.index("manifest = load_campaign_manifest")
     ]
-    namespace: dict[str, Any] = {}
+    namespace: dict[str, Any] = (
+        {} if colab_gpu is _SKIP_PC_GPU else {"COLAB_GPU": colab_gpu}
+    )
     exec(compile(settings, f"{CAMPAIGN_NOTEBOOK}:settings", "exec"), namespace)
     exec(compile(fingerprint, f"{CAMPAIGN_NOTEBOOK}:fingerprint", "exec"), namespace)
     exec(compile(helpers, f"{CAMPAIGN_NOTEBOOK}:helpers", "exec"), namespace)

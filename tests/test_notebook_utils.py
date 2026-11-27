@@ -2882,3 +2882,26 @@ def test_obs_normalizer_loads_a_valid_snapshot(tmp_path):
     normalize = _load_obs_normalizer(str(tmp_path), _ball_balance_env)
     obs = np.full(venv.observation_space.shape, 5.0, dtype=np.float32)
     assert np.allclose(normalize(obs), 0.0, atol=1e-3)
+
+
+def test_best_model_video_refuses_after_a_render_failure_in_the_process(
+    tmp_path, monkeypatch
+):
+    """After a MuJoCo render failure in this process, the next
+    render-context attempt would abort the interpreter (and the notebook
+    kernel with it), so the replay must refuse with a Python error
+    before it loads anything or builds an env."""
+    import mujoco
+
+    from courtside_dynamics.callbacks import video_record
+    from courtside_dynamics.notebook_utils import record_best_model_video
+
+    monkeypatch.setattr(
+        video_record, "_rendering_failure", mujoco.FatalError("no GL platform")
+    )
+
+    def env_fn():
+        raise AssertionError("an env was built after a render failure")
+
+    with pytest.raises(RuntimeError, match="already failed in this process"):
+        record_best_model_video(tmp_path, env_fn)
