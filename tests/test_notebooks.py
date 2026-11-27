@@ -703,11 +703,21 @@ def test_campaign_notebook_validates_config_and_plumbs_env_kwargs() -> None:
     assert "except RunConfigPlanMismatch as err:" in source
     assert "except ValueError" not in source
     assert 'validation = {"verdict": "mismatch", "error": str(err)}' in source
-    train_index = source.index("model = train(cfg)")
-    validate_index = source.index("validate_run_config_against_plan(")
-    record_index = source.index('"config_validation": validation,')
-    gate_score_index = source.index("gate_report = score_paddle_stage(")
-    assert train_index < validate_index < record_index < gate_score_index
+    # book_leg validates, then records, then writes the manifest; run_leg
+    # calls it after train() returns, and the gate scores after that.
+    book_leg = source[source.index("def book_leg(") : source.index("def run_leg(")]
+    run_leg = source[source.index("def run_leg(") : source.index("def record_stage(")]
+    assert (
+        book_leg.index("validate_run_config_against_plan(")
+        < book_leg.index('"config_validation": validation,')
+        < book_leg.index("write_campaign_manifest(CAMPAIGN_ROOT, manifest)")
+    )
+    assert run_leg.index("model = train(cfg)") < run_leg.index(
+        "validation, run_status = book_leg("
+    )
+    assert source.index("validation, run_status = book_leg(") < source.index(
+        "gate_report = score_paddle_stage("
+    )
     assert 'if validation["verdict"] != "ok":' in source
     assert "does not match the" in source
     # record_stage merges over run_leg's record instead of dropping the
