@@ -757,11 +757,19 @@ host, and the protocols pinned only `device="cpu"`. The fix:
   `lib` and, on Linux, in any loaded MKL library (a conda build). A
   Windows build that exports no `mkl_cbwr_get` is untested.
 - **The re-score notebook reuses only rows scored under this session's
-  numerics.** It compares each row's recorded `cpu_numerics` (BLAS and
-  branch) with this session's. Rows from a session before the pin are
-  re-scored when their run is picked. Until then they stay out of the
-  curves and verdicts, with their earlier verdict dropped and their
-  runs listed.
+  numerics.** A session whose MKL is not pinned stops in its re-score
+  cell, before it scores, refuses or drops anything; without that stop
+  it booked its own numerics as every run's refusal and every verdict's
+  staleness. A session that proceeds compares each row's recorded
+  `cpu_numerics` (BLAS and branch) with its own. Rows from a session
+  before the pin are re-scored when their run is picked. Until then
+  they stay out of the curves and verdicts, with their earlier verdict
+  dropped and their runs listed. Each verdict records its
+  `cpu_numerics`, and one of any series that records none (every
+  verdict from before the pin) or others is dropped from
+  `verdicts.json` until its series is re-scored. A session with no run
+  to plot removes the series' earlier `curves_<series>.png` rather than
+  leave it showing runs the verdicts no longer cover.
 - **Costs.** Every CPU float32 GEMM changes, so CPU-trained runs (the
   PPO reference) after the pin are a new numeric era: their streams are
   not bit-comparable with earlier CPU runs. GPU training (cuBLAS) is
@@ -798,27 +806,51 @@ was replaced by a fresh 1M-3M-step `attempt_02`. The fix:
   as usual. If it never verifies, `run_leg` raises with the way out.
   A Ctrl-C inside the final mirror books the leg `unsynced` the same
   way, when its local copy verifies complete, and re-raises.
-- **The booking survives a Drive that refuses the manifest too.** A
-  full or dead mount usually refuses both. So a leg booked from its
-  local copy is first written to `local_leg_bookings.json` in the
-  campaign's local root, and the Drive manifest's failure is printed,
-  not raised. The loop cell adopts such bookings before it resumes any
-  leg (`adopt_local_leg_bookings`), unless the Drive manifest holds a
-  later word on that leg (the same attempt, a later attempt, or
-  `complete`). Booking a leg from Drive drops its local booking.
+- **The booking survives a Drive that refuses the manifest too, for as
+  long as the runtime does.** A full or dead mount usually refuses
+  both. So a leg booked from its local copy is first written to
+  `local_leg_bookings.json` in the campaign's local root, and the Drive
+  manifest's failure is printed, not raised. The loop cell adopts such
+  bookings before it resumes any leg (`adopt_local_leg_bookings`),
+  unless the Drive manifest holds a later word on that leg (the same
+  attempt, a later attempt, or `complete`). Booking a leg from Drive
+  drops its local booking. A booking keeps its campaign's fingerprint
+  and is never adopted into another campaign: not under other settings,
+  and not once its Drive attempt dir is gone (the campaign folder was
+  deleted and re-created under the same ID). The bookings file lives on
+  the runtime's disk, beside the local copy, so a new runtime has
+  neither: a leg whose booking only that file held then retrains,
+  whatever its Drive copy holds by then.
 - **A leg is booked by what its sealed run reached.** A finished,
-  validated leg is booked `unsynced`. A config mismatch is booked
-  `config_mismatch`, and an interrupted run `interrupted`. A run sealed
-  `crashed`, or without a stage summary, is booked by its run record's
-  status. Only an `unsynced` leg is promised a score; the others
-  retrain, and the error says which applies.
+  validated leg whose local copy verifies is booked `unsynced`; an early
+  stop is a finished leg (its stage summary says `completed`, its run
+  record `early_stop`), as on the Drive path, which books it `trained`.
+  A config mismatch is booked `config_mismatch`, and an interrupted run
+  `interrupted`. A crashed run stopped inside its final mirror is
+  booked `crashed` (an ordinary crash raises its own error, and
+  `run_leg` books nothing). A finished run that no stage summary marks
+  completed, or whose local copy changed after it was sealed, is
+  booked `incomplete`. Only an `unsynced` leg is promised a score; the
+  others retrain, and the error says which applies.
 - **On resume, an `unsynced` leg is finished, then scored.**
   `campaign_leg_resume_point` uses the Drive copy if it now verifies
   (the operator re-synced it). Otherwise it mirrors the local copy if
-  the runtime still has it, and raises while Drive refuses: a fresh
-  attempt would hit the same Drive. It then takes the `trained` checks.
-  Only when the local copy is gone (a new runtime) and the Drive copy
-  does not verify does the leg retrain, with the reason printed.
+  the runtime still has it and it still verifies, and raises while
+  Drive refuses: a fresh attempt would hit the same Drive. It then
+  takes the `trained` checks. Only when the local copy is gone (a new
+  runtime) or changed since its seal, and the Drive copy does not
+  verify, does the leg retrain, with the reason printed.
+- **A re-sync finishes the run's own half-written mirror.** A
+  checkpoint pass that failed before any manifest existed leaves copies
+  of files that changed later (`progress.csv` grows). A fresh mirror
+  (`sync_run_dir`, the printed re-sync, the campaign's recovery) did
+  not write them and could not prove them the run's, so it refused the
+  run's own attempt dir on every try, even with Drive healthy again.
+  The directory the source's run record names as its mirror
+  (`sync.dir`, checked empty when the run started) now counts the paths
+  its sealed manifest lists, and temporary leftovers, as the run's. Any
+  other destination, and any file the seal does not list (a report
+  written into the mirror after training), is still refused.
 - **A local copy that does not verify is never mirrored.** A mirror of
   it would seal damage as a complete run.
 
@@ -991,6 +1023,11 @@ recovery. Update its list here and in `ci.yml` when that happens. Also:
 - `digests.version_info()` records `libc`. A mismatch names a libc
   difference only when both sides know their libc. Older entries lack
   the field, as they lack `numpy_simd`, and get a neutral note instead.
+- Run artifacts and re-score rows record it too, since the MKL pin
+  ("CPU scores pin MKL's numerics"): `harness._versions()` and
+  `artifacts._versions()` carry `libc`, so a Colab-versus-local libm
+  split is visible where cross-host comparisons happen. Runs and rows
+  recorded before it lack the field.
 - The render smoke step runs whenever the job was not cancelled. It was
   skipped behind the golden failures.
 
@@ -999,10 +1036,6 @@ recovery. Update its list here and in `ci.yml` when that happens. Also:
   clause). Colab's image ships its own glibc, and every August run
   trained there, so record them before leaning on "bit-identical since
   August".
-- **Run records and re-score rows do not record the libc.**
-  `harness._versions()` and `artifacts._versions()` keep python, numpy,
-  MuJoCo, torch and SB3 only, so a Colab-versus-local libm split is not
-  visible where cross-host comparisons happen.
 - **Lifting the pin** needs one of two things: a libm-independent
   stream path, as was done for BLAS, or one lock per platform, the
   ladder design's fallback.

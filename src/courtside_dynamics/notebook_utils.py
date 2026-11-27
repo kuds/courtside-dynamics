@@ -2221,7 +2221,9 @@ def write_campaign_manifest(
 #: not verify yet, kept on local disk in the campaign's local root. A
 #: booking lands here before the Drive manifest is written, so a Drive
 #: that refuses the manifest as well as the mirror cannot lose a
-#: finished leg to a retrain (review 2026-11-27, N3).
+#: finished leg to a retrain while this runtime's local disk lasts (a
+#: new runtime has neither the bookings nor the local copy; review
+#: 2026-11-27, N3).
 LOCAL_LEG_BOOKINGS_NAME = "local_leg_bookings.json"
 
 
@@ -2236,20 +2238,32 @@ def _local_leg_bookings(local_campaign_root: str | Path) -> dict[str, Any]:
     return bookings
 
 
+#: The key a local booking keeps its campaign's fingerprint under.
+_BOOKED_FINGERPRINT = "campaign_fingerprint"
+
+
 def save_local_leg_booking(
     local_campaign_root: str | Path,
     stage_name: str,
     record: Mapping[str, Any],
+    *,
+    fingerprint: Mapping[str, Any] | None = None,
 ) -> str:
     """Book a leg on local disk; returns the bookings file's path.
 
     The campaign notebook calls this before it writes the Drive
     manifest whenever it books a leg from its local copy, so the booking
-    survives a Drive that refuses the manifest too. See
-    :func:`adopt_local_leg_bookings`.
+    survives a Drive that refuses the manifest too -- for as long as the
+    runtime's local disk does. ``fingerprint`` is the campaign manifest's
+    (kept beside the record, never adopted into the manifest), so a
+    campaign re-created under the same ID with other settings does not
+    adopt it. See :func:`adopt_local_leg_bookings`.
     """
     bookings = _local_leg_bookings(local_campaign_root)
-    bookings[stage_name] = dict(record)
+    booking = dict(record)
+    if fingerprint is not None:
+        booking[_BOOKED_FINGERPRINT] = _json_normalized(dict(fingerprint))
+    bookings[stage_name] = booking
     Path(local_campaign_root).mkdir(parents=True, exist_ok=True)
     path = os.path.join(str(local_campaign_root), LOCAL_LEG_BOOKINGS_NAME)
     _atomic_write_json(path, bookings)
@@ -2281,12 +2295,33 @@ def adopt_local_leg_bookings(
     leg, or holds one for an earlier attempt that is not ``complete``
     (the booked attempt was trained after that record sent the leg back
     to training). A record for the same attempt dir is the Drive
-    manifest's later word and is kept. The caller writes the manifest.
+    manifest's later word and is kept. A booking is never adopted into
+    another campaign: one whose Drive attempt dir is gone (the campaign
+    folder was deleted; ``next_stage_attempt_dir`` created the dir
+    before training) or whose recorded fingerprint differs from the
+    manifest's is skipped, said so. The caller writes the manifest.
     """
     adopted = []
     stages = manifest.setdefault("stages", {})
+    fingerprint = manifest.get("fingerprint")
     for stage_name, local in _local_leg_bookings(local_campaign_root).items():
         if not isinstance(local, Mapping) or not local.get("run_dir"):
+            continue
+        booked_fingerprint = local.get(_BOOKED_FINGERPRINT)
+        if booked_fingerprint is not None and (
+            not isinstance(fingerprint, Mapping)
+            or _json_normalized(dict(fingerprint)) != booked_fingerprint
+        ):
+            print(
+                f"[campaign] {stage_name}: not adopting the local booking of "
+                f"{local['run_dir']}: it was booked under other campaign settings"
+            )
+            continue
+        if not Path(str(local["run_dir"])).is_dir():
+            print(
+                f"[campaign] {stage_name}: not adopting the local booking of "
+                f"{local['run_dir']}: that Drive attempt dir is gone"
+            )
             continue
         current = stages.get(stage_name)
         if isinstance(current, Mapping):
@@ -2302,7 +2337,9 @@ def adopt_local_leg_bookings(
                 or local_attempt <= current_attempt
             ):
                 continue
-        stages[stage_name] = dict(local)
+        stages[stage_name] = {
+            key: value for key, value in local.items() if key != _BOOKED_FINGERPRINT
+        }
         adopted.append(stage_name)
         print(
             f"[campaign] {stage_name}: adopting the local booking "
@@ -2486,10 +2523,11 @@ def _finish_unsynced_leg(record: Mapping[str, Any]) -> bool:
     The leg trained and its local copy was sealed, but the Drive mirror
     did not verify when it was booked. If the Drive copy verifies now
     (the operator re-ran ``sync_run_dir``), it is used. If the local copy
-    is still here (the same runtime), it is mirrored; a mirror that
-    still fails raises, since a fresh attempt would hit the same Drive.
-    With the local copy gone (a new runtime) and the Drive copy
-    incomplete, nothing can be scored: ``False``, said so.
+    is still here (the same runtime) and verifies, it is mirrored; a
+    mirror that still fails raises, since a fresh attempt would hit the
+    same Drive. With the local copy gone (a new runtime) or changed since
+    it was sealed, and the Drive copy incomplete, nothing can be scored:
+    ``False``, said so.
     """
     from courtside_dynamics.experiments.records import verify_run_dir
 
@@ -2499,6 +2537,17 @@ def _finish_unsynced_leg(record: Mapping[str, Any]) -> bool:
         print(f"[campaign] {run_dir}'s Drive copy verifies now; scoring it")
         return True
     if local_dir and Path(local_dir).is_dir():
+        local = verify_run_dir(local_dir)
+        if not local.complete:
+            # Changed after it was sealed: no mirror of it can be
+            # trusted, and no free Drive space would make one verify.
+            print(
+                f"[campaign] {run_dir} finished training, but its local copy "
+                f"{local_dir} no longer verifies "
+                f"({'; '.join(local.problems) or local.manifest}): training "
+                "a fresh attempt"
+            )
+            return False
         print(f"[campaign] finishing the Drive mirror of {local_dir}")
         if finish_leg_mirror(local_dir, run_dir, retry_seconds=()):
             return True

@@ -35,7 +35,12 @@ supersedes it (see the ground-rules bullet).
     run artifacts record `versions.mkl_cbwr` and `versions.libc`.
   - **`rescore_runs` reuses only rows scored under this session's CPU
     numerics.** It re-scores the others when their run is picked, and
-    leaves them out of the curves and verdicts until then.
+    leaves them out of the curves and verdicts until then. A session
+    whose MKL is not pinned stops before it scores or records anything.
+    Each verdict records its `cpu_numerics`, and verdicts of any series
+    picked under other numerics (all from before the pin) are dropped.
+    A session with nothing to plot removes the series' stale curves
+    PNG.
   - **Speed.** Batch-1 inference and a PaddleTennis PPO iteration (64×64
     nets) cost the same. 256-wide training steps run 2-2.6x slower, and
     the test suite takes about 22% longer.
@@ -45,16 +50,26 @@ supersedes it (see the ground-rules bullet).
   - **`train()` raises `FinalMirrorError`** (a `RuntimeError`, as
     before) naming the sealed local copy and the mirror.
   - **The campaign's `run_leg` books the leg `unsynced`** from its
-    local copy, retries the mirror in-session, and books it `trained`
-    once the Drive copy verifies. A Ctrl-C inside the final mirror is
-    booked the same way. A crashed run is booked `crashed`.
+    local copy (an early stop included), retries the mirror in-session,
+    and books it `trained` once the Drive copy verifies. A Ctrl-C inside
+    the final mirror is booked the same way. A crashed run stopped
+    inside its final mirror is booked `crashed`, and a local copy
+    changed after its seal `incomplete`; both retrain.
   - **The booking also goes to local disk** (`local_leg_bookings.json`)
     before the Drive manifest, and the loop cell adopts it on the next
-    Run-All. A Drive that refuses the manifest too therefore cannot lose
-    the leg.
+    Run-All in the same runtime. A Drive that refuses the manifest too
+    therefore cannot lose the leg while the runtime lasts; a new runtime
+    has neither the booking nor the local copy. A booking is never
+    adopted into another campaign (other settings, or its Drive attempt
+    dir gone).
   - **`campaign_leg_resume_point` finishes an `unsynced` leg's mirror,
-    then scores it.** It retrains only when the local copy is gone and
-    the Drive copy does not verify.
+    then scores it.** It retrains only when the local copy is gone (or
+    changed since its seal) and the Drive copy does not verify.
+  - **`sync_run_dir` finishes the run's own half-written mirror.** In
+    the directory the source's run record names as its mirror, the
+    paths its sealed manifest lists count as the run's, so a re-sync no
+    longer refuses copies a failed first pass left before any manifest
+    existed. Any other destination is refused as before.
   - New helpers in `notebook_utils`: `finish_leg_mirror`,
     `save_local_leg_booking`, `forget_local_leg_booking` and
     `adopt_local_leg_bookings`.

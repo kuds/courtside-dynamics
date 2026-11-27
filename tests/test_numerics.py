@@ -106,16 +106,40 @@ def test_an_mkl_call_before_the_import_leaves_mkl_unpinned():
     assert "import courtside_dynamics before" in report["problem"]
 
 
+def _mkl_dispatches_avx512() -> bool:
+    """Whether this host's MKL runs its AVX-512 kernels unpinned.
+
+    MKL's own dispatch, read from its MKL_VERBOSE banner, not ATen's CPU
+    capability: oneMKL does not run its AVX-512 kernels on every CPU
+    that has AVX-512 (review wf r1: AMD Zen 4 and 5 report AVX512 to
+    torch)."""
+    env = {k: v for k, v in os.environ.items() if k not in {"MKL_CBWR", "MKL_ENABLE_INSTRUCTIONS"}}
+    env.update(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", MKL_VERBOSE="1", MKL_CBWR="AUTO")
+    result = subprocess.run(
+        [sys.executable, "-c", "import torch; torch.ones(64, 64) @ torch.ones(64, 64)"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    banner = next(
+        (line for line in result.stdout.splitlines() if "oneMKL" in line or "Intel(R) MKL" in line),
+        "",
+    )
+    return "AVX-512" in banner
+
+
 def test_pinned_policy_outputs_are_the_same_under_every_mkl_kernel():
     """The property the pin exists for. ``MKL_ENABLE_INSTRUCTIONS=AVX2``
     makes this host's MKL run the kernels an AVX2-only host would: pinned,
-    the policy's float32 outputs are bit-identical either way. On an
-    AVX-512 host the unpinned outputs differ, which shows the comparison
-    can see the problem at all."""
+    the policy's float32 outputs are bit-identical either way. Where MKL
+    runs its AVX-512 kernels unpinned, the unpinned outputs differ, which
+    shows the comparison can see the problem at all."""
     pinned_default = _outputs()["hash"]
     pinned_avx2 = _outputs(MKL_ENABLE_INSTRUCTIONS="AVX2")["hash"]
     assert pinned_default == pinned_avx2
-    if torch.backends.cpu.get_cpu_capability() == "AVX512":
+    if _mkl_dispatches_avx512():
         unpinned_default = _outputs(MKL_CBWR="AUTO")["hash"]
         unpinned_avx2 = _outputs(MKL_CBWR="AUTO", MKL_ENABLE_INSTRUCTIONS="AVX2")["hash"]
         assert unpinned_default != unpinned_avx2

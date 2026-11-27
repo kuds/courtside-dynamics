@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -2071,6 +2072,19 @@ def test_an_unsynced_leg_is_mirrored_and_scored_never_retrained(
     assert campaign_leg_resume_point(unvalidated) == ("train", None)
     assert "no 'ok' config validation verdict" in capsys.readouterr().out
 
+    # Review wf r1: a local copy changed after its seal is never mirrored,
+    # and no free Drive space would help: the leg retrains, said so,
+    # instead of raising the Drive guidance on every Run-All.
+    changed = _sealed_leg(tmp_path / "local" / "leg2" / "attempt_01")
+    (Path(changed) / "config.json").write_text('{"edited": true}\n')
+    damaged = {
+        **record,
+        "run_dir": str(tmp_path / "drive" / "leg2" / "attempt_01"),
+        "local_dir": changed,
+    }
+    assert campaign_leg_resume_point(damaged) == ("train", None)
+    assert "no longer verifies" in capsys.readouterr().out
+
 
 def test_local_leg_bookings_rejoin_the_manifest_only_when_newer(tmp_path, capsys):
     """Review 2026-11-27, N3 follow-up: a Drive that refuses the mirror
@@ -2093,10 +2107,14 @@ def test_local_leg_bookings_rejoin_the_manifest_only_when_newer(tmp_path, capsys
             "local_dir": str(root / stage / f"attempt_{attempt:02d}"),
         }
 
+    fingerprint = {"campaign_id": "c1", "seed": 0}
     assert adopt_local_leg_bookings({"stages": {}}, root) == []  # none yet
     for stage, attempt in (("new", 1), ("same", 1), ("newer", 2), ("older", 1), ("done", 2)):
-        save_local_leg_booking(root, stage, booking(stage, attempt))
+        # next_stage_attempt_dir made the Drive attempt dir before training.
+        Path(booking(stage, attempt)["run_dir"]).mkdir(parents=True)
+        save_local_leg_booking(root, stage, booking(stage, attempt), fingerprint=fingerprint)
     manifest = {
+        "fingerprint": fingerprint,
         "stages": {
             "same": booking("same", 1, status="trained"),
             "newer": booking("newer", 1, status="interrupted"),
@@ -2113,9 +2131,28 @@ def test_local_leg_bookings_rejoin_the_manifest_only_when_newer(tmp_path, capsys
     assert "adopting the local booking 'unsynced'" in capsys.readouterr().out
     forget_local_leg_booking(root, "new")
     forget_local_leg_booking(root, "never-booked")
-    assert sorted(adopt_local_leg_bookings({"stages": {}}, root)) == [
+    fresh = {"fingerprint": dict(fingerprint), "stages": {}}
+    assert sorted(adopt_local_leg_bookings(fresh, root)) == [
         "done", "newer", "older", "same"
     ]
+    assert all("campaign_fingerprint" not in entry for entry in fresh["stages"].values())
+
+    # Review wf r1 (N3): never adopted into another campaign. Under other
+    # settings (a fingerprint that differs, or a manifest without one) ...
+    for other in ({"fingerprint": {"campaign_id": "c1", "seed": 1}}, {}):
+        assert adopt_local_leg_bookings({**other, "stages": {}}, root) == []
+        assert "booked under other campaign settings" in capsys.readouterr().out
+    # ... or once its Drive attempt dir is gone (the campaign folder was
+    # deleted, then re-created under the same ID and settings).
+    for stage, attempt in (("same", 1), ("newer", 2)):
+        Path(booking(stage, attempt)["run_dir"]).rmdir()
+    assert sorted(adopt_local_leg_bookings({"fingerprint": fingerprint}, root)) == [
+        "done", "older"
+    ]
+    assert "that Drive attempt dir is gone" in capsys.readouterr().out
+    # A booking saved without a fingerprint is judged by its dir alone.
+    save_local_leg_booking(root, "bare", booking("done", 2))
+    assert "bare" in adopt_local_leg_bookings({"stages": {}}, root)
     (root / "local_leg_bookings.json").write_text("[]")
     with pytest.raises(ValueError, match="JSON object of leg bookings"):
         adopt_local_leg_bookings({"stages": {}}, root)

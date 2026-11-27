@@ -29,7 +29,9 @@ destination holding a file the mirror cannot prove is this run's (one
 it did not copy, its manifest for this run id does not list, and that
 differs from the source's file): a mistyped destination, such as the
 Drive root, is refused instead of having every unrelated file under it
-deleted.
+deleted. The run's own mirror target -- the directory its run record
+names -- also counts the paths its sealed manifest lists as its own, so
+a re-sync finishes a mirror an earlier, failed pass left half-written.
 
 Stable-Baselines3 and torch are never imported here.
 """
@@ -42,8 +44,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from courtside_dynamics.experiments.records import (
+    RUN_RECORD_NAME,
     SYNC_MANIFEST_NAME,
     _manifest_entries,
+    is_temporary_path,
     manifest_payload,
     read_json_object,
     run_files,
@@ -255,6 +259,38 @@ class RunDirMirror:
             )
         return listed
 
+    def _sealed_paths_if_own_target(self) -> set[str]:
+        """The source's sealed paths, when the destination is its own mirror.
+
+        ``train()`` records its mirror target in the run record
+        (``sync.dir``) after :func:`validate_sync_target` found it absent
+        or empty, so a destination the source's own record names held
+        nothing but this run's mirror passes. A pass that failed before
+        any manifest was written leaves copies of files that later
+        changed, which no manifest lists and a fresh mirror (the manual
+        re-sync, the campaign's recovery) did not write; the paths the
+        source's sealed ``sync_manifest.json`` lists are claimed for it
+        (review 2026-11-27, N3). Empty when the record names another
+        directory, or the source has no readable record or seal: a
+        mistyped destination is still refused.
+        """
+        try:
+            record = read_json_object(
+                self.source / RUN_RECORD_NAME, label=RUN_RECORD_NAME
+            )
+            sync = record.get("sync")
+            target = sync.get("dir") if isinstance(sync, dict) else None
+            if not isinstance(target, str) or not target:
+                return set()
+            if Path(target).expanduser().resolve() != self.destination:
+                return set()
+            sealed = read_json_object(
+                self.source / SYNC_MANIFEST_NAME, label=SYNC_MANIFEST_NAME
+            )
+            return set(_manifest_entries(sealed))
+        except ValueError:
+            return set()
+
     def _check_destination(self, files: list[str]) -> set[str]:
         """Refuse a destination holding files that are not this run's.
 
@@ -262,10 +298,14 @@ class RunDirMirror:
         destination's manifest for this run id lists it, it is
         byte-identical to the source's file at the same path (a copy a
         failed pass left before any manifest), or it is a copy's
-        temporary leftover for a source file. Anything else -- an
+        temporary leftover for a source file. When the source's own run
+        record names the destination as its mirror, the paths its sealed
+        manifest lists and any temporary leftover are this run's too
+        (:meth:`_sealed_paths_if_own_target`). Anything else -- an
         unrelated file in a mistyped destination, another run's file of
-        the same name -- would be overwritten or deleted: the pass
-        raises :class:`SyncError` before writing anything. Returns the
+        the same name, a report written into the mirror after training --
+        would be overwritten or deleted: the pass raises
+        :class:`SyncError` before writing anything. Returns the
         destination paths a pass may remove once the source lacks them.
         """
         existing = run_files(self.destination)
@@ -274,6 +314,7 @@ class RunDirMirror:
         source_files = set(files)
         listed = self._listed_by_this_run()
         temporaries = {_sync_temporary_of(relative) for relative in source_files}
+        own_target = self._sealed_paths_if_own_target()
         claimed: set[str] = set()
         foreign = []
         for relative in existing:
@@ -281,6 +322,8 @@ class RunDirMirror:
                 relative in self._written
                 or relative in listed
                 or relative in temporaries
+                or relative in own_target
+                or (own_target and is_temporary_path(relative))
             ):
                 claimed.add(relative)
                 continue
