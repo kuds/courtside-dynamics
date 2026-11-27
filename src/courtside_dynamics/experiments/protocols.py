@@ -1206,6 +1206,15 @@ def eval_protocol_record(
         )
         return None
     fingerprint = protocol.fingerprint
+    # A CPU protocol is a score only under pinned CPU numerics: a run
+    # whose MKL kernels follow the host does not evaluate under it, even
+    # with the same fingerprint (docs/DECISIONS.md, "CPU scores pin MKL's
+    # numerics").
+    unpinned = False
+    if protocol.device == "cpu":
+        from courtside_dynamics.numerics import cpu_numerics_problem
+
+        unpinned = cpu_numerics_problem() is not None
     candidates: list[EvalProtocol] = []
     for protocol_id in _registered_for_recipe(cfg.recipe_name):
         try:
@@ -1215,6 +1224,14 @@ def eval_protocol_record(
             warnings.warn(str(error), stacklevel=2)
             continue
         if candidate.fingerprint == fingerprint:
+            if unpinned:
+                return {
+                    "id": None,
+                    "fingerprint": fingerprint,
+                    "device": protocol.device,
+                    "nearest": protocol_id,
+                    "differs": ["cpu_numerics"],
+                }
             return {"id": protocol_id, "fingerprint": fingerprint, "device": protocol.device}
         candidates.append(candidate)
     nearest: str | None = None
@@ -1223,6 +1240,8 @@ def eval_protocol_record(
         fields = differing_fields(protocol, candidate)
         if differs is None or len(fields) < len(differs):
             nearest, differs = candidate.id, fields
+    if unpinned and differs is not None:
+        differs = [*differs, "cpu_numerics"]
     return {
         "id": None,
         "fingerprint": fingerprint,
