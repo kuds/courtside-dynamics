@@ -44,6 +44,8 @@ supersedes it (see the ground-rules bullet).
   - **Speed.** Batch-1 inference and a PaddleTennis PPO iteration (64×64
     nets) cost the same. 256-wide training steps run 2-2.6x slower, and
     the test suite takes about 22% longer.
+  - **The four training and re-scoring notebooks pin `REPO_REF` to
+    `cffb2a3`,** which carries the pin and the campaign booking below.
   - See `docs/DECISIONS.md`, "CPU scores pin MKL's numerics".
 - **A campaign leg whose final Drive mirror fails is booked, not
   retrained (2026-11-27).** No env, training or recipe change.
@@ -90,9 +92,10 @@ supersedes it (see the ground-rules bullet).
     Run-All before the audit, the Drive mirror and the disconnect.
   - **`_in_colab()`** returns `False` when no `google` package is
     installed.
-  - **The four training and re-scoring notebooks pin `REPO_REF` to
+  - **The four training and re-scoring notebooks pinned `REPO_REF` to
     `069d000`,** which carries these changes, the render guard and the
-    BLAS-free streams. The S1 spike keeps its own pin.
+    BLAS-free streams, until `cffb2a3` (the MKL pin above). The S1 spike
+    keeps its own pin.
   - See `docs/DECISIONS.md`, "A PPO notebook runs on a Colab CPU
     runtime".
 - **CI pins its runner OS, and a failed render is never retried

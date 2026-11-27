@@ -787,6 +787,8 @@ host, and the protocols pinned only `device="cpu"`. The fix:
 
   The test suite takes about 22% longer, mostly in its 256-wide SAC
   tests.
+- **Pins.** The training and re-scoring notebooks get the pin from
+  `REPO_REF` `cffb2a3` on; a notebook pinned earlier scores unpinned.
 
 ### A campaign leg whose final Drive mirror fails is booked, not retrained — *implemented (unreleased, 2026-11-27)*
 Under `LOCAL_THEN_SYNC`, `train()` seals the leg's local copy and then
@@ -853,6 +855,8 @@ was replaced by a fresh 1M-3M-step `attempt_02`. The fix:
   written into the mirror after training), is still refused.
 - **A local copy that does not verify is never mirrored.** A mirror of
   it would seal damage as a complete run.
+- **Pins.** The campaign notebook runs this from `REPO_REF` `cffb2a3`
+  on.
 
 ### A PPO notebook runs on a Colab CPU runtime; only the SAC family demands a GPU — *implemented (unreleased, 2026-11-27)*
 PPO trains on CPU by design: its profiles pin `device="cpu"`, and SB3's
@@ -903,9 +907,10 @@ ladder design's "no humanoid training on CPU" is about the training
 backend, which both notebooks share.
 
 **Pins.** The fix lives in the package, so the four training and
-re-scoring notebooks pin `REPO_REF` to `069d000`, the commit that ships
-it. That commit also carries the render guard and the BLAS-free
-streams. The S1 spike keeps its own pin. Merge with a merge commit, not
+re-scoring notebooks pinned `REPO_REF` to `069d000`, the commit that
+ships it. That commit also carries the render guard and the BLAS-free
+streams. They now pin `cffb2a3`, which adds the MKL pin and the
+campaign's booking of an unsynced leg. The S1 spike keeps its own pin. Merge with a merge commit, not
 a squash: a squash leaves pinned branch SHAs unreachable from `main`.
 
 ### A failed render is never retried: MuJoCo aborts the process on a second render context — *implemented (unreleased, 2026-11-27)*
