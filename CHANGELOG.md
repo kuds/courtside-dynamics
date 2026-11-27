@@ -28,7 +28,9 @@ supersedes it (see the ground-rules bullet).
   - **The campaign notebook** no longer refuses a CPU runtime before
     `ALGO` is read. Its settings cell refuses the SAC plan's
     `REQUIRE_DEVICE = "cuda"` on a runtime without a GPU.
-  - **`sb3_training`** demands a GPU for the SAC family only.
+  - **`sb3_training`** demands a GPU for the SAC family only. Its replay
+    cell skips, or prints a failed recording, instead of stopping
+    Run-All before the audit, the Drive mirror and the disconnect.
   - **`_in_colab()`** returns `False` when no `google` package is
     installed.
   - **The four training and re-scoring notebooks pin `REPO_REF` to

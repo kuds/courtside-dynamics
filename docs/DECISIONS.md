@@ -742,18 +742,29 @@ leaves idle. The fix:
   render.
 - **The campaign's `pc-gpu`** calls `setup_colab(require_gpu=False)` and
   keeps the answer as `COLAB_GPU`. The settings cell refuses the SAC
-  plan's `REQUIRE_DEVICE = "cuda"` when `COLAB_GPU is False`, before
-  any leg setup. `train()`'s `require_device` remains the binding check
+  plan's `REQUIRE_DEVICE = "cuda"` when `COLAB_GPU` is False, before
+  any leg setup. It reads the value with `globals().get`, because
+  re-entering at the settings cell after a session restart skips
+  `pc-gpu`. `train()`'s `require_device` remains the binding check
   that torch sees the GPU; the 2026-08-28 false starts passed
   `nvidia-smi`.
 - **`sb3_training`** calls `setup_colab(require_gpu=algo_family(ALGO)
-  != "PPO")`.
+  != "PPO")`. Its replay cell (9b) skips with the reason where
+  rendering is unavailable, and prints a failed recording instead of
+  raising. Otherwise Run-All would stop there on every CPU-runtime run,
+  before the artifact audit, the Drive mirror and the disconnect. This
+  also closes finding `colab-2`.
 - **`_in_colab()`** returns `False` instead of raising
   `ModuleNotFoundError` when no `google` package is installed (finding
   `notebook-utils-5` of 2026-10-16).
 
-The humanoid notebook still demands a GPU: the ladder design forbids
-humanoid training on CPU.
+The humanoid notebook is unchanged and still calls `setup_colab()`, so it
+refuses a CPU runtime. Its PPO runs train on the CPU device on any
+runtime (the on-policy CPU default), so that demand buys EGL video and
+a larger VM, not GPU training. `sb3_training` decides by algorithm
+family alone, so it admits a humanoid PPO stage on a CPU runtime. The
+ladder design's "no humanoid training on CPU" is about the training
+backend, which both notebooks share.
 
 **Pins.** The fix lives in the package, so the four training and
 re-scoring notebooks pin `REPO_REF` to `069d000`, the commit that ships

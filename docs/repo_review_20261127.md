@@ -27,8 +27,9 @@ PR #81, "week-1 foundations", 2026-10-18) and conducted 2026-11-27.
 - **Stack.** Fresh resolve on 2026-11-27: Python 3.13, MuJoCo 3.15.0
   (the pyproject cap), gymnasium 1.4.0, SB3 2.9.2, CPU torch 2.15 and
   numpy 2.5.3, on 4 shared CPUs.
-- **No code changes.** Only this document and its `docs/README.md`
-  row were added.
+- **Snapshot scope.** The body describes `main`@`8df9277`. Fixes made
+  afterwards on the same branch are listed in §11, and short inline
+  notes point there.
 
 ## 1. Bottom line
 
@@ -89,7 +90,8 @@ PR #81, "week-1 foundations", 2026-10-18) and conducted 2026-11-27.
    - **The new risk:** CPU re-scores depend on the host's MKL kernels,
      so the same snapshot under the same protocol scores differently on
      AVX2 and AVX-512 Colab hosts (N2). Pinning `MKL_CBWR` fixes it.
-   - **Older findings:** of the 98 from 2026-10-16, 82 remain open,
+   - **Older findings:** of the 98 from 2026-10-16, 82 remain open (81
+     after this branch, §11),
      including 7 of the 10 medium ones. The open ones that matter are
      the paired `confirm_best` bias and the misleading
      reporting (§6.3).
@@ -360,10 +362,10 @@ Three consequences:
 
 | Notebook | Use | Pitfalls at HEAD |
 |---|---|---|
-| `sb3_training.ipynb` | Generic driver for any recipe | `ENV` defaults to `WallBallTrueBaseline`, a closed chapter (6M SAC on Run-All). No `REQUIRE_DEVICE` guard, so an SAC run on a CPU runtime trains silently. `LOCAL_THEN_SYNC` defaults to False |
+| `sb3_training.ipynb` | Generic driver for any recipe | `ENV` defaults to `WallBallTrueBaseline`, a closed chapter (6M SAC on Run-All). No `REQUIRE_DEVICE` guard: off Colab, or when `nvidia-smi` passes but torch sees no GPU, an SAC run trains on CPU silently. `LOCAL_THEN_SYNC` defaults to False |
 | `paddle_tennis_campaign.ipynb` | Multi-leg PaddleTennis campaign | Forces CUDA for SAC. Switching to PPO takes three edits, and its warm-start fallback points at an SAC run. Its `learning_starts` equals `eval_freq`, so evaluation 1 scores the untouched warm-start source (the 2026-08-28 "best = step 25,000") |
 | `humanoid_tennis_training.ipynb` | Gated Stage 0-2 PPO | No sync option. Training is forbidden by the ladder design |
-| `rescore_runs.ipynb` | CPU re-score of a Drive runs folder under `@v3` | Ready. A stale comment calls its pin a "Placeholder" |
+| `rescore_runs.ipynb` | CPU re-score of a Drive runs folder under `@v3` | Ready. A stale comment calls its pin a "Placeholder" (fixed on this branch, §11) |
 
 - **Pins.** All notebooks pin `REPO_REF = 95fb930`. That predates the
   BLAS fix `c669f4d`. (This review's branch moves the four training and
@@ -478,7 +480,8 @@ move, so a change to that set is visible.
 
 ### 5.3 Other CI and dependency notes
 
-- **The render smoke test has been skipped since 2026-11-09.** Its step
+- **The render smoke test has been skipped since 2026-11-16** (#229,
+  #230; fixed on this branch, §11). Its step
   has no `if: ${{ !cancelled() }}`, so it is skipped whenever the
   coverage step fails. The local suite skips it too (no GL).
 - **What CI does not run:** golden `--full`, gate 3, the PPO learning
@@ -610,7 +613,7 @@ a finding.
 
 | # | Finding | Severity | Where |
 |---|---|---|---|
-| N1 | **A second video attempt on a host without OpenGL aborts the training process** (SIGABRT, uncatchable). The run is left `running`, with no manifest and no final model. The bug predates week 1, but PPO's move to CPU makes it bite now (§8) | **high** for CPU launches | `callbacks/video_record.py:173-190` |
+| N1 | **Fixed on this branch (§11).** **A second video attempt on a host without OpenGL aborts the training process** (SIGABRT, uncatchable). The run is left `running`, with no manifest and no final model. The bug predates week 1, but PPO's move to CPU makes it bite now (§8) | **high** for CPU launches | `callbacks/video_record.py:173-190` |
 | N2 | **CPU re-scores depend on the host.** torch's CPU `Linear` calls MKL SGEMM, and MKL's AVX2 and AVX-512 kernels round differently. PaddleTennis is chaotic, so one ulp in an action changes whole episodes. The same snapshot, seeds and protocol fingerprint gave 53 of 132 differing metrics on the two kernels. The protocol pins only `device="cpu"`, and score rows record no CPU model, MKL mode or package SHA | **medium** | `experiments/protocols.py:264`; `harness.py:649` |
 | N3 | **A campaign leg whose final Drive mirror fails is never booked.** It goes unbooked even after the operator runs the printed `sync_run_dir(...)` fix. `run_leg` does not catch `train()`'s final-sync error, so on the next Run-All `campaign_leg_resume_point` returns "train" and the complete `attempt_01` is replaced by a fresh `attempt_02`. A Ctrl-C during the final mirror takes the same path | **medium** | `paddle_tennis_campaign.ipynb` (`run_leg`); `train.py:743-773`; `notebook_utils.py:2334` |
 | N4 | **Fixed on this branch.** **The campaign and `sb3_training` notebooks refused a Colab CPU runtime.** `setup_colab()` defaults to `require_gpu=True` and runs before `ALGO` is read, although the PPO reference is a CPU run by design | low (but it blocks the planned launch path) | `colab_setup.py:51`; campaign cell `pc-gpu` |
@@ -648,9 +651,9 @@ a finding.
 | digests-1 (partly) | The static BLAS guard misses `from numpy.linalg import norm`, `np.vecdot`, `np.matvec` and `@=` |
 | digests-2 | glibc libm picks FMA or SSE2 variants of sin, cos, atan2 and pow per CPU, and no gate exercises that. This supports the libm explanation of §5.2 |
 | digests-3 (partly) | `c669f4d` breaks the documented bit-for-bit `--protocol inloop` re-score for legacy WallBall and BallBounce runs evaluated on AVX-512 hosts. PaddleTennis is unaffected |
-| colab-2 | In `sb3_training` with `LOCAL_THEN_SYNC`, a failing replay-video cell halts Run-All before the 9d mirror, so the audit and plots stay on the VM's disk |
+| colab-2 | *Fixed on this branch (§11).* In `sb3_training` with `LOCAL_THEN_SYNC`, a failing replay-video cell halts Run-All before the 9d mirror, so the audit and plots stay on the VM's disk |
 | colab-4 | The humanoid notebook writes its promotion evidence at the run-directory root after sealing, so every gated stage fails `verify` |
-| colab-5 (partly) | The `REPO_REF` pin predates `c669f4d`. Non-PaddleTennis streams on pinned notebooks still depend on the host's OpenBLAS kernel. Several "bump REPO_REF for PPO / LOCAL_THEN_SYNC" notes are stale, since the pin already ships both |
+| colab-5 (partly) | *Fixed on this branch (§11): the training and re-scoring notebooks pin `069d000`.* The `REPO_REF` pin predates `c669f4d`. Non-PaddleTennis streams on pinned notebooks still depend on the host's OpenBLAS kernel. Several "bump REPO_REF for PPO / LOCAL_THEN_SYNC" notes are stale, since the pin already ships both |
 
 **What held up under review:**
 - `_linalg` is equivalent to the pre-AVX2 numpy calls: 0 differences
@@ -730,7 +733,8 @@ no every-500k option, so use `QUICK`, `RUN_IDS`, or the CLI's
   with its run record. This happened here: this review's own
   work-in-progress commit (`86ab95d`) landed during the SAC quick
   test, so its summary says `86ab95d` and its record `8df9277`.
-- `rescore_runs.ipynb`'s pin comment is stale: 95fb930 does ship
+- `rescore_runs.ipynb`'s pin comment is stale (fixed on this branch,
+  §11): 95fb930 does ship
   `@v3`.
 
 ## 9. The humanoid and GPU track
@@ -851,6 +855,27 @@ in flight. Items 1-6 need no design work. Most of them run on CPU.
   - the S1 `REPO_REF` in DECISIONS;
   - the incomplete `docs/README.md` index.
 
+## 11. Post-snapshot updates (same day, on this branch)
+
+The fixes below landed on `claude/inspiring-lamport-bxvxn5` after the
+snapshot. The body of this review still describes `main`@`8df9277`.
+
+| Commits | What they close |
+|---|---|
+| `619ea91`, `5028bc4` | **§5.2 items 1-3.** CI's gating jobs run on `ubuntu-24.04`. A non-gating `golden-canary` job checks `ubuntu-latest` against its known 7-case drift. `digests.version_info()` records `libc`. The render smoke step runs when the coverage step fails. Run #231 (green on 24.04, the same 7 cases failing on `ubuntu-latest`, glibc 2.43) confirmed the runner image as the cause, and #232 was green throughout. **N1, the render guard:** where there is no display the recorder skips without trying, and a failed recording is never retried. A context failure poisons rendering for the process and sets `MUJOCO_GL=disable`, and `record_best_model_video` then refuses with a Python error. Both end-to-end scenarios die of SIGABRT on the old code and pass on the new |
+| `069d000` and the commit after `957cc46` | **N4.** A PPO notebook runs on a Colab CPU runtime. `setup_colab(require_gpu=False)` leaves `MUJOCO_GL` alone there and reports what `nvidia-smi` found. The campaign refuses the SAC plan's `REQUIRE_DEVICE = "cuda"` on a runtime without a GPU, and `sb3_training` demands a GPU for the SAC family only. **colab-2:** the `sb3_training` replay cell no longer stops Run-All. **notebook-utils-5:** `_in_colab()` no longer raises without a `google` package |
+| `957cc46` | **colab-5.** The four training and re-scoring notebooks pin `REPO_REF` to `069d000`, which ships these fixes and the BLAS-free streams. The stale "bump REPO_REF" notes and the re-score "Placeholder" comment are corrected. The S1 spike keeps its own pin |
+
+**Still open from this review:**
+- N2: CPU re-scores depend on MKL's host kernels; pin `MKL_CBWR` and
+  record the numeric mode.
+- N3: a campaign leg is unbooked after a failed final mirror.
+- `records-1` to `records-5`, `eval-2` to `eval-4`, `ppo-1`,
+  `digests-1` to `digests-3` and `colab-4`.
+- The other 81 findings of 2026-10-16.
+- Every research step of §10 from item 3 on: the PPO reference, the
+  August re-score, the Colab digests, S1 and the context-blind pilot.
+
 ## Appendix A. Status of the 2026-10-16 findings at HEAD
 
 Status as reviewed at HEAD. Evidence is a file:line or commit at `8df9277`; batches are from `repo_review_20261016.md` §8.
@@ -889,7 +914,7 @@ Status as reviewed at HEAD. Evidence is a file:line or commit at `8df9277`; batc
 | env-wallball-simple-1 | bug | low | - | open | notebook_utils.py:1019-1022 _LEGACY_WALL_BALL_CONSTRUCTOR_DEFAULTS still lacks return_shaping_scale |
 | env-wallball-simple-4 | bug | low | - | open | envs/wall_ball.py changed only for _linalg.norm (c669f4d); no pre-step guard added |
 | notebook-utils-3 | bug | low | - | open | paddle_tennis_campaign.ipynb section 7 cell still reads record['report'] for every manifest stage |
-| notebook-utils-5 | bug | low | - | open | colab_setup.py:27-28 find_spec('google.colab') unchanged |
+| notebook-utils-5 | bug | low | - | open | colab_setup.py:27-28 find_spec('google.colab') unchanged at 8df9277; fixed on this branch (`069d000`, §11) |
 | tests-2 | bug | low | - | open | tests/test_paddle_tennis.py:155 mirror test unchanged (diff only touches recipe/eval-env tests) |
 | tests-3 | bug | low | - | open | tests/test_train.py:323-353 still asserts only that progress.csv exists |
 | tools-1 | bug | low | - | open | tools/paddle_tennis_k2_harvest.py diff adds --algo only |
