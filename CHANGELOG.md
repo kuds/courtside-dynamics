@@ -31,6 +31,9 @@ supersedes it (see the ground-rules bullet).
   - **`sb3_training`** demands a GPU for the SAC family only.
   - **`_in_colab()`** returns `False` when no `google` package is
     installed.
+  - **The four training and re-scoring notebooks pin `REPO_REF` to
+    `069d000`,** which carries these changes, the render guard and the
+    BLAS-free streams. The S1 spike keeps its own pin.
   - See `docs/DECISIONS.md`, "A PPO notebook runs on a Colab CPU
     runtime".
 - **CI pins its runner OS, and a failed render is never retried

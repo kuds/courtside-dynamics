@@ -755,6 +755,12 @@ leaves idle. The fix:
 The humanoid notebook still demands a GPU: the ladder design forbids
 humanoid training on CPU.
 
+**Pins.** The fix lives in the package, so the four training and
+re-scoring notebooks pin `REPO_REF` to `069d000`, the commit that ships
+it. That commit also carries the render guard and the BLAS-free
+streams. The S1 spike keeps its own pin. Merge with a merge commit, not
+a squash: a squash leaves pinned branch SHAs unreachable from `main`.
+
 ### A failed render is never retried: MuJoCo aborts the process on a second render context — *implemented (unreleased, 2026-11-27)*
 On a host without a working OpenGL backend the first render context
 fails, and the next attempt kills the interpreter:

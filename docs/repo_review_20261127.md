@@ -366,7 +366,8 @@ Three consequences:
 | `rescore_runs.ipynb` | CPU re-score of a Drive runs folder under `@v3` | Ready. A stale comment calls its pin a "Placeholder" |
 
 - **Pins.** All notebooks pin `REPO_REF = 95fb930`. That predates the
-  BLAS fix `c669f4d`.
+  BLAS fix `c669f4d`. (This review's branch moves the four training and
+  re-scoring notebooks to `069d000`; see §10.)
   - PaddleTennis streams are identical across OpenBLAS kernels and
     across the old and new code (verified on 150k steps).
   - The pin is therefore harmless for the active rung. BallBounce,
